@@ -29298,18 +29298,31 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
               .catch(error => console.warn('Display proxy fill failed:', item.file?.name, error));
             return true;
           };
+          // A frame the worker path could not settle although nothing changed:
+          // measured again, in the worker once more, then on the page, which
+          // always settles it, so the attempts end (#229 review R2-015).
+          const workerFailed = (item, reason) => {
+            workerFailures.set(item, (workerFailures.get(item) || 0) + 1);
+            console.warn('Roll frame analysis did not settle in its worker; measuring it again:', item.file?.name, reason);
+            return null;
+          };
           // The flagged half-size analysis (#252 part 6): the worker measured a
           // half-size decode (or the page did, after a fallback); detection
           // and edge results are mapped onto the full frame (crop x2) and
-          // merged with today's functions on a full-size frame descriptor.
+          // merged with today's functions on a full-size frame descriptor. A
+          // RAW LibRaw does not halve (LinearRaw, monochrome DNGs, sRAW) comes
+          // back without `fullSize`: it is its own full frame, its crop as
+          // detected (R2-015).
           const analyzeHalfSizeRollFrame = async (item, decoded, { filmType, itemValid, key }) => {
-            const full = decoded.fullSize;
             const worker = decoded.analysis;
-            if (!full || rollFrameOptionsKey(rollFrameOptions(item)) !== decoded.optionsKey) return null;
+            const pageImage = decoded.analysisImage || null;
+            const own = decoded.held || pageImage;
+            const full = decoded.fullSize || (own ? { width: own.width, height: own.height } : null);
+            if (rollFrameOptionsKey(rollFrameOptions(item)) !== decoded.optionsKey) return null;
+            if (!full) return workerFailed(item, 'no frame');
             let detection = worker?.complete && !worker.detectionError ? worker.detection : null;
             let read = worker?.complete && !worker.edgeError ? { result: worker.edge } : null;
             let filmStats = worker?.filmStats || null;
-            const pageImage = decoded.analysisImage || null;
             if (!worker && pageImage) {
               filmStats = { borderBufferPct: defaultFilmBaseBuffer(), filmType: cachedDetectFilmType(pageImage), filmBase: autoDetectFilmBase(pageImage, defaultFilmBaseBuffer()) };
               const analysed = await runImportDetections(pageImage, {
@@ -29319,12 +29332,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
               detection = analysed.detection?.result ?? null;
               read = analysed.read;
             }
-            if (!filmStats) return null;
+            if (!filmStats) return workerFailed(item, 'no film statistics');
             const frame = { width: full.width, height: full.height, data: null };
             primeFilmStats(frame, filmStats);
             const defaults = createDefaultSettings(frame, item);
             if (!itemValid()) return null;
-            const scaled = detection?.cropRegion ? { ...detection, cropRegion: scaleHalfSizeCrop(detection.cropRegion, full, detection.angle || 0) } : detection;
+            const scaled = decoded.fullSize && detection?.cropRegion
+              ? { ...detection, cropRegion: scaleHalfSizeCrop(detection.cropRegion, full, detection.angle || 0) } : detection;
             let settings = await analyzeStudioImportFrame(frame, defaults, { silent: true, filmType, detection: { result: scaled } });
             const edge = await mergeImportFilmEdge(frame, settings, read, { applyDefaults: state.importFilmTypeAuto });
             if (!itemValid()) return null;
@@ -29334,11 +29348,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
             let sample;
             if (decoded.held) {
               try { sample = (await decoded.held.sample(rollSampleSettings(settings), { tileMax: STUDIO_TILE_PREVIEW_MAX, fullSize: full })).sample; }
-              catch { return null; }
+              catch (error) { return itemValid() ? workerFailed(item, error) : null; }
             } else {
               sample = buildRollSampleOf(pageImage, settings, { tileMax: STUDIO_TILE_PREVIEW_MAX, sanitizeCrop: sanitizeCropRegionForImage, fullSize: full });
             }
-            if (!sample || !itemValid()) return null;
+            if (!itemValid()) return null;
+            if (!sample) return workerFailed(item, 'no sample');
             return { settings, sample, key };
           };
           const trace = createPerfTrace('automaticRollImport', {
@@ -29386,11 +29401,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
                           console.warn('Roll frame analysis failed in its worker; measuring it again:', item.file?.name, worker.detectionError || worker.edgeError);
                           return null;
                         }
-                        if (rollFrameOptionsKey(rollFrameOptions(item)) !== decoded.optionsKey || !worker.filmStats) return null;
+                        if (rollFrameOptionsKey(rollFrameOptions(item)) !== decoded.optionsKey) return null;
+                        if (!worker.filmStats) return workerFailed(item, 'no film statistics');
                         const frame = image || { width: decoded.held.width, height: decoded.held.height, data: null };
                         if (!image) primeFilmStats(frame, worker.filmStats);
                         const defaults = createDefaultSettings(frame, item);
-                        if (defaults.filmType !== worker.frameFilmType) return null;
+                        if (defaults.filmType !== worker.frameFilmType) return workerFailed(item, 'another film type');
                         if (!itemValid()) return null;
                         let settings = await analyzeStudioImportFrame(frame, defaults, { silent: true, filmType, detection: { result: worker.detection } });
                         const edge = await mergeImportFilmEdge(frame, settings, { result: worker.edge }, { applyDefaults: state.importFilmTypeAuto });

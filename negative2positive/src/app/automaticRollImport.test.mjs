@@ -1324,4 +1324,59 @@ function gatedDemosaics(f, load = f.context.loadFileToImageData) {
   assert.ok(f.items.every(item => item.settings));
 }
 
+{
+  // #229 review R2-015: LibRaw cannot halve a LinearRaw (or monochrome, or
+  // sRAW) frame, so the flagged half-size request comes back at full size
+  // without a fullSize. The frame is its own full frame: measured once, its
+  // crop as detected, its sample for that frame, no retry.
+  const f = fixture();
+  f.context.safeStorageGet = key => (key === 'nc_roll_analysis_half_v1' ? 'on' : null);
+  const { heldFrames } = workerRoll(f, { analysisFor: () => ({ detection: { angle: 0, cropRegion: { left: 1, top: 2, width: 5, height: 4 } } }) });
+  const load = f.context.loadFileToImageData;
+  const halfCalls = [];
+  f.context.loadFileToImageData = async (file, options) => { halfCalls.push(Boolean(options?.halfSize)); return load(file, options); };
+  const detections = [];
+  const analyze = f.context.analyzeStudioImportFrame;
+  f.context.analyzeStudioImportFrame = async (image, settings, options) => {
+    detections.push({ size: [image.width, image.height], crop: options.detection?.result?.cropRegion });
+    return analyze(image, settings, options);
+  };
+  f.context.scheduleAutomaticRollImport(f.items);
+  await f.fire(1200);
+  assert.ok(f.items.every(item => item.settings), 'every frame measured');
+  assert.deepEqual(halfCalls, [true, true, true]);
+  assert.deepEqual(f.decoded, [1, 2, 3], 'no frame decoded again');
+  assert.equal(f.timers.size, 0, 'no retry');
+  assert.equal(f.groups.length, 1, 'the roll is committed');
+  assert.ok(detections.every(entry => entry.size.join() === '10,10' && JSON.stringify(entry.crop) === JSON.stringify({ left: 1, top: 2, width: 5, height: 4 })),
+    'merged on its own frame, the crop as detected: ' + JSON.stringify(detections));
+  assert.ok(heldFrames.every(held => held.samples.length === 1 && held.samples[0].options.fullSize.width === 10), 'samples of that frame');
+}
+
+{
+  // A frame the half-size path cannot settle (its worker sample keeps
+  // failing) is measured in the worker once more, then on the page, which
+  // settles it: the attempts end (R2-015).
+  const f = fixture();
+  f.context.safeStorageGet = key => (key === 'nc_roll_analysis_half_v1' ? 'on' : null);
+  const { heldFrames, pageReads } = workerRoll(f);
+  const load = f.context.loadFileToImageData;
+  f.context.loadFileToImageData = async (file, options) => {
+    const out = await load(file, options);
+    const held = heldFrames.at(-1);
+    if (options?.postDecode && held?.id === 2) held.sample = async () => { throw new Error('Roll-frame worker crashed'); };
+    return out?.held ? { ...out, fullSize: { width: 20, height: 20 } } : out;
+  };
+  const warn = console.warn; console.warn = () => {};
+  try {
+    f.context.scheduleAutomaticRollImport(f.items);
+    await f.fire(1200);
+    for (let round = 0; round < 3 && f.timers.size; round++) await f.fire(750);
+  } finally { console.warn = warn; }
+  assert.ok(f.items.every(item => item.settings), 'every frame ends with its recipe');
+  assert.equal(f.decoded.filter(id => id === 2).length, 3, 'twice in the worker, then once on the page');
+  assert.deepEqual(pageReads, [2]);
+  assert.equal(f.timers.size, 0, 'no further attempt');
+}
+
 console.log('automaticRollImport tests passed');

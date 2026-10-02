@@ -459,7 +459,9 @@ Roll analysis has its own lane plan and its own per-frame worker (#252):
   heavy IIQ preview, UTIF DNGs), garbled output, a lost worker and a worker
   that does not answer keep today's path (garbled and lost go through the
   lazy embedded preview). A frame whose worker detection or film-edge read
-  fails is measured once more in the worker, then on the page, as before. The
+  fails is measured once more in the worker, then on the page, as before; so
+  is one the worker path cannot otherwise settle while nothing changed (no
+  statistics, another film type, a failed sample), so its attempts end. The
   detector options, the film-type choice and the border buffer are
   snapshotted when a frame's job starts; a frame whose options changed before
   its merge is measured again.
@@ -476,13 +478,15 @@ Roll analysis has its own lane plan and its own per-frame worker (#252):
   size for the analysis (LibRaw `halfSize`, about 2.0 s instead of 5.1 s at
   60 MP), maps the worker's crop x2 onto the full frame and builds the roll
   sample for the full size; such a decode is never adopted by the
-  foreground, prefetched or retained. It changes the automatic film base (up
-  to 23 levels in the reviewers' check) and the 900 px sample grid, and
-  through the roll median, the outliers and `channelData` the exported
-  pixels, permanently. It may be offered only with a recorded comparison on
-  the 151-frame M11 roll (roll base delta, outlier-set diff, `channelData`
-  delta, per-frame crop and angle diffs against a stated tolerance), which
-  has not been made.
+  foreground, prefetched or retained. A RAW LibRaw does not halve
+  (LinearRaw, monochrome DNGs, sRAW) comes back at its full size and is
+  measured as its own full frame, its crop as detected. Half size changes
+  the automatic film base (up to 23 levels in the reviewers' check) and the
+  900 px sample grid, and through the roll median, the outliers and
+  `channelData` the exported pixels, permanently. It may be offered only
+  with a recorded comparison on the 151-frame M11 roll (roll base delta,
+  outlier-set diff, `channelData` delta, per-frame crop and angle diffs
+  against a stated tolerance), which has not been made.
 
 The exact 900px geometry-applied roll samples now live in
 `analysisSampleStore.js`, with a 128 MiB retained-RAM budget. Samples that do
