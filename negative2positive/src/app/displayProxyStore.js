@@ -575,6 +575,20 @@ export function createPortRecords(port) {
   };
 }
 
+// Every tab of the origin opens the same records (OPFS, or the IndexedDB
+// fallback), and each keeps its own copy of their index (R2-010). Whatever
+// changes the index (a put, has, forget, trim, Clear cache and the first
+// load) runs under this Web Lock on the index as the records hold it, with
+// the changes of this tab's reads since it last wrote merged in (their last
+// uses and purges: reads take no lock), and writes it back. No tab writes
+// over another tab's entries or deletes its records as orphans, and the
+// budget and LRU count every tab's records.
+export const DISPLAY_PROXY_STORE_LOCK = 'negativeconverter-display-proxy-store';
+// Without Web Locks (Safari before 15.4) a record missing from the index may
+// be another tab's write in flight: it is deleted as an orphan only once it
+// is this old.
+export const DISPLAY_PROXY_ORPHAN_AGE_MS = 60 * 60 * 1000;
+
 /**
  * The persistent store, main-thread side: the index (content key -> record
  * name, size, last use and what installs it), the budget and LRU eviction.
@@ -582,19 +596,26 @@ export function createPortRecords(port) {
  * port); `port` encodes and decodes records in the worker. With
  * `encodeInWorker`, a put writes from the worker directly (web).
  * `availableBytes()` resolves the free space displayProxyStoreBudget reads
- * (a volume's, or `{ bytes, kind: 'quota' }` on the web).
+ * (a volume's, or `{ bytes, kind: 'quota' }` on the web). `locks` is
+ * navigator.locks (DISPLAY_PROXY_STORE_LOCK).
  */
 export function createDisplayProxyStore({
   port, records, availableBytes = async () => null, limitBytes = () => DISPLAY_PROXY_STORE_DEFAULT_LIMIT_BYTES,
-  floorBytes = DISPLAY_PROXY_STORE_FLOOR_BYTES, encodeInWorker = false, now = () => Date.now()
+  floorBytes = DISPLAY_PROXY_STORE_FLOOR_BYTES, encodeInWorker = false, now = () => Date.now(),
+  locks = globalThis.navigator?.locks
 } = {}) {
   const index = new Map();
+  // What this tab's reads changed since it last wrote the index: a record's
+  // last use, or null for a record they purged.
+  const changes = new Map();
   let loaded = null;
   let bytes = 0;
   let queue = Promise.resolve();
   let indexDirty = false;
   let budgetCache = { at: -Infinity, value: 0 };
   const stats = { writes: 0, reads: 0, misses: 0, corrupt: 0, failures: 0, refused: 0, evictions: 0 };
+  const lockable = typeof locks?.request === 'function';
+  const exclusive = operation => (lockable ? locks.request(DISPLAY_PROXY_STORE_LOCK, { mode: 'exclusive' }, operation) : operation());
 
   function enqueue(operation) {
     const result = queue.then(operation);
@@ -602,27 +623,39 @@ export function createDisplayProxyStore({
     return result;
   }
 
-  async function load() {
-    loaded ||= (async () => {
-      try {
-        const raw = await records.read('index');
-        const parsed = raw ? JSON.parse(new TextDecoder().decode(raw)) : null;
-        for (const [name, entry] of parsed?.entries || []) {
-          if (RECORD_NAME.test(name) && entry && Number.isFinite(entry.bytes)) index.set(name, entry);
-        }
-      } catch { /* A lost index leaves orphans, removed below. */ }
-      try {
-        const listed = await records.list();
-        const present = new Set(listed.map(entry => entry.name));
-        for (const name of [...index.keys()]) if (!present.has(name)) index.delete(name);
-        for (const entry of listed) {
-          if (entry.name !== 'index' && !index.has(entry.name)) await records.delete(entry.name).catch(() => {});
-        }
-      } catch { stats.failures++; }
-      bytes = 0;
-      for (const entry of index.values()) bytes += entry.bytes;
-    })();
-    return loaded;
+  // The index the records hold: empty when there is none or it does not
+  // parse (lost: its records are orphans); a rejection when it cannot be
+  // read, so nothing is written over it and nothing deleted.
+  async function readIndex() {
+    const raw = await records.read('index');
+    const entries = new Map();
+    let parsed = null;
+    try { parsed = raw ? JSON.parse(new TextDecoder().decode(raw)) : null; } catch { /* lost */ }
+    for (const [name, entry] of parsed?.entries || []) {
+      if (RECORD_NAME.test(name) && entry && Number.isFinite(entry.bytes)) entries.set(name, entry);
+    }
+    return entries;
+  }
+
+  // Under the lock: this tab's copy becomes the index the records hold, with
+  // its reads' changes merged in (indexDirty when they change it).
+  async function sync() {
+    const entries = await readIndex();
+    indexDirty = false;
+    for (const [name, lastUsed] of changes) {
+      const entry = entries.get(name);
+      if (!entry || (lastUsed !== null && entry.lastUsed >= lastUsed)) continue;
+      if (lastUsed === null) entries.delete(name);
+      else entry.lastUsed = lastUsed;
+      indexDirty = true;
+    }
+    changes.clear();
+    index.clear();
+    bytes = 0;
+    for (const [name, entry] of entries) {
+      index.set(name, entry);
+      bytes += entry.bytes;
+    }
   }
 
   async function saveIndex() {
@@ -630,6 +663,48 @@ export function createDisplayProxyStore({
     indexDirty = false;
     const data = new TextEncoder().encode(JSON.stringify({ version: 1, entries: [...index] }));
     try { await records.write('index', data.buffer); } catch { stats.failures++; }
+  }
+
+  // Once per tab, under the lock: entries whose record is gone are dropped
+  // and records without an entry deleted (a lost index leaves orphans): no
+  // tab is between writing a record and its entry then.
+  function load() {
+    loaded ||= exclusive(async () => {
+      try { await sync(); } catch { stats.failures++; return; }
+      try {
+        const listed = await records.list();
+        const present = new Set(listed.map(entry => entry.name));
+        for (const [name, entry] of [...index]) if (!present.has(name)) drop(name, entry);
+        const time = Date.now();
+        for (const entry of listed) {
+          if (entry.name === 'index' || index.has(entry.name)) continue;
+          if (!lockable && time - (entry.modifiedMs || 0) < DISPLAY_PROXY_ORPHAN_AGE_MS) continue;
+          await records.delete(entry.name).catch(() => {});
+        }
+      } catch { stats.failures++; }
+      await saveIndex();
+    }).catch(() => { stats.failures++; });
+    return loaded;
+  }
+
+  // A change of the index: under the lock, on the index as the records hold
+  // it now (another tab may have added, used or removed records since) and
+  // written back when it changed. `fresh` is false when the index cannot be
+  // read: the operation then works on this tab's copy and writes nothing.
+  function locked(operation) {
+    return enqueue(async () => {
+      await load();
+      return exclusive(async () => {
+        let fresh = true;
+        try { await sync(); } catch { fresh = false; stats.failures++; }
+        try {
+          return await operation(fresh);
+        } finally {
+          if (fresh) await saveIndex();
+          indexDirty = false;
+        }
+      });
+    });
   }
 
   async function budget() {
@@ -640,21 +715,41 @@ export function createDisplayProxyStore({
     return value;
   }
 
+  function drop(name, entry) {
+    index.delete(name);
+    bytes -= entry.bytes;
+    indexDirty = true;
+  }
+
   async function evict(target) {
     const byAge = [...index].sort((a, b) => a[1].lastUsed - b[1].lastUsed);
     for (const [name, entry] of byAge) {
       if (bytes <= target) break;
-      index.delete(name);
-      bytes -= entry.bytes;
-      indexDirty = true;
+      drop(name, entry);
       stats.evictions++;
       await records.delete(name).catch(() => { stats.failures++; });
     }
   }
 
+  // A read's changes, merged into the index by the next change of it.
+  function touch(name, entry) {
+    entry.lastUsed = now();
+    changes.set(name, entry.lastUsed);
+  }
+
+  // A read's record that cannot be read back: gone, with its entry.
+  async function purge(name, entry) {
+    drop(name, entry);
+    changes.set(name, null);
+    await records.delete(name).catch(() => {});
+  }
+
   return {
     load,
-    /** Whether an entry of a file of this size and date exists (no hashing). */
+    /**
+     * Whether an entry of a file of this size and date exists (no hashing):
+     * this tab's copy of the index, as of its last change.
+     */
     hasCandidate(file, { kind = null } = {}) {
       if (!file) return false;
       const identity = `${file.size}:${file.lastModified || 0}`;
@@ -673,13 +768,11 @@ export function createDisplayProxyStore({
      * renders the level again only for put() to find it).
      */
     has(fileKey, proxyKey) {
-      return enqueue(async () => {
-        await load();
+      return locked(async () => {
         for (const entry of index.values()) {
           if (entry.kind || entry.fileKey !== fileKey || entry.proxyKey !== proxyKey) continue;
           entry.lastUsed = now();
           indexDirty = true;
-          await saveIndex();
           return true;
         }
         return false;
@@ -687,8 +780,8 @@ export function createDisplayProxyStore({
     },
     /** Stores a proxy (copies its planes) unless the budget is zero. */
     put(fileKey, proxyKey, { file, image, sample = null, meta = {} }) {
-      return enqueue(async () => {
-        await load();
+      return locked(async fresh => {
+        if (!fresh) return false;
         const limit = await budget();
         const estimate = image.width * image.height * 6 + (sample?.data?.byteLength || 0);
         if (!limit || estimate > limit) { stats.refused++; return false; }
@@ -698,7 +791,6 @@ export function createDisplayProxyStore({
         if (existing) {
           existing.lastUsed = now();
           indexDirty = true;
-          await saveIndex();
           return true;
         }
         await evict(Math.max(0, limit - estimate));
@@ -714,7 +806,6 @@ export function createDisplayProxyStore({
           bytes += reply.bytes;
           indexDirty = true;
           stats.writes++;
-          await saveIndex();
           return true;
         } catch (error) {
           stats.failures++;
@@ -728,18 +819,17 @@ export function createDisplayProxyStore({
      * under `fileKey` and `key`, with a checksum; the proxies' budget and
      * LRU apply. Never a source: only presented.
      */
-    putBytes(fileKey, key, bytes, { file, kind = 'presentation', meta = {} } = {}) {
-      return enqueue(async () => {
-        await load();
+    putBytes(fileKey, key, data, { file, kind = 'presentation', meta = {} } = {}) {
+      return locked(async fresh => {
+        if (!fresh) return false;
         const limit = await budget();
-        const record = wrapStoredBytes(bytes);
+        const record = wrapStoredBytes(data);
         if (!limit || record.byteLength > limit) { stats.refused++; return false; }
         const name = await sha256Hex(`${kind}\n${fileKey}\n${key}`);
         const existing = index.get(name);
         if (existing) {
           existing.lastUsed = now();
           indexDirty = true;
-          await saveIndex();
           return true;
         }
         await evict(Math.max(0, limit - record.byteLength));
@@ -749,7 +839,6 @@ export function createDisplayProxyStore({
           bytes += record.byteLength;
           indexDirty = true;
           stats.writes++;
-          await saveIndex();
           return true;
         } catch (error) {
           stats.failures++;
@@ -769,15 +858,10 @@ export function createDisplayProxyStore({
           const data = unwrapStoredBytes(await records.read(name));
           if (!data) {
             stats.corrupt++;
-            index.delete(name);
-            bytes -= entry.bytes;
-            indexDirty = true;
-            await records.delete(name).catch(() => {});
-            await saveIndex();
+            await purge(name, entry);
             return null;
           }
-          entry.lastUsed = now();
-          indexDirty = true;
+          touch(name, entry);
           stats.reads++;
           return data;
         } catch { stats.failures++; return null; }
@@ -795,15 +879,10 @@ export function createDisplayProxyStore({
           if (!reply || reply.miss) {
             if (reply?.corrupt || record) stats.corrupt++;
             else stats.misses++;
-            index.delete(name);
-            bytes -= entry.bytes;
-            indexDirty = true;
-            await records.delete(name).catch(() => {});
-            await saveIndex();
+            await purge(name, entry);
             return null;
           }
-          entry.lastUsed = now();
-          indexDirty = true;
+          touch(name, entry);
           stats.reads++;
           const image = imageOfReply(reply.image, ImageDataCtor);
           return { image, sample: reply.sample || null, meta: reply.meta || entry.meta, proxyKey: entry.proxyKey };
@@ -816,41 +895,45 @@ export function createDisplayProxyStore({
     },
     /** Removes every entry of `fileKey` (a failed self-check). */
     forget(fileKey) {
-      return enqueue(async () => {
-        await load();
+      return locked(async () => {
         for (const [name, entry] of [...index]) {
           if (entry.fileKey !== fileKey) continue;
-          index.delete(name);
-          bytes -= entry.bytes;
-          indexDirty = true;
+          drop(name, entry);
           await records.delete(name).catch(() => {});
         }
-        await saveIndex();
       });
     },
+    /** Removes every record (every tab's: Clear cache). */
     clear() {
-      return enqueue(async () => {
+      return enqueue(() => exclusive(async () => {
         index.clear();
+        changes.clear();
         bytes = 0;
         indexDirty = false;
         loaded = Promise.resolve();
         budgetCache = { at: -Infinity, value: 0 };
         try { await records.clear(); } catch { stats.failures++; }
-      });
+      }));
     },
     /** Applies a new limit at once (the setting changed). */
     trim() {
       budgetCache = { at: -Infinity, value: 0 };
-      return enqueue(async () => {
-        await load();
-        await evict(await budget());
-        await saveIndex();
-      });
+      return locked(async () => { await evict(await budget()); });
     },
     async budget() { await load(); return budget(); },
     get bytes() { return bytes; },
     get size() { return index.size; },
     get stats() { return { ...stats, bytes, entries: index.size }; },
-    settled() { return queue.then(saveIndex); }
+    /** Resolves once every queued operation has settled and this tab's reads' changes are written. */
+    settled() {
+      return enqueue(async () => {
+        await loaded;
+        if (!changes.size) return;
+        await exclusive(async () => {
+          try { await sync(); } catch { stats.failures++; return; }
+          await saveIndex();
+        });
+      });
+    }
   };
 }

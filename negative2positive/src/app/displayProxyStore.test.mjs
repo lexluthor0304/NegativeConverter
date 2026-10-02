@@ -3,7 +3,8 @@
 // store's min(setting, 25 % of the free space above 10 GiB) on a volume and
 // half of the quota left on the web), LRU eviction, corrupted and truncated
 // records, the index across restarts, Clear cache, and the desktop records'
-// chunked IPC.
+// chunked IPC. Two tabs share one store over a fake origin-private file
+// system (R2-010).
 import assert from 'node:assert/strict';
 
 globalThis.ImageData = class ImageData {
@@ -14,8 +15,8 @@ globalThis.ImageData = class ImageData {
 };
 const {
   createDisplayProxySpill, createDisplayProxyPort, createDisplayProxyWorkerCore, createDisplayProxyStore,
-  displayProxyStoreBudget, displayProxyFileKey, namedRecords, sha256Hex, DISPLAY_PROXY_STORE_FLOOR_BYTES,
-  DISPLAY_PROXY_STORE_QUOTA_FLOOR_BYTES
+  displayProxyStoreBudget, displayProxyFileKey, namedRecords, sha256Hex, createOpfsRecords, createPortRecords,
+  DISPLAY_PROXY_STORE_FLOOR_BYTES, DISPLAY_PROXY_STORE_QUOTA_FLOOR_BYTES, DISPLAY_PROXY_STORE_LOCK, DISPLAY_PROXY_ORPHAN_AGE_MS
 } = await import('./displayProxyStore.js');
 const { createDesktopProxyRecords, DISPLAY_PROXY_CHUNK_BYTES } = await import('./displayProxyDesktop.js');
 const { resizeDisplayPreview } = await import('./displayPreview.js');
@@ -221,6 +222,235 @@ for (const stored of [0, 0.5 * GiB, 1 * GiB, 1.4 * GiB]) {
   assert.equal(await unbounded.budget(), Math.floor(0.5 * (10 * GiB - indexBytes)), 'half of the quota with the store filled');
 }
 
+// ---- A fake origin-private file system ----
+// A fake OPFS tree. With `webkit16`, its sync access handles behave as
+// WebKit's before Safari 17 (15.2-16.x): getSize(), truncate(), flush() and
+// close() return promises and take effect a task later, read() and write()
+// are synchronous. A file has one sync access handle at a time, and
+// `onAccess(fileName)` hears each one opened; `beforeOpen(fileName)`, when
+// set, is awaited first. `sizeOf` stands for an engine whose getSize() is no
+// byte count, `openError` for a getFileHandle() that fails for another
+// reason than a missing file.
+function fakeOpfs({ webkit16 = false, onAccess = () => {} } = {}) {
+  let clock = 0;
+  let root = null;
+  const later = effect => (webkit16 ? new Promise(resolve => setTimeout(() => resolve(effect()), 0)) : effect());
+  const error = (name, message) => Object.assign(new Error(message), { name });
+  function file(name) {
+    const node = { kind: 'file', name, bytes: new Uint8Array(0), modified: ++clock, open: false };
+    node.getFile = async () => ({ size: node.bytes.byteLength, lastModified: node.modified });
+    node.createSyncAccessHandle = async () => {
+      await root.beforeOpen?.(name);
+      if (node.open) throw error('NoModificationAllowedError', `${name} has an open access handle`);
+      node.open = true;
+      onAccess(name);
+      let closed = false;
+      const live = () => { if (closed) throw error('InvalidStateError', 'closed'); };
+      return {
+        getSize: () => { live(); return later(() => root.sizeOf(node)); },
+        truncate: size => { live(); return later(() => { node.bytes = node.bytes.slice(0, size); node.modified = ++clock; }); },
+        read: (buffer, { at = 0 } = {}) => {
+          live();
+          const part = node.bytes.subarray(at, at + buffer.byteLength);
+          buffer.set(part);
+          return part.byteLength;
+        },
+        write: (buffer, { at = 0 } = {}) => {
+          live();
+          const data = ArrayBuffer.isView(buffer) ? new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength) : new Uint8Array(buffer);
+          if (at + data.byteLength > node.bytes.byteLength) {
+            const grown = new Uint8Array(at + data.byteLength);
+            grown.set(node.bytes);
+            node.bytes = grown;
+          }
+          node.bytes.set(data, at);
+          node.modified = ++clock;
+          return data.byteLength;
+        },
+        flush: () => { live(); return later(() => {}); },
+        close: () => { closed = true; return later(() => { node.open = false; }); }
+      };
+    };
+    return node;
+  }
+  function directory() {
+    const children = new Map();
+    return {
+      kind: 'directory', children,
+      async getDirectoryHandle(name, { create = false } = {}) {
+        if (!children.has(name)) {
+          if (!create) throw error('NotFoundError', name);
+          children.set(name, directory());
+        }
+        return children.get(name);
+      },
+      async getFileHandle(name, { create = false } = {}) {
+        if (root.openError) throw error(root.openError, name);
+        if (!children.has(name)) {
+          if (!create) throw error('NotFoundError', name);
+          children.set(name, file(name));
+        }
+        return children.get(name);
+      },
+      async removeEntry(name) {
+        if (children.get(name)?.open) throw error('NoModificationAllowedError', `${name} is open`);
+        if (!children.delete(name)) throw error('NotFoundError', name);
+      },
+      async *entries() { for (const entry of [...children]) yield entry; }
+    };
+  }
+  root = Object.assign(directory(), { sizeOf: node => node.bytes.byteLength });
+  return root;
+}
+// A tab: its worker's records in `root`, as main.js wires the web store.
+function opfsTab(root, options = {}) {
+  const port = createDisplayProxyPort({ core: createDisplayProxyWorkerCore({ backend: null, records: () => createOpfsRecords(async () => root) }) });
+  return createDisplayProxyStore({ port, records: createPortRecords(port), encodeInWorker: true, availableBytes: async () => 20 * GiB, ...options });
+}
+const recordFiles = async root => {
+  const folder = await root.getDirectoryHandle('display-proxies');
+  return new Map([...folder.children].map(([name, node]) => [name, node]));
+};
+// ---- Two tabs share one store (R2-010): each keeps a copy of the index;
+// every change of it runs under the store's Web Lock on the index the
+// records hold, so neither writes over the other's entries nor deletes its
+// records as orphans, and the budget and LRU count both tabs' records ----
+function locksStub() {
+  let tail = Promise.resolve();
+  const stub = {
+    held: 0, grants: 0,
+    request(name, options, callback) {
+      assert.equal(name, DISPLAY_PROXY_STORE_LOCK);
+      assert.equal(options.mode, 'exclusive');
+      const run = tail.then(async () => {
+        stub.held++;
+        stub.grants++;
+        try { return await callback({ name, mode: options.mode }); } finally { stub.held--; }
+      });
+      tail = run.catch(() => {});
+      return run;
+    }
+  };
+  return stub;
+}
+const fileOf = i => ({ size: 100 + i, lastModified: i });
+async function sharedByTwoTabs({ webkit16 = false } = {}) {
+  const image = proxyImage();
+  const jpeg = Uint8Array.from({ length: 2000 }, (_, i) => (i * 7) & 255);
+  const label = webkit16 ? 'WebKit before Safari 17' : 'standard';
+  const locks = locksStub();
+  let outside = 0;
+  const root = fakeOpfs({ webkit16, onAccess: name => { if (name === 'index.ncdp' && locks.held !== 1) outside++; } });
+  let clock = 0;
+  const tab = () => opfsTab(root, { locks, now: () => ++clock });
+  const a = tab(), b = tab();
+  // Both tabs start and write at once.
+  const results = await Promise.all([
+    a.load(), b.load(),
+    a.put('file-1', 'p', { file: fileOf(1), image }), b.put('file-2', 'p', { file: fileOf(2), image }),
+    b.putBytes('file-2', 'recipe', jpeg, { file: fileOf(2) }), a.put('file-3', 'p', { file: fileOf(3), image })
+  ]);
+  assert.deepEqual(results.slice(2), [true, true, true, true], `${label}: every write stored`);
+  // A third tab (a reload) starts while the two write, ask and forget again.
+  const c = tab();
+  const more = await Promise.all([
+    c.load(), a.put('file-4', 'p', { file: fileOf(4), image }), b.has('file-1', 'p'),
+    b.put('file-5', 'p', { file: fileOf(5), image }), a.forget('file-3')
+  ]);
+  assert.equal(more[3], true, `${label}: stored again`);
+  await Promise.all([a.settled(), b.settled(), c.settled()]);
+  assert.equal(outside, 0, `${label}: the index is only read and written under the lock`);
+  // A later tab finds every tab's records, and every record is listed.
+  const d = tab();
+  for (const i of [1, 2, 4, 5]) {
+    const [entry] = await d.find(`file-${i}`);
+    assert.ok(entry, `${label}: file-${i} is listed`);
+    same((await d.read(entry.name)).image, image, `${label}: file-${i} reads back`);
+  }
+  assert.deepEqual([...(await d.readBytes('file-2', 'recipe'))], [...jpeg], `${label}: the other tab's preview reads back`);
+  assert.deepEqual(await d.find('file-3'), [], `${label}: a forgotten file is gone in every tab`);
+  const onDisk = [...(await recordFiles(root)).keys()].filter(name => name !== 'index.ncdp');
+  assert.equal(onDisk.length, 5, `${label}: four proxies and a preview on disk, nothing orphaned`);
+  // A tab's copy follows the records' index at its next change.
+  assert.equal(await b.has('file-4', 'p'), true, `${label}: a tab finds a record the other tab stored`);
+  // A tab that starts while another is between writing a record and listing
+  // it in the index waits for the entry: it never takes the record for an
+  // orphan.
+  let release, gated, recordOpened = false;
+  const gate = new Promise(resolve => { release = resolve; });
+  const between = new Promise(resolve => { gated = resolve; });
+  root.beforeOpen = async name => {
+    if (name !== 'index.ncdp') { recordOpened = true; return; }
+    if (!recordOpened) return;
+    root.beforeOpen = null;
+    gated();
+    await gate;
+  };
+  const writing = a.put('file-7', 'p', { file: fileOf(7), image });
+  await between;
+  const loading = tab().load();
+  for (let i = 0; i < 20; i++) await new Promise(resolve => setTimeout(resolve, 0));
+  release();
+  assert.equal(await writing, true);
+  await loading;
+  const [seventh] = await tab().find('file-7');
+  assert.ok(seventh && (await tab().read(seventh.name)), `${label}: a record written while another tab starts is kept`);
+  // Reads take no lock.
+  const grants = locks.grants;
+  await d.read((await d.find('file-1'))[0].name);
+  await d.readBytes('file-2', 'recipe');
+  await d.find('file-5');
+  assert.equal(locks.grants, grants, `${label}: reads take no lock`);
+  // Their last uses are merged into the index by the next change.
+  const used = (await d.find('file-1'))[0].lastUsed;
+  await d.settled();
+  assert.equal((await tab().find('file-1'))[0].lastUsed, used, `${label}: a read's last use reaches the index`);
+  // Clear cache empties every tab's records; the other tabs follow.
+  await a.clear();
+  assert.equal((await recordFiles(root)).size, 0, `${label}: cleared`);
+  assert.equal(await b.read((await b.find('file-5'))[0].name), null, `${label}: a stale entry reads as a miss`);
+  assert.equal(await b.put('file-6', 'p', { file: fileOf(6), image }), true);
+  assert.equal([...(await recordFiles(root)).keys()].filter(name => name !== 'index.ncdp').length, 1, `${label}: only the new record`);
+  assert.equal(b.size, 1, `${label}: the other tab's copy is the records' index again`);
+}
+await sharedByTwoTabs();
+// The budget and the LRU count every tab's records: room for about two
+// proxies in all, three puts from each of two tabs leave two.
+{
+  const image = proxyImage();
+  const probe = opfsTab(fakeOpfs(), { locks: locksStub() });
+  await probe.put('probe', 'p', { file: fileOf(0), image });
+  const recordBytes = probe.bytes;
+  const locks = locksStub();
+  const root = fakeOpfs();
+  let clock = 0;
+  const tab = () => opfsTab(root, { locks, now: () => ++clock, limitBytes: () => Math.floor(recordBytes * 2.5) });
+  const a = tab(), b = tab();
+  for (let i = 0; i < 3; i++) {
+    assert.equal(await a.put(`a-${i}`, 'p', { file: fileOf(10 + i), image }), true);
+    assert.equal(await b.put(`b-${i}`, 'p', { file: fileOf(20 + i), image }), true);
+  }
+  const kept = [...(await recordFiles(root))].filter(([name]) => name !== 'index.ncdp');
+  assert.equal(kept.length, 2, 'two proxies in the shared budget');
+  assert.ok(kept.reduce((sum, [, node]) => sum + node.bytes.byteLength, 0) <= recordBytes * 2.5, 'within it');
+  assert.equal((await tab().find('b-2')).length + (await tab().find('a-2')).length, 2, 'the most recent ones');
+}
+
+// ---- Without Web Locks (Safari before 15.4) a record missing from the index
+// may be another tab's write in flight: only old orphans are deleted ----
+{
+  const records = memoryRecords();
+  const young = 'a'.repeat(64), old = 'b'.repeat(64);
+  records.data.set(young, { bytes: new Uint8Array(10), modifiedMs: Date.now() });
+  records.data.set(old, { bytes: new Uint8Array(10), modifiedMs: Date.now() - DISPLAY_PROXY_ORPHAN_AGE_MS - 1000 });
+  await createDisplayProxyStore({ port: localPort(), records, availableBytes: async () => 20 * GiB, locks: null }).load();
+  assert.equal(records.data.has(young), true, 'a young record without an entry is kept');
+  assert.equal(records.data.has(old), false, 'an old one is an orphan');
+  // Under the lock no tab is between a record and its entry: every orphan goes.
+  await createDisplayProxyStore({ port: localPort(), records, availableBytes: async () => 20 * GiB, locks: locksStub() }).load();
+  assert.equal(records.data.has(young), false, 'under the lock every orphan is deleted');
+}
+
 // ---- Presentation previews (#235 slice 3): opaque bytes with a checksum ----
 {
   const records = memoryRecords();
@@ -308,4 +538,4 @@ for (const stored of [0, 0.5 * GiB, 1 * GiB, 1.4 * GiB]) {
   assert.equal(files.get('c'.repeat(64)).byteLength, 0, 'an empty record still renames into place');
 }
 
-console.log('displayProxyStore: spill, persistent store, budgets, LRU, checksum purge, index restart, Clear cache and desktop chunks passed');
+console.log('displayProxyStore: spill, persistent store, budgets, LRU, checksum purge, index restart, Clear cache, two tabs and desktop chunks passed');
