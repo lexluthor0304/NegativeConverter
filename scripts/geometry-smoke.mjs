@@ -135,7 +135,10 @@ export async function runGeometrySmoke({ send, evaluate, waitFor, wait, fail, in
     // (WebGL off), where the border is drawn around the frame on #canvas:
     // the bordered paint of the new planes ends the interim turn and flip
     // too (R1-063).
-    const gpuWas = await evaluate(`document.getElementById('coreUseWebGL').checked`);
+    // The WebGL setting is restored afterwards; the GPU pass runs only where
+    // the GL display presents (a browser without WebGL shows #canvas).
+    const glSetting = await evaluate(`document.getElementById('coreUseWebGL').checked`);
+    const onGpu = shownAfter.surface === 'gl';
     const display = ({ gpu, border }) => evaluate(`(() => {
       const gl = document.getElementById('coreUseWebGL'); if (gl.checked !== ${gpu}) gl.click();
       const button = document.getElementById('sprocketPreviewBtn');
@@ -143,10 +146,10 @@ export async function runGeometrySmoke({ send, evaluate, waitFor, wait, fail, in
     })()`);
     // The border is shown: the GL photo rectangle inside it, or #canvas larger than the frame it holds.
     const bordered = `(() => { const f = window.__ncDisplay.frame(); return Boolean(f.display) && (f.surface === 'gl' ? f.glPhoto !== null : f.canvases.main[0] * f.canvases.main[1] > f.display[0] * f.display[1]); })()`;
-    await display({ gpu: gpuWas, border: true });
+    await display({ gpu: glSetting, border: true });
     await waitFor('film border on', `${ready} && ${bordered}`, 60_000);
     const surfaces = [];
-    for (const gpu of gpuWas ? [true, false] : [false]) {
+    for (const gpu of onGpu ? [true, false] : [false]) {
       await display({ gpu, border: true });
       await waitFor(`film border on the ${gpu ? 'GPU' : 'CPU'} display`, `${ready} && ${bordered} && window.__ncDisplay.frame().surface === ${JSON.stringify(gpu ? 'gl' : 'cpu')}`, 60_000);
       await wait(300);
@@ -167,7 +170,7 @@ export async function runGeometrySmoke({ send, evaluate, waitFor, wait, fail, in
       if (planes.hash16 !== planes.chainHash16 || planes.hash8 !== planes.chainHash8) fail('bordered edits built other planes than the export chain: ' + JSON.stringify(planes));
       surfaces.push(after.surface);
     }
-    await display({ gpu: gpuWas, border: false });
+    await display({ gpu: glSetting, border: false });
     await waitFor('film border off', `${ready} && !${bordered}`, 60_000);
     console.log(`ok: with the film border on (${surfaces.join(', ')}), the new planes' paint ends the interim turn and flip and turns the bordered frame`);
 
