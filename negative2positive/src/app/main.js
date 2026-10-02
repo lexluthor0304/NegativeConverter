@@ -9095,8 +9095,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // last pass changed are written onto a copy of the source instead. A mask
     // from the page's OpenCV fallback carries no hash and always runs.
     // `info` is the summary of the mask's content; the export passes that of
-    // the live mask while the pass reads a copy of it.
-    async function commitDustPass(source, mask, isCurrent = () => true, info = dustMaskInfo(mask)) {
+    // the live mask while the pass reads a copy of it. A brush stroke patches
+    // the live mask in place, between the tiles of a pass (#259), and forgets
+    // its summary: such a pass mixed two masks, so it is kept only while
+    // `maskUnchanged` holds (the export's private copy always does).
+    async function commitDustPass(source, mask, isCurrent = () => true, info = dustMaskInfo(mask),
+      maskUnchanged = () => dustMaskInfo(mask) === info) {
       const deciding = state.dustRemoval.ai && (aiRepair.status === 'idle' || aiRepair.status === 'loading');
       const key = { source, maskHash: info?.hash, usedAi: aiRepairReady(), revision: aiRepair.revision };
       if (info && !deciding && dustPassMatches(dustPassCache, key)) {
@@ -9105,7 +9109,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       }
       const report = {};
       const imageData = await inpaintForCommit(source, mask, isCurrent, null, { report });
-      if (info && isCurrent() && report.revision === aiRepair.revision) {
+      if (info && isCurrent() && maskUnchanged() && report.revision === aiRepair.revision) {
         dustPassCache = captureDustPass(imageData, { source, maskHash: info.hash, usedAi: report.usedAi,
           revision: report.revision, blocks: report.usedAi ? report.blocks : info.blocks });
       }
@@ -17705,7 +17709,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         const token = coreReprocessToken;
         const lensMapping = state.conversionSourceImageData?.__lensMapping || null;
         const modelRevision = aiRepair.revision;
-        const dust = dustEnabled && mask ? await commitDustPass(source, mask, () => true, dustMaskInfo(liveMask)) : null;
+        // The pass reads its own copy of the mask, which nothing patches.
+        const dust = dustEnabled && mask ? await commitDustPass(source, mask, () => true, dustMaskInfo(liveMask), () => true) : null;
         const repaired = await inpaintManualBrush(dust ? dust.imageData : source);
         // Manual-only background repair creates a fresh, unused zero dust
         // mask. Its identity does not change the export recipe. Actual dust

@@ -42,6 +42,7 @@ function fixture() {
   const infos = new WeakMap();
   const calls = { detect: 0, dust: 0, strokes: 0, dustInputs: [], strokeInputs: [] };
   let bumpDuringStrokes = false;
+  let duringDustPass = null;
   const state = {
     originalImageData: clean, loadedBaseImageData: clean, conversionSourceImageData: { __lensMapping: lens },
     processedImageData: clean, processedImageDataIsPreview: false, currentStep: 3,
@@ -76,8 +77,11 @@ function fixture() {
     dustDetectionRun: null, dustMaskSources: new WeakMap(), rememberRepairMasks() {},
     dustMaxParticleSizeFor: () => 40,
     detectDustOffMainThread: async () => { calls.detect++; return { mask: detectedMask(), particleCount: 2, _state: null }; },
-    // Dust pass: changes pixels inside the mask's blocks only, as MI-GAN and TELEA do.
+    // Dust pass: changes pixels inside the mask's blocks only, as MI-GAN and
+    // TELEA do. A brush stroke can land while it runs
+    // (`strokeDuringNextDustPass`), between two of its tiles.
     async inpaintForCommit(input, mask, isCurrent, worker, { report } = {}) {
+      if (duringDustPass) { const stroke = duringDustPass; duringDustPass = null; stroke(mask); }
       calls.dust++;
       calls.dustInputs.push(input);
       const usedAi = c.aiRepairReady();
@@ -110,6 +114,7 @@ function fixture() {
     'applyDustResultToState', 'runDustDetection', 'runDustDetectionPass', 'prepareCurrentImageForExport', 'renderCurrentImageDataForExport',
     'ensureRepairsReadyForExport', 'dustMaskIsStale', 'whenBrushRepairsSettled'].map(functionSource).join('\n'), c);
   return { c, state, clean, lens, calls, detectedMask, infos, bumpNextStrokePass: () => { bumpDuringStrokes = true; },
+    strokeDuringNextDustPass: (stroke) => { duringDustPass = stroke; },
     exportImage: () => c.renderCurrentImageDataForExport({ format: 'png', bitDepth: 8 }) };
 }
 const counts = (f) => ({ dust: f.calls.dust, strokes: f.calls.strokes });
@@ -240,4 +245,23 @@ for (const [label, mutate, rerun] of negatives) {
   assert.deepEqual(counts(f), { dust: 1, strokes: 2 }, 'different strokes are repaired again, on the kept dust pass');
 }
 
-console.log('repairCommitReuse: settled commits export with 0 passes; unchanged dust content skips the dust pass; recipe changes, reloads and stand-ins re-run');
+// A dust-brush stroke that lands between the tiles of a dust pass patches
+// the live mask in place and forgets its summary (#259). The pass read two
+// masks, so it is not kept under the hash it started with, and the next
+// detection of that content runs a fresh pass.
+{
+  const f = fixture();
+  f.strokeDuringNextDustPass((mask) => {
+    mask[20 * W + 30] = 255;
+    f.infos.delete(mask);
+    f.state.dustRemoval.revision++;
+  });
+  await f.c.runDustDetection();
+  assert.equal(f.c.dustPassCache, null, 'nothing kept under the pre-stroke hash');
+  assert.equal(f.c.repairStamps.recipeOf(f.state.dustRemoval.inpaintedImageData), null, 'nor stamped');
+  await f.c.runDustDetection();
+  assert.deepEqual(counts(f), { dust: 2, strokes: 2 }, 'the same content runs a fresh pass');
+  assert.notEqual(f.c.dustPassCache, null, 'which is kept');
+}
+
+console.log('repairCommitReuse: settled commits export with 0 passes; unchanged dust content skips the dust pass; recipe changes, reloads and stand-ins re-run; a stroke during a dust pass leaves nothing kept');
