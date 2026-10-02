@@ -214,25 +214,26 @@ export function createPhotoSwitchPresentation(feedback, { label = () => '' } = {
       reveal(item, kind, 'bitmap');
       return true;
     },
-    relabel() {
-      const chip = suffix();
-      if (chip) chip.textContent = target ? label() : '';
+    // The Studio flush calls these two with its diffed writer (`set`), so an
+    // unchanged label or a released veil writes nothing and every write is
+    // counted (R1-116).
+    relabel(set = writeDirectly) {
+      set(suffix(), 'textContent', target ? label() : '');
     },
-    clear() {
+    clear(set = writeDirectly) {
       if (!target && !feedback.dataset.provisional) return;
       target = null;
-      delete feedback.dataset.provisional;
+      set(feedback, 'dataset.provisional', undefined);
       const canvas = surface('image');
-      if (canvas) { canvas.hidden = true; canvas.width = 0; canvas.height = 0; }
+      if (canvas) { set(canvas, 'hidden', true); set(canvas, 'width', 0); set(canvas, 'height', 0); }
       const image = surface('thumbnail');
-      if (image) { image.hidden = true; image.removeAttribute('src'); }
+      if (image) { set(image, 'hidden', true); set(image, '@src', null); }
       const bitmap = surface('bitmap');
       if (bitmap) {
-        bitmap.hidden = true;
+        set(bitmap, 'hidden', true);
         try { bitmapContext?.transferFromImageBitmap(null); } catch { /* engines without the null release */ }
       }
-      const chip = suffix();
-      if (chip) chip.textContent = '';
+      set(suffix(), 'textContent', '');
     },
   };
   return presentation;
@@ -351,8 +352,8 @@ export function syncPhotoSwitchFeedback({ state, document, text, rows = true, se
     .replace('{name}', item.file.name) : '';
   set(document.getElementById('studioPhotoSwitchFeedback'), 'hidden', !item);
   // A presentation belongs to exactly one target and ends with the veil.
-  if (presentation && presentation.target !== item) presentation.clear();
-  else presentation?.relabel();
+  if (presentation && presentation.target !== item) presentation.clear(set);
+  else presentation?.relabel(set);
   set(document.getElementById('studioPhotoSwitchMessage'), 'textContent', message);
   set(document.getElementById('studioPhotoSwitchHint'), 'textContent', item ? text('photoSwitchHint') : '');
   set(document.getElementById('canvasContainer'), '@aria-busy', String(Boolean(item)));

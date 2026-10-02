@@ -336,8 +336,47 @@ console.log('studioWorkspace: coalesced sync flushes once per burst, before the 
   render();
   assert.equal(rows[0].getAttribute('aria-current'), 'true');
   assert.equal(rows[1].getAttribute('aria-current'), null);
+
+  // R1-116: during a cold switch that shows a presentation, the chip suffix
+  // goes through the same writer. A flush with nothing changed writes (and
+  // counts) nothing; a language change writes the chip once and counts it;
+  // the veil's release is counted too.
+  let chipText = '';
+  let chipWrites = 0;
+  const chip = { get textContent() { return chipText; }, set textContent(value) { chipText = String(value); chipWrites++; } };
+  const image = { ...fake(), hidden: true, width: 0, height: 0, getContext: () => ({ putImageData() {} }) };
+  const veil = { dataset: {}, querySelector: selector => ({ '[data-surface="image"]': image, '.studio-photo-switch-provisional': chip })[selector] ?? null };
+  let lang = 'en';
+  const presentation = createPhotoSwitchPresentation(veil, { label: () => ' · ' + studioText[lang].provisionalPreview });
+  const cold = { file: { name: 'cold.dng' } };
+  const coldState = { fileQueue: [cold], photoSwitchTarget: cold, photoSwitchPhase: 'preparing', currentFileIndex: 0 };
+  const coldDoc = { body: { dataset: { photoSwitching: 'true' } }, getElementById: id => nodes.get(id), querySelectorAll: () => [] };
+  const coldWriter = createDiffedWriter();
+  const flush = () => {
+    const before = { counted: coldWriter.counters.writes, chip: chipWrites };
+    syncPhotoSwitchFeedback({ state: coldState, document: coldDoc, text: key => studioText[lang][key], rows: false, set: coldWriter.set, presentation });
+    return { counted: coldWriter.counters.writes - before.counted, chip: chipWrites - before.chip };
+  };
+  assert.equal(presentation.showImageData(cold, { width: 12, height: 8, data: new Uint8ClampedArray(12 * 8 * 4) }), true);
+  assert.equal(chipText, ' · ' + studioText.en.provisionalPreview);
+  flush();
+  assert.deepEqual(flush(), { counted: 0, chip: 0 }, 'an unchanged flush neither rewrites the chip nor counts a write');
+  coldState.photoSwitchPhase = 'loading';
+  assert.deepEqual(flush(), { counted: 1, chip: 0 }, 'only the changed message is written');
+  lang = 'ja';
+  assert.deepEqual(flush(), { counted: 3, chip: 1 }, 'the message, the hint and the relabelled chip, each counted');
+  assert.equal(chipText, ' · ' + studioText.ja.provisionalPreview);
+  assert.deepEqual(flush(), { counted: 0, chip: 0 });
+  delete coldDoc.body.dataset.photoSwitching;
+  const released = flush();
+  assert.equal(presentation.target, null);
+  assert.deepEqual([chipText, veil.dataset.provisional, image.hidden, image.width, image.height], ['', undefined, true, 0, 0]);
+  // The chip, the veil's dataset and the image's hidden flag and size, then
+  // the hidden veil, the message, the hint and aria-busy.
+  assert.deepEqual(released, { counted: 9, chip: 1 }, 'the release goes through the writer');
+  assert.deepEqual(flush(), { counted: 0, chip: 0 }, 'a released veil writes nothing more');
 }
-console.log('studioWorkspace: diffed writes compare with the live DOM and skip unchanged filmstrip rows');
+console.log('studioWorkspace: diffed writes compare with the live DOM and skip unchanged filmstrip rows and switch chips');
 
 // #261: Studio fires no synthetic window resize (ResizeObservers in main.js
 // follow the viewer, histogram and curve), and one flush owns these fields.
