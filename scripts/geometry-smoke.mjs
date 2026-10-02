@@ -70,10 +70,31 @@ export async function runGeometrySmoke({ send, evaluate, waitFor, wait, fail, in
     // Rotate 90: the new framing is on screen in the click's own task.
     await evaluate(`document.getElementById('studioTab-composition').click()`);
     const beforeRotate = await evaluate(counters);
-    // The displayed frame's size: #canvas holds a display-size frame, and none
-    // while WebGL presents (#242).
-    const displayedSize = `(() => { const f = window.__ncDisplay.frame(); return [f.width, f.height]; })()`;
-    const sizeBefore = await evaluate(displayedSize);
+    // What the screen shows (#242, R1-142): the display preview the surface
+    // draws, #canvas (a display-size frame, with the film border around it;
+    // none while WebGL presents), the GL source texture, and the wrapper's
+    // interim turn.
+    const shown = `(() => {
+      const f = window.__ncDisplay.frame();
+      return { surface: f.surface, display: f.display, handle: f.handle, main: f.canvases.main, texture: f.texture,
+        transform: document.getElementById('canvasTransformWrapper').style.transform };
+    })()`;
+    // A quarter turn turns what is shown, not only the planes: the display
+    // preview's aspect, the texture uploaded for it after the build settled
+    // (a new geometry resets it) or the frame on #canvas; and the paint of
+    // the new planes ends the interim turn.
+    const aspect = ([w, h]) => w / h;
+    const turned = (a, b) => Boolean(a && b) && Math.abs(aspect(a) * aspect(b) - 1) <= 0.02;
+    const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+    const checkTurnedDisplay = (before, after, label) => {
+      if (!turned(before.display, after.display)) fail(`${label} did not turn the displayed frame: ` + JSON.stringify({ before, after }));
+      if (after.surface === 'gl' && !same(after.texture, after.display)) fail(`${label}: no texture of the turned frame was uploaded: ` + JSON.stringify({ before, after }));
+      if (after.surface === 'cpu' && (!same(after.handle, after.display) || (before.surface === 'cpu' && !turned(before.main, after.main)))) {
+        fail(`${label} did not turn the frame on #canvas: ` + JSON.stringify({ before, after }));
+      }
+      if (/rotate|scaleX\(-1\)/.test(after.transform)) fail(`${label}: the interim turn outlived the new paint: ` + after.transform);
+    };
+    const shownBefore = await evaluate(shown);
     const interim = await evaluate(`(() => {
       const started = performance.now();
       document.getElementById('rotateRightBtn').click();
@@ -84,7 +105,7 @@ export async function runGeometrySmoke({ send, evaluate, waitFor, wait, fail, in
     await wait(500);
     const rotated = await evaluate(`window.__ncGeometry.inspect({ chain: true })`);
     const afterRotate = await evaluate(counters);
-    const sizeAfter = await evaluate(displayedSize);
+    const shownAfter = await evaluate(shown);
     if (rotated.hash16 !== rotated.chainHash16 || rotated.hash8 !== rotated.chainHash8) fail('rotated planes differ from the export chain: ' + JSON.stringify(rotated));
     if (afterRotate.poolRotations - beforeRotate.poolRotations !== 1 || afterRotate.mainRotations !== beforeRotate.mainRotations) fail('rotate 90 did not build its planes in the pool: ' + JSON.stringify({ beforeRotate, afterRotate }));
     // The crop box maps through the turn with floor/ceil, so a side may grow by a pixel.
@@ -92,9 +113,7 @@ export async function runGeometrySmoke({ send, evaluate, waitFor, wait, fail, in
       fail('rotate 90 did not swap the frame: ' + JSON.stringify({ before: [importState.width, importState.height], after: [rotated.width, rotated.height] }));
     }
     // Only the aspect ratio of the displayed frame has to turn with it.
-    const aspect = ([w, h]) => w / h;
-    if (Math.abs(aspect(sizeAfter) * aspect(sizeBefore) - 1) > 0.02) fail('rotate 90 did not swap the displayed frame: ' + JSON.stringify({ sizeBefore, sizeAfter }));
-    if (/rotate/.test(await evaluate(`document.getElementById('canvasTransformWrapper').style.transform`))) fail('the interim turn outlived the new paint');
+    checkTurnedDisplay(shownBefore, shownAfter, 'rotate 90');
 
     // Mirror: flipped at once, exact planes from the pool.
     const flip = await evaluate(`(() => { document.getElementById('mirrorBtn').click(); return document.getElementById('canvasTransformWrapper').style.transform; })()`);
@@ -110,7 +129,7 @@ export async function runGeometrySmoke({ send, evaluate, waitFor, wait, fail, in
     const undone = await evaluate(`window.__ncGeometry.inspect()`);
     const afterUndo = await evaluate(counters);
     if (undone.mirrored || undone.hash16 !== rotated.hash16 || afterUndo.poolJobs !== beforeUndo.poolJobs) fail('undo of the latest geometry edit was not an instant swap: ' + JSON.stringify({ undone, beforeUndo, afterUndo }));
-    console.log('ok: rotate 90 and mirror show the new framing in the click task, build exact planes in the pool; undo swaps references');
+    console.log(`ok: rotate 90 and mirror show the new framing in the click task, build exact planes in the pool, turn the displayed frame (${shownAfter.surface}); undo swaps references`);
 
     // Crop mode shows the whole frame from a sample built off the base.
     await evaluate(`document.getElementById('cropBtn').click()`);

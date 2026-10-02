@@ -7104,6 +7104,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         exact: step3 && !state.processedImageDataIsPreview && !state.fullResolutionPending,
         display: size(shown), handle: size(state.displayImageData),
         surface: glCanvas.style.display === 'block' ? 'gl' : 'cpu',
+        // The source texture the GL display draws: a new geometry resets it,
+        // and the first GL frame of the new planes uploads it again.
+        texture: webglState.gl ? [webglState.sourceSize.w, webglState.sourceSize.h] : null,
         canvases: {
           main: size(canvas), comparison: size(beforeAfterCanvas),
           // The dust tint pooled for the overlay, the live brush overlay (#254).
