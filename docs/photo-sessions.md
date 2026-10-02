@@ -281,7 +281,8 @@ reports its usage plus 10 GiB), it is `min(setting, half of the quota left)`
 with the store's own records counted as left, off below 512 MiB (R2-068: the
 disk floor kept the web store off in both). Least recently used records go
 out first; the Studio menu shows the size, a limit
-(Off, 1-10 GB, default 2 GB) and **Clear cache**. The store also keeps #235's
+(Off, 1-10 GB, default 2 GB) and **Clear cache** (the size line is built
+again on a language switch, R2-069). The store also keeps #235's
 1200 px presentation previews as JPEG, keyed by content and a recipe digest,
 which the switch veil shows at once after a restart; they are presentation
 only. The veil shows a stored or spilled hit's presentation copy until the

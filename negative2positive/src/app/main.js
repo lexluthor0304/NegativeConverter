@@ -674,6 +674,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         if (typeof updateExportUI === 'function') updateExportUI();
         updateDesktopBatchExportUI();
         if (state.sprocketPreviewEnabled) refreshSprocketPreviewAfterSettingsChange();
+        // The Studio menu's photo-cache and learned-defaults lines interpolate
+        // their values and have no data-i18n key: they are built again (R2-069).
+        void updateDisplayCacheUI();
+        updateLearningUI();
       }
       studioWorkspace?.sync();
     }
