@@ -659,4 +659,93 @@ for (const step of [1, 3]) {
   assert.equal(h.target.geometryDiagnostics.frameSyncReads, 0);
 }
 
+// ---- A photo switch while a geometry build is pending (R1-069) ----
+// The import detection tail's settings refresh (the film strip stays
+// navigable while it runs; prepareStudioPhoto holds the lock) and a Rotate
+// (its build holds the lock). The switch supersedes the build: its late
+// planes never land on the photo switched to, the photo left keeps no
+// snapshot of the half-built state (it reopens from its base and saved
+// recipe), and editing is unlocked once the switch ends.
+// Without room for the photo left in the session cache, only the switch's
+// own cancellation stops the build (its planes are not released).
+for (const [pending, sessionBudget] of [['refresh', undefined], ['rotation', undefined], ['rotation', 0]]) {
+  const baseA = makeBase(60, 44, 61), baseB = makeBase(52, 36, 62);
+  const h = createHarness(baseA, { realProcessNegative: true, sessionBudget }), c = h.context;
+  const dataset = h.target.document.body.dataset;
+  const itemA = { file: { name: 'a.png' }, settings: null, isDirty: true };
+  const itemB = { file: { name: 'b.png' }, settings: null };
+  Object.assign(h.state, { fileQueue: [itemA, itemB], currentFileIndex: 0, loadedFile: itemA.file });
+  c.restoreSettings({ rotationAngle: 1.5, mirrored: false, cropRegion: crop(4, 4) });
+  await h.state.geometryReady;
+  await c.processNegative({ quiet: true });
+  c.pushUndo('exposure');
+  h.target.getCurrentQueueItem = () => h.state.fileQueue[h.state.currentFileIndex];
+  h.target.persistCurrentFileSettings = () => { h.state.fileQueue[h.state.currentFileIndex].settings = settingsFor(h.state); };
+  // A decode installs the photo's base as its working image (loadFile).
+  const decodes = [];
+  h.target.loadFile = async file => {
+    decodes.push({ file, busy: dataset.studioBusy, switching: dataset.photoSwitching, pending: h.state.geometryPending });
+    const base = file === itemA.file ? baseA : baseB;
+    Object.assign(h.state, {
+      loadedFile: file, loadedBaseImageData: base, originalImageData: base, croppedImageData: null,
+      processedImageData: null, rotationAngle: 0, mirrored: false, cropRegion: null, currentStep: 1
+    });
+    return { status: 'loaded' };
+  };
+  // The pool holds the build until the switch is over.
+  let release, entered;
+  const held = new Promise(resolve => { release = resolve; });
+  const inPool = new Promise(resolve => { entered = resolve; });
+  const render = h.pool.render;
+  h.pool.render = async (...args) => { entered(); await held; return render(...args); };
+  if (pending === 'refresh') {
+    dataset.studioBusy = 'true';
+    c.restoreSettings({ rotationAngle: -2, mirrored: true, cropRegion: crop(6, 5) }, { refreshDisplay: false });
+  } else {
+    void c.applyRotation(90);
+  }
+  await inPool;
+  assert.equal(h.state.geometryPending, true, `${pending}: the build is in the pool`);
+  const recipe = settingsFor(h.state);
+  const conversions = h.conversions.length;
+  await c.switchToFile(1);
+  release();
+  await settle();
+  await settle();
+  assert.equal(h.state.loadedFile, itemB.file, `${pending}: the switch went through`);
+  assert.equal(decodes.length, 1);
+  assert.equal(decodes[0].pending, false, `${pending}: the switch superseded the build before the next photo decoded`);
+  assert.equal(decodes[0].switching, 'true', `${pending}: the switch held its lock while the next photo decoded`);
+  // A Rotate's build lets go of the lock it holds when the switch supersedes
+  // it; photoSwitching keeps the workspace locked. (The film strip is inert
+  // while such a build runs, so only a direct call starts this switch; see
+  // audit-backlog.md.)
+  if (pending === 'refresh') assert.equal(decodes[0].busy, 'true');
+  assert.equal(h.state.originalImageData, baseB, `${pending}: the late planes never land on the photo switched to`);
+  assert.equal(h.state.croppedImageData, null);
+  assert.deepEqual(settingsFor(h.state), { rotationAngle: 0, mirrored: false, cropRegion: null }, `${pending}: its settings are its own`);
+  assert.equal(h.state.geometryPending, false);
+  assert.equal(h.conversions.length, conversions, `${pending}: nothing converted the late planes`);
+  assert.equal(h.target.geometryDiagnostics.rollbacks, 0, `${pending}: the superseded build is not rolled back`);
+  assert.equal(h.target.toasts.length, 0);
+  assert.equal(dataset.studioBusy, undefined, `${pending}: editing is unlocked`);
+  assert.equal(dataset.photoSwitching, undefined);
+  const session = h.target.photoSessions.get(itemA);
+  if (sessionBudget === 0) assert.equal(session, null, `${pending}: no room, nothing kept`);
+  else {
+    assert.equal(session?.base, baseA, `${pending}: the photo left keeps its base`);
+    assert.equal(session.snapshot, null, `${pending}: and no snapshot of the half-built state`);
+  }
+  assert.deepEqual(itemA.settings, recipe, `${pending}: its recipe names the pending geometry`);
+  // Back on it: the planes its recipe names, built from its base.
+  await c.switchToFile(0);
+  await h.state.geometryReady;
+  await settle();
+  assert.equal(h.state.loadedFile, itemA.file);
+  assert.equal(decodes.at(-1).file, itemA.file);
+  samePixels(h.state.croppedImageData, exportChain(baseA, recipe), `${pending}: reopened with the planes of its recipe`);
+  assert.equal(dataset.studioBusy, undefined);
+  assert.equal(dataset.photoSwitching, undefined);
+}
+
 console.log('geometry history tests passed');
