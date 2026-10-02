@@ -6792,7 +6792,14 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // with the data URL made from them: zoom, pan and resize redraws change
     // neither, so they rebuild nothing, and any other writer of the tile
     // (roll-transaction undo) shows up as a different data URL.
-    const studioThumbnailInputs = new WeakMap();
+    // The source is remembered as an identity (rasterIdentity), never held: a
+    // photo's converted frame (up to 240 MB + 480 MB at 60 MP) must not outlive
+    // its session, its eviction or the next decode for the sake of its tile.
+    // Only the open photo's pair is kept (invalidatePhotoActivation forgets
+    // the rest).
+    let studioThumbnailInputs = new WeakMap();
+    const rasterIdentities = new WeakMap();
+    let nextRasterIdentity = 1;
     const STUDIO_THUMBNAIL_SETTLE_MS = 250;
     // Long side of the light-table lane's render before the 144 px tile.
     const STUDIO_TILE_PREVIEW_MAX = 288;
@@ -12247,8 +12254,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // The detail layer shows the outgoing photo (#248).
       dropDetailLayer();
       cancelPendingTimers();
-      // The outgoing photo's tile update cannot write into the incoming one.
+      // The outgoing photo's tile update cannot write into the incoming one,
+      // and its tile inputs are never read again: its persist restamped the
+      // tile already, and a return adopts or rebuilds it.
       cancelStudioThumbnailUpdate();
+      studioThumbnailInputs = new WeakMap();
       // The pin belongs to the outgoing photo; the next one pins on its own.
       unpinDustWorker();
       if (dustAiRefresh.timer) { clearTimeout(dustAiRefresh.timer); dustAiRefresh.timer = null; }
@@ -22395,6 +22405,18 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       return exactSettingsKey([adjustments], 1);
     }
 
+    // A number for a raster object that holds no reference to it: equal
+    // numbers mean the same object (never reused, unlike an address).
+    function rasterIdentity(image) {
+      if (!image) return 0;
+      let id = rasterIdentities.get(image);
+      if (!id) {
+        id = nextRasterIdentity++;
+        rasterIdentities.set(image, id);
+      }
+      return id;
+    }
+
     // Rebuilds the active tile only when its inputs changed; otherwise it only
     // restamps the settings key (item.settings may have been persisted since).
     function updateStudioThumbnail() {
@@ -22407,12 +22429,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       cancelStudioThumbnailUpdate();
       const adjustments = buildAdjustmentSettings(state);
       const signature = studioThumbnailSignature(adjustments);
+      const sourceId = rasterIdentity(source);
       const rendered = studioThumbnailInputs.get(item);
-      if (!rendered || rendered.source !== source || rendered.signature !== signature
+      if (!rendered || rendered.sourceId !== sourceId || rendered.signature !== signature
         || rendered.thumbnail !== item.thumbnail || item.thumbnailKind !== 'processed') {
         item.thumbnail = thumbnailDataUrl(createAdjustedPhotoPreview(source, adjustments));
         item.thumbnailKind = 'processed';
-        studioThumbnailInputs.set(item, { source, signature, thumbnail: item.thumbnail });
+        studioThumbnailInputs.set(item, { sourceId, signature, thumbnail: item.thumbnail });
       }
       item.thumbnailKey = photoSettingsKey(item);
       item.thumbnailErrorKey = null;
@@ -22427,7 +22450,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (!source || !item.thumbnail) return;
       cancelStudioThumbnailUpdate();
       studioThumbnailInputs.set(item, {
-        source, signature: studioThumbnailSignature(buildAdjustmentSettings(state)), thumbnail: item.thumbnail
+        sourceId: rasterIdentity(source), signature: studioThumbnailSignature(buildAdjustmentSettings(state)), thumbnail: item.thumbnail
       });
     }
 
@@ -22437,8 +22460,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     function carryStudioThumbnailSource(previousSource) {
       const item = getCurrentQueueItem();
       const rendered = item && studioThumbnailInputs.get(item);
-      if (rendered && previousSource && rendered.source === previousSource) {
-        rendered.source = currentConvertedPreviewSource();
+      if (rendered && previousSource && rendered.sourceId === rasterIdentity(previousSource)) {
+        rendered.sourceId = rasterIdentity(currentConvertedPreviewSource());
       }
     }
 
