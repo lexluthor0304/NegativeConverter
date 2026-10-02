@@ -14397,6 +14397,53 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     });
 
     // ===========================================
+    // Measurement barriers (#233, #245)
+    // ===========================================
+    // The measurements that persist settings (the gray-point click, the
+    // expired rescue's analysis, lab match) read the frame on screen and the
+    // photo's analysis area. 1703835 measured with both in place. Now a
+    // dragged frame's 16-bit plane may still be in the preview worker (#233),
+    // and Apply Crop releases the UI before its crop-area detection answers
+    // (#245; a hit sets the analysis area and white balance and converts
+    // again).
+    function measurementInputsPending() {
+      return Boolean(corePreviewRetained || corePreviewCommit) || hasPendingCropDetection();
+    }
+
+    // Runs `measure` at once when nothing is pending, as before. Otherwise
+    // Studio is busy (the panel, the photo and the strip inert, as for any
+    // tool's wait) until the plane is back and the detection has settled, a
+    // hit's conversion included, and `measure` runs then, as if clicked
+    // after them: only for the same photo and load, with no edit (or undo)
+    // made meanwhile, and while `isCurrent()` holds. Resolves whether it ran.
+    async function settleMeasurementInputs(measure, isCurrent = () => true) {
+      if (measurementInputsPending()) {
+        const generation = loadGeneration;
+        const file = state.loadedFile;
+        const revision = manualEditRevision;
+        const owned = !document.body.dataset.studioBusy;
+        if (owned) {
+          document.body.dataset.studioBusy = 'true';
+          studioWorkspace?.sync();
+        }
+        try {
+          while (isCurrentLoad(generation) && measurementInputsPending()) {
+            if (hasPendingCropDetection()) await settlePendingCropDetection();
+            else await settleCorePreviewPlane();
+          }
+        } finally {
+          if (owned && isCurrentLoad(generation) && !geometryBusyOwner) {
+            delete document.body.dataset.studioBusy;
+            studioWorkspace?.sync();
+          }
+        }
+        if (!isCurrentLoad(generation) || state.loadedFile !== file || manualEditRevision !== revision || !isCurrent()) return false;
+      }
+      measure();
+      return true;
+    }
+
+    // ===========================================
     // Canvas Click Handler (Sampling)
     // ===========================================
     function handleSamplingClick(e) {
@@ -14432,34 +14479,42 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       } else if (state.samplingMode === 'whiteBalance') {
         // Sample from processed image (post-inversion)
         if (!state.processedImageData) return;
-
-        pushUndo('whiteBalance');
-        const x = Math.floor(relX * state.processedImageData.width);
-        const y = Math.floor(relY * state.processedImageData.height);
-
-        const sample = sampleFilmBase(state.processedImageData, x, y, 5);
-        const gray = (sample.r + sample.g + sample.b) / 3;
-
-        // Calculate multipliers to make sampled point neutral
-        state.wbR = sample.r > 0 ? gray / sample.r : 1;
-        state.wbG = sample.g > 0 ? gray / sample.g : 1;
-        state.wbB = sample.b > 0 ? gray / sample.b : 1;
-
-        // Normalize so G=1
-        const norm = state.wbG;
-        state.wbR /= norm;
-        state.wbG = 1;
-        state.wbB /= norm;
-        state.grayPointSampled = true;
-        state.wbAutoConfidence = null; state.wbSemanticApplied = false;
-
-        state.samplingMode = null;
-        updateSamplingModeUI();
-        updateWBSliders();
-        markCurrentFileDirty();
-        updateBeforeAfterButtonState();
-        updateFull();
+        // With its 16-bit plane and after a pending crop-area hit (R1-023,
+        // R1-071): the click's place on the photo waits for them.
+        void settleMeasurementInputs(() => sampleGrayPoint(relX, relY), () => state.samplingMode === 'whiteBalance');
       }
+    }
+
+    // The gray-point click at (relX, relY) of the frame on screen.
+    function sampleGrayPoint(relX, relY) {
+      if (!state.processedImageData) return;
+
+      pushUndo('whiteBalance');
+      const x = Math.floor(relX * state.processedImageData.width);
+      const y = Math.floor(relY * state.processedImageData.height);
+
+      const sample = sampleFilmBase(state.processedImageData, x, y, 5);
+      const gray = (sample.r + sample.g + sample.b) / 3;
+
+      // Calculate multipliers to make sampled point neutral
+      state.wbR = sample.r > 0 ? gray / sample.r : 1;
+      state.wbG = sample.g > 0 ? gray / sample.g : 1;
+      state.wbB = sample.b > 0 ? gray / sample.b : 1;
+
+      // Normalize so G=1
+      const norm = state.wbG;
+      state.wbR /= norm;
+      state.wbG = 1;
+      state.wbB /= norm;
+      state.grayPointSampled = true;
+      state.wbAutoConfidence = null; state.wbSemanticApplied = false;
+
+      state.samplingMode = null;
+      updateSamplingModeUI();
+      updateWBSliders();
+      markCurrentFileDirty();
+      updateBeforeAfterButtonState();
+      updateFull();
     }
 
     canvas.addEventListener('click', handleSamplingClick);
@@ -17637,7 +17692,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // Undo, redo, a new geometry edit or a second Apply, a new load and a
     // photo switch end the pending detection; an undo or redo of an edit made
     // while it ran does not. Everything that reads or copies the photo's
-    // settings for output awaits settlePendingCropDetection().
+    // settings for output awaits settlePendingCropDetection(), and every
+    // measurement that persists settings settleMeasurementInputs().
     const CROP_DETECTION_TARGETS = Object.entries(AUTO_FRAME_FORMAT_RATIOS).map(([key, ratio]) => ({ key, ratio }));
 
     function hasPendingCropDetection() {
@@ -25041,6 +25097,17 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         updateExpiredRescueUI();
         return;
       }
+      // Turning the rescue on measures the frame on screen and drops
+      // automatic gains: with the frame's 16-bit plane and after a pending
+      // crop-area hit, which sets the analysis area and those gains (R1-023,
+      // R1-071). The whole action waits for them; the session entry (the
+      // menu, outside the busy panel) toggled meanwhile drops it.
+      if (next && measurementInputsPending()) {
+        const session = state.expiredSession;
+        void settleMeasurementInputs(() => setExpiredEnabled(enabled, { reanalyze, undoLabel }), () => state.expiredSession === session)
+          .then(ran => { if (!ran) updateExpiredRescueUI(); });
+        return;
+      }
       pushUndo(undoLabel);
       state.expiredEnabled = next;
       if (next) {
@@ -25095,6 +25162,21 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       scheduleFullUpdate();
     }
 
+    // Studio's "Reset color": the photo's default colours.
+    function resetStudioColors() {
+      if (state.currentStep < 3) return;
+      pushUndo('studioReset');
+      // Studio colours never depend on the pixels createDefaultSettings
+      // analyses, so the working planes serve (no frame is built).
+      Object.assign(state, pickStudioColors(createDefaultSettings(state.croppedImageData || state.originalImageData)));
+      refreshExpiredAfterColorReset();
+      ['r', 'g', 'b'].forEach(ch => updateCurveFromPoints(ch));
+      updateSlidersFromState();
+      renderCurve();
+      markCurrentFileDirty();
+      scheduleCoreReprocess({ full: false });
+    }
+
     // After "Reset color" put back the defaults: strengths from this frame's
     // measurement, and a measurement if the rescue is now on without one.
     function refreshExpiredAfterColorReset() {
@@ -25129,12 +25211,16 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       setupSlider(key, key, expiredSliderHandlers);
     }
     document.getElementById('expiredEnabled')?.addEventListener('change', (event) => setExpiredEnabled(event.target.checked));
-    document.getElementById('expiredAnalyzeBtn')?.addEventListener('click', () => {
+    function analyzeExpiredAgain() {
       if (!state.processedImageData) return;
       pushUndo('expiredAnalyze');
       runExpiredAnalysis(state.processedImageData, { force: true });
       schedulePreviewUpdate();
       scheduleFullUpdate();
+    }
+    // With the frame's 16-bit plane, after a pending crop-area hit (R1-023).
+    document.getElementById('expiredAnalyzeBtn')?.addEventListener('click', () => {
+      if (state.processedImageData) void settleMeasurementInputs(analyzeExpiredAgain);
     });
     document.getElementById('expiredResetBtn')?.addEventListener('click', resetExpiredStrengths);
     document.getElementById('expiredApplySelectedBtn')?.addEventListener('click', applyExpiredToSelected);
@@ -25246,7 +25332,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       labMatchRunning = true;
       updateLabMatchUI();
       try {
-        const ours = renderCurrentForMatching(1000);
+        // The look is fitted to this rendering, white balance included:
+        // after a pending crop-area hit, which sets it (R1-071).
+        let ours = null;
+        if (!(await settleMeasurementInputs(() => { ours = renderCurrentForMatching(1000); })) || !ours) return;
         let reference;
         try {
           reference = await decodeReferenceImage(labMatchReferenceFile, 1600);
@@ -29185,16 +29274,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         },
         onReset: () => {
           if (state.currentStep < 3) return;
-          pushUndo('studioReset');
-          // Studio colours never depend on the pixels createDefaultSettings
-          // analyses, so the working planes serve (no frame is built).
-          Object.assign(state, pickStudioColors(createDefaultSettings(state.croppedImageData || state.originalImageData)));
-          refreshExpiredAfterColorReset();
-          ['r', 'g', 'b'].forEach(ch => updateCurveFromPoints(ch));
-          updateSlidersFromState();
-          renderCurve();
-          markCurrentFileDirty();
-          scheduleCoreReprocess({ full: false });
+          // The rescue stays on (as the session's default) without a
+          // current measurement: Reset measures the frame on screen
+          // (refreshExpiredAfterColorReset), so it waits like any other
+          // measurement (R1-023).
+          if (state.expiredSession && state.processedImageData && !hasCurrentExpiredAnalysis()) void settleMeasurementInputs(resetStudioColors);
+          else resetStudioColors();
         },
         onSync: async () => {
           // The colours copied include white balance: a pending crop-area
