@@ -353,11 +353,15 @@ export function createDisplayProxySpill({
 // Display proxies kept across restarts and project reopens, keyed by the
 // file's content and the proxy's geometry, lens, analysis area and target.
 // Only exact decode routes are stored, never a recipe; a record carries its
-// full key and a checksum, verified on read. The budget follows the disk:
-// at most `min(setting, 25 % of the free space above a 10 GiB floor)`, off
-// below the floor.
+// full key and a checksum, verified on read. The budget follows the disk on
+// the desktop: at most `min(setting, 25 % of the free space above a 10 GiB
+// floor)`, off below the floor. The web knows only the origin's quota left,
+// which no disk floor applies to (Firefox caps an origin at 10 GiB, Chrome
+// reports its usage plus 10 GiB: R2-068): at most `min(setting, half of
+// it)`, the store's own records counted as left, off below 512 MiB.
 
 export const DISPLAY_PROXY_STORE_FLOOR_BYTES = 10 * 1024 ** 3;
+export const DISPLAY_PROXY_STORE_QUOTA_FLOOR_BYTES = 512 * 1024 ** 2;
 export const DISPLAY_PROXY_STORE_DEFAULT_LIMIT_BYTES = 2 * 1024 ** 3;
 export const DISPLAY_PROXY_TAIL_BYTES = 64 * 1024;
 const RECORD_NAME = /^[0-9a-f]{64}$/;
@@ -390,12 +394,23 @@ export async function sha256Hex(input) {
   return Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('');
 }
 
-/** The store's budget for this much free space and this setting. */
-export function displayProxyStoreBudget(freeBytes, limitBytes, floorBytes = DISPLAY_PROXY_STORE_FLOOR_BYTES) {
+/**
+ * The store's budget for this much free space and this setting. `free` is
+ * the free space of the volume that holds the records (bytes, or
+ * `{ bytes, kind: 'volume' }`: desktop) or the origin's quota left
+ * (`{ bytes, kind: 'quota' }`: web), whose usage includes the store's own
+ * `storedBytes`.
+ */
+export function displayProxyStoreBudget(free, limitBytes, floorBytes = DISPLAY_PROXY_STORE_FLOOR_BYTES, storedBytes = 0) {
   const limit = Math.max(0, Number(limitBytes) || 0);
-  if (!Number.isFinite(freeBytes)) return limit;
-  if (freeBytes < floorBytes) return 0;
-  return Math.min(limit, Math.floor(0.25 * (freeBytes - floorBytes)));
+  const { bytes, kind = 'volume' } = free !== null && typeof free === 'object' ? free : { bytes: free };
+  if (!Number.isFinite(bytes)) return limit;
+  if (kind === 'quota') {
+    const left = bytes + Math.max(0, Number(storedBytes) || 0);
+    return left < DISPLAY_PROXY_STORE_QUOTA_FLOOR_BYTES ? 0 : Math.min(limit, Math.floor(0.5 * left));
+  }
+  if (bytes < floorBytes) return 0;
+  return Math.min(limit, Math.floor(0.25 * (bytes - floorBytes)));
 }
 
 /**
@@ -566,6 +581,8 @@ export function createPortRecords(port) {
  * `records` holds the bytes (Rust store, or the worker's OPFS through the
  * port); `port` encodes and decodes records in the worker. With
  * `encodeInWorker`, a put writes from the worker directly (web).
+ * `availableBytes()` resolves the free space displayProxyStoreBudget reads
+ * (a volume's, or `{ bytes, kind: 'quota' }` on the web).
  */
 export function createDisplayProxyStore({
   port, records, availableBytes = async () => null, limitBytes = () => DISPLAY_PROXY_STORE_DEFAULT_LIMIT_BYTES,
@@ -618,7 +635,7 @@ export function createDisplayProxyStore({
   async function budget() {
     if (now() - budgetCache.at < 10_000) return budgetCache.value;
     const free = await availableBytes().catch(() => null);
-    const value = displayProxyStoreBudget(free, limitBytes(), floorBytes);
+    const value = displayProxyStoreBudget(free, limitBytes(), floorBytes, bytes);
     budgetCache = { at: now(), value };
     return value;
   }

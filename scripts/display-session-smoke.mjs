@@ -298,22 +298,25 @@ export async function runDisplaySessionSmoke({ send, evaluate, waitFor, fail, in
     await open(0, X);
     expect((await diagnostics()).spillHits === spillHits + 1, 'the colour frame did not open from the spill');
     sameView(await view(), 'spill');
-    // Left again, its proxy is stored; the session and the spill go. The
-    // store's budget is a quarter of the free space above a 10 GiB floor
-    // (#249 part 3), and Chrome reports every page a quota of its usage plus
-    // 10 GiB (whatever the disk or a DevTools override): the web store has no
-    // budget there and the store hit is checked where it has one.
+    // Left again, its proxy is stored; the session and the spill go. On the
+    // web the store's budget is half of the origin's quota left, at most the
+    // setting (#249 part 3, R2-068: before, the desktop's 10 GiB disk floor
+    // applied to it, and Chrome, which reports every page a quota of its
+    // usage plus 10 GiB, never stored). The store hit is checked wherever
+    // the store has a budget.
     await evaluate(`window.__ncDisplaySessions.force(null)`);
     await open(1, Y);
     await evaluate('window.__ncDisplaySessions.settled()');
     const storeFree = await evaluate(`navigator.storage.estimate().then(({ quota, usage }) => quota - (usage || 0))`);
-    if (displayProxyStoreBudget(storeFree, DISPLAY_PROXY_STORE_DEFAULT_LIMIT_BYTES) >= 64 * 1024 ** 2) {
+    const storeBudget = displayProxyStoreBudget({ bytes: storeFree, kind: 'quota' }, DISPLAY_PROXY_STORE_DEFAULT_LIMIT_BYTES);
+    console.log(`display-proxy store: ${(storeFree / 1024 ** 3).toFixed(2)} GiB of origin quota left, a budget of ${(storeBudget / 1024 ** 3).toFixed(2)} GiB`);
+    if (storeBudget >= 64 * 1024 ** 2) {
       const storeHits = (await diagnostics()).storeHits;
       await open(0, X, { before: 'await window.__ncDisplaySessions.drop(0, { keepStore: true })' });
       expect((await diagnostics()).storeHits === storeHits + 1, 'the colour frame did not open from the store: ' + JSON.stringify({ diagnostics: await diagnostics(), store: await evaluate('window.__ncDisplaySessions.store()') }));
       sameView(await view(), 'store');
     } else {
-      console.log(`note: the display-proxy store has no budget with ${(storeFree / 1024 ** 3).toFixed(2)} GiB reported free (its floor is 10 GiB): the store hit is not checked`);
+      console.log(`note: the display-proxy store has no budget with ${(storeFree / 1024 ** 3).toFixed(2)} GiB of quota left (its floor is 512 MiB): the store hit is not checked`);
       await open(0, X);
     }
     // A fill (a lane's or the roll pass's decode of a frame not on screen)

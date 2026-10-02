@@ -1,8 +1,9 @@
 // The display-proxy spill and persistent store (#249) with in-memory
 // records: exact round trips, budgets (the spill's free-space floor, the
-// store's min(setting, 25 % of the free space above 10 GiB)), LRU eviction,
-// corrupted and truncated records, the index across restarts, Clear cache,
-// and the desktop records' chunked IPC.
+// store's min(setting, 25 % of the free space above 10 GiB) on a volume and
+// half of the quota left on the web), LRU eviction, corrupted and truncated
+// records, the index across restarts, Clear cache, and the desktop records'
+// chunked IPC.
 import assert from 'node:assert/strict';
 
 globalThis.ImageData = class ImageData {
@@ -13,7 +14,8 @@ globalThis.ImageData = class ImageData {
 };
 const {
   createDisplayProxySpill, createDisplayProxyPort, createDisplayProxyWorkerCore, createDisplayProxyStore,
-  displayProxyStoreBudget, displayProxyFileKey, namedRecords, sha256Hex, DISPLAY_PROXY_STORE_FLOOR_BYTES
+  displayProxyStoreBudget, displayProxyFileKey, namedRecords, sha256Hex, DISPLAY_PROXY_STORE_FLOOR_BYTES,
+  DISPLAY_PROXY_STORE_QUOTA_FLOOR_BYTES
 } = await import('./displayProxyStore.js');
 const { createDesktopProxyRecords, DISPLAY_PROXY_CHUNK_BYTES } = await import('./displayProxyDesktop.js');
 const { resizeDisplayPreview } = await import('./displayPreview.js');
@@ -57,6 +59,31 @@ assert.equal(displayProxyStoreBudget(100 * GiB, 2 * GiB), 2 * GiB, 'the setting 
 assert.equal(displayProxyStoreBudget(100 * GiB, 0), 0, 'a zero setting turns it off');
 assert.equal(displayProxyStoreBudget(null, 2 * GiB), 2 * GiB, 'without a free-space reading the setting applies');
 assert.equal(DISPLAY_PROXY_STORE_FLOOR_BYTES, 10 * GiB);
+
+// ---- On the web the figure is the origin's quota left, which the volume's
+// 10 GiB floor does not apply to (R2-068): Firefox caps an origin at 10 GiB
+// and Chrome reports its usage plus 10 GiB, so the store never wrote there ----
+for (const free of [11 * GiB, 2.7 * GiB, 100 * GiB, null]) {
+  assert.equal(displayProxyStoreBudget({ bytes: free, kind: 'volume' }, 2 * GiB), displayProxyStoreBudget(free, 2 * GiB),
+    `a volume figure of ${free} is read as before`);
+}
+assert.equal(displayProxyStoreBudget({ bytes: 10 * GiB, kind: 'volume' }, 2 * GiB), 0, 'a volume of 10 GiB free stays off');
+assert.ok(displayProxyStoreBudget({ bytes: 10 * GiB, kind: 'quota' }, 2 * GiB) > 0, 'a Firefox-like 10 GiB quota stores');
+assert.equal(displayProxyStoreBudget({ bytes: 10 * GiB, kind: 'quota' }, 2 * GiB), 2 * GiB, 'the setting caps it');
+assert.equal(displayProxyStoreBudget({ bytes: 3 * GiB, kind: 'quota' }, 2 * GiB), 1.5 * GiB, 'at most half of the quota left');
+assert.equal(displayProxyStoreBudget({ bytes: 10 * GiB, kind: 'quota' }, 0), 0, 'Off stays off');
+assert.equal(displayProxyStoreBudget({ bytes: null, kind: 'quota' }, 2 * GiB), 2 * GiB, 'without an estimate the setting applies');
+assert.equal(DISPLAY_PROXY_STORE_QUOTA_FLOOR_BYTES, 512 * 1024 ** 2);
+assert.equal(displayProxyStoreBudget({ bytes: DISPLAY_PROXY_STORE_QUOTA_FLOOR_BYTES - 1, kind: 'quota' }, 2 * GiB), 0, 'off below the quota floor');
+assert.equal(displayProxyStoreBudget({ bytes: DISPLAY_PROXY_STORE_QUOTA_FLOOR_BYTES, kind: 'quota' }, 2 * GiB), DISPLAY_PROXY_STORE_QUOTA_FLOOR_BYTES / 2);
+// The usage includes the store's own records: they count as left to it, so
+// the budget does not shrink as the store fills (nor evict to a smaller one).
+for (const stored of [0, 0.5 * GiB, 1 * GiB, 1.4 * GiB]) {
+  assert.equal(displayProxyStoreBudget({ bytes: 3 * GiB - stored, kind: 'quota' }, 2 * GiB, undefined, stored), 1.5 * GiB,
+    `the same budget with ${stored} bytes stored`);
+  assert.equal(displayProxyStoreBudget(20 * GiB - stored, 2 * GiB, undefined, stored), displayProxyStoreBudget(20 * GiB - stored, 2 * GiB),
+    'a volume figure ignores them, as before');
+}
 
 // ---- The store: exact round trip, index across a restart, LRU, Clear cache ----
 {
@@ -158,6 +185,40 @@ assert.equal(DISPLAY_PROXY_STORE_FLOOR_BYTES, 10 * GiB);
   await restarted.settled();
   const reloaded = createDisplayProxyStore({ port: localPort(), records, availableBytes: async () => 20 * GiB });
   assert.equal((await reloaded.find('file-a'))[0].lastUsed, a.lastUsed, 'and the index keeps it');
+}
+
+// ---- A store on a Firefox-like quota (R2-068): 10 GiB for the origin, its
+// usage the records it holds. Every put is stored and the budget stays the
+// setting as it fills ----
+{
+  const records = memoryRecords();
+  const usage = () => [...records.data.values()].reduce((sum, entry) => sum + entry.bytes.byteLength, 0);
+  const store = createDisplayProxyStore({
+    port: localPort(), records, availableBytes: async () => ({ bytes: 10 * GiB - usage(), kind: 'quota' }), limitBytes: () => 2 * GiB
+  });
+  const image = proxyImage();
+  for (let i = 0; i < 4; i++) assert.equal(await store.put(`file-${i}`, 'p', { file: { size: i, lastModified: 1 }, image }), true, `put ${i} stored`);
+  assert.equal(store.stats.refused, 0);
+  assert.equal(store.size, 4);
+  assert.equal(await store.budget(), 2 * GiB, 'the budget on a 10 GiB quota is the setting');
+  // The same figure read as a volume's free space (the old reading) stores nothing.
+  const asVolume = createDisplayProxyStore({ port: localPort(), records: memoryRecords(), availableBytes: async () => 10 * GiB - usage() });
+  assert.equal(await asVolume.put('file-v', 'p', { file: { size: 1, lastModified: 1 }, image }), false);
+  assert.equal(asVolume.stats.refused, 1);
+  // Above the setting, the budget is half of the quota however full the
+  // store is: its own records count as left to it.
+  const own = memoryRecords();
+  const ownUsage = () => [...own.data.values()].reduce((sum, entry) => sum + entry.bytes.byteLength, 0);
+  let clock = 0;
+  const unbounded = createDisplayProxyStore({
+    port: localPort(), records: own, availableBytes: async () => ({ bytes: 10 * GiB - ownUsage(), kind: 'quota' }),
+    limitBytes: () => 10 * GiB, now: () => (clock += 20_000)
+  });
+  for (let i = 0; i < 3; i++) await unbounded.put(`file-${i}`, 'p', { file: { size: i, lastModified: 1 }, image });
+  // (The index is the one byte count of the store's usage it does not hold.)
+  const indexBytes = own.data.get('index').bytes.byteLength;
+  assert.ok(ownUsage() > 10 * indexBytes);
+  assert.equal(await unbounded.budget(), Math.floor(0.5 * (10 * GiB - indexBytes)), 'half of the quota with the store filled');
 }
 
 // ---- Presentation previews (#235 slice 3): opaque bytes with a checksum ----

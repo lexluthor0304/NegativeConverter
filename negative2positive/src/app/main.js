@@ -11905,16 +11905,17 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     });
     const desktopProxyInvoke = isTauriDesktop() ? (...args) => window.__TAURI__.core.invoke(...args) : null;
     // Free space the caches may count on: the volume's on the desktop, the
-    // origin's quota left on the web.
-    async function displayProxyFreeBytes() {
-      if (desktopProxyInvoke) return (await createDesktopProxyRecords(desktopProxyInvoke, 'store').space()).freeBytes;
+    // origin's quota left on the web. The store's budget reads the two
+    // differently (R2-068: its 10 GiB floor is the volume's).
+    async function displayProxyFreeSpace() {
+      if (desktopProxyInvoke) return { bytes: (await createDesktopProxyRecords(desktopProxyInvoke, 'store').space()).freeBytes, kind: 'volume' };
       const estimate = await navigator.storage?.estimate?.();
-      return estimate && Number.isFinite(estimate.quota) ? estimate.quota - (estimate.usage || 0) : null;
+      return { bytes: estimate && Number.isFinite(estimate.quota) ? estimate.quota - (estimate.usage || 0) : null, kind: 'quota' };
     }
     const displayProxySpill = createDisplayProxySpill({
       port: displayProxyPort,
       recordStore: desktopProxyInvoke ? namedRecords(createDesktopProxyRecords(desktopProxyInvoke, 'spill')) : null,
-      availableBytes: displayProxyFreeBytes
+      availableBytes: async () => (await displayProxyFreeSpace()).bytes
     });
     // Across restarts and project reopens (part 3): keyed by the file's
     // content and the build's decoder and code hashes. Off where the build
@@ -11928,7 +11929,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     const displayProxyStore = DISPLAY_PROXY_HASHES ? createDisplayProxyStore({
       port: displayProxyPort,
       records: desktopProxyInvoke ? createDesktopProxyRecords(desktopProxyInvoke, 'store') : createPortRecords(displayProxyPort),
-      availableBytes: displayProxyFreeBytes, limitBytes: displayCacheLimitBytes, encodeInWorker: !desktopProxyInvoke
+      availableBytes: displayProxyFreeSpace, limitBytes: displayCacheLimitBytes, encodeInWorker: !desktopProxyInvoke
     }) : null;
     // One content hash per file (8-10 ms, the first MiB and the last 64 KiB).
     const displayProxyFileKeys = new WeakMap();

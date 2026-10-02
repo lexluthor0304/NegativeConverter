@@ -255,8 +255,13 @@ reads, the volume's free space, `CACHEDIR.TAG` and Time Machine's exclusion;
 the spill of an earlier run is removed at start), so no pixels reach WebKit's
 origin storage; the web keeps them in the origin-private file system from the
 worker (IndexedDB where sync access handles are missing). The budget is
-`min(setting, 25 % of the free space above 10 GiB)`, off below the floor,
-least recently used out first; the Studio menu shows the size, a limit
+`min(setting, 25 % of the free space above 10 GiB)` of the desktop's volume,
+off below that floor; on the web, which knows only the origin's quota left
+(`navigator.storage.estimate()`: Firefox caps an origin at 10 GiB, Chrome
+reports its usage plus 10 GiB), it is `min(setting, half of the quota left)`
+with the store's own records counted as left, off below 512 MiB (R2-068: the
+disk floor kept the web store off in both). Least recently used records go
+out first; the Studio menu shows the size, a limit
 (Off, 1-10 GB, default 2 GB) and **Clear cache**. The store also keeps #235's
 1200 px presentation previews as JPEG, keyed by content and a recipe digest,
 which the switch veil shows at once after a restart; they are presentation
@@ -673,9 +678,9 @@ the spill and, where the store has a budget, from the store, and requires the
 cold open's GPU sample hash, white balance (gains and confidence) and saved
 settings each time. It then confirms another image area, comes back as
 Tier A, undoes to the earlier area and requires PNG16 and TIFF16 exports
-equal to a cold reopen's (decoded samples). Chrome reports a page's quota as
-its usage plus 10 GiB, the store's floor, so the web store has no budget in
-Chrome and that hit is skipped there; fills only make levels smaller than
+equal to a cold reopen's (decoded samples). The store hit is checked
+wherever the store has a budget, which Chrome's quota (its usage plus 10 GiB)
+gives it since R2-068; fills only make levels smaller than
 their frame (k > 1, about 16 MP and up), so `displaySessions.test.mjs`
 checks a filled proxy's first open, from the spill and from the store,
 against a cold open's conversion request. It also opens a stored frame whose
