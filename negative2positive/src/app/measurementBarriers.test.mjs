@@ -1,5 +1,5 @@
 // Standalone Node test: the measurements that persist settings wait for
-// their inputs (#229 review R1-023, R1-071). Runs the real main.js
+// their inputs (#229 review R1-023, R1-071, R1-073). Runs the real main.js
 // functions in the geometry harness - run with:
 // node negative2positive/src/app/measurementBarriers.test.mjs
 //
@@ -10,8 +10,8 @@
 //   plane, as 1703835 did, not the 8-bit samples (or their 600k-pixel
 //   downsample).
 // - A pending crop-area detection (#245): One-click colour correct, the
-//   gray-point click and lab match wait for it, then use the hit's analysis
-//   area and white balance.
+//   gray-point click, lab match, Copy recipe and Apply film type to roll
+//   wait for it, then use the hit's analysis area and white balance.
 // - A new load, an edit, leaving the sampling mode or turning the expired-roll
 //   entry off again while they wait: nothing is measured or persisted.
 // - Nothing pending: each runs within the click, as before.
@@ -57,12 +57,13 @@ const MEASURE_FUNCTIONS = [
   'clampBetween', 'setExpiredEnabled', 'setExpiredSession', 'analyzeExpiredAgain', 'runExpiredAnalysis', 'expiredAnalysisSample',
   'applyExpiredAnalysisDefaults', 'resetExpiredStrengthsInState', 'hasCurrentExpiredAnalysis', 'expiredSourceKey',
   'baseSizeSource', 'sanitizeNumeric', 'cropImageData', 'sanitizeCropRegionForImage', 'resetStudioColors',
-  'refreshExpiredAfterColorReset', 'runLabMatch', 'renderCurrentForMatching'
+  'refreshExpiredAfterColorReset', 'runLabMatch', 'renderCurrentForMatching', 'currentRecipeCode', 'copyRecipe'
 ];
 const INLINE_HANDLERS = [
   inlineSource('onColorCorrect', '        onColorCorrect: () => {', '\n        },'),
   inlineSource('onReset', '        onReset: () => {', '\n        },'),
-  inlineSource('expiredAnalyzeClick', "    document.getElementById('expiredAnalyzeBtn')?.addEventListener('click', () => {", '\n    });')
+  inlineSource('expiredAnalyzeClick', "    document.getElementById('expiredAnalyzeBtn')?.addEventListener('click', () => {", '\n    });'),
+  inlineSource('applyFilmTypeToRoll', "    document.getElementById('applyFilmTypeToRollBtn').addEventListener('click', async () => {", '\n    });')
 ];
 
 // The harness with the measurement path. `analysed` records each expired
@@ -76,6 +77,9 @@ function measureContext(base = makeBase(90, 64, 7)) {
   const sampled = [];
   const analysed = [];
   const rendered = [];
+  const persisted = [];
+  const copied = [];
+  const elements = { recipeCode: { value: '' }, recipeQrCanvas: { hidden: true } };
   class TestImageData {
     constructor(data, width, height) {
       if (typeof data === 'number') { height = width; width = data; data = new Uint8ClampedArray(width * height * 4); }
@@ -111,17 +115,27 @@ function measureContext(base = makeBase(90, 64, 7)) {
     },
     alignmentSide: () => 8, collectPairs: () => ({ count: 0 }), resizeImageDataNearest: image => image,
     fitLook: () => ({ look: { matrix: [1, 0, 0, 0, 1, 0, 0, 0, 1] }, method: 'histogram', deltaBefore: 2, deltaAfter: 1 }),
-    sanitizeLookForSettings: look => look
+    sanitizeLookForSettings: look => look,
+    // Copy recipe around the settings it encodes.
+    extractCurrentSettings: () => ({ ...whiteBalanceOf(h.state), autoFrameMeta: structuredClone(h.state.autoFrame.lastDiagnostics) }),
+    encodeRecipe: settings => `NC1.${JSON.stringify({ wb: [settings.wbR, settings.wbG, settings.wbB], method: settings.autoFrameMeta?.method })}`,
+    recipeTags: () => ({}), navigator: { clipboard: { writeText: async text => { copied.push(text); } } },
+    // Apply film type to roll persists and restores the open photo.
+    persistCurrentFileSettings: () => {
+      persisted.push({ meta: structuredClone(h.state.autoFrame.lastDiagnostics), wb: whiteBalanceOf(h.state), pending: c.hasPendingCropDetection() });
+    },
+    applyFilmTypeOverride: (settings, choice) => ({ ...settings, ...choice })
   });
+  h.target.document.getElementById = id => elements[id] || null;
   Object.assign(h.state, {
     ...EXPIRED_RESCUE_DEFAULTS, samplingMode: null, expiredSession: false, expiredAnalysis: null,
     wbAutoConfidence: null, wbUserOverride: false, grayPointSampled: false, wbSemanticApplied: false,
     coreBorderBuffer: 10, semanticMap: null, loadedFile: { name: 'frame.tif' }, filmType: 'color', positiveMode: 'correct',
-    look: null, processedImageDataIsPreview: true, currentStep: 3
+    look: null, processedImageDataIsPreview: true, currentStep: 3, rollAnalysis: {}
   });
   vm.runInContext([...MEASURE_FUNCTIONS.map(functionSource), ...INLINE_HANDLERS].join('\n'), c);
   const body = h.target.document.body;
-  return { h, c, state: h.state, target: h.target, body, commits, sampled, analysed, rendered };
+  return { h, c, state: h.state, target: h.target, body, commits, sampled, analysed, rendered, persisted, copied, elements };
 }
 
 // A click at (x, y) on a 64 x 64 canvas showing the frame.
@@ -494,9 +508,47 @@ const hitView = t => ({
 }
 
 {
+  // Copy recipe during the detection copies the hit's white balance (R1-073).
+  const t = detectionContext();
+  await t.apply();
+  const copying = t.c.copyRecipe();
+  await settle();
+  assert.equal(t.copied.length, 0, 'Copy recipe waits for the detection');
+  await t.hitLands();
+  await copying;
+  assert.equal(t.copied.length, 1);
+  assert.deepEqual(JSON.parse(t.copied[0].slice(4)), { wb: [HIT_WB.wbR, HIT_WB.wbG, HIT_WB.wbB], method: 'manual-image-window' });
+  assert.equal(t.elements.recipeCode.value, t.copied[0]);
+}
+
+{
+  // Apply film type to roll persists and restores the open photo: after the
+  // hit, so the restore cannot end the detection unapplied (R1-073).
+  const t = detectionContext();
+  await t.apply();
+  const item = { file: t.state.loadedFile, settings: { filmType: 'color' } };
+  const restored = [];
+  Object.assign(t.target, {
+    getCurrentQueueItem: () => item, restoreSettings: settings => { restored.push(settings); }
+  });
+  t.state.fileQueue = [item, { file: { name: 'other.tif' }, settings: null }];
+  const applying = t.c.applyFilmTypeToRoll();
+  await settle();
+  assert.equal(t.persisted.length, 0, 'the roll action waits for the detection');
+  await t.hitLands();
+  await applying;
+  assert.equal(t.persisted.length, 1);
+  assert.equal(t.persisted[0].pending, false);
+  assert.equal(t.persisted[0].meta.method, 'manual-image-window', 'the photo is persisted with the hit');
+  assert.deepEqual(t.persisted[0].wb, HIT_WB);
+  assert.equal(t.target.cropDetectionStats.stale, 0, 'the hit was not dropped');
+  assert.equal(restored.length, 1);
+}
+
+{
   // A new load while they wait: nothing is measured or persisted, for
   // either photo.
-  for (const action of ['colorCorrect', 'grayPoint', 'labMatch']) {
+  for (const action of ['colorCorrect', 'grayPoint', 'labMatch', 'copyRecipe']) {
     const t = detectionContext();
     await t.apply();
     const before = hitView(t);
@@ -504,6 +556,7 @@ const hitView = t => ({
     if (action === 'colorCorrect') t.c.onColorCorrect();
     if (action === 'grayPoint') { t.state.samplingMode = 'whiteBalance'; t.c.handleSamplingClick(click(20, 30)); }
     if (action === 'labMatch') done = t.c.runLabMatch();
+    if (action === 'copyRecipe') done = t.c.copyRecipe();
     await settle();
     // A dropped file loads: a new load generation, and the detection ends.
     t.target.loadGeneration++;
@@ -511,7 +564,7 @@ const hitView = t => ({
     t.c.cancelCropDetection();
     await settle();
     await done;
-    assert.equal(t.analysed.length + t.sampled.length + t.rendered.length, 0, `${action}: nothing measured`);
+    assert.equal(t.analysed.length + t.sampled.length + t.rendered.length + t.copied.length, 0, `${action}: nothing measured or copied`);
     assert.deepEqual(hitView(t), before, `${action}: nothing persisted`);
     assert.equal(t.target.labMatchRunning, false);
   }

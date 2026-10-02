@@ -14577,6 +14577,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         || state.cropping || isDesktopBatchExportLocked() || !state.fileQueue.length;
       if (blocked()) return;
       const choice = { filmType: state.filmType, positiveMode: state.positiveMode };
+      // This photo's settings are persisted and restored below: a pending
+      // crop-area hit first, or the restore would end it unapplied (R1-073).
+      if (hasPendingCropDetection()) {
+        const generation = loadGeneration;
+        await settlePendingCropDetection();
+        if (!isCurrentLoad(generation) || blocked()) return;
+      }
       if (!currentPhotoExact()) {
         const current = getCurrentQueueItem();
         if (!await ensureFullDecodeWithNotice('film-type-roll') || getCurrentQueueItem() !== current || blocked()) return;
@@ -26858,7 +26865,14 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // from this photo's automatic defaults, which keeps the code short.
     // The defaults are measured on the whole working frame; beside a crop
     // that frame is built in the pool for this (#244).
+    // A pending crop-area hit first: it sets the white balance the recipe
+    // carries (R1-073). Null when the photo left meanwhile.
     async function currentRecipeCode() {
+      if (hasPendingCropDetection()) {
+        const generation = loadGeneration;
+        await settlePendingCropDetection();
+        if (!isCurrentLoad(generation) || state.currentStep < 3 || !state.processedImageData) return null;
+      }
       let defaults = null;
       const frame = state.originalImageData ? await geometryFramePixels() : null;
       if (frame) {
@@ -26874,6 +26888,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         return;
       }
       const code = await currentRecipeCode();
+      if (!code) return;
       const box = document.getElementById('recipeCode');
       if (box) box.value = code;
       try {
@@ -26915,7 +26930,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const box = document.getElementById('recipeCode');
       let code = box?.value.trim() || '';
       if (!code && state.currentStep >= 3 && state.processedImageData) {
-        code = await currentRecipeCode();
+        code = await currentRecipeCode() || '';
         if (box) box.value = code;
       }
       if (code) drawRecipeQr(code);
