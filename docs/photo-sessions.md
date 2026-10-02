@@ -184,10 +184,20 @@ the page with its roll sample for the fill.
 **The store** (across restarts and project reopens). The same records, keyed by
 the file's content (size, date, SHA-256 of the first MiB plus the size, SHA-256
 of the last 64 KiB, hashed only when size and date match an index entry), the
-build's LibRaw and code hashes (`scripts/display-proxy-hashes.mjs`, stamped by
-`vite.config.js`; #264's decoders count too: the decoder choice, the desktop's
-native plane and its transfer, libraw-wasm's threaded build, and on the dev
-server the `LIBRAW_WASM_DIST` package it resolves) and the proxy's key. Only reproducible decode routes are
+build's decoder and code hashes (`scripts/display-proxy-hashes.mjs`, stamped
+by `vite.config.js`) and the proxy's key. The decoder hash covers libraw-wasm
+(#264's decoders count too: the decoder choice, the desktop's native plane and
+its transfer, libraw-wasm's threaded build, and on the dev server the
+`LIBRAW_WASM_DIST` package it resolves), the pinned scan decoders (utif for
+TIFF scans, upng-js for 16-bit PNGs) and the HEIF codec in `public/codecs`.
+The code hash covers the modules that shape a stored proxy and its
+colour-analysis sample: the decode, geometry, display-level, record and
+sample modules (`analysisRegion.js`) and their whole relative-import closure,
+which `displayProxyHashes.test.mjs` computes (static, dynamic and worker
+imports) and fails on when a module is missing. Decoders the browser runs
+(JPEG, WebP and 8-bit PNG scans, HEIC where the browser decodes it) cannot be
+hashed: the checks of `ensureBase()` and `ensureSource()` above catch their
+drift once the original is decoded again. Only reproducible decode routes are
 stored, never a recipe; a record carries its full key and checksum, verified
 on read. The desktop app keeps records in `app_cache_dir()/display-proxies`
 through `src-tauri/src/display_proxy_store.rs` (chunked atomic writes and
