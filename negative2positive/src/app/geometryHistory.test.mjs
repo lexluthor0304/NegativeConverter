@@ -468,4 +468,56 @@ for (const edit of ['rotation', 'mirror']) {
   await c.ensureFullResolutionReadyForExport();
 }
 
+// ---- The film border's paints end the interim turn too (R1-063) ----
+// The real paint of the main canvas, with the border composed or drawn over
+// its cached background (a drag frame); the border's pixels do not matter.
+function withMainCanvasPaints(h) {
+  const paints = { fast: 0, composed: 0, plain: 0 };
+  delete h.target.displayNegative;
+  Object.assign(h.target, {
+    ctx: {
+      putImageData: image => { if (!image.framed && !paints.drawn) paints.plain++; paints.drawn = false; },
+      clearRect() {}, drawImage: () => { paints.fast++; paints.drawn = true; }
+    },
+    getSprocketFrameComposeOptions: () => ({ edgeMarkings: { fontLocale: 'en' } }),
+    sprocketFrameReference: (image, reference) => reference,
+    composeDisplaySprocketFrame: image => { paints.composed++; return { width: image.width + 8, height: image.height + 12, framed: true }; },
+    getSprocketFrameLayout: (width, height) => ({ x: 4, y: 6, width, height, frameWidth: width + 8, frameHeight: height + 12 }),
+    ensureSprocketPreviewFrameBackground: image => ({ metrics: { outputWidth: image.width + 8, outputHeight: image.height + 12, sideMargin: 4, bandHeight: 6 } })
+  });
+  vm.runInContext(['renderAdjustedImageDataToMainCanvas', 'renderFastSprocketPreview', 'displayNegative', 'presentCpuFrame']
+    .map(functionSource).join('\n'), h.context);
+  return paints;
+}
+
+for (const step of [1, 3]) {
+  const base = makeBase(64, 44, 51);
+  const h = createHarness(base), c = h.context;
+  const paints = withMainCanvasPaints(h);
+  c.restoreSettings({ rotationAngle: 0, mirrored: false, cropRegion: crop(5, 4) });
+  await h.state.geometryReady;
+  h.state.sprocketPreviewEnabled = true;
+  h.state.currentStep = step;
+  Object.assign(paints, { fast: 0, composed: 0, plain: 0 });
+  const transform = () => h.target.canvasTransformWrapper.style.transform;
+  // A landscape crop (a drag frame takes the cached border), then portrait
+  // and landscape again; at Step 3 the slider path's frame, then a settled one.
+  const edits = [['mirror', /scaleX\(-1\)/, { fastSprocketPreview: true }], ['rotation', /rotate\(90deg\)/, { fastSprocketPreview: true }], ['rotation', /rotate\(90deg\)/, {}]];
+  for (const [edit, interim, options] of edits) {
+    const label = `step ${step}, ${edit} to ${h.state.rotationAngle + (edit === 'rotation' ? 90 : 0)}`;
+    const editing = edit === 'mirror' ? c.applyMirror() : c.applyRotation(90);
+    assert.match(transform(), interim, `${label}: the stand-in shows while the build runs`);
+    await editing;
+    if (step >= 3) {
+      // The conversion has not painted yet: the stand-in still turns the old frame.
+      assert.match(transform(), interim, `${label}: no paint, no change`);
+      c.presentCpuFrame(h.state.croppedImageData || h.state.originalImageData, options);
+    }
+    assert.doesNotMatch(transform(), /rotate|scaleX\(-1\)/, `${label}: the paint with the border ends the stand-in`);
+  }
+  assert.ok(paints.composed > 0, `step ${step}: the composed border path ran`);
+  if (step >= 3) assert.ok(paints.fast > 0, 'the cached border path ran');
+  assert.equal(paints.plain, 0, 'every paint went through the border');
+}
+
 console.log('geometry history tests passed');

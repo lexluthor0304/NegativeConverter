@@ -4372,19 +4372,19 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         const composeOptions = getSprocketFrameComposeOptions();
         prepareSprocketPreviewFont(composeOptions);
         const framedReference = reference ? sprocketFrameReference(imageData, reference, composeOptions) : null;
-        if (options.fastSprocketPreview && renderFastSprocketPreview(imageData, reference, framedReference, composeOptions)) {
-          return;
+        if (!options.fastSprocketPreview || !renderFastSprocketPreview(imageData, reference, framedReference, composeOptions)) {
+          const framed = composeDisplaySprocketFrame(imageData, composeOptions);
+          mainCanvasPhoto = getSprocketFrameLayout(imageData.width, imageData.height, composeOptions);
+          setMainCanvasDimensions(framed.width, framed.height, framedReference);
+          ctx.putImageData(framed, 0, 0);
         }
-        const framed = composeDisplaySprocketFrame(imageData, composeOptions);
-        mainCanvasPhoto = getSprocketFrameLayout(imageData.width, imageData.height, composeOptions);
-        setMainCanvasDimensions(framed.width, framed.height, framedReference);
-        ctx.putImageData(framed, 0, 0);
-        return;
+      } else {
+        mainCanvasPhoto = null;
+        setMainCanvasDimensions(imageData.width, imageData.height, reference);
+        ctx.putImageData(imageData, 0, 0);
       }
-
-      mainCanvasPhoto = null;
-      setMainCanvasDimensions(imageData.width, imageData.height, reference);
-      ctx.putImageData(imageData, 0, 0);
+      // Every paint, with the film border or without, ends the rotate or
+      // mirror stand-in of the planes it shows (R1-063).
       settleInterimGeometryDisplay();
     }
 

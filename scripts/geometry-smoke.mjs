@@ -131,6 +131,46 @@ export async function runGeometrySmoke({ send, evaluate, waitFor, wait, fail, in
     if (undone.mirrored || undone.hash16 !== rotated.hash16 || afterUndo.poolJobs !== beforeUndo.poolJobs) fail('undo of the latest geometry edit was not an instant swap: ' + JSON.stringify({ undone, beforeUndo, afterUndo }));
     console.log(`ok: rotate 90 and mirror show the new framing in the click task, build exact planes in the pool, turn the displayed frame (${shownAfter.surface}); undo swaps references`);
 
+    // With the film border on, on the surface in use and in a CPU mode
+    // (WebGL off), where the border is drawn around the frame on #canvas:
+    // the bordered paint of the new planes ends the interim turn and flip
+    // too (R1-063).
+    const gpuWas = await evaluate(`document.getElementById('coreUseWebGL').checked`);
+    const display = ({ gpu, border }) => evaluate(`(() => {
+      const gl = document.getElementById('coreUseWebGL'); if (gl.checked !== ${gpu}) gl.click();
+      const button = document.getElementById('sprocketPreviewBtn');
+      if ((button.getAttribute('aria-pressed') === 'true') !== ${border}) button.click();
+    })()`);
+    // The border is shown: the GL photo rectangle inside it, or #canvas larger than the frame it holds.
+    const bordered = `(() => { const f = window.__ncDisplay.frame(); return Boolean(f.display) && (f.surface === 'gl' ? f.glPhoto !== null : f.canvases.main[0] * f.canvases.main[1] > f.display[0] * f.display[1]); })()`;
+    await display({ gpu: gpuWas, border: true });
+    await waitFor('film border on', `${ready} && ${bordered}`, 60_000);
+    const surfaces = [];
+    for (const gpu of gpuWas ? [true, false] : [false]) {
+      await display({ gpu, border: true });
+      await waitFor(`film border on the ${gpu ? 'GPU' : 'CPU'} display`, `${ready} && ${bordered} && window.__ncDisplay.frame().surface === ${JSON.stringify(gpu ? 'gl' : 'cpu')}`, 60_000);
+      await wait(300);
+      const before = await evaluate(shown);
+      const turn = await evaluate(`(() => { document.getElementById('rotateRightBtn').click(); return document.getElementById('canvasTransformWrapper').style.transform; })()`);
+      if (!/rotate\(90deg\)/.test(turn)) fail(`rotate 90 with the film border (${before.surface}) did not show the new framing at once: ` + turn);
+      await waitFor(`bordered rotation converted (${before.surface})`, ready, 120_000);
+      await wait(500);
+      const after = await evaluate(shown);
+      checkTurnedDisplay(before, after, `rotate 90 with the film border (${after.surface})`);
+      const flip = await evaluate(`(() => { document.getElementById('mirrorBtn').click(); return document.getElementById('canvasTransformWrapper').style.transform; })()`);
+      if (!/scaleX\(-1\)/.test(flip)) fail(`mirror with the film border (${after.surface}) did not flip the display at once: ` + flip);
+      await waitFor(`bordered mirror converted (${after.surface})`, ready, 120_000);
+      await wait(500);
+      const flipped = await evaluate(shown);
+      if (/rotate|scaleX\(-1\)/.test(flipped.transform)) fail(`mirror with the film border (${flipped.surface}): the interim flip outlived the new paint: ` + flipped.transform);
+      const planes = await evaluate(`window.__ncGeometry.inspect({ chain: true })`);
+      if (planes.hash16 !== planes.chainHash16 || planes.hash8 !== planes.chainHash8) fail('bordered edits built other planes than the export chain: ' + JSON.stringify(planes));
+      surfaces.push(after.surface);
+    }
+    await display({ gpu: gpuWas, border: false });
+    await waitFor('film border off', `${ready} && !${bordered}`, 60_000);
+    console.log(`ok: with the film border on (${surfaces.join(', ')}), the new planes' paint ends the interim turn and flip and turns the bordered frame`);
+
     // Crop mode shows the whole frame from a sample built off the base.
     await evaluate(`document.getElementById('cropBtn').click()`);
     await waitFor('crop mode', `document.getElementById('canvasContainer').classList.contains('crop-mode')`, 30_000);
