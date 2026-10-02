@@ -36,7 +36,11 @@ function workerFactory() {
     postMessage(message, transfers) {
       // A shared buffer in a transfer list would throw here, as in a browser.
       const copy = structuredClone(message, { transfer: transfers });
-      posted.push({ src: copy.src, out16: Boolean(copy.out16), transfers: transfers.length, levelOnly: Boolean(copy.levelOnly) });
+      // Sizes as posted: a level band hands its rows' buffers back (R2-003).
+      posted.push({
+        src: copy.src, out16: Boolean(copy.out16), transfers: transfers.length, levelOnly: Boolean(copy.levelOnly),
+        bytes: (copy.src.data8?.byteLength || 0) + (copy.src.data16?.byteLength || 0)
+      });
       setTimeout(() => {
         const { payload, transfers: back } = runGeometryBand(copy);
         worker.onmessage?.({ data: structuredClone(payload, { transfer: back }) });
@@ -75,7 +79,7 @@ for (const derived of [true, false]) {
       if (plan.kind === 'index') assert.equal(Boolean(band.src.data8), !derived, `${label}: 8-bit rows ${derived ? 'derived' : 'copied'}`);
       assert.equal(band.transfers, band.src.data8 ? 1 : 0);
     }
-    assert.equal(pool.counters.copiedBytes, posted.reduce((sum, band) => sum + (band.src.data8?.byteLength || 0), 0),
+    assert.equal(pool.counters.copiedBytes, posted.reduce((sum, band) => sum + band.bytes, 0),
       `${label}: only 8-bit rows that are not derived are copied here`);
     pool.dispose();
   }
@@ -146,8 +150,8 @@ for (const derived of [true, false]) {
       posted.length = 0;
       const copied = await pool.renderDisplayLevel(plain, plan, { k: 2 });
       assert.ok(bytes(copied.__image16.data).equals(bytes(expected.__image16.data)), `${label}: plain base`);
-      assert.ok(posted.every(band => band.src.data16 && !band.src.shared16), `${label}: a plain base is copied`);
-      assert.equal(pool.counters.copiedBytes, posted.reduce((sum, band) => sum + band.src.data16.byteLength, 0));
+      assert.ok(posted.every(band => band.src.data16 && !band.src.shared16 && !band.src.data8), `${label}: a plain base's 16-bit rows are copied`);
+      assert.equal(pool.counters.copiedBytes, posted.reduce((sum, band) => sum + band.bytes, 0));
       pool.dispose();
     }
   }

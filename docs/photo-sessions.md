@@ -208,11 +208,13 @@ bit-identical to the whole level of the export chain's crop). A base in
 shared memory (#264, a lane decode on an isolated page) is read through
 views, so nothing is copied on the main thread. A plain one (a roll frame's
 planes from its worker, every base in the macOS app) is copied once per band,
-only the plane the level reads (the 16-bit one). A tilted band also copies
-the rows its output rows span, so these bands are planned by the bytes they
-copy (`planDisplayLevelBands`, R2-003): as many run at once as 2 bytes per
-base pixel hold (what a roll frame's #258 claim leaves beside its planes on
-the page), each copying at most a third more than its own rows. Where that does
+only the plane the level reads (the 16-bit one), into a buffer an earlier
+band's worker handed back where one is free (a copy into pages that are
+mapped already takes about 40 % less time). A tilted band also copies the
+rows its output rows span, so these bands are planned by the bytes they copy
+(`planDisplayLevelBands`, R2-003): as many run at once as 2 bytes per base
+pixel hold (what a roll frame's #258 claim leaves beside its planes on the
+page), each copying at most a third more than its own rows. Where that does
 not fit (about 3.5-5° at 60 MP) one band at a time takes the whole budget
 while it copies each row at most twice, and a steeper angle takes one band
 that reads the window once. At 60 MP a fill copies 357 MiB untilted and

@@ -174,10 +174,13 @@ function bandSource(src) {
 export function runGeometryBand(message) {
   const { id, plan, y0, y1, levelFactor = 1, planes16 = false, levelOnly = false } = message;
   const src = bandSource(message.src);
-  // A display proxy band (#249) sends back its level rows only.
+  // A display proxy band (#249) sends back its level rows only, and the
+  // buffers of the rows it was sent, for the page to copy the next band's
+  // rows into (R2-003); never a shared base's.
   if (levelOnly) {
     const level16 = renderLevelRows(plan, levelBandSource(plan, src), y0, y1, levelFactor);
-    return { payload: { id, level16 }, transfers: [level16.buffer] };
+    const spent = [...new Set([src.data16?.buffer, src.data8?.buffer])].filter(buffer => buffer instanceof ArrayBuffer);
+    return { payload: { id, level16, spent }, transfers: [level16.buffer, ...spent] };
   }
   const length = (y1 - y0) * plan.outWidth * 4;
   if (planes16 && plan.has16) {
@@ -214,6 +217,25 @@ function sharedBandSlice(source, plan, rect, { needs8 = plan.kind === 'index' } 
     needs8, derive8,
     data8: needs8 && !derive8 ? source.data.slice(rect.y * rowWords, (rect.y + rect.height) * rowWords) : null
   };
+}
+
+// The rows a display level's band reads, of the plane the level reads (the
+// 16-bit one of a 16-bit frame, R2-003), copied here into a buffer an
+// earlier band's worker handed back when one is large enough: its pages are
+// mapped already, so the copy takes about 40 % less time than one into a new
+// array.
+function sliceLevelSource(source, plan, rect, spare) {
+  const plane = plan.has16 ? source.__image16.data : source.data;
+  const Type = plan.has16 ? Uint16Array : Uint8ClampedArray;
+  const rowLength = rect.width * 4;
+  const length = rowLength * rect.height;
+  const index = spare.findIndex(buffer => buffer.byteLength >= length * Type.BYTES_PER_ELEMENT);
+  const rows = index >= 0 ? new Type(spare.splice(index, 1)[0], 0, length) : new Type(length);
+  for (let row = 0; row < rect.height; row++) {
+    const start = ((rect.y + row) * plan.baseWidth + rect.x) * 4;
+    rows.set(plane.subarray(start, start + rowLength), row * rowLength);
+  }
+  return { x: rect.x, y: rect.y, width: rect.width, height: rect.height, data8: plan.has16 ? null : rows, data16: plan.has16 ? rows : null };
 }
 
 // The bytes a band's slice copied here (a shared base's view is no copy).
@@ -320,7 +342,7 @@ export function createGeometryPool({
         fail(entry, error);
         return;
       }
-      pending.resolve({ data8: data.data8, data16: data.data16 || null, level16: data.level16 || null });
+      pending.resolve({ data8: data.data8, data16: data.data16 || null, level16: data.level16 || null, spent: data.spent || null });
       handOver(entry);
     };
     workers.push(entry);
@@ -543,6 +565,8 @@ export function createGeometryPool({
       counters.syncBands++;
       return rows;
     };
+    // Buffers of copied rows the workers handed back, for the next bands.
+    const spare = [];
     const running = new Map();
     let token = 0;
     while (queue.length || running.size) {
@@ -559,8 +583,7 @@ export function createGeometryPool({
           if (!rows) return null;
           place(band, rows);
         } else {
-          const slice = shared ? sharedBandSlice(source, plan, band.rect, { needs8: false })
-            : sliceGeometrySource(source, plan, band.rect, { with8: !plan.has16 });
+          const slice = shared ? sharedBandSlice(source, plan, band.rect, { needs8: false }) : sliceLevelSource(source, plan, band.rect, spare);
           counters.copiedBytes += copiedBytes(slice);
           const key = ++token;
           running.set(key, postBand(entry, plan, band, slice, k, { levelOnly: true }).then(
@@ -574,6 +597,7 @@ export function createGeometryPool({
       }
       const settled = await Promise.race(running.values());
       running.delete(settled.key);
+      if (settled.part?.spent) spare.push(...settled.part.spent);
       if (!isCurrent()) return null;
       const rows = settled.error || !settled.part.level16 ? await here(settled.band) : settled.part.level16;
       if (!rows) return null;

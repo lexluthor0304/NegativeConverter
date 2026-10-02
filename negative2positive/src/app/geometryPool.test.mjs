@@ -291,6 +291,40 @@ for (const failure of [{ failOn: 1 }, { crashOn: 0 }, { throwOnPost: true }]) {
   }
 }
 
+// The buffers a level band's rows were copied into come back with its level
+// rows, and the next bands' rows are copied into them (R2-003: pages that
+// are mapped already copy faster): a job allocates about one buffer per band
+// in flight, not one per band, with the same level.
+{
+  const frame = makeSource(1200, 800, 23);
+  const plan = planGeometry(frame, { rotationAngle: 1.3, mirrored: false, cropRegion: { left: 70, top: 50, width: 1060, height: 720 } });
+  const posted = [];
+  const returned = new Set();
+  const workerFactory = () => {
+    const worker = {
+      postMessage(message, transfers) {
+        posted.push(transfers.slice());
+        const copy = structuredClone(message, { transfer: transfers });
+        setTimeout(() => {
+          const { payload, transfers: back } = runGeometryBand(copy);
+          const reply = structuredClone(payload, { transfer: back });
+          for (const buffer of reply.spent || []) returned.add(buffer);
+          worker.onmessage?.({ data: reply });
+        }, 1);
+      },
+      terminate() {}
+    };
+    return worker;
+  };
+  const pool = createGeometryPool({ workerFactory, workersSupported: true, size: 3 });
+  const level = await pool.renderDisplayLevel(frame, plan, { k: 2, maxBytesInFlight: 2 * 1024 * 1024 });
+  assert.ok(bytes(level.__image16.data).equals(bytes(buildDisplayLevel(renderGeometry(frame, plan), 2).__image16.data)), 'the same level');
+  const fresh = posted.filter(list => !list.some(buffer => returned.has(buffer))).length;
+  assert.ok(posted.length >= 4, `${posted.length} bands`);
+  assert.ok(fresh <= 2 && fresh < posted.length, `${fresh} of ${posted.length} bands copied into a new buffer`);
+  pool.dispose();
+}
+
 // The plan on a 60 MP frame's geometry (sizes only: the planner reads no
 // pixels), 88 % of the turned frame: bands of 16 level rows copied 0.5-1.9
 // GiB per fill (both planes without a tilt); the planned bands copy at most

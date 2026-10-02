@@ -276,11 +276,10 @@ function copyRect(array, stride, rect, Type) {
 
 /**
  * Copies the pixels a band reads, row by row. Bilinear plans read only the
- * 16-bit plane; index plans copy both planes, unless `with8` is false (a
- * display level of a 16-bit frame reads its 16-bit rows only, #249).
+ * 16-bit plane; index plans copy both planes.
  */
-export function sliceGeometrySource(source, plan, rect, { with8 = plan.kind === 'index' } = {}) {
-  const data8 = with8 ? copyRect(source.data, plan.baseWidth, rect, Uint8ClampedArray) : null;
+export function sliceGeometrySource(source, plan, rect) {
+  const data8 = plan.kind === 'index' ? copyRect(source.data, plan.baseWidth, rect, Uint8ClampedArray) : null;
   const data16 = plan.has16 ? copyRect(source.__image16.data, plan.baseWidth, rect, Uint16Array) : null;
   return { x: rect.x, y: rect.y, width: rect.width, height: rect.height, data8, data16 };
 }
