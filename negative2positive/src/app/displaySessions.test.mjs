@@ -894,4 +894,103 @@ for (const [tier, area, decodes] of [['A', AREA, 0], ['A', AREA3, 1], ['B', AREA
     'without the sample (before the fix) the engine converted other pixels');
 }
 
-console.log('displaySessions: Tier A, Tier B, demotion, spill, ensureBase/ensureSource, invalidation, the proxy invariant and the colour-analysis sample across Undo, Redo and recipe changes (export parity) passed');
+// ---- Settled-view parity of a filled proxy (R2-007): the first open of a
+// frame from the proxy a lane's decode filled, from the spill in this session
+// or from the store in the next, converts what a cold open of the same recipe
+// converts: the same display level, display target, colour-analysis sample
+// and auto-WB sample request. (The browser smoke cannot make a fill: fills
+// are of levels smaller than their source, k > 1, at about 16 MP and up.) ----
+{
+  const geometry = { rotationAngle: 1.3, mirrored: false, cropRegion: { left: 9, top: 7, width: 96, height: 60 } };
+  const base = makeBase(120, 80, 21);
+  const settings = { ...geometry, autoFrameMeta: { imageArea: AREA }, filmEdge: { checked: true } };
+  const harness = () => {
+    const h = createHarness(base, { sessionBudget: 1 << 30, realProcessNegative: true, displayLevels: true, conversionRequests: true });
+    // Small frames standing in for large ones: a level of k = 2, a display
+    // target smaller than it.
+    Object.assign(h.target, { largeImagePixels: 1000, displayLevelFactor: () => 2, getCanvasContainerSize: () => ({ width: 40, height: 32 }),
+      previewTierMaxPixels: () => 600, usesSilverCoreConversion: () => true,
+      restoreAutoFrameDiagnostics: meta => { h.state.autoFrame.lastDiagnostics = meta ? structuredClone(meta) : null; } });
+    return { h, c: h.context };
+  };
+  const memoryBackend = () => {
+    const records = new Map();
+    return { async put(key, value) { records.set(key, value); }, async get(key) { return records.get(key) || null; },
+      async delete(key) { records.delete(key); }, async clear() { records.clear(); } };
+  };
+  // A cold open: the decoded base, the recipe restored, processNegative.
+  const cold = harness();
+  cold.c.restoreSettings(settings);
+  await cold.h.state.geometryReady;
+  await cold.c.processNegative({ quiet: true });
+  const coldRequest = cold.h.requests.at(-1);
+  assert.ok(coldRequest.display && coldRequest.options.preview, 'a cold open converts a display target of the level');
+  const sameRequest = (request, label) => {
+    sameLevel(request.imageData, coldRequest.imageData, `${label}: the display level`);
+    assert.deepEqual({ ...request.display.target }, { ...coldRequest.display.target }, `${label}: the display target`);
+    assert.deepEqual({ ...request.display.geometry }, { ...coldRequest.display.geometry }, `${label}: the level geometry`);
+    sameSample(request.options.analysisImageData, coldRequest.options.analysisImageData, `${label}: the colour-analysis sample`);
+    assert.deepEqual(JSON.parse(JSON.stringify(request.wbSample)), JSON.parse(JSON.stringify(coldRequest.wbSample)), `${label}: the auto-WB sample request`);
+    assert.equal(request.options.preview, coldRequest.options.preview);
+    assert.equal(request.options.includeAnalysisPreview, coldRequest.options.includeAnalysisPreview);
+  };
+  // Fill (a lane's decode while another photo is open), then open it.
+  const fillAndOpen = async ({ store = null } = {}) => {
+    const { h, c } = harness();
+    h.target.displayProxySpill = createDisplayProxySpill({ port: createDisplayProxyPort({ core: createDisplayProxyWorkerCore({ backend: memoryBackend() }) }) });
+    if (store) Object.assign(h.target, store);
+    const item = { id: 'roll-07::1', file: store?.file || { name: 'roll-07.dng' }, settings };
+    h.state.fileQueue = [{ id: 'open', file: { name: 'open.dng' } }, item];
+    h.state.currentFileIndex = 0;
+    h.state.loadedFile = h.state.fileQueue[0].file;
+    assert.equal(await c.fillDisplayProxy(item, base, settings), true, 'filled');
+    return { h, c, item };
+  };
+  const openFilled = async (h, c, item, entry) => {
+    h.target.getCurrentQueueItem = () => item;
+    h.state.currentFileIndex = 1;
+    h.target.prepareStudioPhoto = async () => { await c.processNegative({ quiet: true }); };
+    const before = h.requests.length;
+    await c.activateDisplaySession(item, entry, h.target.loadGeneration);
+    assert.equal(h.requests.length, before + 1, 'the first open converted once');
+    assert.equal(h.target.baseDecodes, undefined, 'without a decode');
+    assert.equal(h.state.conversionSourceImageData, null, 'from the proxy');
+    return h.requests.at(-1);
+  };
+  {
+    const { h, c, item } = await fillAndOpen();
+    const entry = await c.readSpilledDisplaySession(item);
+    sameRequest(await openFilled(h, c, item, entry), 'a filled proxy from the spill');
+    assert.equal(h.target.displaySessionDiagnostics.sampleMisses, 0);
+  }
+  {
+    const records = new Map();
+    const memoryRecords = {
+      async write(name, record) { records.set(name, new Uint8Array(record instanceof ArrayBuffer ? record : record.buffer).slice()); },
+      async read(name) { return records.has(name) ? records.get(name).slice().buffer : null; },
+      async delete(name) { records.delete(name); }, async clear() { records.clear(); },
+      async list() { return [...records].map(([name, bytes]) => ({ name, bytes: bytes.byteLength, modifiedMs: 0 })); }
+    };
+    const bytes = new Uint8Array(300_000).map((_, i) => (i * 7) & 255);
+    const storeFor = () => ({
+      file: Object.assign(new Blob([bytes]), { name: 'roll-07.dng', lastModified: 1234 }),
+      hashFileForProject: async blob => sha256Hex(new Uint8Array(await blob.slice(0, 1 << 20).arrayBuffer())), displayProxyFileKey, sha256Hex,
+      displayProxyStore: createDisplayProxyStore({
+        port: createDisplayProxyPort({ core: createDisplayProxyWorkerCore({ backend: null }) }), records: memoryRecords,
+        availableBytes: async () => 64 * 1024 ** 3
+      })
+    });
+    // This session fills it into the store; the next one opens it from there.
+    const first = await fillAndOpen({ store: storeFor() });
+    await first.h.target.displayProxyStore.settled();
+    const next = harness();
+    Object.assign(next.h.target, storeFor());
+    const item = { id: 'roll-07::1', file: next.h.target.file, settings };
+    next.h.state.fileQueue = [{ id: 'open', file: { name: 'open.dng' } }, item];
+    const entry = await next.c.readStoredDisplaySession(item);
+    assert.ok(entry?.stored, 'the next session finds the filled proxy in the store');
+    sameRequest(await openFilled(next.h, next.c, item, entry), 'a filled proxy from the store');
+  }
+}
+
+console.log('displaySessions: Tier A, Tier B, demotion, spill, ensureBase/ensureSource, invalidation, the proxy invariant, the colour-analysis sample across Undo, Redo and recipe changes (export parity) and the settled-view parity of filled proxies passed');

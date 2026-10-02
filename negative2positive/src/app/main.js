@@ -15019,7 +15019,28 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         bytes: () => ({ sessions: photoSessions.bytes, budget: PHOTO_SESSION_BUDGET_BYTES }),
         spill: () => displayProxySpill.stats,
         store: () => displayProxyStore?.stats || null,
-        settled: () => Promise.all([displayProxySpill.settled(), displayProxyStore?.settled()])
+        settled: () => Promise.all([displayProxySpill.settled(), displayProxyStore?.settled()]),
+        // The settled view's recipe and automatic white balance, which the
+        // settled-view parity check compares across the ways a photo opens.
+        recipe: () => JSON.parse(JSON.stringify({
+          settings: extractCurrentSettings(),
+          wb: { r: state.wbR, g: state.wbG, b: state.wbB, confidence: state.wbAutoConfidence ?? null }
+        })),
+        // A photo that is not on screen opens cold next time (or, with
+        // `keepStore`, from the persistent store): its session, prefetched
+        // base and spilled (and stored) proxies go.
+        drop: async (index, { keepStore = false } = {}) => {
+          const item = state.fileQueue[index];
+          if (!item || item.file === state.loadedFile) return false;
+          photoSessions.delete(item);
+          photoPrefetch.delete(item);
+          await displayProxySpill.delete(item.id);
+          if (!keepStore && displayProxyStore) {
+            const fileKey = await displayProxyFileKeyFor(item.file);
+            if (fileKey) await displayProxyStore.forget(fileKey);
+          }
+          return true;
+        }
       };
     }
 
