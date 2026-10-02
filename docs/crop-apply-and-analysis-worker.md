@@ -27,7 +27,10 @@ paint. There the overlay must be visible and opaque, and neither the
 geometry build nor the detection may have started. A rAF of the smoke's own
 would run before the handler's, which asks for its frame only once
 `overlay.show()` has resolved, so it could not tell `yieldToPaint()` from a
-bare rAF, which starts the work inside that frame.
+bare rAF, which starts the work inside that frame. The smoke also checks
+that Apply showed the indeterminate strip and that, once Apply has settled,
+the hidden overlay runs no animation (#261; `loadingOverlayIdle` fails on a
+page without an overlay unless the caller expects none).
 
 ## Converting without waiting for the crop-area detection
 

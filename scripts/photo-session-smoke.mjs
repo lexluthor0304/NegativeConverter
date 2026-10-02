@@ -570,8 +570,9 @@ export async function runPhotoSessionSmoke({ send, evaluate, waitFor, fail, inst
     expect(await evaluate(feedbackCleared), 'stale cold completion restored a superseded indicator');
 
     // A successful first open must clear feedback only after the new positive
-    // is ready, not merely after decoding the source container. Its frame
-    // detection (auto-frame is on) shows the overlay's indeterminate strip.
+    // is ready, not merely after decoding the source container. Auto-frame is
+    // on, so it detects the frame, in the background tail behind the veil: a
+    // cold switch is quiet and shows no loading overlay itself.
     expect(await evaluate(`document.getElementById('autoFrameEnabledInput')?.checked !== false`), 'auto-frame must be on for the overlay check');
     await evaluate(`(() => {
       window.__overlayShows = [];
@@ -591,8 +592,10 @@ export async function runPhotoSessionSmoke({ send, evaluate, waitFor, fail, inst
       && document.getElementById('studioFilename').textContent === 'session-cold-success.png'
       && document.querySelector('.file-list-name[aria-current="true"]')?.dataset.index === '4'`, 120000);
     await idle();
-    // #261: whatever the last show was (the indeterminate strip here), the
-    // hidden overlay runs no animation once the switch settles.
+    // #261: the overlay an earlier show left (an import's conversion, an
+    // export) runs no animation once the switch settles; the check fails if
+    // no overlay was ever shown (R1-113). The indeterminate strip is checked
+    // after Apply Crop, which shows it (crop-apply-smoke).
     const overlayShows = await evaluate(`(() => { window.__overlayWatch.disconnect(); return window.__overlayShows; })()`);
     await expectLoadingOverlayIdle({ evaluate, waitFor, fail: message => { throw new Error(message); } }, 'cold switch');
     console.log('cold switch overlay idle:', JSON.stringify({ shows: overlayShows.length, indeterminate: overlayShows.includes(true) }));

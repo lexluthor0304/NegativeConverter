@@ -6,7 +6,9 @@
 //   turning the draft by 90 degrees redraws without a histogram or a pixel
 //   rotation;
 // - the first frame after the Apply click shows the overlay fully opaque,
-//   before the geometry build or the crop-area detection starts;
+//   before the geometry build or the crop-area detection starts; Apply
+//   shows the indeterminate strip, and once it has settled the hidden
+//   overlay runs no animation (#261);
 // - the detection runs in the auto-frame worker, a miss converts once and a
 //   hit at most twice, and the page never boots its own OpenCV;
 // - while the detection runs, the frame notice reports it and nothing asks
@@ -21,6 +23,8 @@
 //   detection runs, or right after a slider release while the frame's 16-bit
 //   plane is still in the preview worker, wait for them and export what the
 //   same clicks made after waiting export (runMeasureWhileWaiting).
+
+import { expectLoadingOverlayIdle, loadingOverlayIdle } from './loading-overlay-idle.mjs';
 
 // Imports the synthetic negative without auto crop, in a page expression: an
 // orange rebate around a dark, textured frame.
@@ -65,6 +69,11 @@ export async function runCropApplySmoke({ send, evaluate, waitFor, wait, fail, i
   await waitFor('crop apply boot', `!!document.getElementById('studioImportAutoCrop') && !!window.__ncAnalysis && !!window.__ncGeometry`);
   await installDialogAutoAccept();
   await wait(300);
+  // Nothing has shown the loading overlay yet: the idle check fails on a
+  // page without one, unless the caller expects none (R1-113).
+  if (await evaluate(loadingOverlayIdle()) || !await evaluate(loadingOverlayIdle({ overlayExpected: false }))) {
+    fail('the loading-overlay idle check passed where no overlay was ever shown: ' + JSON.stringify(await evaluate(`({ overlays: document.querySelectorAll('.loading-overlay').length })`)));
+  }
   await evaluate(`(async () => {
     window.__analysisWarnings = [];
     const warn = console.warn.bind(console);
@@ -146,6 +155,13 @@ export async function runCropApplySmoke({ send, evaluate, waitFor, wait, fail, i
       return post.apply(this, arguments);
     };
     probe.release = () => { const held = probe.held; probe.held = null; for (const deliver of held) deliver(); };
+    // While the overlay is shown: whether it shows the indeterminate strip.
+    window.__overlayShows = [];
+    window.__overlayWatch = new MutationObserver(() => {
+      const overlay = document.querySelector('.loading-overlay.visible');
+      if (overlay) window.__overlayShows.push(overlay.classList.contains('indeterminate'));
+    });
+    window.__overlayWatch.observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ['class'] });
   })()`);
   const firstFrame = await evaluate(`(async () => {
     const before = { started: window.__ncAnalysis.detection.started, jobs: window.__ncGeometry.pool.jobs, conversions: window.__ncAnalysis.detection.conversions };
@@ -206,6 +222,12 @@ export async function runCropApplySmoke({ send, evaluate, waitFor, wait, fail, i
   }
   console.log(`ok: Apply overlay opaque in the first frame (${firstFrame.ms.toFixed(0)} ms), detection in the worker (${applied.hits ? 'hit' : 'miss'}, ${applied.conversions} conversion(s)), no OpenCV in the page`);
   console.log('ok: while the detection ran the frame notice read "detecting" and nothing asked to confirm the image area; the forced miss then did (notice, composition pane, filmstrip)');
+  // Apply's detection showed the indeterminate strip, the conversion its
+  // progress; once both are done the hidden overlay is idle (#261, R1-113).
+  const overlayShows = await evaluate(`(() => { window.__overlayWatch.disconnect(); return window.__overlayShows; })()`);
+  if (!overlayShows.includes(true)) fail('Apply Crop did not show the indeterminate strip: ' + JSON.stringify(overlayShows));
+  await expectLoadingOverlayIdle({ evaluate, waitFor, fail }, 'Apply Crop');
+  console.log(`ok: Apply showed the indeterminate strip (${overlayShows.length} overlay states, last ${overlayShows.at(-1) ? 'indeterminate' : 'progress'}); the hidden overlay is idle afterwards`);
 
   // ---- One-click colour correction in the worker, then the page fallback ----
   const correct = async (label) => {
