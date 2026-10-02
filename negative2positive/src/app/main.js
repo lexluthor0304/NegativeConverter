@@ -7385,10 +7385,14 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         return;
       }
       const shown = state.previewSourceImageData;
-      const target = getDisplayPreviewSize(processed);
+      // At the normal tier's size: inside a reduced session (#263) the frame on
+      // screen may be either tier's, and the session end needs this one
+      // (#229 review R1-123).
+      const target = getDisplayPreviewSize(processed, undefined, 'normal');
       if (deferDisplay && shown && previous
         && previous.width === processed.width && previous.height === processed.height
-        && (target.width < processed.width || target.height < processed.height) && displaySizeServes(shown, target)) {
+        && (target.width < processed.width || target.height < processed.height)
+        && (displaySizeServes(shown, target) || previewTier === 'reduced')) {
         rebuildDisplayPreview(processed, target);
         return;
       }

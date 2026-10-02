@@ -585,6 +585,49 @@ for (const largePreviewFrames of [true, false]) {
   assert.equal(same.conversions.length, count + 2, 'the end converts nothing more');
 }
 
+// ---- #229 review R1-123: a whole-frame result of the same size (a repair
+// pass, a cleared mask) landing inside a reduced session is rebuilt for the
+// normal tier off the main thread, whichever tier's frame is on screen: the
+// normal one during a curve drag or a slider drag before its first reduced
+// frame, a reduced one after it ----
+for (const kind of ['curve', 'slider', 'reduced frame']) {
+  const f = fixture({ largePreviewFrames: false });
+  const rebuilds = [];
+  f.context.convertPreviewFrameInWorker.resample = (image, target) => {
+    rebuilds.push({ image, target: { ...target } });
+    return Promise.resolve(resizeDisplayPreview(image, target));
+  };
+  const plane = f.state.processedImageData;
+  const normalShown = f.state.previewSourceImageData;
+  f.context.onPreviewTierChange('reduced');
+  if (kind === 'slider') await f.post(6);
+  if (kind === 'reduced frame') await f.input(6);
+  const shown = f.state.previewSourceImageData;
+  assert.equal(f.state.processedImageData, plane, `${kind}: the full-resolution plane is on screen`);
+  assert.equal(shown === normalShown, kind !== 'reduced frame', `${kind}: with the expected display preview`);
+  assert.equal(f.context.reducedDisplayImages.has(shown), kind === 'reduced frame');
+  const resamples = f.context.displayCounters.mainResamples;
+  const result = convertPixels(f.base, kind === 'curve' ? 9 : 6);
+  f.context.applyProcessedImageToState(result, { deferDisplay: true });
+  assert.equal(f.context.displayCounters.mainResamples, resamples, `${kind}: no main-thread resample of the whole frame`);
+  assert.equal(f.state.previewSourceImageData, shown, `${kind}: the frame on screen stays until its rebuild lands`);
+  assert.equal(rebuilds.length, 1, `${kind}: the preview worker rebuilds it`);
+  assert.deepEqual(rebuilds[0].target, { width: f.normalTarget.width, height: f.normalTarget.height }, `${kind}: at the normal tier's size`);
+  await settle();
+  assert.ok(bytesEqual(f.state.previewSourceImageData, resizeDisplayPreview(result, f.normalTarget)), `${kind}: the rebuild is shown`);
+  await f.answerAll();
+  f.context.onPreviewTierChange('normal');
+  if (kind !== 'curve') f.handlers.onCommit(6);
+  f.runTimers();
+  await f.answerAll();
+  assert.equal(f.context.displayCounters.mainResamples, resamples, `${kind}: nor after the session`);
+  assert.equal(f.context.displayIsReduced(), false, `${kind}: nothing reduced is left on screen`);
+  if (kind === 'slider') {
+    assert.equal(f.conversions.at(-1).input.width, f.normalTarget.width, 'the slider settles at the normal size');
+    assert.equal(f.conversions.at(-1).exposure, 6);
+  }
+}
+
 // ---- Session end diagnostics ----
 {
   const f = fixture();
