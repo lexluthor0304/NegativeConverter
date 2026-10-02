@@ -250,6 +250,16 @@ Remaining performance proposals below are not claims of completed work.
   A geometry edit or a second Apply ends the pending detection (pushUndo), so its hit never lands. Undoing that edit, like redo right after an undo of Apply (the edge case #245 accepted), restores Apply's frame with analysisNeedsReview and no auto white balance, where 1703835 had the hit in place before the edit. The restored entry carries the ended detection's token (captureSnapshot), so it can be recognised.  
   _Suggested fix:_ Mark the token when cancelCropDetection ends a detection without a reply, and start the detection again (as Apply does) when an undo or redo restores an entry carrying such a token.
 
+- **low/bug** — A recipe applied while Apply Crop's crop-area detection runs loses its white balance to the hit's auto white balance (#245)  
+  `negative2positive/src/app/main.js:25970`  
+  applyRecipeToCurrent writes the recipe's wbR/wbG/wbB and wbUserOverride (false in a recipe of an auto-balanced photo) while the detection is pending. A hit then converts again, and maybeAutoWhiteBalance, whose gates the recipe left open, replaces those gains with its own; 1703835 applied the hit before the UI was free, so the recipe's gains won. The measurement barriers (settleMeasurementInputs) and the copy barriers (Copy recipe, Apply film type to roll, sync) do not cover writes like this one.  
+  _Suggested fix:_ Have applyRecipeToCurrent wait for settlePendingCropDetection() first, as Copy recipe does.
+
+- **low/bug** — Import background tasks persist and restore the open photo while Apply Crop's crop-area detection runs (#245)  
+  `negative2positive/src/app/main.js:21685`  
+  studioBackgroundReady() does not look at a pending detection, so the import's film-type flip (flipImportPhoto) and applyImportPositives can persist the open photo with the miss outcome and restore it; the restore installs new diagnostics, which ends the detection without its hit (it counts as stale).  
+  _Suggested fix:_ Add `!hasPendingCropDetection()` to studioBackgroundReady (its callers already retry until it holds).
+
 - **low/i18n** — Export failure alert and several export-path Error messages are hard-coded English; 'selected folder' fallback leaks into localized toast  
   `negative2positive/src/app/main.js:9010`  
   notifyExportError shows alert(`Export failed: ${message}`) where message is one of several English-only Error strings thrown in the export path ('Full-resolution processing is not ready yet. Please wait…', 'Export payload is not a Blob.', 'No image available for export.', 'JSZip module is unavailable'). Chinese/Japanese users see an English dialog for the most important failure in the app. showDes…  

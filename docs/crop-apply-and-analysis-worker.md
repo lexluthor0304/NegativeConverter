@@ -89,7 +89,26 @@ worker meanwhile (`startCropDetection`):
   the settings), `ensureFullResolutionReadyForExport`, batch and ZIP export,
   the contact sheet, project save, the photo switch (it waits rather than
   cancels, so the leaving photo is persisted with the outcome), roll sync,
-  apply to selected and the roll reference.
+  apply to selected, the roll reference, Copy recipe and its QR code, and
+  Apply film type to roll (it persists and restores the photo, and the
+  restore would end the detection without its hit).
+- The measurements that persist settings read the positive, the analysis
+  area and the white balance a hit decides: the gray-point click, the
+  expired rescue's analysis (one-click colour correction, turning the rescue
+  on, Analyze, and Reset colour when it measures) and lab match's rendering.
+  They go through `settleMeasurementInputs`, which also waits for a dragged
+  frame's 16-bit plane to come back from the preview worker (#233). With
+  either pending, Studio is busy (panel, photo and strip inert) until both
+  have settled, a hit's conversion included, and the action then runs as if
+  clicked after them; it is dropped if the photo, its load or the edit
+  revision changed meanwhile, the gray-point mode was left, or the
+  expired-roll entry (the menu, outside the busy panel) was toggled. With
+  nothing pending it runs within the click, as before. The crop-apply smoke holds the
+  detection request, and the plane's commit after a core exposure release,
+  while each is clicked, and compares the settings and the PNG8 and TIFF16
+  exports with the same clicks made after waiting
+  (`runMeasureWhileWaiting`, on a fixture made large with
+  `?largeImagePixels` so the display preview stays the measured frame).
 - Known edge cases, accepted: redo right after an undo of Apply that ended a
   pending detection restores the provisional (miss) diagnostics, and so does
   an undo of a geometry edit or a second Apply made while the detection ran
@@ -165,7 +184,9 @@ Chrome):
 reconversions, conversions), `cropView` (proxy builds, stand-ins, draws,
 histograms, the last redraw's time), `settle()`, `pendingDetection()`,
 `converting()` (a `processNegative` in flight), `proxyReady()`, `draftView()`,
-`failWorker(true)` to force the page fallback.
+`plane()` (whether the 16-bit plane of the frame on screen is still in the
+preview worker, on its way back or attached, and whether that frame is the
+display preview), `failWorker(true)` to force the page fallback.
 
 ## Remaining acceptance runs
 

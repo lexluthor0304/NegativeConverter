@@ -6,8 +6,13 @@ converted photo and applies the same automatic rescue defaults to the current
 photo, without changing the roll's import mode, geometry, film type or active
 tab. The action is one undo step; CMYD remains available for manual refinement.
 Pressing it again remeasures the uncorrected conversion instead of stacking
-corrections. Preview, export, saved projects and color sync share the existing
-rescue settings.
+corrections. It measures the frame on screen with its 16-bit plane, inside
+the analysis area when there is one: right after a slider release (the plane
+still in the preview worker) or while Apply Crop's crop-area detection runs,
+the click waits for them, as do the rescue checkbox, Analyze and Reset colour
+(`settleMeasurementInputs`, docs/crop-apply-and-analysis-worker.md).
+Preview, export, saved projects and color sync share the existing rescue
+settings.
 
 The separate expired-roll entry remains available for rolls that were shot
 or developed long past their date. It applies to both kinds of input:
