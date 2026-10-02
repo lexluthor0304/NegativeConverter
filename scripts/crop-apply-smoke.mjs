@@ -1,9 +1,10 @@
 // Apply Crop and the crop view (#245), on a synthetic negative imported
 // without auto crop (so no image area is stored and every changed frame is
 // detected again):
-// - crop mode draws on its own canvas at display resolution, fitted like the
-//   develop view; the area-filtered proxy replaces the stand-in; turning the
-//   draft by 90 degrees redraws without a histogram or a pixel rotation;
+// - crop mode draws on its own canvas at display resolution, in the develop
+//   view's box (within 1 px); the area-filtered proxy replaces the stand-in;
+//   turning the draft by 90 degrees redraws without a histogram or a pixel
+//   rotation;
 // - the first frame after the Apply click shows the overlay fully opaque,
 //   before the geometry build or the crop-area detection starts;
 // - the detection runs in the auto-frame worker, a miss converts once and a
@@ -95,19 +96,13 @@ export async function runCropApplySmoke({ send, evaluate, waitFor, wait, fail, i
       draft: window.__ncAnalysis.draftView(), histograms: window.__ncAnalysis.cropView.histograms, renderMs: window.__ncAnalysis.cropView.lastRenderMs };
   })()`);
   if (!view.shown || !view.mainHidden || !view.glHidden) fail('crop mode is not on its own canvas: ' + JSON.stringify(view));
-  // The crop toolbar can change the container's size by a few pixels. Both
-  // views are fitted by the same rule, the full-size frame into the container
-  // less 20 px and never above 100 % (adjustCanvasDisplay), each in the
-  // container it has.
+  // For an uncropped frame at angle 0 the crop view's box is the develop
+  // view's within 1 px (#245): both are fitted by the same rule
+  // (adjustCanvasDisplay), and crop mode's ratio control is no taller than
+  // the toolbar's buttons, so the container keeps its size (R1-076).
   const cropContainer = await evaluate(containerSize);
-  const fitted = (frame, container) => {
-    const scale = Math.min((container.width - 20) / frame.width, (container.height - 20) / frame.height, 1);
-    return { width: frame.width * scale, height: frame.height * scale };
-  };
-  const expectCrop = fitted(view.draft.frame, cropContainer), expectDevelop = fitted(view.draft.frame, developContainer);
-  if (Math.abs(view.box.width - expectCrop.width) > 1 || Math.abs(view.box.height - expectCrop.height) > 1
-    || Math.abs(developBox.width - expectDevelop.width) > 1 || Math.abs(developBox.height - expectDevelop.height) > 1) {
-    fail('the crop view is not fitted like the develop view: ' + JSON.stringify({ view, developBox, cropContainer, developContainer }));
+  if (Math.abs(view.box.width - developBox.width) > 1 || Math.abs(view.box.height - developBox.height) > 1) {
+    fail('the crop view is not in the develop view\'s box: ' + JSON.stringify({ view, developBox, cropContainer, developContainer }));
   }
   const wanted = Math.min(Math.round(view.box.width * view.dpr), view.draft.frame.width);
   if (view.pixels[0] < wanted - 2) fail('the crop canvas is below display resolution: ' + JSON.stringify({ view, wanted }));
@@ -127,7 +122,7 @@ export async function runCropApplySmoke({ send, evaluate, waitFor, wait, fail, i
   if (turned.draws < 1 || turned.histograms || turned.rotations || !(turned.pixels[1] > turned.pixels[0]) || turned.renderMs > 30) fail('turning the draft did pixel work or did not redraw: ' + JSON.stringify(turned));
   const back = await turn('rotateLeftBtn');
   if (back.histograms || back.rotations || !(back.pixels[0] > back.pixels[1])) fail('turning the draft back: ' + JSON.stringify(back));
-  console.log(`ok: crop view ${view.pixels.join('x')} px in a ${Math.round(view.box.width)}x${Math.round(view.box.height)} box (develop view's), proxy swapped in, a 90-degree turn redraws in ${turned.renderMs.toFixed(1)} ms without a histogram or pixel rotation`);
+  console.log(`ok: crop view ${view.pixels.join('x')} px in a ${Math.round(view.box.width)}x${Math.round(view.box.height)} box (the develop view's: ${Math.round(developBox.width)}x${Math.round(developBox.height)}), proxy swapped in, a 90-degree turn redraws in ${turned.renderMs.toFixed(1)} ms without a histogram or pixel rotation`);
 
   // ---- Apply: paint first ----
   // The new frame straddles the image window's corner: a crop inside or

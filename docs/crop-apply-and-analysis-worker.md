@@ -172,7 +172,14 @@ Chrome):
 - The canvas is sized at display resolution for the turned frame
   (`displayPreviewSize`: canvas area x DPR, 4 MP cap, zoom 1) and its CSS box
   is fitted like the develop view's (`getFullResDisplayReference` returns the
-  turned frame's full size while cropping).
+  turned frame's full size while cropping). For an uncropped frame at angle
+  0 the two boxes are the same: the ratio control crop mode adds to the
+  toolbar is no taller than its buttons (`.studio .toolbar-select`, 30 px),
+  so the container keeps its size. At its own 32 px it made the toolbar 2 px
+  taller, and the picture shrank and moved when crop mode opened. A toolbar
+  that wraps into a second row in crop mode (a narrow window) still shrinks
+  the container, and the crop view is fitted to that. The crop-apply smoke
+  compares the two boxes (within 1 px).
 - The picture is an area-filtered (`app/areaResample.js`) 8-bit proxy of the
   base, sized for either orientation, built in ~8 ms row slices at idle
   after a photo settles and kept per base image. It is drawn with canvas

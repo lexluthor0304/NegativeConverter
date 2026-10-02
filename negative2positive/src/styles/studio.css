@@ -160,6 +160,11 @@ body.studio {
 .studio .preview-toolbar { padding: 10px 0 0; background: transparent; border: 0; box-shadow: none; border-radius: 0; justify-content: center; gap: 7px; flex-wrap: wrap; }
 .studio .toolbar-btn { border: 0; background: transparent; color: var(--text-secondary); font-size: 12px; padding: 7px 9px; box-shadow: none; }
 .studio .toolbar-btn.active { color: var(--accent); background: var(--bg-hover); }
+/* No taller than the buttons (a 16 px icon, 7 px padding): at its own 32 px,
+   crop mode's ratio control made the toolbar taller, so the picture shrank
+   and moved when crop mode opened (#245). Narrow layouts keep their
+   min-height (app.css), which matches their buttons. */
+.studio .toolbar-select { height: 30px; padding-block: 0; }
 .studio-filmstrip { display: none; min-width: 0; border-top: 1px solid var(--border); background: #202020; padding: 6px 12px; }
 .studio-loaded .studio-filmstrip { display: block; grid-row: 2; grid-column: 1; }
 .studio-strip-header { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; min-width: 0; font-size: 12px; }
