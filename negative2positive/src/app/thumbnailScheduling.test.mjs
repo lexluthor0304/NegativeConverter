@@ -194,8 +194,10 @@ for (const [label, settings, settled, name] of [
 }
 
 // #247 part 4: a trickled watch-folder frame keeps the roll sample of its
-// one lane decode, keyed by the recipe the lane just prepared. Other frames,
-// half-size decodes and frames a roll already covered keep none.
+// one lane decode, keyed by the recipe the lane just made: a watch-folder
+// arrival's full-resolution recipe, rendered from that decode before its
+// tile (#229 review, R1-124). Other frames, half-size decodes and frames a
+// roll already covered keep none.
 for (const [label, setup, kept] of [
   ['watch', f => { f.items[1].importId = 'watch:1'; }, true],
   ['picker', f => { f.items[1].importId = 'import-1'; }, false],
@@ -210,13 +212,22 @@ for (const [label, setup, kept] of [
   record.settled = true;
   record.resolve({ ...f.image(1), ...(record.options.halfSize ? { __fullSize: { width: 8, height: 8 } } : {}) });
   await flush();
+  if (label === 'watch') {
+    const recipe = f.renders[0];
+    assert.deepEqual([recipe.settings, recipe.options.stage, recipe.options.previewMaxDimension], [null, 'processed', undefined],
+      'a watch-folder arrival first gets its full-resolution recipe');
+    recipe.done = true;
+    recipe.resolve({ processed: f.image(1), settings: { arrival: 1 } });
+    await flush();
+  }
   await f.finishRender(1, 'tile');
   const sample = f.context.watchRollSamples.take(f.items[1]);
   assert.equal(Boolean(sample), kept, label);
   if (kept) {
     assert.equal(sample.base.id, 1);
-    assert.deepEqual({ ...sample.settings }, { prepared: 1 }, 'built with the recipe the lane prepared');
-    assert.equal(sample.__itemKey, JSON.stringify({ prepared: 1 }));
+    assert.deepEqual({ ...sample.settings }, { arrival: 1 }, 'built with the recipe the lane made');
+    assert.equal(sample.__itemKey, JSON.stringify({ arrival: 1 }));
+    assert.deepEqual({ ...f.renders[1].settings }, { arrival: 1 }, 'the tile is rendered from that recipe');
   }
 }
 

@@ -1,16 +1,21 @@
-// What a lane-prepared recipe is measured on (#229 review, R1-081). The
-// light-table lane's first render of a frame without a recipe prepares the
+// What the recipes the light-table lane prepares are measured on (#229
+// review). The lane's first render of a frame without a recipe prepares the
 // recipe it stores (gray point, expired-rescue measurement), and exports
-// reuse it. 1703835 built that tile with the full-resolution chain and the
-// preview downsample; #247's reduced tile decimates first wherever the
-// geometry core cannot plan the chain (an 8-bit source at a non-right
-// angle), so a recipe-preparing render keeps 1703835's order there. Renders
-// with a saved recipe only show it and keep the reduced path.
+// reuse it.
+// - R1-081: 1703835 built that tile with the full-resolution chain and the
+//   preview downsample; #247's reduced tile decimates first wherever the
+//   geometry core cannot plan the chain (an 8-bit source at a non-right
+//   angle), so a recipe-preparing render keeps 1703835's order there.
+//   Renders with a saved recipe only show it and keep the reduced path.
+// - R1-082, R1-124: a watch-folder arrival's recipe is the full-resolution
+//   one 1703835's arrival handler made, rendered in the lane from its one
+//   decode, and a batch of arrivals starts no roll import of its own.
 // Run with: node negative2positive/src/app/laneRecipeInputs.test.mjs
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
+import { createLaneFixture, flush, functionSource as laneFunctionSource } from './backgroundLanesHarness.mjs';
 
 class TestImageData {
   constructor(data, width, height) { Object.assign(this, { data, width, height }); }
@@ -274,4 +279,176 @@ for (const [label, base, frame] of [
   assert.equal(reducedGeometryExact(loose, {}), false, 'a 16-bit plane of another size');
 }
 
-console.log('laneRecipeInputs: recipe-preparing lane renders measure 1703835\'s tile; saved-recipe renders keep the reduced path');
+// ---------------------------------------------------------------------------
+// R1-082, R1-124: watch-folder arrivals, with the desktop IPC stubbed. The
+// app's own arrival handlers, addFilesToQueue and light-table lane run; the
+// renders are recorded. 1703835's handler rendered each arrival with
+// processFileWithSettings(file, null, { bitDepth: 8 }): a full-resolution
+// recipe (gray point and expired rescue measured on the whole frame), not
+// marked automatic, one arrival at a time; 2.5 s after the last one, three
+// or more formed a roll on top of their recipes and fewer were dropped.
+// ---------------------------------------------------------------------------
+const { readDesktopImportFile } = await import('./desktopImportReader.js');
+const WATCH_FUNCTIONS = ['addFilesToQueue', 'createQueueItemId', 'receiveHotFolderArrival', 'hotFolderHas', 'queueHotFolderBatch',
+  'noteHotFolderRecipe', 'scheduleHotFolderRoll'];
+
+function watchFixture({ open = true } = {}) {
+  const f = createLaneFixture({ count: open ? 1 : 0, current: 0, settings: true, tilesDone: true });
+  const disk = new Map();
+  const rolls = [], toasts = [], switched = [], released = [];
+  Object.assign(f.context, {
+    hotFolder: { session: 'S', path: '/watched' }, hotFolderEpoch: 1, hotFolderImports: Promise.resolve(), hotFolderFiles: [],
+    hotFolderQuiet: null, hotFolderBatch: [], hotFolderBatchTimer: null, HOT_FOLDER_BATCH_MS: 1000,
+    // The desktop side: the watched folder's files, read in checked chunks.
+    window: { __TAURI__: { core: { invoke: async (command, args) => {
+      assert.equal(command, 'read_import_file');
+      assert.equal(args.session, 'S');
+      const bytes = disk.get(args.path);
+      return bytes.slice(args.offset, Math.min(bytes.length, args.offset + 8 * 1024 * 1024)).buffer;
+    } } } },
+    readDesktopImportFile,
+    crypto: { randomUUID: () => 'import-id' },
+    hasRollReference: () => false, syncBatchUIState: noop, updateFileListUI: noop, queueEmbeddedTiles: noop,
+    updateExportButtons: noop, scheduleProjectRecovery: noop,
+    scheduleAutomaticRollImport: (items, options) => rolls.push({ names: Array.from(items, item => item.file.name), options: { ...options } }),
+    switchToFile: async index => {
+      const item = f.state.fileQueue[index];
+      switched.push(item.file.name);
+      item.settings = { opened: item.file.name };
+      f.state.currentFileIndex = index; f.state.loadedFile = item.file; f.state.originalImageData = {};
+    },
+    showToast: text => toasts.push(text),
+    getInterpolatedText: (_key, _values, fallback) => fallback, getLocalizedText: (_key, fallback) => fallback,
+    releaseOwnedPlanes: (...planes) => released.push(...planes)
+  });
+  f.state.originalImageData = open ? {} : null;
+  vm.runInContext(WATCH_FUNCTIONS.map(laneFunctionSource).join('\n'), f.context);
+  const arrive = async name => {
+    const bytes = Uint8Array.from({ length: 300 }, (_, i) => (i * 7 + name.length) & 255);
+    disk.set(`/watched/${name}`, bytes);
+    f.context.receiveHotFolderArrival({ name, size: bytes.length, path: `/watched/${name}`, session: 'S', modified: '1700000000000000000' }, 1);
+    await flush();
+  };
+  const item = name => f.state.fileQueue.find(entry => entry.file.name === name);
+  // The lane's decode of `name`, then its renders: what each render is asked
+  // for, answered as processFileWithSettings would.
+  const decode = async name => {
+    for (let i = 0; i < 40 && !f.decodes.some(record => record.file.name === name && !record.settled); i++) await f.clock.advance(250);
+    const record = f.decodes.find(entry => entry.file.name === name && !entry.settled);
+    assert.ok(record, `the lane decodes ${name}`);
+    record.settled = true;
+    record.resolve({ name, width: 4, height: 4, data: new Uint8ClampedArray(64) });
+    await flush();
+  };
+  const pendingRender = name => f.renders.find(entry => entry.file.name === name && !entry.done);
+  const recipeRender = async name => {
+    const render = pendingRender(name);
+    assert.ok(render, `a render of ${name} is pending`);
+    assert.deepEqual([render.settings, render.options.stage, render.options.previewMaxDimension, render.options.silent],
+      [null, 'processed', undefined, true], `${name}: a full-resolution recipe render, no tile size, no overlay`);
+    assert.equal(render.options.updateItemSettings, false);
+    render.done = true;
+    render.options.ownedPlanes.push({ plane: name });
+    render.resolve({ processed: { plane: name }, settings: { measuredOn: `full:${name}` } });
+    await flush();
+  };
+  const tileRender = async name => {
+    const render = pendingRender(name);
+    assert.ok(render, `a tile render of ${name} is pending`);
+    assert.equal(render.options.previewMaxDimension, 288, `${name}: then the tile`);
+    assert.deepEqual({ ...render.settings }, { measuredOn: `full:${name}` }, `${name}: rendered from its full-resolution recipe`);
+    render.done = true;
+    render.options.onPreparedSettings?.({ measuredOn: `tile:${name}` });
+    render.resolve({ preview: `tile:${name}` });
+    await f.clock.advance(50);
+  };
+  return { ...f, rolls, toasts, switched, released, arrive, item, decode, recipeRender, tileRender };
+}
+
+// One capture while a photo is open: the lane gives it the recipe 1703835's
+// handler made (full resolution, not automatic) and its tile from that
+// recipe, from one decode. Alone it forms no roll.
+{
+  const f = watchFixture();
+  await f.arrive('a.jpg');
+  await f.clock.advance(1000);
+  const a = f.item('a.jpg');
+  assert.ok(a, 'queued after the batch window');
+  assert.equal(a.importId, 'watch:S');
+  assert.equal(a.settings, null, 'not converted on arrival');
+  await f.decode('a.jpg');
+  await f.recipeRender('a.jpg');
+  await f.tileRender('a.jpg');
+  assert.deepEqual({ ...a.settings }, { measuredOn: 'full:a.jpg' }, 'the recipe measured on the full-resolution frame');
+  assert.notEqual(a.automaticSettings, true, 'not marked automatic: exports keep its gray point, as at 1703835');
+  assert.equal(a.thumbnail, 'tile:a.jpg');
+  assert.equal(a.thumbnailKey, JSON.stringify(a.settings), 'the tile is keyed by that recipe');
+  assert.deepEqual(f.released, [{ plane: 'a.jpg' }], 'the full-resolution planes are released once measured');
+  assert.equal(f.decodes.filter(record => record.file.name === 'a.jpg').length, 1, 'one decode');
+  assert.deepEqual(Array.from(f.context.hotFolderFiles, entry => entry.file.name), ['a.jpg'], 'counted once its recipe exists');
+  await f.clock.advance(2500);
+  assert.deepEqual(f.rolls, [], 'one recipe is not a roll');
+  assert.equal(f.context.hotFolderFiles.length, 0, 'and is dropped, as at 1703835');
+}
+
+// Three captures within 1 s: one addFilesToQueue call, no roll import of
+// their own; each gets its own full-resolution recipe. Recipes that land
+// more than 2.5 s apart (full-resolution renders of real captures; 1703835's
+// handler took about 17 s per 60 MP capture) never form a roll. Recipes that
+// land within 2.5 s of each other form one on top of them, as at 1703835.
+for (const gap of [3000, 500]) {
+  const f = watchFixture();
+  for (const name of ['1.jpg', '2.jpg', '3.jpg']) { await f.arrive(name); await f.clock.advance(300); }
+  await f.clock.advance(1000);
+  const names = ['1.jpg', '2.jpg', '3.jpg'];
+  assert.deepEqual(names.map(name => f.item(name)?.importId), ['watch:S', 'watch:S', 'watch:S'], 'one batch');
+  assert.deepEqual(f.rolls, [], `gap ${gap}: a batch of three starts no roll import (no roll-analysis recipes instead of their own)`);
+  for (const name of names) {
+    await f.decode(name);
+    await f.recipeRender(name);
+    await f.tileRender(name);
+    assert.deepEqual({ ...f.item(name).settings }, { measuredOn: `full:${name}` }, `gap ${gap}: ${name} has its own full-resolution recipe`);
+    assert.notEqual(f.item(name).automaticSettings, true);
+    if (name !== '3.jpg') await f.clock.advance(gap);
+  }
+  assert.equal(f.renders.filter(render => render.options.stage === 'processed').length, 3, 'three full-resolution recipe renders');
+  await f.clock.advance(2500);
+  if (gap > 2500) assert.deepEqual(f.rolls, [], 'recipes 3 s apart form no roll: each frame exports with its own recipe');
+  else assert.deepEqual(f.rolls, [{ names, options: { prepared: true } }], 'recipes within the quiet window form a roll on top of them');
+  assert.equal(f.toasts.length, 1);
+}
+
+// Nothing open: the first arrival of a batch opens (its recipe is the
+// editor's, as at 1703835) and counts once open; the lane makes the others'.
+{
+  const f = watchFixture({ open: false });
+  for (const name of ['x.jpg', 'y.jpg']) await f.arrive(name);
+  await f.clock.advance(1000);
+  assert.deepEqual(f.switched, ['x.jpg']);
+  assert.deepEqual(Array.from(f.context.hotFolderFiles, entry => entry.file.name), ['x.jpg']);
+  await f.decode('y.jpg');
+  await f.recipeRender('y.jpg');
+  await f.tileRender('y.jpg');
+  assert.deepEqual({ ...f.item('y.jpg').settings }, { measuredOn: 'full:y.jpg' });
+  assert.equal(f.renders.some(render => render.file.name === 'x.jpg'), false, 'the open photo is the foreground\'s');
+  assert.deepEqual(Array.from(f.context.hotFolderFiles, entry => entry.file.name), ['x.jpg', 'y.jpg']);
+}
+
+// A frame imported with the picker keeps the lane's tile recipe (1703835's
+// lane did the same): marked automatic, no full-resolution render.
+{
+  const f = watchFixture();
+  f.context.addFilesToQueue([new File([new Uint8Array(10)], 'p.jpg')]);
+  await f.decode('p.jpg');
+  const render = f.renders.find(entry => entry.file.name === 'p.jpg');
+  assert.equal(render.options.previewMaxDimension, 288, 'only the tile render');
+  render.done = true;
+  render.options.onPreparedSettings({ measuredOn: 'tile:p.jpg' });
+  render.resolve({ preview: 'tile:p.jpg' });
+  await f.clock.advance(50);
+  assert.deepEqual({ ...f.item('p.jpg').settings }, { measuredOn: 'tile:p.jpg' });
+  assert.equal(f.item('p.jpg').automaticSettings, true);
+  assert.equal(f.renders.length, 1);
+}
+
+console.log('laneRecipeInputs: recipe-preparing lane renders measure 1703835\'s tile; saved-recipe renders keep the reduced path; watch-folder arrivals get full-resolution recipes, no roll import of their own');

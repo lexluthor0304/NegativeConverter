@@ -165,6 +165,10 @@ export function createLaneFixture({ count = 5, order = null, current = 0, prefet
     isRawLikeFileName: name => /\.(dng|nef|cr2|arw)$/.test(name),
     automaticRollItemKey: item => JSON.stringify(item.settings ?? null),
     buildRollSample: (base, settings) => ({ width: 1, height: 1, data: new Uint8ClampedArray(4), base, settings }),
+    // A watch-folder arrival's full-resolution recipe render releases the
+    // planes it made; the watch's roll timer is not part of this harness
+    // (#229 review, R1-124; laneRecipeInputs.test.mjs runs it).
+    releaseOwnedPlanes: () => {}, noteHotFolderRecipe: () => {},
     renderPreviewFromWorkingImage: async (working, settings, ctx) => {
       sourceRenders.push({ working, settings, ctx });
       if (!ctx.isCurrent()) throw new DOMException('stale', 'AbortError');

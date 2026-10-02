@@ -1,6 +1,9 @@
 // Watch-folder arrivals through the normal import path (#247 part 4), with the
 // app's own handlers: batched, deduplicated before any read, never converted
-// on arrival, and trickled captures counted across the session.
+// on arrival. Each arrival's recipe is its own full-resolution one, made by
+// the light-table lane (laneRecipeInputs.test.mjs); a batch starts no roll
+// import, and recipes that land within 2.5 s of each other form a roll on top
+// of them, as at 1703835 (#229 review, R1-124).
 // Run with: node negative2positive/src/app/watchFolderImport.test.mjs
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -12,7 +15,7 @@ function functionSource(name) {
   assert.ok(match, `${name} exists`);
   return source.slice(match.index, source.indexOf('\n    }', match.index) + '\n    }'.length);
 }
-const runtime = ['receiveHotFolderArrival', 'hotFolderHas', 'queueHotFolderBatch', 'scheduleHotFolderRoll'].map(functionSource).join('\n');
+const runtime = ['receiveHotFolderArrival', 'hotFolderHas', 'queueHotFolderBatch', 'noteHotFolderRecipe', 'scheduleHotFolderRoll'].map(functionSource).join('\n');
 const flush = async () => { for (let i = 0; i < 10; i++) await new Promise(setImmediate); };
 
 function fixture({ open = true } = {}) {
@@ -28,7 +31,7 @@ function fixture({ open = true } = {}) {
     window: { __TAURI__: { core: { invoke: () => { throw new Error('reads go through readDesktopImportFile'); } } } },
     readDesktopImportFile: async payload => { reads.push(payload.name); return { name: payload.name, size: payload.size }; },
     addFilesToQueue: (files, options) => {
-      queued.push({ names: Array.from(files, file => file.name), importId: options?.importId });
+      queued.push({ names: Array.from(files, file => file.name), importId: options?.importId, automaticRoll: options?.automaticRoll });
       const items = files.map(file => ({ file, importId: options?.importId, settings: null }));
       state.fileQueue.push(...items);
       return items;
@@ -53,39 +56,50 @@ function fixture({ open = true } = {}) {
 }
 
 // "Import existing files too": one scan's arrivals reach addFilesToQueue in
-// one call, whose own roll trigger takes them; a name and size already
-// queued (or read for this batch) is never read again.
+// one call, which starts no roll import for them; a name and size already
+// queued (or read for this batch) is never read again. Nothing counts toward
+// a roll before its recipe exists.
 {
   const f = fixture();
   for (const name of ['a.dng', 'b.dng', 'c.dng', 'b.dng']) await f.arrive(name);
   assert.deepEqual(f.reads, ['a.dng', 'b.dng', 'c.dng'], 'a duplicate within the batch is not read');
   assert.equal(f.queued.length, 0, 'nothing is queued before the batch window closes');
   await f.fire(1000);
-  assert.deepEqual(f.queued, [{ names: ['a.dng', 'b.dng', 'c.dng'], importId: 'watch:S' }]);
+  assert.deepEqual(f.queued, [{ names: ['a.dng', 'b.dng', 'c.dng'], importId: 'watch:S', automaticRoll: false }]);
   assert.deepEqual(f.toasts, ['Imported 3 files']);
-  assert.equal(f.context.hotFolderFiles.length, 0, 'a batch of three is already a scheduled roll import');
-  assert.equal(f.timers.size, 0, 'no quiet timer for it');
+  assert.deepEqual(f.rolls, [], 'a batch of three starts no roll import: each frame gets its own recipe first');
+  assert.equal(f.context.hotFolderFiles.length, 0, 'and none counts before its recipe exists');
+  assert.equal(f.timers.size, 0, 'no quiet timer yet');
   await f.arrive('a.dng');
   assert.equal(f.reads.length, 3, 'an arrival whose name and size are queued makes no read');
   await f.arrive('a.dng', 101);
   assert.equal(f.reads.length, 4, 'a changed size is a new file');
 }
 
-// Trickled captures: each is queued alone; the quiet timer forms a roll from
-// the session's unanalysed watch frames once there are three, and keeps
-// fewer for the next capture.
+// Recipes: the first arrival counts once it is open, the others once the
+// lane has made their recipes (noteHotFolderRecipe). 2.5 s after the last
+// recipe, three or more form a roll on top of their recipes; fewer are
+// dropped, as 1703835 dropped them.
 {
   const f = fixture({ open: false });
   await f.arrive('1.dng'); await f.fire(1000);
   assert.deepEqual(f.switched, [0], 'the first arrival opens when nothing is open');
+  assert.deepEqual(Array.from(f.context.hotFolderFiles, item => item.file.name), ['1.dng'], 'and counts once it is open');
   await f.arrive('2.dng'); await f.fire(1000);
+  assert.equal(f.context.hotFolderFiles.length, 1, 'a queued arrival without a recipe does not count');
+  f.context.noteHotFolderRecipe(f.state.fileQueue[1]);
   await f.fire(2500);
-  assert.equal(f.rolls.length, 0, 'two frames are not a roll');
-  assert.equal(f.context.hotFolderFiles.length, 2, 'and stay counted');
+  assert.equal(f.rolls.length, 0, 'two recipes are not a roll');
+  assert.equal(f.context.hotFolderFiles.length, 0, 'and are dropped');
   await f.arrive('3.dng'); await f.fire(1000);
-  assert.deepEqual(f.queued.map(entry => entry.names), [['1.dng'], ['2.dng'], ['3.dng']]);
+  f.context.noteHotFolderRecipe(f.state.fileQueue[2]);
   await f.fire(2500);
-  assert.deepEqual(f.rolls, [{ names: ['1.dng', '2.dng', '3.dng'], options: { prepared: true } }]);
+  assert.equal(f.rolls.length, 0, 'a third recipe after the timer fired is not a roll with the first two');
+  for (const name of ['4.dng', '5.dng', '6.dng']) { await f.arrive(name); await f.fire(1000); }
+  assert.deepEqual(f.queued.map(entry => entry.names), [['1.dng'], ['2.dng'], ['3.dng'], ['4.dng'], ['5.dng'], ['6.dng']]);
+  for (const item of f.state.fileQueue.slice(3)) f.context.noteHotFolderRecipe(item);
+  await f.fire(2500);
+  assert.deepEqual(f.rolls, [{ names: ['4.dng', '5.dng', '6.dng'], options: { prepared: true } }], 'three recipes within the quiet window form a roll');
   assert.equal(f.context.hotFolderFiles.length, 0);
   assert.deepEqual(f.switched, [0], 'later arrivals do not take the editor');
 }
@@ -93,19 +107,26 @@ function fixture({ open = true } = {}) {
   // Frames a roll analysis covered, or a roll import owns, are not counted.
   const f = fixture();
   for (const name of ['1.dng', '2.dng', '3.dng', '4.dng']) { await f.arrive(name); await f.fire(1000); }
+  for (const item of f.state.fileQueue) f.context.noteHotFolderRecipe(item);
   f.state.fileQueue[0].settings = { rollFrame: { rollId: 'r' } };
   f.context.automaticRollPendingItems.add(f.state.fileQueue[1]);
   await f.fire(2500);
   assert.equal(f.rolls.length, 0);
-  assert.deepEqual(Array.from(f.context.hotFolderFiles, item => item.file.name), ['3.dng', '4.dng']);
+  assert.equal(f.context.hotFolderFiles.length, 0);
 }
 {
-  // A stopped watch (new epoch) queues nothing it read before.
+  // A stopped watch (new epoch) queues nothing it read before, and a recipe
+  // of another watch session does not count.
   const f = fixture();
   await f.arrive('late.dng');
   f.context.hotFolderEpoch = 2;
   await f.fire(1000);
   assert.equal(f.queued.length, 0);
+  f.context.noteHotFolderRecipe({ file: { name: 'other.dng' }, importId: 'watch:T' });
+  f.context.hotFolder = null;
+  f.context.noteHotFolderRecipe({ file: { name: 'stopped.dng' }, importId: 'watch:S' });
+  assert.equal(f.context.hotFolderFiles.length, 0);
+  assert.equal(f.timers.size, 0);
 }
 
-console.log('watchFolderImport: batched arrivals, reads skipped for queued files, no conversion on arrival, trickled rolls');
+console.log('watchFolderImport: batched arrivals, reads skipped for queued files, no conversion or roll import on arrival, rolls from recipes within the quiet window');

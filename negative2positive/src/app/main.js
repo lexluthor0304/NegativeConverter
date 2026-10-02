@@ -22096,7 +22096,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
     // `importId` names the import transaction (watch-folder arrivals share
     // their session's). Returns the queue items it added.
-    function addFilesToQueue(files, { importId: importIdOption = null } = {}) {
+    // `automaticRoll: false` (watch-folder batches): no roll import of three
+    // or more here; those frames count toward one once their recipes are
+    // ready (noteHotFolderRecipe).
+    function addFilesToQueue(files, { importId: importIdOption = null, automaticRoll = true } = {}) {
       // Filter for supported image files
       const supportedExtensions = ['.cr2', '.cr3', '.crw', '.nef', '.nrw', '.arw', '.dng', '.raf', '.raw', '.rw2', '.pef', '.srw', '.3fr', '.mef', '.orf', '.rwl', '.iiq', '.x3f', '.mrw', '.kdc', '.dcr', '.tif', '.tiff', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.heic', '.heif', '.hif'];
       const validFiles = files.filter(file => {
@@ -22145,7 +22148,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         state.batchSessionActive = true;
       }
       syncBatchUIState({ reason: 'addFilesToQueue' });
-      if (imported.length >= 3) scheduleAutomaticRollImport(imported);
+      if (automaticRoll && imported.length >= 3) scheduleAutomaticRollImport(imported);
 
       updateFileListUI();
       queueEmbeddedTiles(imported);
@@ -23155,9 +23158,29 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         async run(base, step) {
           let prepared;
           let tileSource = null;
+          // A watch-folder arrival's recipe is the one 1703835's arrival
+          // handler made: a full-resolution render, so its automatic gray
+          // point and expired-rescue measurement are the whole frame's rather
+          // than this tile's, and it is not marked automatic (#229 review,
+          // R1-082, R1-124). The render stops before the adjustments, which
+          // never change a recipe; the tile is then rendered from it.
+          let arrivalRecipe = null;
+          if (!source && base && !item.settings && String(item.importId || '').startsWith('watch:')) {
+            const planes = [];
+            try {
+              arrivalRecipe = (await processFileWithSettings(item.file, null, {
+                stage: 'processed', silent: true, updateItemSettings: false, sourceImageData: base, ownedPlanes: planes,
+                isCurrent: valid, convert: request => backgroundConvert(request),
+                analyzers: backgroundAnalyzers(), beforeHeavyStep: step
+              })).settings;
+            } finally {
+              releaseOwnedPlanes(...planes);
+            }
+            if (!valid()) return;
+          }
           const image = source
             ? await renderTileFromSource(item, source, { convert: request => backgroundConvert(request), isCurrent: valid })
-            : await processFileWithSettings(item.file, item.settings, {
+            : await processFileWithSettings(item.file, arrivalRecipe || item.settings, {
               previewMaxDimension: STUDIO_TILE_PREVIEW_MAX, updateItemSettings: false, sourceImageData: base,
               isCurrent: valid, convert: request => backgroundConvert(request),
               analyzers: backgroundAnalyzers(), beforeHeavyStep: step,
@@ -23168,7 +23191,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           // Before the tile encode.
           await step();
           if (!valid()) return;
-          if (!item.settings && prepared) {
+          if (!item.settings && arrivalRecipe) {
+            item.settings = cloneSettings(arrivalRecipe);
+          } else if (!item.settings && prepared) {
             item.settings = cloneSettings(prepared);
             item.automaticSettings = true;
           }
@@ -23180,6 +23205,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           item.thumbnailKey = photoSettingsKey(item);
           item.thumbnailErrorKey = null;
           updateFileThumbnail(item);
+          if (arrivalRecipe) noteHotFolderRecipe(item);
         },
         fail(error) {
           if (!valid()) return;
@@ -28034,9 +28060,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     // Watch-folder arrivals take the normal import path (#247 part 4): one
-    // addFilesToQueue call per batch, no conversion here. The light-table
-    // lane then prepares each frame's recipe and its keyed tile from one
-    // silent background decode, or a roll import of three or more does.
+    // addFilesToQueue call per batch, no conversion here. Each frame's recipe
+    // is the one 1703835 gave it (#229 review, R1-124): the first arrival
+    // opens when nothing is open, and the light-table lane renders every
+    // other one at full resolution from its one silent background decode
+    // (beginLaneTile). A batch starts no roll import of its own.
     function queueHotFolderBatch(epoch) {
       hotFolderBatchTimer = null;
       const batch = hotFolderBatch;
@@ -28046,30 +28074,38 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         if (epoch !== hotFolderEpoch) return;
         const files = batch.map(entry => entry.file)
           .filter(file => !state.fileQueue.some(item => item.file.name === file.name && item.file.size === file.size));
-        const imported = files.length ? addFilesToQueue(files, { importId: `watch:${batch[0].session}` }) : [];
+        const imported = files.length ? addFilesToQueue(files, { importId: `watch:${batch[0].session}`, automaticRoll: false }) : [];
         if (!imported.length) return;
         showToast(imported.length === 1
           ? getInterpolatedText('watchFolderArrival', { name: imported[0].file.name }, `Imported ${imported[0].file.name}`)
           : getInterpolatedText('watchFolderArrivals', { count: String(imported.length) }, `Imported ${imported.length} files`));
-        // A batch of three or more is already a scheduled roll import
-        // (addFilesToQueue). Trickled captures wait for the quiet timer.
-        if (imported.length < 3) {
-          hotFolderFiles.push(...imported);
-          scheduleHotFolderRoll();
+        if (!state.originalImageData) {
+          await switchToFile(state.fileQueue.indexOf(imported[0]));
+          noteHotFolderRecipe(imported[0]);
         }
-        if (!state.originalImageData) await switchToFile(state.fileQueue.indexOf(imported[0]));
       }).catch(error => { console.warn('Hot folder import failed:', error); showToast(getLocalizedText('watchFolderFailed', 'Could not import the new file.')); });
     }
 
-    // Trickled captures: 2.5 s after the last one, the session's watch frames
-    // that no roll analysis has covered and no roll import owns form a roll
-    // once there are three. Fewer stay counted for the next capture.
+    // A watch-folder arrival whose recipe is ready (opened, or rendered by
+    // the lane) counts toward a roll, as 1703835 counted each arrival after
+    // its render (#229 review, R1-124).
+    function noteHotFolderRecipe(item) {
+      if (!hotFolder || item.importId !== `watch:${hotFolder.session}`) return;
+      hotFolderFiles.push(item);
+      scheduleHotFolderRoll();
+    }
+
+    // 2.5 s after the last recipe, the arrivals counted since the timer last
+    // fired form a roll on top of their recipes once three of them are still
+    // queued, unedited and not taken by a roll analysis. Fewer are dropped:
+    // 1703835 formed a roll only from recipes that landed within 2.5 s of
+    // each other.
     function scheduleHotFolderRoll() {
       clearTimeout(hotFolderQuiet);
       hotFolderQuiet = setTimeout(() => {
         const arrived = hotFolderFiles.filter(item => state.fileQueue.includes(item) && !item.savedSettings
           && !item.userEdited && !item.settings?.rollFrame && !automaticRollPendingItems.has(item));
-        hotFolderFiles = arrived.length >= 3 ? [] : arrived;
+        hotFolderFiles = [];
         if (arrived.length >= 3) scheduleAutomaticRollImport(arrived, { prepared: true });
       }, 2500);
     }
