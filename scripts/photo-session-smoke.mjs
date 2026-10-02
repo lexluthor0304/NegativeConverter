@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { expectLoadingOverlayIdle } from './loading-overlay-idle.mjs';
 
 const UPNG = createRequire(import.meta.url)('upng-js');
+const UTIF = createRequire(import.meta.url)('utif');
 const ready = `document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy`;
 
 export function installPhotoSessionProbe() {
@@ -117,7 +118,8 @@ export function installPhotoSessionProbe() {
   window.showSaveFilePicker = undefined;
   URL.revokeObjectURL = function(url) { if (!heldUrls.has(url)) original.revoke.call(URL, url); };
   HTMLAnchorElement.prototype.click = function(...args) {
-    if (!this.download?.endsWith('.png') || !this.href.startsWith('blob:')) return original.click.apply(this, args);
+    // PNG and (display-session smoke) TIFF exports.
+    if (!/\.(png|tiff?)$/.test(this.download || '') || !this.href.startsWith('blob:')) return original.click.apply(this, args);
     const href = this.href, capture = { name: this.download };
     heldUrls.add(href); probe.exports.push(capture);
     fetch(href).then(response => response.blob()).then(blob => new Promise((resolve, reject) => {
@@ -186,12 +188,28 @@ export function installPhotoSessionProbe() {
   };
 }
 
+// The samples of an uncompressed TIFF export (the app writes no compression),
+// hashed like decodePng's.
+export function decodeTiff(dataUrl) {
+  const bytes = Buffer.from(dataUrl.split(',')[1], 'base64');
+  const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  const [ifd] = UTIF.decode(buffer);
+  UTIF.decodeImage(buffer, ifd);
+  return { width: ifd.width, height: ifd.height, depth: ifd.t258?.[0] ?? null,
+    sha256: createHash('sha256').update(Buffer.from(ifd.data.buffer, ifd.data.byteOffset, ifd.data.byteLength)).digest('hex') };
+}
+
 export function decodePng(dataUrl) {
   const bytes = Buffer.from(dataUrl.split(',')[1], 'base64');
   const png = UPNG.decode(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
   // UPNG.toRGBA8 intentionally discards the low byte. Compare raw unfiltered
   // 16-bit samples for precision regressions, not only their 8-bit appearance.
-  const pixels = png.depth === 16 ? Buffer.from(png.data) : Buffer.from(UPNG.toRGBA8(png)[0]);
+  // UPNG unfilters in place: the samples are the buffer's first height x row
+  // bytes, followed by one leftover byte per row, which were hashed too and
+  // made the level count below read past the end (and throw) for some sizes.
+  const channels16 = { 0: 1, 2: 3, 4: 2, 6: 4 }[png.ctype] || 4;
+  const pixels = png.depth === 16 ? Buffer.from(png.data.subarray(0, png.height * png.width * channels16 * 2))
+    : Buffer.from(UPNG.toRGBA8(png)[0]);
   const levels = [new Set(), new Set(), new Set()];
   if (png.depth === 16 && [2, 6].includes(png.ctype)) {
     const channels = png.ctype === 6 ? 4 : 3;
