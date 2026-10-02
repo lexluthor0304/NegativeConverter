@@ -43,8 +43,9 @@ of ledger bytes the same way, demoting the one stored last too when it has a
 display form. Native GPU resources and file
 storage are not counted. While a job runs in a hidden
 macOS window, or once an idle window has been hidden for five minutes, these
-caches and the prefetch slot (#243) are emptied to stay under WebKit's inactive memory limit; they refill
-on use (`docs/hidden-window-jobs.md`).
+caches and the prefetch slot (#243) are emptied to stay under WebKit's inactive memory limit; the
+background lanes keep no base and do not prefetch there, and the caches refill
+on use once the window is shown (`docs/hidden-window-jobs.md`).
 
 ### Display-resolution sessions (#249)
 
@@ -564,9 +565,13 @@ hides come last. No job starts on a file another lane is working on.
   user opens a frame a lane is decoding, or still holds while it analyses it,
   `loadFile` adopts that decode instead of reading the file again (a
   two-stage file skips its stand-in); the lane's analysis of the now-current frame
-  stops and the foreground analyses it, as before. Leases are reference
-  counted: a superseded adopter detaches without cancelling the lane's decode,
-  and the entry lives until the owning job releases the base. A roll-analysis
+  stops and the foreground analyses it, as before. `switchToFile` takes its
+  lease in the switch's first task, before it paints the target and reads a
+  display form, and hands it to `loadFile`: a lane step that ends meanwhile
+  would otherwise release the decode before anything adopted it. Leases are
+  reference counted: a superseded adopter detaches without cancelling the
+  lane's decode (a switch that ends before its load releases its lease), and
+  the entry lives until the owning job releases the base. A roll-analysis
   lane decodes a RAW into its roll-frame worker (#252), which keeps the planes
   (`{ base: null, held }`): adopting such a frame asks the worker for its
   planes (between its steps while it still measures, or at once when it holds
@@ -578,9 +583,10 @@ hides come last. No job starts on a file another lane is working on.
   devices the activation aborts the lanes' decodes, except the target's own.
 - **After a job.** Its base becomes a base-only `photoSessions` entry only if
   it fits without evicting anything (`putIfRoom`); otherwise it goes to the
-  prefetch slot when the frame is the next photo, or is dropped. Tiles and
-  prefetch previews use the lanes' own conversion and frame-detection
-  workers, never the foreground's.
+  prefetch slot when the frame is the next photo, or is dropped. In a hidden
+  macOS window it is always dropped: that window sheds those caches (#241).
+  Tiles and prefetch previews use the lanes' own conversion and
+  frame-detection workers, never the foreground's.
 - **Prefetch.** A separate one-entry session cache (`photoPrefetch`, the
   desktop session budget; off on low-memory devices until #258 owns the
   budget) holds the next photo's base-only entry `{ file, base, rawMetadata }`,
@@ -592,7 +598,8 @@ hides come last. No job starts on a file another lane is working on.
   opens without a read or decode: the veil shows the matching preview in the
   click's task and the exact positive follows from the base. A new recipe (a
   roll commit) re-renders the preview from the held base; the slot is dropped
-  once the user is two photos away from it.
+  once the user is two photos away from it. A hidden macOS window prefetches
+  nothing (#241): each hidden admission empties the slot again.
 - **Buffers.** A shared, retained or prefetched base is read-only: it is
   listed among the editor's live buffers, so no export transfers it (#244 and
   #249 copy instead).

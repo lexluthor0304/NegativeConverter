@@ -61,7 +61,7 @@ once the window is shown, and roll analysis and tiles go on meanwhile
 | window | rule |
 |---|---|
 | visible | admit at once (the normal lane plan) |
-| hidden, macOS WebKit (desktop app, Safari) | one item in flight; for `HIDDEN_GRACE_MS` (5 min) no byte check; then only if resident + estimate ≤ `HIDDEN_BUDGET_BYTES` (3.3 GB), else wait until visible (running items finish) |
+| hidden, macOS WebKit (desktop app, Safari) | one item in flight; for `HIDDEN_GRACE_MS` (5 min) no byte check; then only if resident + estimate ≤ `HIDDEN_BUDGET_BYTES` (3.3 GB), checked again after the page has shed (`onBudgetHold`), else wait until visible (running items finish) |
 | hidden, Chromium or WebKitGTK | admit at once |
 
 The reason is WebKit's memory policy on a 16 GB Mac: 8 GiB (7 + 1 per page)
@@ -87,8 +87,10 @@ status and the browser batch overlay read "Paused while the window is hidden",
 and the page logs the resident breakdown (`[hidden-job] paused while hidden`).
 
 **Shedding.** On macOS WebKit, while a job runs when the window hides, before
-each hidden admission, when a hidden job ends, and at the end of the grace
-period when idle, the page drops the photo-session, preview and prefetch caches,
+each hidden admission, before an item is held back for its bytes (the gate
+then checks it again, so what was shed can let it start), when the gate goes
+idle after a job ran hidden, and at the end of the grace period when idle,
+the page drops the photo-session, preview and prefetch caches,
 terminates the export-worker singleton when it has no request in flight, and
 releases the MI-GAN session unless the running job may use AI repair. (The
 RAW post-decode worker, which runs the sensor-defect pass, lives only for its
@@ -100,15 +102,27 @@ stroke reloads the model and repairs from scratch (`technical-depth.md`). The
 stroke's own learned refresh loads it too (`dust-removal.md`). The release
 also takes the model of a repair brush armed on Retouch; showing the window
 loads it again for that brush.
-An idle window that is only briefly hidden keeps its warm caches. Showing the window releases waiting items and
-restarts the background photo lanes; caches (the prefetch slot too) refill and workers respawn lazily.
+An idle window that is only briefly hidden keeps its warm caches. A background
+photo lane (#243) is a running job only while one of its jobs holds its
+admission for a frame's analysis or tile: a lane that rests between jobs,
+waits for the foreground or for its admission, or only prefetches is not, so
+hiding the window then sheds nothing, nor does the end of that prefetch.
+While the window is hidden the lanes keep no base (none goes to the photo
+sessions or the prefetch slot) and do not prefetch: every hidden admission
+empties the slot again, and the lane would decode the same next photo after
+each of its other jobs. Showing the window releases waiting items and
+restarts the background photo lanes; caches (the prefetch slot too) refill and
+workers respawn lazily, so the first switch after it may be cold.
 
 **Parking (opt-in).** With `localStorage nc_hidden_park_v1 = 'on'`, a held
 item also parks the open photo: its recipe is persisted, only the decoded base
 and the undo history are kept, and showing the window rebuilds the planes from
-that base through the cold photo-switch path, without a decode. It is off
-until a visible 60 MP desktop export's WebKit "Current memory footprint" shows
-whether it is needed (#244's lazy planes make it cheaper).
+that base through the cold photo-switch path, without a decode. Every history
+step stays, as a cold entry (#244: its pixels are rebuilt from the base on
+restore): a hot one pins the very planes parking drops, so the held item would
+stay held. A dust-brush stroke (#259) cannot go cold and is kept as it is. It
+is off until a visible 60 MP desktop export's WebKit "Current memory
+footprint" shows whether it is needed (#244's lazy planes make it cheaper).
 
 For QA, `localStorage nc_hidden_job_limits_v1 = 'force'` applies the WebKit
 rules in any browser, and `window.__ncHiddenJobs.status()` reports the gate
@@ -185,10 +199,14 @@ state, cache bytes, live workers, the MI-GAN session and `aiRepair.revision`.
 
 - Unit: `yieldToPaint`, `hiddenJobGate`, `jobMarker` (options round trip,
   version-1 markers, lock and heartbeat owners, reported once, the boot
-  sentence in zh/en/ja), `interruptedJobResume` (main.js's export, boot and
-  resume functions: a desktop folder job killed after frame 1 resumes with its
-  options while the controls keep their defaults; ZIP restart; version-1
-  question; another tab's job; roll analysis), the job-options parity in
+  sentence in zh/en/ja), `hiddenHandOver` (the lanes in a hidden window: no
+  base kept, no prefetch, what counts as a running job; the shed before an
+  item is held for its bytes; parking frees what hot history pinned; a switch
+  keeps a lane's decode from its first task), `interruptedJobResume`
+  (main.js's export, boot and resume functions: a desktop folder job killed
+  after frame 1 resumes with its options while the controls keep their
+  defaults; ZIP restart; version-1 question; another tab's job; roll
+  analysis), the job-options parity in
   `exportPlaneLifecycle`, `hiddenPhotoPark`, `batchExportScheduler` (admission
   before claiming, deadlock), worker and cache helpers, the MI-GAN release in
   `photoSessionLifecycle`, the roll marker in `automaticRollImport`; Rust:
