@@ -134,6 +134,32 @@ assert.equal(DISPLAY_PROXY_STORE_FLOOR_BYTES, 10 * GiB);
   assert.notEqual(changedCode, key, 'another code hash is another key');
 }
 
+// ---- has(): a fill finds a stored proxy before rendering it again (#249,
+// R2-003), without reading the record, and marks it used as the put it
+// replaces did ----
+{
+  const records = memoryRecords();
+  let clock = 0;
+  const store = createDisplayProxyStore({ port: localPort(), records, availableBytes: async () => 20 * GiB, now: () => ++clock });
+  const image = proxyImage();
+  const file = { size: 10, lastModified: 1 };
+  assert.equal(await store.put('file-a', 'proxy-1', { file, image }), true);
+  assert.equal(await store.put('file-b', 'proxy-1', { file, image }), true);
+  assert.equal(await store.putBytes('file-a', 'proxy-2', new Uint8Array(10), { file }), true);
+  const restarted = createDisplayProxyStore({ port: localPort(), records, availableBytes: async () => 20 * GiB, now: () => ++clock });
+  assert.equal(await restarted.has('file-a', 'proxy-1'), true, 'the index of an earlier run answers');
+  assert.equal(await restarted.has('file-a', 'proxy-3'), false, 'another proxy key');
+  assert.equal(await restarted.has('file-c', 'proxy-1'), false, 'another file');
+  assert.equal(await restarted.has('file-a', 'proxy-2'), false, 'a presentation preview is no proxy');
+  assert.equal(restarted.stats.reads + restarted.stats.writes, 0, 'nothing is read or written');
+  const [a] = await restarted.find('file-a');
+  const [b] = await restarted.find('file-b');
+  assert.ok(a.lastUsed > b.lastUsed, 'the proxy found is the more recently used');
+  await restarted.settled();
+  const reloaded = createDisplayProxyStore({ port: localPort(), records, availableBytes: async () => 20 * GiB });
+  assert.equal((await reloaded.find('file-a'))[0].lastUsed, a.lastUsed, 'and the index keeps it');
+}
+
 // ---- Presentation previews (#235 slice 3): opaque bytes with a checksum ----
 {
   const records = memoryRecords();

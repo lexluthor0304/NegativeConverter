@@ -650,6 +650,24 @@ export function createDisplayProxyStore({
       return [...index].filter(([, entry]) => entry.fileKey === fileKey && !entry.kind)
         .sort((a, b) => b[1].lastUsed - a[1].lastUsed).map(([name, entry]) => ({ name, ...entry }));
     },
+    /**
+     * Whether the proxy of `fileKey` and `proxyKey` is stored, marking it
+     * used as a put of it would (#249, R2-003: a fill finds it before it
+     * renders the level again only for put() to find it).
+     */
+    has(fileKey, proxyKey) {
+      return enqueue(async () => {
+        await load();
+        for (const entry of index.values()) {
+          if (entry.kind || entry.fileKey !== fileKey || entry.proxyKey !== proxyKey) continue;
+          entry.lastUsed = now();
+          indexDirty = true;
+          await saveIndex();
+          return true;
+        }
+        return false;
+      });
+    },
     /** Stores a proxy (copies its planes) unless the budget is zero. */
     put(fileKey, proxyKey, { file, image, sample = null, meta = {} }) {
       return enqueue(async () => {

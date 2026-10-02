@@ -840,11 +840,13 @@ function workerRoll(f, { analysisFor = () => ({}), dng = true } = {}) {
 {
   // #249 on #252's worker path: a held frame whose display proxy is still to
   // be filled comes back to the page with its sample and is filled from those
-  // planes; a frame the fill passes over (or already has) stays in its worker.
+  // planes; a frame the fill passes over (or already has, in the spill or the
+  // persistent store: the plan resolves after a store lookup, R2-003) stays
+  // in its worker.
   const f = fixture();
   const { heldFrames, pageReads } = workerRoll(f);
   const plans = [];
-  f.context.displayProxyFillPlan = (item, shape, settings) => {
+  f.context.displayProxyFillPlan = async (item, shape, settings) => {
     plans.push({ id: item.id, shape, settings });
     return item.id === 2 ? { kept: false } : item.id === 3 ? { kept: true } : { skip: true };
   };
@@ -861,6 +863,7 @@ function workerRoll(f, { analysisFor = () => ({}), dng = true } = {}) {
     'planned on the held frame\'s size as an exact 16-bit LibRaw decode');
   const asked = Object.fromEntries(heldFrames.map(held => [held.id, Boolean(held.samples[0].options.returnPlanes)]));
   assert.deepEqual(asked, { 1: false, 2: true, 3: false }, 'only a frame with a proxy to fill asks for its planes');
+  assert.equal(f.context.displaySessionDiagnostics.fillsKept, 1, 'the frame whose proxy is kept is counted');
   assert.equal(fills.length, 1);
   assert.equal(fills[0].id, 2);
   assert.equal(fills[0].base.planesFromWorker, true, 'filled from the planes the worker handed back');

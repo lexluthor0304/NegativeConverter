@@ -105,7 +105,7 @@ const FUNCTIONS = [
   'readSpilledDisplaySession', 'spilledDisplayEntry', 'activateDisplaySession', 'getColorAnalysisSample',
   'colorAnalysisSampleMissing', 'ensureColorAnalysisSample', 'analysisSamplesFor', 'sameAnalysisSample',
   'sameDescriptorSamples', 'displaySessionMismatch',
-  'hasSeparateConversionPreview', 'displayProxyShape', 'displayProxyFillPlan', 'fillDisplayProxy', 'readStoredDisplaySession',
+  'hasSeparateConversionPreview', 'displayProxyShape', 'displayProxyFillPlan', 'storedDisplayProxyKept', 'fillDisplayProxy', 'readStoredDisplaySession',
   'expectedStoredProxyKey', 'persistDisplayProxy', 'displayProxyFileKeyFor', 'persistPresentationPreview',
   'presentStoredPreview', 'encodePresentationJpeg'
 ];

@@ -13,7 +13,7 @@ export function displaySessionDiagnosticsStub() {
   return {
     tierA: 0, tierB: 0, demotions: 0, spills: 0, spillWrites: 0, spillFailures: 0, ramHits: 0, spillHits: 0, storeHits: 0,
     recipeChanged: 0, provisional: 0, baseDecodes: 0, sourceBuilds: 0, baseMismatches: 0, baseFailures: 0, selfChecks: 0,
-    selfCheckMismatches: 0, sampleMisses: 0, fills: 0, fillSkips: 0, unsettled: 0, force: null
+    selfCheckMismatches: 0, sampleMisses: 0, fills: 0, fillSkips: 0, fillsKept: 0, unsettled: 0, force: null
   };
 }
 
@@ -46,7 +46,7 @@ export function displaySessionStubs(overrides = {}) {
     // The planes are always the geometry the settings name (R1-065), and no
     // session is left unsettled without its base (R2-002).
     geometryOutOfStep: () => false, rememberUnsettledDisplaySession: () => false,
-    fillDisplayProxy: async () => false, displayProxyFillPlan: () => null,
+    fillDisplayProxy: async () => false, displayProxyFillPlan: async () => null,
     // Part 3: no persistent store.
     displayProxyStore: null, persistDisplayProxy: async () => false, readStoredDisplaySession: async () => null,
     persistPresentationPreview: async () => false, presentStoredPreview: async () => {},

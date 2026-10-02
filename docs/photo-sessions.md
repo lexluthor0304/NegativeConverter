@@ -219,10 +219,13 @@ that reads the window once. At 60 MP a fill copies 357 MiB untilted and
 469-491 MiB at 0.6-1.3°, where bands of 16 level rows copied 535 MiB-1.9 GiB
 (`__ncGeometry.pool.copiedBytes` counts them). Frames with lens correction,
 repairs, an undecided recipe, an 8-bit RAW fallback or no level smaller than
-themselves (k = 1) are skipped. A roll frame measured in its lane's
+themselves (k = 1) are skipped, and so is a frame whose proxy the spill or
+the persistent store already holds (`displayProxyStore.has`, which marks it
+used): after a restart or a project reopen a roll pass, lane or prefetch
+decode of a stored frame renders nothing. A roll frame measured in its lane's
 roll-frame worker (#252) stays there, so `displayProxyFillPlan` decides from
-its size alone whether it has a proxy to fill; only then do its planes come
-back to the page with its roll sample for the fill.
+its size alone (and those lookups) whether it has a proxy to fill; only then
+do its planes come back to the page with its roll sample for the fill.
 
 **The store** (across restarts and project reopens). The same records, keyed by
 the file's content (size, date, SHA-256 of the first MiB plus the size, SHA-256

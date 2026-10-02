@@ -559,11 +559,11 @@ for (const tier of ['A', 'B']) {
     h.state.fileQueue = [{ id: 1, file: { name: 'open.dng' } }, item];
     h.state.currentFileIndex = 0;
     const shape = { width: 120, height: 80, has16: true, route: 'libraw16' };
-    const planned = c.displayProxyFillPlan(item, shape, item.settings);
+    const planned = await c.displayProxyFillPlan(item, shape, item.settings);
     assert.equal(planned.kept, false, 'a fill is planned from the size alone (#252 held frames)');
     assert.equal(await c.fillDisplayProxy(item, base, item.settings), true, `filled ${JSON.stringify(geometry)}`);
     assert.equal(h.target.displaySessionDiagnostics.fills, 1);
-    const again = c.displayProxyFillPlan(item, shape, item.settings);
+    const again = await c.displayProxyFillPlan(item, shape, item.settings);
     assert.equal(again.proxyKey, planned.proxyKey);
     assert.equal(again.proxyKey, h.target.displayProxySpill.proxyKey(item.id), 'the planned key is the one the fill kept');
     assert.equal(again.kept, true, 'then kept: a held frame is not asked for its planes again');
@@ -596,14 +596,14 @@ for (const tier of ['A', 'B']) {
   h.state.fileQueue = [item];
   h.target.lensCorrectionActive = () => true;
   assert.equal(await c.fillDisplayProxy(item, base, item.settings), false, 'lens-corrected frames are skipped');
-  assert.equal(c.displayProxyFillPlan(item, { width: 120, height: 80, has16: true, route: 'libraw16' }, item.settings).skip, true,
+  assert.equal((await c.displayProxyFillPlan(item, { width: 120, height: 80, has16: true, route: 'libraw16' }, item.settings)).skip, true,
     'and planned as skipped');
   h.target.lensCorrectionActive = () => false;
   assert.equal(await c.fillDisplayProxy(item, base, { ...item.settings, repairStrokes: [{}] }), false, 'repaired frames are skipped');
   const eight = makeBase(120, 80, 21);
   delete eight.__image16;
   assert.equal(await c.fillDisplayProxy(item, eight, item.settings), false, 'an 8-bit RAW fallback is not reproducible');
-  assert.equal(c.displayProxyFillPlan(item, c.displayProxyShape(item, eight), item.settings).skip, true);
+  assert.equal((await c.displayProxyFillPlan(item, c.displayProxyShape(item, eight), item.settings)).skip, true);
   assert.equal(await c.fillDisplayProxy(item, base, { ...item.settings, filmEdge: null }), false, 'undecided recipes are skipped');
   h.target.displayLevelFactor = () => 1;
   assert.equal(await c.fillDisplayProxy(item, base, item.settings), false, 'a frame that is its own level needs no proxy');
@@ -689,6 +689,100 @@ for (const tier of ['A', 'B']) {
     const changed = session(Object.assign(new Blob([bytes]), { name: 'roll-07.dng', lastModified: 9999 }));
     assert.equal(await changed.c.readStoredDisplaySession(changed.item), null);
   }
+}
+
+// ---- A proxy the persistent store already holds is not filled again
+// (R2-003): after a restart or a project reopen, a roll pass, lane or
+// prefetch decode of a stored frame plans it as kept, before any pixel is
+// read, so its level is not rendered (nor its planes asked back from a roll
+// worker) only for put() to find the record; the file is hashed only when
+// an entry has its size and date. Another geometry is filled as before ----
+{
+  const geometry = { rotationAngle: 1.3, mirrored: false, cropRegion: { left: 9, top: 7, width: 96, height: 60 } };
+  const file = Object.assign(new Blob([new Uint8Array(4096).map((_, i) => (i * 5) & 255)]), { name: 'roll-09.dng', lastModified: 77 });
+  const shape = { width: 120, height: 80, has16: true, route: 'libraw16' };
+  // A harness whose persistent store is `store`; the pool's renders are counted.
+  const session = (store, settings = geometry) => {
+    const base = makeBase(120, 80, 21);
+    const h = createHarness(base, { sessionBudget: 1 << 30 }), c = h.context;
+    const calls = { hashed: 0, renders: 0 };
+    Object.assign(h.target, {
+      largeImagePixels: 1000, displayLevelFactor: () => 2, displayProxyStore: store, displayProxyFileKey, sha256Hex,
+      hashFileForProject: async blob => { calls.hashed++; return sha256Hex(new Uint8Array(await blob.slice(0, 1 << 20).arrayBuffer())); }
+    });
+    const render = h.pool.renderDisplayLevel;
+    h.pool.renderDisplayLevel = (...args) => { calls.renders++; return render(...args); };
+    const item = { id: 'roll-09::1', file, settings: { ...settings, autoFrameMeta: { imageArea: AREA }, filmEdge: { checked: true } } };
+    h.state.fileQueue = [{ id: 'open', file: { name: 'open.dng' } }, item];
+    h.state.currentFileIndex = 0;
+    return { h, c, base, item, calls };
+  };
+  // A fake store that holds the records in `held` (file key, proxy key) and
+  // records what it is asked.
+  const fakeStore = held => {
+    const asked = { has: [], puts: 0 };
+    return {
+      asked, async load() {}, hasCandidate: candidate => candidate === file,
+      async has(fileKey, proxyKey) { asked.has.push([fileKey, proxyKey]); return held.some(([f, p]) => f === fileKey && p === proxyKey); },
+      async put() { asked.puts++; return true; }, async settled() {}
+    };
+  };
+  const empty = fakeStore([]);
+  const first = session(empty);
+  const plan = await first.c.displayProxyFillPlan(first.item, shape, first.item.settings);
+  const fileKey = await first.c.displayProxyFileKeyFor(file);
+  assert.equal(plan.kept, false, 'nothing stored: a fill is planned');
+  assert.deepEqual(empty.asked.has, [[fileKey, plan.proxyKey]], 'the store is asked for this file and proxy key');
+  assert.equal(await first.c.fillDisplayProxy(first.item, first.base, first.item.settings), true);
+  assert.deepEqual([first.calls.renders, empty.asked.puts, first.h.target.displaySessionDiagnostics.fills], [1, 1, 1], 'rendered and stored');
+  // The store holds it (a fill in an earlier session).
+  const holding = fakeStore([[fileKey, plan.proxyKey]]);
+  const next = session(holding);
+  const kept = await next.c.displayProxyFillPlan(next.item, shape, next.item.settings);
+  assert.equal(kept.kept, true, 'a stored proxy is planned as kept');
+  assert.equal(kept.proxyKey, plan.proxyKey);
+  assert.equal(await next.c.fillDisplayProxy(next.item, next.base, next.item.settings), true, 'the fill resolves that the proxy is kept');
+  assert.equal(next.calls.renders, 0, 'renderDisplayLevel is not called');
+  assert.equal(holding.asked.puts, 0, 'nothing is written');
+  assert.deepEqual([next.h.target.displaySessionDiagnostics.fills, next.h.target.displaySessionDiagnostics.fillsKept], [0, 1]);
+  // Another geometry is another proxy key: filled.
+  const moved = session(holding, { ...geometry, cropRegion: { left: 10, top: 7, width: 96, height: 60 } });
+  assert.equal((await moved.c.displayProxyFillPlan(moved.item, shape, moved.item.settings)).kept, false);
+  assert.equal(await moved.c.fillDisplayProxy(moved.item, moved.base, moved.item.settings), true);
+  assert.equal(moved.calls.renders, 1, 'another geometry is rendered');
+  // A file of another size or date is no candidate: not even hashed.
+  const other = session(holding);
+  other.item.file = Object.assign(new Blob([new Uint8Array(10)]), { name: 'other.dng', lastModified: 1 });
+  assert.equal((await other.c.displayProxyFillPlan(other.item, shape, other.item.settings)).kept, false);
+  assert.equal(other.calls.hashed, 0, 'no hash without a candidate');
+  // The real store: a frame filled in one session is kept in the next, and
+  // the lookup marks the record used, as the put it replaces did.
+  const records = new Map();
+  const memoryRecords = {
+    async write(name, record) { records.set(name, new Uint8Array(record instanceof ArrayBuffer ? record : record.buffer).slice()); },
+    async read(name) { return records.has(name) ? records.get(name).slice().buffer : null; },
+    async delete(name) { records.delete(name); }, async clear() { records.clear(); },
+    async list() { return [...records].map(([name, bytes]) => ({ name, bytes: bytes.byteLength, modifiedMs: 0 })); }
+  };
+  let clock = 0;
+  const realStore = () => createDisplayProxyStore({
+    port: createDisplayProxyPort({ core: createDisplayProxyWorkerCore({ backend: null }) }), records: memoryRecords,
+    availableBytes: async () => 64 * 1024 ** 3, now: () => ++clock
+  });
+  const filling = session(realStore());
+  assert.equal(await filling.c.fillDisplayProxy(filling.item, filling.base, filling.item.settings), true);
+  await filling.h.target.displayProxyStore.settled();
+  assert.equal(filling.h.target.displayProxyStore.stats.writes, 1);
+  const restarted = session(realStore());
+  const store = restarted.h.target.displayProxyStore;
+  const storedKey = await restarted.c.displayProxyFileKeyFor(file);
+  const [before] = await store.find(storedKey);
+  assert.equal(await restarted.c.fillDisplayProxy(restarted.item, restarted.base, restarted.item.settings), true);
+  await store.settled();
+  assert.deepEqual([restarted.calls.renders, store.stats.writes, restarted.h.target.displaySessionDiagnostics.fillsKept], [0, 0, 1],
+    'after a restart the stored frame is neither rendered nor written again');
+  const [after] = await store.find(storedKey);
+  assert.ok(after.lastUsed > before.lastUsed, 'the record is marked used');
 }
 
 // ---- The colour-analysis sample of a session without its base (R2-001,
@@ -1457,4 +1551,4 @@ for (const tier of ['A', 'B']) {
   }
 }
 
-console.log('displaySessions: Tier A, Tier B, demotion, spill, ensureBase/ensureSource, invalidation, the proxy invariant, the colour-analysis sample across Undo, Redo and recipe changes (export parity), the settled-view parity of filled proxies and the sample check of stored proxies (export parity), failed geometry builds and decodes, and sessions left before they settled (settled-view parity) passed');
+console.log('displaySessions: Tier A, Tier B, demotion, spill, ensureBase/ensureSource, invalidation, the proxy invariant, the colour-analysis sample across Undo, Redo and recipe changes (export parity), the settled-view parity of filled proxies, no second fill of a stored proxy and the sample check of stored proxies (export parity), failed geometry builds and decodes, and sessions left before they settled (settled-view parity) passed');

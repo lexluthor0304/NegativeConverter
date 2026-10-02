@@ -408,7 +408,8 @@ Roll analysis has its own lane plan and its own per-frame worker (#252):
   sample (`rollSample.js`, the page's own builder) and drops the frame. No
   plane of the frame travels back to the page and no main-thread loop runs
   over it, except for a frame whose display proxy is still to be filled
-  (#249): its planes come back with the sample for `fillDisplayProxy`.
+  (#249: neither the spill nor the persistent store holds it): its planes
+  come back with the sample for `fillDisplayProxy`.
 - **Fallbacks per frame.** Scans and TIFFs, the pre-LibRaw branches (the
   heavy IIQ preview, UTIF DNGs), garbled output, a lost worker and a worker
   that does not answer keep today's path (garbled and lost go through the

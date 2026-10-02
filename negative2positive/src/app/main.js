@@ -2708,7 +2708,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     const displaySessionDiagnostics = {
       tierA: 0, tierB: 0, demotions: 0, spills: 0, spillWrites: 0, spillFailures: 0, ramHits: 0, spillHits: 0, storeHits: 0,
       recipeChanged: 0, provisional: 0, baseDecodes: 0, sourceBuilds: 0, baseMismatches: 0, baseFailures: 0, selfChecks: 0,
-      selfCheckMismatches: 0, sampleMisses: 0, fills: 0, fillSkips: 0, unsettled: 0, force: null
+      selfCheckMismatches: 0, sampleMisses: 0, fills: 0, fillSkips: 0, fillsKept: 0, unsettled: 0, force: null
     };
 
     function clearFullResolutionRenderState() {
@@ -12103,10 +12103,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // (displayProxyShape), decided before any pixel is read: null when fills
     // are off or the item is gone, `{ skip: true }` for a frame a fill passes
     // over, else the geometry key, the level's factor and the proxy key,
-    // `kept` when the spill holds that key already. A roll frame held in its
-    // worker (#252) comes back to the page only when there is a proxy to
-    // fill.
-    function displayProxyFillPlan(item, shape, settings) {
+    // `kept` when the spill or the persistent store holds that key already
+    // (R2-003: after a restart or a project reopen, a roll pass, lane or
+    // prefetch decode of a stored frame renders nothing). A roll frame held
+    // in its worker (#252) comes back to the page only when there is a proxy
+    // to fill.
+    async function displayProxyFillPlan(item, shape, settings) {
       if (!(displayProxySpill.enabled || displayProxyStore) || !item || !shape || !state.fileQueue.includes(item)) return null;
       const skip = { skip: true };
       if (!settings?.autoFrameMeta || !settings.filmEdge?.checked || lensCorrectionActive(settings)) return skip;
@@ -12123,7 +12125,25 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const proxyKey = displayProxyKey({
         id: null, route: shape.route, base: descriptor, rotationAngle: key.angle, mirrored: key.mirrored, cropRegion: key.crop, lens: null, area
       });
-      return { key, source, k, descriptor, area, proxyKey, kept: displayProxySpill.proxyKey(item.id) === proxyKey };
+      const kept = displayProxySpill.proxyKey(item.id) === proxyKey || await storedDisplayProxyKept(item, proxyKey);
+      // The item may have left the queue while its file was hashed.
+      if (!state.fileQueue.includes(item)) return null;
+      return { key, source, k, descriptor, area, proxyKey, kept };
+    }
+
+    // Whether the persistent store holds `proxyKey` for `item`'s file (the
+    // put a fill ends with would find it). The file is hashed only when an
+    // entry has its size and date.
+    async function storedDisplayProxyKept(item, proxyKey) {
+      if (!displayProxyStore || !item.file) return false;
+      try {
+        await displayProxyStore.load();
+        if (!displayProxyStore.hasCandidate(item.file)) return false;
+        const fileKey = await displayProxyFileKeyFor(item.file);
+        return Boolean(fileKey) && await displayProxyStore.has(fileKey, proxyKey);
+      } catch {
+        return false;
+      }
     }
 
     // Roll analysis and the lanes decode frames the editor has not opened.
@@ -12139,10 +12159,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     async function fillDisplayProxy(item, base, settings, { isCurrent = () => true } = {}) {
       const skip = () => { displaySessionDiagnostics.fillSkips++; return false; };
       if (!base?.data || isReleasedPlane(base)) return false;
-      const fill = displayProxyFillPlan(item, displayProxyShape(item, base), settings);
+      const fill = await displayProxyFillPlan(item, displayProxyShape(item, base), settings);
       if (!fill) return false;
       if (fill.skip) return skip();
-      if (fill.kept) return true;
+      if (fill.kept) {
+        displaySessionDiagnostics.fillsKept++;
+        return true;
+      }
       const { key, source, k, descriptor, area, proxyKey } = fill;
       const plan = geometryPlanFor(base, key);
       if (!plan) return skip();
@@ -28441,11 +28464,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
                           sample = buildRollSample(image, settings);
                         } else {
                           // A frame whose display proxy is still to be filled
-                          // (#249) comes back to the page with its sample. The
+                          // (#249: neither the spill nor the store holds it)
+                          // comes back to the page with its sample. The
                           // worker holds only LibRaw's exact 16-bit decodes.
-                          const fill = displayProxyFillPlan(item, {
+                          const fill = await displayProxyFillPlan(item, {
                             width: decoded.held.width, height: decoded.held.height, has16: true, route: 'libraw16'
                           }, settings);
+                          if (fill?.kept) displaySessionDiagnostics.fillsKept++;
                           let built;
                           try {
                             built = await decoded.held.sample(rollSampleSettings(settings), {
