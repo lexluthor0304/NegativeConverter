@@ -18,15 +18,9 @@ import { resolve } from 'node:path';
 
 const READY = `document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy`;
 
-export async function runEmbeddedPreviewSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port }) {
-  const expect = (condition, message, detail) => { if (!condition) fail(message + (detail === undefined ? '' : ': ' + JSON.stringify(detail))); };
-  // debugCounters=1 exposes window.__ncDebug.forgetPhotoCaches for the cold switch.
-  await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en&debugCounters=1` });
-  await waitFor('embedded preview boot', `!!document.getElementById('autoRollOnImport') && !!document.getElementById('studioPhotoSwitchFeedback')`);
-  await installDialogAutoAccept();
-  await wait(1000);
-
-  await evaluate(`(async () => {
+// Three synthetic DNGs in window.__embeddedFiles: `${prefix}1.dng` ... with
+// lastModified `${modified} + i`.
+const buildDngs = (prefix, modified) => `(async () => {
     const { buildRgbDngWithPreviews } = await import('/src/app/rawEmbeddedPreview.fixtures.mjs');
     const jpeg = async (width, height, seed) => {
       const canvas = new OffscreenCanvas(width, height);
@@ -52,11 +46,20 @@ export async function runEmbeddedPreviewSmoke({ send, evaluate, waitFor, wait, f
         { width: 1600, height: 1066, bytes: await jpeg(1600, 1066, i) },
       ];
       const built = buildRgbDngWithPreviews({ width, height, rgb, previews });
-      files.push(new File([built.bytes], 'embedded-' + i + '.dng', { lastModified: 1000 + i }));
+      files.push(new File([built.bytes], '${prefix}' + i + '.dng', { lastModified: ${modified} + i }));
       window.__embeddedPreviewLengths = built.previews.map(p => p.length);
     }
     window.__embeddedFiles = files;
-  })()`);
+  })()`;
+
+export async function runEmbeddedPreviewSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port }) {
+  const expect = (condition, message, detail) => { if (!condition) fail(message + (detail === undefined ? '' : ': ' + JSON.stringify(detail))); };
+  // debugCounters=1 exposes window.__ncDebug.forgetPhotoCaches for the cold switch.
+  await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en&debugCounters=1` });
+  await waitFor('embedded preview boot', `!!document.getElementById('autoRollOnImport') && !!document.getElementById('studioPhotoSwitchFeedback')`);
+  await installDialogAutoAccept();
+  await wait(1000);
+  await evaluate(buildDngs('embedded-', 1000));
 
   // --- Worker capability, read budget and preview choice -------------------
   const jobs = await evaluate(`(async () => {
@@ -272,4 +275,86 @@ export async function runEmbeddedPreviewSmoke({ send, evaluate, waitFor, wait, f
   console.log('main-thread long tasks during the embedded-preview smoke (ms):', JSON.stringify(longTasks));
   await evaluate('window.__embeddedProbe.restore(); delete window.__embeddedFiles;');
   console.log('ok: embedded previews fill the veil and every tile before the exact decode, without touching editor state');
+
+  // --- Undo of a roll commit restores each tile with its rank -------------
+  // A roll analysis commits while two frames still show their camera-JPEG
+  // tiles: their page reads are held (the analysis's own decodes pass), so
+  // no lane or prefetch decode replaces those tiles. Undo must bring them
+  // back as `embedded` and pending (#229 review R1-033), and a cold switch to
+  // one must not colour-match its provisional frame to that tile.
+  await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en&debugCounters=1` });
+  await waitFor('roll undo boot', `!!document.getElementById('autoRollOnImport') && !!document.getElementById('analyzeRollBtn')`);
+  await installDialogAutoAccept();
+  await wait(1000);
+  await evaluate(buildDngs('undo-', 2000));
+  const autoRollBefore = await evaluate(`(() => {
+    // A manual analysis: automatic roll import would give the frames
+    // per-frame tiles first.
+    const key = 'nc_auto_roll_import_v1', before = localStorage.getItem(key);
+    const autoRoll = document.getElementById('autoRollOnImport'); if (autoRoll?.checked) autoRoll.click();
+    localStorage.setItem(key, 'off');
+    const autoCrop = document.getElementById('studioImportAutoCrop'); if (autoCrop?.checked) autoCrop.click();
+    const p = window.__undoProbe = { held: new Set(['undo-2.dng', 'undo-3.dng']), waiting: [], viewerJobs: [] };
+    Error.stackTraceLimit = 50;
+    const read = File.prototype.arrayBuffer;
+    File.prototype.arrayBuffer = function (...args) {
+      if (p.held.has(this.name) && !/\\brunRollAnalysis\\b/.test(new Error().stack)) {
+        return new Promise(resolve => p.waiting.push(resolve)).then(() => read.apply(this, args));
+      }
+      return read.apply(this, args);
+    };
+    // The provisional frame's job as the scan-decode worker receives it.
+    const post = Worker.prototype.postMessage;
+    Worker.prototype.postMessage = function (message, ...rest) {
+      if (message?.type === 'embedded-preview' && message.purpose === 'viewer') {
+        p.viewerJobs.push({ name: message.file?.name || null, matchTo: message.matchTo ? String(message.matchTo).slice(0, 23) : null });
+      }
+      return post.call(this, message, ...rest);
+    };
+    p.release = () => { p.held.clear(); for (const resolve of p.waiting.splice(0)) resolve(); };
+    p.restore = () => { p.release(); File.prototype.arrayBuffer = read; Worker.prototype.postMessage = post; };
+    const transfer = new DataTransfer();
+    for (const file of window.__embeddedFiles) transfer.items.add(file);
+    const input = document.getElementById('fileInput');
+    input.files = transfer.files;
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    return before;
+  })()`);
+  const tileKinds = `Object.fromEntries([...document.querySelectorAll('#fileListItems .file-list-name')].map(tile => [
+    tile.querySelector('.file-list-filename')?.textContent, [tile.dataset.thumbnailKind || '', tile.dataset.previewState || '']]))`;
+  await waitFor('roll undo: first photo open, held frames on camera-JPEG tiles', `${READY}
+    && document.getElementById('studioFilename').textContent === 'undo-1.dng' && !document.getElementById('analyzeRollBtn').disabled
+    && (() => { const kinds = ${tileKinds}; return kinds['undo-2.dng']?.[0] === 'embedded' && kinds['undo-3.dng']?.[0] === 'embedded'; })()`, 120000);
+  await evaluate(`document.getElementById('analyzeRollBtn').click()`);
+  await waitFor('roll undo: the analysis commits every frame\'s canonical tile', `${READY}
+    && /\\b\\d\\/3\\b/.test(document.getElementById('rollAnalysisStatus').textContent)
+    && Object.values(${tileKinds}).every(([kind, state]) => kind === 'processed' && state === 'ready')`, 120000);
+  const committed = await evaluate(tileKinds);
+  await evaluate(`document.getElementById('undoBtn').click()`);
+  await waitFor('roll undo settles', READY, 30000);
+  await wait(500);
+  const undone = await evaluate(tileKinds);
+  console.log('roll undo tiles:', JSON.stringify({ committed, undone }));
+  expect(['undo-2.dng', 'undo-3.dng'].every(name => undone[name]?.[0] === 'embedded' && undone[name]?.[1] === 'pending'),
+    'undo of the roll commit restores the camera-JPEG tiles as embedded and pending', undone);
+  // A cold switch to a restored frame: its provisional frame is not matched
+  // to the camera-JPEG tile.
+  await evaluate(`(() => {
+    window.__ncDebug.forgetPhotoCaches();
+    [...document.querySelectorAll('#fileListItems .file-list-name')]
+      .find(tile => tile.querySelector('.file-list-filename')?.textContent === 'undo-3.dng').click();
+  })()`);
+  await waitFor('roll undo: the cold switch asks for the embedded frame', `window.__undoProbe.viewerJobs.some(job => job.name === 'undo-3.dng')`, 15000);
+  const viewerJob = (await evaluate('window.__undoProbe.viewerJobs')).find(job => job.name === 'undo-3.dng');
+  console.log('roll undo, provisional frame job:', JSON.stringify(viewerJob));
+  expect(viewerJob.matchTo === null, 'a restored camera-JPEG tile is no colour-match target for the provisional frame', viewerJob);
+  await evaluate('window.__undoProbe.release()');
+  await waitFor('roll undo: the switch settles', `${READY} && document.getElementById('studioFilename').textContent === 'undo-3.dng'
+    && document.getElementById('studioPhotoSwitchFeedback').hidden`, 120000);
+  await evaluate(`(() => {
+    window.__undoProbe.restore(); delete window.__embeddedFiles;
+    const key = 'nc_auto_roll_import_v1', before = ${JSON.stringify(autoRollBefore ?? null)};
+    if (before === null) localStorage.removeItem(key); else localStorage.setItem(key, before);
+  })()`);
+  console.log('ok: undo of a roll commit restores each tile with its rank, and colour matching ignores restored camera-JPEG tiles');
 }

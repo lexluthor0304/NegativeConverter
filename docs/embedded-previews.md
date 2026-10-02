@@ -73,7 +73,8 @@ runs on the page's main thread wherever the capability exists.
 
 ```sh
 npm test    # rawEmbeddedPreview, embeddedPreviewRender, scanDecodeClient,
-            # nefJpegPreview.parity, provisionalPreview, thumbnailRank, ...
+            # nefJpegPreview.parity, provisionalPreview, thumbnailRank,
+            # rollTileProvenance, ...
 PORT=5215 CDP_PORT=9239 npm run test:smoke -- --embedded-preview-only
 AUTOFRAME_RAW_DIR=/path/to/nefs npm run test:smoke -- --embedded-preview-only
 node scripts/check-embedded-previews.mjs /path/to/m11-roll --expect-m11
@@ -84,7 +85,10 @@ IFD0 plus browser-encoded JPEG previews) and checks the capability, the read
 budget, worker/main-thread HE NEF plane hashes (also on the repo NEFs when a
 directory is given), the provisional import frame while the container read is
 held, embedded tiles at import, forward-only tile ranks and the cold-switch
-thumbnail → embedded → exact sequence. `check-embedded-previews.mjs` walks a
+thumbnail → embedded → exact sequence. A second import then commits a roll
+analysis while two frames still show embedded tiles and undoes it: those
+tiles come back `embedded` and pending, and a cold switch to one posts its
+provisional frame without a colour-match target. `check-embedded-previews.mjs` walks a
 real folder (header slices only) and, with `--expect-m11`, requires the
 2112 × 1408 viewer and 720 × 480 tile picks within the read budget on every
 file (`L1009967.dng`: tile path 100 KB, viewer path 560 KB). Timing targets (≤ 300 ms import,
