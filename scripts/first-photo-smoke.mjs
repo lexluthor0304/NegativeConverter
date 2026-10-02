@@ -5,6 +5,9 @@
 // three or more) a semantic worker. Opening the Repair tab loads MI-GAN.
 // The colour photo of scenario 1 runs the semantic pass, which reads the same
 // model store: the store check looks for MI-GAN's model in particular (R1-039).
+// During the detection tail the toolbar, the brushes on the photo and the
+// history keys edit nothing, Export stays disabled, and the photo settles on
+// the recipe it gets without them (R1-034).
 import { join } from 'node:path';
 
 const ready = `document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy`;
@@ -12,11 +15,20 @@ const ready = `document.body.classList.contains('studio-ready') && !document.bod
 // Installed before the app's own scripts on every navigation of this scenario.
 const PROBE = `(() => {
   if (window.__firstPhotoProbe) return;
-  const probe = window.__firstPhotoProbe = { workers: [], databases: [], modelReads: [], overlay: [], detecting: [], maxOpacity: 0 };
+  const probe = window.__firstPhotoProbe = { workers: [], databases: [], modelReads: [], overlay: [], detecting: [], maxOpacity: 0,
+    hold: false, held: [] };
   const NativeWorker = window.Worker;
   window.Worker = class extends NativeWorker {
     constructor(url, options) { probe.workers.push(String(url)); super(url, options); }
   };
+  // The import's frame and film-edge request waits here while probe.hold is
+  // set, which keeps the photo in its detection tail until release().
+  const post = NativeWorker.prototype.postMessage;
+  window.Worker.prototype.postMessage = function (message, transfer) {
+    if (probe.hold && message && message.type === 'analyze-import') { probe.held.push(() => post.call(this, message, transfer)); return; }
+    return post.apply(this, arguments);
+  };
+  probe.release = () => { probe.hold = false; for (const deliver of probe.held.splice(0)) deliver(); };
   const open = indexedDB.open.bind(indexedDB);
   indexedDB.open = (name, ...rest) => { probe.databases.push(String(name)); return open(name, ...rest); };
   // Which model a read is for: IndexedDB keys and fetched URLs (modelCache.js).
@@ -78,6 +90,7 @@ export async function runFirstPhotoSmoke({ send, evaluate, waitFor, wait, fail, 
   const colourPhoto = join(fixtures, 'negative-textured.png');
   const script = await send('Page.addScriptToEvaluateOnNewDocument', { source: PROBE });
   let autoRollBefore;
+  let learnedSeeded = false;
   try {
     await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en` });
     await waitFor('first photo boot', `!!window.__firstPhotoProbe && !!document.getElementById('studioImportAutoCrop') && /No model loaded/.test(document.getElementById('dustAiStatus')?.textContent)`);
@@ -179,7 +192,137 @@ export async function runFirstPhotoSmoke({ send, evaluate, waitFor, wait, fail, 
     if (semantic) fail('a roll import must not run the semantic model for its first photo');
     if (probe.workers.some(url => /aiInpaintWorker/.test(url))) fail('a roll import must not start the MI-GAN worker');
     console.log('ok: a three-photo import creates no semantic or MI-GAN worker');
+
+    // 4. Editing stays locked during the detection tail (R1-034). The import's
+    // frame and film-edge request is held, so the provisional photo stays in
+    // its tail while real input arrives (CDP mouse and keys: hit-testing and
+    // inert apply): an AI-brush stroke on the photo, +90°, Crop and Ctrl+Z.
+    // None of them edits, Export stays disabled, and the photo settles on the
+    // recipe the same import gets without them: its learned value applied and
+    // the automatic values it was added to recorded. After the tail the same
+    // input edits, so it does reach the controls.
+    const point = id => evaluate(`(() => { const r = document.getElementById('${id}').getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`);
+    const click = async ({ x, y }) => {
+      await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
+      await send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
+      await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
+    };
+    const brush = async ({ x, y }) => {
+      await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
+      await send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
+      for (let i = 1; i <= 4; i++) await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: x + 8 * i, y: y + 4 * i, button: 'left', buttons: 1 });
+      await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: x + 32, y: y + 16, button: 'left', clickCount: 1 });
+    };
+    const undoKey = async () => {
+      for (const type of ['keyDown', 'keyUp']) await send('Input.dispatchKeyEvent', { type, key: 'z', code: 'KeyZ', windowsVirtualKeyCode: 90, modifiers: 2 });
+    };
+    const cropMode = `document.getElementById('canvasContainer').classList.contains('crop-mode')`;
+    const record = `({ settings: window.__ncTwoStage.status().settings, import: window.__ncAnalysis.importRecord(), cropping: ${cropMode},
+      exportDisabled: document.getElementById('exportBtn').disabled })`;
+    const settled = `${ready} && !document.body.dataset.studioDetecting && !window.__ncAnalysis.converting() && !window.__ncTwoStage.status().semanticPending`;
+    const boot = async label => {
+      await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en` });
+      await waitFor(label + ': boot', `!!window.__firstPhotoProbe && !!document.getElementById('studioImportAutoCrop') && !!document.getElementById('resetLearnedDefaults')`);
+      await installDialogAutoAccept();
+      await wait(300);
+    };
+    const resetLearned = async () => {
+      await evaluate(`document.getElementById('resetLearnedDefaults').click()`);
+      await waitFor('learned defaults reset', `/: 0 /.test(document.getElementById('learnedDefaultsCount').textContent)`, 30_000);
+    };
+    // A learned value for this stock through the app's own flow: one roll's
+    // exported cyan edit of +12 is +3 on the next import (n / (n + 3)).
+    await boot('learned value');
+    learnedSeeded = true;
+    await resetLearned();
+    await evaluate(`(() => {
+      window.showSaveFilePicker = undefined;
+      HTMLAnchorElement.prototype.click = function () { if (!this.download) return; };
+    })()`);
+    await importFiles([colourPhoto]);
+    await waitFor('learned value: photo settled', settled, 150_000);
+    await evaluate(`(() => { const el = document.getElementById('cyan'); el.value = '12'; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+    await evaluate(`document.querySelector('.format-btn[data-format="png"]').click(); document.querySelector('.bitdepth-btn[data-bitdepth="8"]').click(); document.getElementById('exportSingleBtn').click()`);
+    await waitFor('learned value recorded', `/: [1-9]/.test(document.getElementById('learnedDefaultsCount').textContent)`, 120_000);
+
+    const tailRun = async (interact) => {
+      const label = interact ? 'tail with input' : 'tail without input';
+      await boot(label);
+      // The brush that paints on the photo: Retouch tab, AI brush on, model ready.
+      await evaluate(`document.getElementById('studioTab-repair').click()`);
+      await waitFor(label + ': MI-GAN ready', `/Model ready/.test(document.getElementById('dustAiStatus').textContent)`, 180_000);
+      await evaluate(`(() => { const box = document.getElementById('aiBrushEnabled'); if (!box.checked) box.click(); })()`);
+      await evaluate(`${probeReset}; window.__firstPhotoProbe.hold = true`);
+      await importFiles([colourPhoto]);
+      await waitFor(label + ': provisional photo in its tail', `document.body.classList.contains('studio-ready') && !!document.body.dataset.studioDetecting && window.__firstPhotoProbe.held.length > 0`, 150_000);
+      await wait(300);
+      const before = await evaluate(record);
+      const armed = await evaluate(`({ retouch: document.getElementById('studioTab-repair').getAttribute('aria-selected'), brush: document.getElementById('aiBrushEnabled').checked,
+        model: document.getElementById('dustAiStatus').textContent })`);
+      if (interact) {
+        await brush(await point('canvasContainer'));
+        await click(await point('rotateRightBtn'));
+        await click(await point('cropBtn'));
+        await undoKey();
+      }
+      await wait(800);
+      const during = await evaluate(`({ ...${record}, held: window.__firstPhotoProbe.held.length, detecting: document.body.dataset.studioDetecting || null,
+        toolbarInert: document.getElementById('previewToolbar').inert, surfaceInert: document.getElementById('canvasTransformWrapper').inert,
+        toasts: [...document.querySelectorAll('.toast-message')].map(t => t.textContent) })`);
+      await evaluate(`window.__firstPhotoProbe.release()`);
+      await waitFor(label + ': tail ended', settled, 120_000);
+      await wait(1500);
+      await waitFor(label + ': settled', settled, 60_000);
+      const after = await evaluate(record);
+      return { label, armed, before, during, after };
+    };
+    const quiet = await tailRun(false);
+    const busy = await tailRun(true);
+    console.log('tail lock evidence:', JSON.stringify({ armed: busy.armed, during: { ...busy.during, settings: undefined },
+      before: busy.before.settings && { rotationAngle: busy.before.settings.rotationAngle, cyan: busy.before.settings.cyan },
+      after: { cyan: busy.after.settings?.cyan, learned: busy.after.settings?.learnedDefaults, import: { ...busy.after.import, automaticDefaults: Boolean(busy.after.import?.automaticDefaults) } } }));
+    if (busy.armed.retouch !== 'true' || !busy.armed.brush || !/Model ready/.test(busy.armed.model)) fail('the AI brush was not armed for the tail: ' + JSON.stringify(busy.armed));
+    const lockedDuring = busy.during;
+    if (!lockedDuring.detecting || lockedDuring.held < 1) fail('the input did not land inside the detection tail: ' + JSON.stringify({ detecting: lockedDuring.detecting, held: lockedDuring.held }));
+    // Every problem at once, what the user sees first.
+    const problems = [];
+    const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+    if (lockedDuring.import.repairStrokes || lockedDuring.import.history || lockedDuring.import.userEdited) problems.push('an edit was made during the tail: ' + JSON.stringify(lockedDuring.import));
+    if (lockedDuring.settings.rotationAngle !== busy.before.settings.rotationAngle) problems.push('+90° rotated the photo during the tail: ' + JSON.stringify([busy.before.settings.rotationAngle, lockedDuring.settings.rotationAngle]));
+    if (lockedDuring.cropping) problems.push('Crop opened crop mode during the tail');
+    if (lockedDuring.toasts.some(text => /undo|Undone/i.test(text))) problems.push('Ctrl+Z reached the history during the tail: ' + JSON.stringify(lockedDuring.toasts));
+    if (!lockedDuring.exportDisabled || !quiet.during.exportDisabled) problems.push('Export must stay disabled during the tail');
+    for (const run of [quiet, busy]) {
+      if (run.after.exportDisabled) problems.push(`${run.label}: Export is still disabled after the tail`);
+      if (!run.after.import?.automaticDefaults) problems.push(`${run.label}: the final settings did not record their automatic values`);
+      if (!run.after.settings?.learnedDefaults || !(run.after.settings.cyan > 0)) problems.push(`${run.label}: the learned value was not applied: ` + JSON.stringify({ learned: run.after.settings?.learnedDefaults, cyan: run.after.settings?.cyan }));
+    }
+    if (!same(busy.after.settings, quiet.after.settings)) {
+      const keys = Object.keys({ ...busy.after.settings, ...quiet.after.settings }).filter(key => !same(busy.after.settings?.[key], quiet.after.settings?.[key]));
+      problems.push('input during the tail changed the settled recipe: ' + JSON.stringify(Object.fromEntries(keys.map(key => [key, [quiet.after.settings?.[key], busy.after.settings?.[key]]]))));
+    }
+    if (!same(busy.after.import, quiet.after.import)) problems.push('input during the tail changed the import record: ' + JSON.stringify({ quiet: quiet.after.import, busy: busy.after.import }));
+    if (!lockedDuring.toolbarInert || !lockedDuring.surfaceInert) problems.push('the toolbar and the photo surface must be inert during the tail: ' + JSON.stringify({ toolbar: lockedDuring.toolbarInert, surface: lockedDuring.surfaceInert }));
+    if (problems.length) fail(problems.join('\n'));
+    // The same input once the tail has ended: it reaches the controls.
+    await brush(await point('canvasContainer'));
+    await waitFor('the brush paints after the tail', `window.__ncAnalysis.importRecord().repairStrokes === 1`, 30_000);
+    await waitFor('ready after the stroke', settled, 120_000);
+    const rotationBefore = await evaluate(`window.__ncTwoStage.status().settings.rotationAngle`);
+    await click(await point('rotateRightBtn'));
+    await waitFor('+90° rotates after the tail', `window.__ncTwoStage.status().settings.rotationAngle !== ${JSON.stringify(rotationBefore)}`, 30_000);
+    await waitFor('ready after the rotation', settled, 120_000);
+    await click(await point('cropBtn'));
+    await waitFor('Crop opens crop mode after the tail', cropMode, 30_000);
+    await evaluate(`document.getElementById('cancelCropBtn').click()`);
+    await waitFor('crop mode closed', `!${cropMode}`, 30_000);
+    console.log('ok: during the detection tail an AI-brush stroke, +90°, Crop and Ctrl+Z edit nothing and Export stays disabled; the photo settles on the recipe it gets without them (learned value applied, automatic values recorded); after the tail the same input edits');
   } finally {
+    if (learnedSeeded) {
+      // Later steps import colour photos too: leave no learned value behind.
+      await evaluate(`document.getElementById('resetLearnedDefaults')?.click()`).catch(() => {});
+      await waitFor('learned defaults reset after the tail check', `/: 0 /.test(document.getElementById('learnedDefaultsCount')?.textContent || '')`, 30_000, { soft: true });
+    }
     if (autoRollBefore !== undefined) {
       await evaluate(`(() => {
         const key = 'nc_auto_roll_import_v1', before = ${JSON.stringify(autoRollBefore ?? null)};

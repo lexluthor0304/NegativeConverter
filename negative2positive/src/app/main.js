@@ -16871,7 +16871,14 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         diagnostics: () => structuredClone(state.autoFrame.lastDiagnostics),
         whiteBalance: () => ({ wbR: state.wbR, wbG: state.wbG, wbB: state.wbB, wbAutoConfidence: state.wbAutoConfidence }),
         fullResolution: () => Boolean(state.processedImageData) && !state.processedImageDataIsPreview && !state.fullResolutionPending,
-        expiredAnalysis: () => (state.expiredAnalysis ? JSON.parse(JSON.stringify(state.expiredAnalysis)) : null)
+        expiredAnalysis: () => (state.expiredAnalysis ? JSON.parse(JSON.stringify(state.expiredAnalysis)) : null),
+        // The open photo's import record (R1-034): an edit, the automatic
+        // values its learned defaults were added to, and its history.
+        importRecord: () => {
+          const item = getCurrentQueueItem();
+          return item ? { userEdited: Boolean(item.userEdited), automaticDefaults: item.automaticDefaults ? structuredClone(item.automaticDefaults) : null,
+            history: undoStack.length, repairStrokes: state.repairStrokes?.length || 0 } : null;
+        }
       };
     }
 
