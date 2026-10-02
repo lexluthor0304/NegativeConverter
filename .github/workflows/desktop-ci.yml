@@ -37,6 +37,16 @@ jobs:
       - name: Unit tests
         run: npm test
 
+      # The release that turned cross-origin isolation on renamed every
+      # built script: a browser that cached one without COEP would reuse it,
+      # and the isolated page refuses such a copy as a worker (#229 review
+      # R2-041). npm test ran the check's self-test; this checks the build.
+      - name: Build web
+        run: npm run build:web
+
+      - name: Check built script names
+        run: node scripts/check-dist-asset-names.mjs
+
       # npm test checks a subset; the full lattice / tie-plane / random sweep
       # of the HSL pre-test against the frozen engine takes a minute or two.
       - name: HSL parity sweep

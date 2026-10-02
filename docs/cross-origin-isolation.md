@@ -110,6 +110,42 @@ keeps the copy path it always had, with the same pixels.
 COOP `same-origin` severs `window.opener`; the app's one `window.open` passes
 `noopener`.
 
+## Returning visitors: scripts cached before isolation
+
+Until the release that turns the pair on, the site served `/assets/` with
+`Cache-Control: public, max-age=31536000, immutable` and without COEP. A
+browser that cached a script then reuses its copy without asking, and an
+isolated page refuses a dedicated worker whose own response lacks COEP (the
+embedder-policy check of the HTML standard's worker fetch). Scripts whose
+content did not change keep their content-hash names, so without a rename a
+returning visitor's LibRaw worker would never start (every RAW file opening
+as its 8-bit embedded JPEG after the 30 s open timeout), nor would ONNX
+Runtime's pthreads or any app worker whose code did not change. Fresh
+profiles (the smoke run, `scripts/isolation-preview-check.mjs`) cannot see
+it (#229 review R2-041, R2-046).
+
+- **Every script gets a new name.** The page build and the worker bundles
+  name every script `[name]-[hash]-coi.js` (`isolatedOutputNames()` in
+  `scripts/cross-origin-isolation.mjs`, used by `vite.config.js`). Binary
+  assets (wasm, the lensfun data, fonts) keep their names: they are fetched
+  from the same origin, where COEP asks nothing of them, so returning
+  visitors keep those cached copies. The desktop bundle (relative base
+  `./`, assets embedded) is not affected either way.
+- **The check.** `scripts/check-dist-asset-names.mjs` fails when a build's
+  `assets/` holds a script name that production served at 1703835, the last
+  release without COEP (34 scripts, read from the site), or when a worker
+  script served from outside `assets/` is byte-identical to 1703835's (next
+  point). `npm test` runs its self-test; CI (`desktop-ci.yml`) runs it on the
+  build after `npm run build:web`.
+- **Outside `/assets/`.** Other files are revalidated (`max-age=0`), but
+  Vercel answers a revalidation with a 304 that carries none of
+  `vercel.json`'s headers (checked on the production site), so a browser
+  keeps the headers it cached a file with for as long as the file does not
+  change. The one worker script there, `public/codecs/heif-worker.js` (HEIC
+  decode), changed in this release (#264's isolation probe), so returning
+  browsers fetch it whole, with COEP. The pages change with every build
+  (their script names).
+
 ## Per platform
 
 | target | isolated | SharedArrayBuffer | how it was checked |

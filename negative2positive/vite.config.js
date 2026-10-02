@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { uiFontsPlugin } from '../scripts/build-ui-fonts.mjs';
 import { displayProxyBuildHashes } from '../scripts/display-proxy-hashes.mjs';
 import { opencvAssetsPlugin } from '../scripts/opencv-assets.mjs';
-import { CROSS_ORIGIN_ISOLATION_HEADERS } from '../scripts/cross-origin-isolation.mjs';
+import { CROSS_ORIGIN_ISOLATION_HEADERS, isolatedOutputNames } from '../scripts/cross-origin-isolation.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -87,6 +87,9 @@ export default defineConfig({
   worker: {
     format: 'es',
     plugins: () => [opencvAssetsPlugin()],
+    // Script names no build before cross-origin isolation produced, for the
+    // worker bundles as for the page (scripts/cross-origin-isolation.mjs).
+    rollupOptions: { output: isolatedOutputNames() },
   },
   build: {
     outDir: 'dist',
@@ -111,6 +114,10 @@ export default defineConfig({
         privacy: resolve(__dirname, 'privacy.html'),
         download: resolve(__dirname, 'download.html'),
       },
+      // Every script gets a name no build before cross-origin isolation
+      // produced: browsers keep those from /assets/ without COEP, and an
+      // isolated page refuses such a copy as a worker (#229 review R2-041).
+      output: isolatedOutputNames(),
     },
   },
 });

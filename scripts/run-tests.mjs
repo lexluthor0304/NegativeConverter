@@ -32,15 +32,19 @@ tests.push(join(scriptsDir, 'check-vercel-config.mjs'));
 tests.push(join(scriptsDir, 'check-appstore-screenshots.mjs'));
 tests.push(join(scriptsDir, 'check-updater-manifest.mjs'));
 tests.push(join(scriptsDir, 'check-tauri-config.mjs'));
+// Its real check needs a build (CI runs it after `npm run build:web`).
+tests.push([join(scriptsDir, 'check-dist-asset-names.mjs'), '--self-test']);
 
 // A test that leaves an open handle would otherwise hang the whole suite.
 const TIMEOUT_MS = 120_000;
 
 let failed = 0;
 let timedOut = 0;
-for (const t of tests) {
+for (const entry of tests) {
+  const [file, ...args] = Array.isArray(entry) ? entry : [entry];
+  const t = [file, ...args].join(' ');
   const started = Date.now();
-  const r = spawnSync(process.execPath, [t], {
+  const r = spawnSync(process.execPath, [file, ...args], {
     stdio: 'inherit',
     timeout: TIMEOUT_MS,
     killSignal: 'SIGKILL',

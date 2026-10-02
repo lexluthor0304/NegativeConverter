@@ -17,3 +17,29 @@ export const CROSS_ORIGIN_ISOLATION_HEADERS = Object.freeze({
   'Cross-Origin-Opener-Policy': 'same-origin',
   'Cross-Origin-Embedder-Policy': 'require-corp',
 });
+
+// Every script the build emits is named `[name]-[hash]-coi.js` (#229 review
+// R2-041). Until the release that turned the pair on, /assets/ was served
+// `immutable` for a year and without COEP, so a returning browser reuses such
+// a copy without asking, and an isolated page refuses a dedicated worker
+// whose own response lacks COEP. Scripts whose content did not change in that
+// release (libraw-wasm's worker, ONNX Runtime's chunk that its pthreads start
+// from) would have kept their names. Binary assets (wasm, onnx, data, fonts)
+// keep theirs: they are fetched from the same origin, where COEP asks nothing
+// of them. scripts/check-dist-asset-names.mjs holds a build to this.
+export const ISOLATED_SCRIPT_SUFFIX = '-coi';
+
+/**
+ * Output file names for vite.config.js, for the page build and the worker
+ * bundles alike: Vite's own patterns with the suffix on every script.
+ */
+export function isolatedOutputNames(assetsDir = 'assets') {
+  const script = `${assetsDir}/[name]-[hash]${ISOLATED_SCRIPT_SUFFIX}.js`;
+  return {
+    entryFileNames: script,
+    chunkFileNames: script,
+    assetFileNames: (asset) => (/\.m?js$/i.test(asset.names?.[0] ?? asset.name ?? '')
+      ? `${assetsDir}/[name]-[hash]${ISOLATED_SCRIPT_SUFFIX}.[ext]`
+      : `${assetsDir}/[name]-[hash].[ext]`),
+  };
+}
