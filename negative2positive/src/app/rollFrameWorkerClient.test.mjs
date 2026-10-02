@@ -72,8 +72,17 @@ async function loaderRun(adapter, input, options = postOptions, signal = null) {
   assert.equal(pool.warm(1), 1);
   const input = result();
   const expected = runRawPostDecode({ ...input, data: input.data.slice() }, postOptions);
-  const adapter = pool.frame({ options: { frame: { settings: {} }, filmTypeChoice: { automatic: true }, filmEdge: true } });
+  // The worker reports the packed planes before its answer (#229 review
+  // R2-017): the page's lane claim drops the decode's peak there.
+  const packed = [];
+  let answered = false;
+  const adapter = pool.frame({
+    options: { frame: { settings: {} }, filmTypeChoice: { automatic: true }, filmEdge: true },
+    onPacked: size => packed.push({ ...size, answered })
+  });
   const outcome = await loaderRun(adapter, { ...input, data: input.data.slice() });
+  answered = true;
+  assert.deepEqual(packed, [{ width: 48, height: 32, answered: false }], 'packed once, before the answer');
   assert.equal(outcome.held, true);
   assert.deepEqual([outcome.width, outcome.height], [48, 32]);
   assert.deepEqual(outcome.filmStats, expected.filmStats);
@@ -161,7 +170,8 @@ async function loaderRun(adapter, input, options = postOptions, signal = null) {
   const { factory } = taskWorkers({ silent: true });
   const warn = console.warn; console.warn = () => {};
   const pool = createRollFramePool({ size: 1, workerFactory: factory, readyTimeoutMs: 20 });
-  const adapter = pool.frame({ options: {} });
+  const packed = [];
+  const adapter = pool.frame({ options: {}, onPacked: size => packed.push(size) });
   const input = result();
   const expected = runRawPostDecode({ ...input, data: input.data.slice() }, postOptions);
   let outcome;
@@ -169,6 +179,7 @@ async function loaderRun(adapter, input, options = postOptions, signal = null) {
   assert.equal(outcome.held, undefined);
   assert.equal(sha(outcome.rgba16), sha(expected.rgba16), 'finished on the page with the same functions');
   assert.equal(adapter.ranInWorker, false);
+  assert.deepEqual(packed, [], 'a frame packed on this thread is not reported (the loader returns right after)');
   adapter.done();
   pool.dispose();
 }

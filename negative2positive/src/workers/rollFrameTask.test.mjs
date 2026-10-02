@@ -22,6 +22,7 @@ const { createAutoFrameWorkerClient } = await import('../app/autoFrameWorkerClie
 const { detectFrameAndRotation } = await import('../app/autoFrameAnalyzer.js');
 const { applyRotationToImageData } = await import('../app/imageGeometry.js');
 const { runRawPostDecode, describeView, viewFromDescription } = await import('../app/rawPostDecode.js');
+const { makeRawResult } = await import('../app/rawPostDecode.fixtures.mjs');
 const { buildRollSample, restoreRollSample, rollSampleSettings } = await import('../app/rollSample.js');
 const { imageFromRollPlanes } = await import('../app/rollFrameWorkerClient.js');
 
@@ -83,12 +84,14 @@ async function headSequence(result, { detect = detectFrameAndRotation, recipe = 
   return { outcome, image, detection: analysed.frame, edge: analysed.filmEdge, frameFilmType, settings, sample };
 }
 
-function runTask(task, message) {
+// One request's answer. A `packed` message is progress, not the answer
+// (#229 review R2-017): it goes to `progress`.
+function runTask(task, message, progress = []) {
   return new Promise((resolve) => {
-    const replies = [];
     task.handle(message, (reply, transfers) => {
-      replies.push(structuredClone(reply, { transfer: transfers }));
-      resolve(replies[0]);
+      const received = structuredClone(reply, { transfer: transfers });
+      if (received.type === 'packed') progress.push(received);
+      else resolve(received);
     });
   });
 }
@@ -100,13 +103,18 @@ function newTask(detect = detectFrameAndRotation) {
 async function taskSequence(result, { detect, recipe = null, choice = { automatic: true }, task = newTask(detect) } = {}) {
   const input = result.data.slice();
   const described = describeView(input);
+  const progress = [];
   const reply = await runTask(task, {
     type: 'process', id: 7, width: result.width, height: result.height, bits: result.bits, colors: result.colors,
     input: structuredClone(described, { transfer: [described.buffer] }),
     options: { ...postOptions, frame: frameOptions, filmTypeChoice: choice, filmEdge: true }
-  });
+  }, progress);
   assert.equal(input.byteLength, 0, 'the decode buffer was transferred, not copied');
-  if (reply.garbled) return { reply };
+  if (reply.garbled) {
+    assert.deepEqual(progress, [], 'a garbled frame is never reported packed');
+    return { reply };
+  }
+  assert.deepEqual(progress, [{ type: 'packed', id: 7, width: reply.width, height: reply.height }], 'packed once, before the answer');
   assert.equal(task.held, 7, 'the worker keeps the frame');
   const settings = recipe ? recipe(reply.detection) : {};
   const sampleReply = await runTask(task, { type: 'sample', id: 7, settings: rollSampleSettings(settings), tileMax: 288 });
@@ -185,16 +193,14 @@ for (const [width, height, degrees] of [[900, 640, 3], [900, 640, 0], [640, 900,
   let detections = 0;
   const task = newTask((image, config) => { detections++; return detectFrameAndRotation(image, config); });
   const described = describeView(result.data.slice());
-  const replies = [];
-  const done = new Promise((resolve) => {
-    task.handle({
-      type: 'process', id: 3, width: 300, height: 200, bits: 16, colors: 3, input: described,
-      options: { ...postOptions, frame: frameOptions, filmTypeChoice: { automatic: true }, filmEdge: true }
-    }, (reply, transfers) => { replies.push(structuredClone(reply, { transfer: transfers })); resolve(); });
-  });
+  const progress = [];
+  const done = runTask(task, {
+    type: 'process', id: 3, width: 300, height: 200, bits: 16, colors: 3, input: described,
+    options: { ...postOptions, frame: frameOptions, filmTypeChoice: { automatic: true }, filmEdge: true }
+  }, progress);
   void task.handle({ type: 'return-planes', id: 3 }, () => {});
-  await done;
-  const reply = replies[0];
+  const reply = await done;
+  assert.deepEqual(progress.map(message => message.type), ['packed'], 'the planes were packed before they came back');
   assert.equal(reply.interrupted, true);
   assert.equal(reply.complete, false);
   assert.equal(detections, 0, 'no detection for a frame the foreground took');
@@ -227,6 +233,30 @@ for (const [width, height, degrees] of [[900, 640, 3], [900, 640, 0], [640, 900,
   assert.equal(task.held, null);
 }
 
+// The decode's buffers are gone before the analysis starts: `packed` is sent
+// once the post-decode steps return, before the detection and the film-edge
+// read (#229 review R2-017).
+{
+  const result = libRawResult(300, 200, 0, 7);
+  const progress = [];
+  const seen = [];
+  const task = createRollFrameTask({
+    loadCv: async () => {},
+    detect: (image, config) => { seen.push(['detect', progress.length]); return detectFrameAndRotation(image, config); },
+    rotate: applyRotationToImageData,
+    readEdge: async (image, options) => { seen.push(['edge', progress.length]); return readEdge(image, options); },
+    yieldTask: () => new Promise(setImmediate)
+  });
+  const reply = await runTask(task, {
+    type: 'process', id: 9, width: 300, height: 200, bits: 16, colors: 3, input: describeView(result.data.slice()),
+    options: { ...postOptions, frame: frameOptions, filmTypeChoice: { automatic: true }, filmEdge: true }
+  }, progress);
+  assert.equal(reply.complete, true);
+  assert.deepEqual(seen, [['detect', 1], ['edge', 1]], 'reported packed before the detection and the film edge');
+  assert.deepEqual(progress, [{ type: 'packed', id: 9, width: 300, height: 200 }]);
+  await runTask(task, { type: 'release', id: 9 });
+}
+
 // A garbled decode stops before any analysis; a failed post-decode hands the
 // input back untouched, so the page finishes it with the same functions.
 {
@@ -236,9 +266,17 @@ for (const [width, height, degrees] of [[900, 640, 3], [900, 640, 0], [640, 900,
   const garbled = runRawPostDecode({ ...snow, data: snow.data.slice() }, postOptions).garbled;
   const reply = await runTask(task, { type: 'process', id: 6, ...snow, data: undefined, input: describeView(snow.data.slice()), options: { ...postOptions, frame: frameOptions } });
   assert.equal(reply.garbled, garbled);
-  const broken = await runTask(task, { type: 'process', id: 8, width: 10, height: 10, bits: 16, colors: 3, input: { kind: 'Float64Array', buffer: new ArrayBuffer(8) }, options: postOptions });
+  // A decode the garbled check refuses is never reported packed.
+  const bayer = makeRawResult({ width: 64, height: 64, seed: 9, channels: 3, bits: 16, snow: true });
+  const bayerProgress = [];
+  const refused = await runTask(task, { type: 'process', id: 10, width: 64, height: 64, bits: bayer.bits, colors: bayer.colors, input: describeView(bayer.data), options: { ...postOptions, frame: frameOptions } }, bayerProgress);
+  assert.equal(refused.garbled, true);
+  assert.deepEqual(bayerProgress, [], 'a garbled frame is never reported packed');
+  const brokenProgress = [];
+  const broken = await runTask(task, { type: 'process', id: 8, width: 10, height: 10, bits: 16, colors: 3, input: { kind: 'Float64Array', buffer: new ArrayBuffer(8) }, options: postOptions }, brokenProgress);
   assert.equal(broken.type, 'error');
   assert.equal(broken.stage, 'input');
+  assert.deepEqual(brokenProgress, [], 'a failed post-decode is never reported packed');
   await flush();
 }
 console.log('rollFrameTask: post-decode, detection, film edge and sample equal the lane sequence');

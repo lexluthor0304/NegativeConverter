@@ -9,6 +9,8 @@
  * detection and the film-edge read on its own planes and keeps them. The
  * page gets plain data (`analysis`) and a `held` handle that builds the roll
  * sample there (or hands the planes back) once the settings are merged.
+ * The worker reports when the frame's planes are packed, before its
+ * detection (`onPacked`): the decode's buffers are gone from there.
  *
  * Every failure keeps today's result for the frame:
  *  - a worker that does not answer its ping in time, or cannot take the
@@ -97,6 +99,11 @@ export function createRollFramePool({
       if (data?.type === 'pong') { slot.settleReady(true); return; }
       const entry = slot.pending.get(data?.id);
       if (!entry) return;
+      // Progress of a request still running, not its answer.
+      if (data.type === 'packed') {
+        try { entry.onProgress?.(data); } catch (error) { console.warn('[roll] frame progress handler failed:', error); }
+        return;
+      }
       slot.pending.delete(data.id);
       entry.resolve(data);
     };
@@ -112,10 +119,10 @@ export function createRollFramePool({
     return slot;
   }
 
-  function send(slot, message, transfers = []) {
+  function send(slot, message, transfers = [], onProgress = null) {
     return new Promise((resolve, reject) => {
       if (!slot?.alive) { reject(lostError('Roll-frame worker is gone')); return; }
-      slot.pending.set(message.id, { resolve, reject });
+      slot.pending.set(message.id, { resolve, reject, onProgress });
       try { slot.worker.postMessage(message, transfers); }
       catch (error) { slot.pending.delete(message.id); reject(error); }
     });
@@ -157,9 +164,12 @@ export function createRollFramePool({
    * One frame's adapter. `options`: the worker's analysis request
    * `{ frame, filmTypeChoice, filmEdge }` (snapshotted when the job starts);
    * `returnPlanes(size)`: whether the page wants the planes back with the
-   * analysis (a prefetch, or a base the session cache has room for).
+   * analysis (a prefetch, or a base the session cache has room for);
+   * `onPacked({ width, height })`: the worker packed the frame's planes and
+   * dropped LibRaw's result, before its detection (not called for a frame
+   * whose post-decode steps run on this thread).
    */
-  function frame({ options = {}, returnPlanes = () => false } = {}) {
+  function frame({ options = {}, returnPlanes = () => false, onPacked = null } = {}) {
     let slot = acquire();
     let id = 0;
     let running = false;
@@ -192,7 +202,7 @@ export function createRollFramePool({
           const posting = send(slot, {
             type: 'process', id, ...shape, input,
             options: { ...postOptions, ...options, returnPlanes: Boolean(returnPlanes(shape)) }
-          }, [input.buffer]);
+          }, [input.buffer], progress => onPacked?.({ width: progress.width, height: progress.height }));
           if (wanted) adapter.wantPlanes();
           reply = await posting;
         } catch (err) {

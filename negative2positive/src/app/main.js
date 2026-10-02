@@ -23168,9 +23168,19 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // the prefetch or the photo sessions.
     function decodeRollFrame(file, { signal, context = null, planes = null, wantsBase = false, frames, slots, options, optionsKey }) {
       const half = options.half === true;
+      // Packed: the lane's claim keeps the frame's analysis bytes. The worker
+      // reports it before its detection and film-edge read (#229 review
+      // R2-017); a frame finished on this thread, when the loader returns.
+      let packed = false;
+      const settle = (image) => {
+        if (packed) return;
+        packed = true;
+        settleRollFrameClaim(context?.claim, image);
+      };
       const adapter = frames.frame({
         options: { frame: options.frame, filmTypeChoice: options.filmTypeChoice, filmEdge: options.filmEdge },
-        returnPlanes: ({ width, height }) => !half && (wantsBase || Boolean(planes?.wanted) || photoSessions.hasRoomFor(width * height * 12))
+        returnPlanes: ({ width, height }) => !half && (wantsBase || Boolean(planes?.wanted) || photoSessions.hasRoomFor(width * height * 12)),
+        onPacked: settle
       });
       if (!half) planes?.onWanted(() => adapter.wantPlanes());
       let rawMetadata = null;
@@ -23180,8 +23190,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         claim: context?.claim || null, priority: context?.priority || 'background',
         ...(half ? { halfSize: true } : {})
       }).then((image) => {
-        // Packed: the lane's claim keeps the frame's analysis bytes.
-        settleRollFrameClaim(context?.claim, image);
+        settle(image);
         if (image?.held) {
           return { base: null, held: adapter.held, analysis: adapter.analysis, optionsKey, rawMetadata, fullSize: image.fullSize || null, half };
         }

@@ -424,8 +424,9 @@ Roll analysis has its own lane plan and its own per-frame worker (#252):
   the import (the foreground photo records its size too), and pass 1 plans
   again after its first frame. The memory budget (#258) reserves each lane
   by the same footprint: the frame in analysis from admission to its sink,
-  plus its decode from the loader gate until its planes are packed, so the
-  two agree on 2 frames in flight at 16 GB.
+  plus its decode from the loader gate until its planes are packed (the
+  roll-frame worker reports that before its detection), so the two agree on
+  2 frames in flight at 16 GB.
 - **Decode slots.** `createDecodeSlots` is the semaphore the lanes share. A
   lane opens the file and LibRaw's metadata while another demosaics, then
   reserves its frame's real decode bytes (`loadRawFile`'s `decodeSlot`) and
@@ -442,10 +443,13 @@ Roll analysis has its own lane plan and its own per-frame worker (#252):
   is transferred there (`loadRawFile`'s `postDecode`), and the #232
   post-decode steps, the frame detection on both planes (sizes only, the
   full-resolution fallback in place) and the film-edge read run on the
-  worker's planes. The page merges the plain results with today's functions
-  in today's order (`createDefaultSettings` on a pixel-less frame primed with
-  the worker's statistics, `analyzeStudioImportFrame`,
-  `mergeImportFilmEdge`, learned settings); then the worker builds the roll
+  worker's planes. Once the planes are packed and LibRaw's result dropped,
+  the worker posts `packed`, before the detection: the lane's memory claim
+  keeps the frame's analysis bytes from there (`onPacked`). The page merges
+  the plain results with today's functions in today's order
+  (`createDefaultSettings` on a pixel-less frame primed with the worker's
+  statistics, `analyzeStudioImportFrame`, `mergeImportFilmEdge`, learned
+  settings); then the worker builds the roll
   sample (`rollSample.js`, the page's own builder) and drops the frame. No
   plane of the frame travels back to the page and no main-thread loop runs
   over it, except for a frame whose display proxy is still to be filled

@@ -4,7 +4,9 @@
 // LibRaw's result buffer is transferred in and every step runs on the
 // worker's own planes, with the functions the page ran on them before:
 //   1. post-decode (rawPostDecode.js): pack, garbled check, defect pass, the
-//      >>> 8 mirror, film type and film base statistics;
+//      >>> 8 mirror, film type and film base statistics; a `packed` message
+//      then tells the page the decode's buffers are gone (its lane's memory
+//      claim keeps the frame's analysis bytes from there);
 //   2. frame detection (sizes only, rotatedOutput 'none'), with the
 //      full-resolution fallback on these planes, in place;
 //   3. the film-edge read on the same 8-bit plane;
@@ -87,6 +89,10 @@ export function createRollFrameTask({
       reply(send, { type: 'result', id, garbled: true }, new Set());
       return;
     }
+    // Progress, not the answer: the planes are packed and LibRaw's result is
+    // dropped, before the detection and the film-edge read (#229 review
+    // R2-017).
+    send({ type: 'packed', id, width: outcome.width, height: outcome.height }, []);
     const image = makeImage(outcome.rgba8, outcome.width, outcome.height);
     image.__image16 = { width: outcome.width, height: outcome.height, data: outcome.rgba16 };
     held = { id, image };

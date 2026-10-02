@@ -896,14 +896,14 @@ for (const verdicts of [['noMask', 'mono', 'mono', 'mono', 'mono'], ['mono', 'mo
 // #252: RAW frames decode into their lane's roll-frame worker, which keeps
 // the planes, detects the frame and reads the edge; the page merges its
 // results with today's functions and the worker builds the sample.
-function workerRoll(f, { analysisFor = () => ({}), dng = true } = {}) {
+function workerRoll(f, { analysisFor = () => ({}), dng = true, holdAnalysis = null } = {}) {
   f.context.rollFrameWorkerUsable = () => true;
   if (dng) for (const item of f.items) item.file.name = `${item.id}.dng`;
   const adapters = [];
   const pool = {
     disposed: false, warmed: 0,
-    frame({ options, returnPlanes }) {
-      const adapter = { options, returnPlanes, analysis: null, held: null, doneCalls: 0, done() { adapter.doneCalls++; } };
+    frame({ options, returnPlanes, onPacked = null }) {
+      const adapter = { options, returnPlanes, onPacked, analysis: null, held: null, doneCalls: 0, done() { adapter.doneCalls++; } };
       adapters.push(adapter);
       return adapter;
     },
@@ -918,6 +918,9 @@ function workerRoll(f, { analysisFor = () => ({}), dng = true } = {}) {
     // The loader gate: LibRaw's size and decode estimate.
     await claim?.atDecode({ kind: 'raw', width: 10, height: 10, estimatedBytes: 5000 });
     if (!postDecode) { pageReads.push(id); return { width: 10, height: 10, id }; }
+    // The worker packs the planes, reports it, then analyses the frame.
+    postDecode.onPacked?.({ width: 10, height: 10 });
+    if (holdAnalysis) await holdAnalysis(id);
     const extra = analysisFor(id, postDecode.options) || {};
     postDecode.analysis = {
       complete: true, frameFilmType: f.make(id).filmType, detection: null, detectionError: null, edge: null, edgeError: null,
@@ -990,6 +993,31 @@ function workerRoll(f, { analysisFor = () => ({}), dng = true } = {}) {
     const events = f.context.memoryEvents.filter(event => event.label?.endsWith(` ${id}.dng`) && event.priority === 'background');
     assert.deepEqual(events.map(event => [event.type, event.bytes]),
       [['grant', header], ['resize', frame + 5000], ['resize', frame], ['release', frame]], `frame ${id}`);
+  }
+}
+
+{
+  // #229 review R2-017: the decode's peak is held from the loader gate until
+  // the worker reports the planes packed, before its detection and film-edge
+  // read, not until the analysis comes back.
+  const f = fixture();
+  const analyses = new Map();
+  workerRoll(f, { holdAnalysis: id => { const gate = deferred(); analyses.set(id, gate); return gate.promise; } });
+  f.context.scheduleAutomaticRollImport(f.items);
+  await f.fire(1200);
+  const header = rollAnalysisFootprint(1e6).frameBytes;
+  const frame = rollAnalysisFootprint(100).frameBytes;
+  const events = id => f.context.memoryEvents.filter(event => event.label?.endsWith(` ${id}.dng`) && event.priority === 'background')
+    .map(event => [event.type, event.bytes]);
+  assert.ok(analyses.has(1) && !f.items[1].settings, 'frame 1 is packed and still analysed in its worker');
+  assert.deepEqual(events(1), [['grant', header], ['resize', frame + 5000], ['resize', frame]], 'its claim already settled');
+  for (let round = 0; round < 10 && !f.items.every(item => item.settings); round++) {
+    for (const [id, gate] of [...analyses]) { analyses.delete(id); gate.resolve(); }
+    await flush();
+  }
+  assert.ok(f.items.every(item => item.settings), 'every frame measured');
+  for (const id of [1, 2, 3]) {
+    assert.deepEqual(events(id), [['grant', header], ['resize', frame + 5000], ['resize', frame], ['release', frame]], `frame ${id}`);
   }
 }
 
