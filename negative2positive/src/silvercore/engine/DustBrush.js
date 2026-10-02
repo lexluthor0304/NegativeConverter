@@ -188,11 +188,71 @@ export function closeStrokeRect(mask, oldBox, box, width, height, pad) {
   return { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
 }
 
-// RETR_EXTERNAL skips a component lying in another's hole. R's border ring is
-// background (every cluster inside R keeps `pad` from it), so if one straight
-// run of background joins that ring to the frame edge, nothing outside R can
-// enclose what is inside it and counting R alone is exact. Otherwise recount.
-function mayBeEnclosed(mask, width, height, rect) {
+// The enclosure search gives up after this many expansions per pixel of the
+// frame's width + height: about 5× what dense dust with hairs needed at
+// 12 MP (DustBrush.enclosure.test.mjs).
+const ENCLOSURE_SEARCH_FACTOR = 8;
+
+/**
+ * Searches the 4-connected background around `rect`, whose border ring is
+ * background, for the frame edge. Four bucket queues hold the same reached
+ * pixels and take turns, each expanding the one nearest its own edge (left,
+ * right, top, bottom): open background is crossed in straight lines, and a
+ * pocket that holds one direction back leaves the others free.
+ *
+ * @returns {'open'|'closed'|'unknown'} 'open' once a frame-edge pixel is
+ *   reached (or `rect` touches the edge itself), 'closed' when the background
+ *   runs out first, 'unknown' after `budget` expansions.
+ */
+export function searchBackgroundToEdge(mask, width, height, rect,
+  budget = ENCLOSURE_SEARCH_FACTOR * (width + height)) {
+  const right = rect.x + rect.width, bottom = rect.y + rect.height;
+  if (rect.x === 0 || rect.y === 0 || right === width || bottom === height) return 'open';
+  const seen = new Uint8Array((width * height + 7) >> 3);
+  const queues = [new Array(width), new Array(width), new Array(height), new Array(height)];
+  const lowest = [width, width, height, height];
+  const add = (k, d, p) => {
+    const level = queues[k][d];
+    if (level) level.push(p); else queues[k][d] = [p];
+    if (d < lowest[k]) lowest[k] = d;
+  };
+  // Queues a background pixel outside rect; true when it lies on the frame edge.
+  const reach = (x, y) => {
+    if (x >= rect.x && x < right && y >= rect.y && y < bottom) return false;
+    const p = y * width + x;
+    if (mask[p] || seen[p >> 3] & (1 << (p & 7))) return false;
+    seen[p >> 3] |= 1 << (p & 7);
+    if (x === 0 || y === 0 || x === width - 1 || y === height - 1) return true;
+    add(0, x, p); add(1, width - 1 - x, p); add(2, y, p); add(3, height - 1 - y, p);
+    return false;
+  };
+  // The ring joins every background pixel next to rect.
+  for (let x = rect.x; x < right; x++) if (reach(x, rect.y - 1) || reach(x, bottom)) return 'open';
+  for (let y = rect.y; y < bottom; y++) if (reach(rect.x - 1, y) || reach(right, y)) return 'open';
+  for (;;) {
+    for (let k = 0; k < 4; k++) {
+      const levels = queues[k];
+      let d = lowest[k];
+      while (d < levels.length && !levels[d]?.length) d++;
+      // Every reached pixel enters every queue: one empty queue means all of
+      // them have been expanded.
+      if (d === levels.length) return 'closed';
+      lowest[k] = d;
+      if (--budget < 0) return 'unknown';
+      const p = levels[d].pop();
+      const x = p % width, y = (p - x) / width;
+      if (reach(x - 1, y) || reach(x + 1, y) || reach(x, y - 1) || reach(x, y + 1)) return 'open';
+    }
+  }
+}
+
+// RETR_EXTERNAL skips a component lying in another's hole, and holes are
+// 4-connected background. R's border ring is background (every cluster inside
+// R keeps `pad` from it), so once the background around R reaches the frame
+// edge, nothing outside R can enclose what is inside it and counting R alone
+// is exact. A straight run from R's corners usually shows it; behind dust that
+// blocks all four, the search decides. Closed or undecided: recount.
+export function mayBeEnclosed(mask, width, height, rect) {
   const right = rect.x + rect.width, bottom = rect.y + rect.height;
   if (rect.x === 0 || rect.y === 0 || right === width || bottom === height) return false;
   const clearRow = (y, from, to) => {
@@ -203,8 +263,9 @@ function mayBeEnclosed(mask, width, height, rect) {
     for (let y = from; y < to; y++) if (mask[y * width + x]) return false;
     return true;
   };
-  return !(clearRow(rect.y, 0, rect.x) || clearRow(rect.y, right, width)
-    || clearColumn(rect.x, 0, rect.y) || clearColumn(rect.x, bottom, height));
+  if (clearRow(rect.y, 0, rect.x) || clearRow(rect.y, right, width)
+    || clearColumn(rect.x, 0, rect.y) || clearColumn(rect.x, bottom, height)) return false;
+  return searchBackgroundToEdge(mask, width, height, rect) !== 'open';
 }
 
 /**

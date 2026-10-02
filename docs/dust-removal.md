@@ -75,14 +75,29 @@ few hundred bytes. In the worker (`applyDustStroke`):
    everywhere, TELEA on new-mask pixels. Clusters the stroke did not touch come
    out byte-identical, so the patch needs no write mask.
 5. The particle count moves by the external contours of the old and the new
-   mask inside R. When R could lie in a hole of a component outside it (no
-   straight background run joins R to the frame edge), the frame is recounted.
+   mask inside R. That is exact unless R lies in a hole of a component
+   outside it (`findContours` skips what sits in a hole; holes are
+   4-connected background, and the frame edge is open). R's border ring is
+   background, so the frame is recounted unless the background around R is
+   shown to reach the frame edge (`mayBeEnclosed`): by a straight run from
+   R's corners, or, when dust blocks all four, by a search of that background
+   (`searchBackgroundToEdge`) that expands, in turn, the reached pixel
+   nearest each frame edge, so it crosses open background in straight lines
+   and climbs out of pockets. A search that finds the background closed, or
+   passes 8 × (width + height) expansions, means a recount.
 
 The reply carries R's 8-bit and 16-bit bytes, the stroke box's mask bytes and
 the count, all transferred. `DustBrush.test.mjs` checks 200+ random strokes
 (all modes, edges, corners, points off the frame) against the full-frame path:
 `createBrushMask` + `refineMask*`, full-frame TELEA and full-frame
 `findContours`, and that each stroke box is the tight bounds of its brush.
+`DustBrush.enclosure.test.mjs` checks the enclosure test: built cases
+(blocked runs, a pocket facing away from the nearest edge, diagonal joints,
+one-pixel gaps, a U closed only by the frame edge, closed rings), the search
+against a full background flood on random masks, and a 12 MP run at the #229
+review's dust densities with hairs: no random stroke recounts the frame (the
+four runs alone recount 9 % and 34 % of them), strokes inside closed loops do,
+and every count equals a full recount.
 
 ## Page side (`main.js`, `dustStrokeHistory.js`)
 
