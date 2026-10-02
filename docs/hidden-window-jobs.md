@@ -78,8 +78,10 @@ releases the MI-GAN session unless the running job may use AI repair. (The
 RAW post-decode worker, which runs the sensor-defect pass, lives only for its
 own decode since #232, so there is no idle one to terminate.) MI-GAN keeps its `sourceRef` and reloads the
 same model on the same provider on demand without bumping `aiRepair.revision`,
-so photo keys and thumbnails stay valid. An idle window that is only briefly
-hidden keeps its warm caches. Showing the window releases waiting items and
+so photo keys, thumbnails, repair stamps and the kept dust pass stay valid: a
+settled repair exports without a reload, and an export after a dust-brush
+stroke reloads the model and repairs from scratch (`technical-depth.md`).
+An idle window that is only briefly hidden keeps its warm caches. Showing the window releases waiting items and
 restarts the background photo lanes; caches (the prefetch slot too) refill and workers respawn lazily.
 
 **Parking (opt-in).** With `localStorage nc_hidden_park_v1 = 'on'`, a held

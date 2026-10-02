@@ -84,7 +84,7 @@ function fixture({ enabled = false, mask = null } = {}) {
     clearTimeout(id) { timers.delete(id); },
   });
   vm.runInContext([...DISPLAY_SESSION_HELPERS, 'getDustSource', 'nextDustMaskTag', 'noteDustReplaced', 'hasFrameRepairs', 'isCurrentLoad',
-    'currentRepairRecipe', 'stampRepairResult', 'commitDustPass',
+    'currentRepairRecipe', 'stampRepairResult', 'commitDustPass', 'dustPassUsesAi',
     'applyDustResultToState', 'runDustDetection', 'runDustDetectionPass', 'scheduleDustDetection',
     'prepareCurrentImageForExport', 'renderCurrentImageDataForExport'].map(functionSource).join('\n'), c);
   const actualRunDustDetection = c.runDustDetection;

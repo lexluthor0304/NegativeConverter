@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { createRepairStamps, sameRepairStrokes, captureDustPass, dustPassMatches, restoreDustPass } from './repairReuse.js';
+import { createAiModelLoader } from './aiModelLoading.js';
 import { repairsNeedSettling } from './fullResolutionRouting.js';
 import { displaySessionStubs, DISPLAY_SESSION_HELPERS } from './displaySessionHarness.mjs';
 
@@ -36,13 +37,17 @@ const dustContent = new Uint8Array(W * H);
 dustContent[10 * W + 12] = dustContent[70 * W + 140] = 255;
 const dustBlocks = { size: 64, columns: 3, keys: Uint32Array.of(0, 5) };
 
+const MODEL_URL = '/assets/migan_pipeline_v2-abcdefgh.onnx';
+
 function fixture() {
   const clean = frame(3);
   const lens = { maps: {} };
   const infos = new WeakMap();
-  const calls = { detect: 0, dust: 0, strokes: 0, dustInputs: [], strokeInputs: [] };
+  const calls = { detect: 0, dust: 0, strokes: 0, loads: 0, dustInputs: [], strokeInputs: [] };
   let bumpDuringStrokes = false;
   let duringDustPass = null;
+  // The provider a (re)load lands on.
+  let provider = 'wasm';
   const state = {
     originalImageData: clean, loadedBaseImageData: clean, conversionSourceImageData: { __lensMapping: lens },
     processedImageData: clean, processedImageDataIsPreview: false, currentStep: 3,
@@ -66,7 +71,18 @@ function fixture() {
     state, coreReprocessToken: 7, dustDetectionRevision: 11, loadGeneration: 3, dustPassCache: null,
     dustMaskTagSequence: 0, dustAiRefresh: { rects: [], timer: null }, syncDustWorkerPin() {},
     Uint8Array, DOMException, console,
-    aiRepair: { status: 'ready', revision: 4, run() {} },
+    // A loaded model; the release (#236, #241) and the reload are the real ones.
+    aiRepair: { status: 'ready', revision: 4, run() {}, release: async () => {}, trim: null, resident: null,
+      provider: 'wasm', prefer: 'wasm', source: 'migan_pipeline_v2.onnx', sourceRef: MODEL_URL, released: false,
+      error: '', percent: 0, tiles: 0, ms: 0 },
+    aiRepairRunsInFlight: 0, DEFAULT_MODEL_URL: MODEL_URL, File: globalThis.File,
+    updateAiRepairUI() {}, noteAiRepairUsed() {}, scheduleDustDetection() {},
+    defaultInferencePreference: () => 'wasm',
+    fetchModelBytes: async () => new Uint8Array(4),
+    createInpaintSessionInWorker: async () => {
+      calls.loads++;
+      return { provider, run() {}, release: async () => {} };
+    },
     repairStamps: createRepairStamps(), sameRepairStrokes, captureDustPass, dustPassMatches, restoreDustPass,
     dustMaskInfo: (mask) => infos.get(mask) || null,
     assertRepairCurrent(isCurrent) { if (!isCurrent()) throw new DOMException('Repair superseded', 'AbortError'); },
@@ -110,11 +126,13 @@ function fixture() {
     clearTimeout() {},
   });
   vm.runInContext([...DISPLAY_SESSION_HELPERS, 'getDustSource', 'nextDustMaskTag', 'noteDustReplaced', 'hasFrameRepairs', 'isCurrentLoad', 'currentRepairRecipe',
-    'stampRepairResult', 'carryRestoredRepairStamp', 'commitDustPass', 'aiRepairReady',
+    'stampRepairResult', 'carryRestoredRepairStamp', 'commitDustPass', 'aiRepairReady', 'dustPassUsesAi',
     'applyDustResultToState', 'runDustDetection', 'runDustDetectionPass', 'prepareCurrentImageForExport', 'renderCurrentImageDataForExport',
-    'ensureRepairsReadyForExport', 'dustMaskIsStale', 'whenBrushRepairsSettled'].map(functionSource).join('\n'), c);
+    'ensureRepairsReadyForExport', 'dustMaskIsStale', 'whenBrushRepairsSettled',
+    'settleAiRepairModel', 'releaseAiRepairSession', 'aiRepairLoadArgs', 'performAiRepairModelLoad'].map(functionSource).join('\n'), c);
+  c.loadAiRepairModel = createAiModelLoader(c.performAiRepairModelLoad, MODEL_URL, value => value instanceof File);
   return { c, state, clean, lens, calls, detectedMask, infos, bumpNextStrokePass: () => { bumpDuringStrokes = true; },
-    strokeDuringNextDustPass: (stroke) => { duringDustPass = stroke; },
+    strokeDuringNextDustPass: (stroke) => { duringDustPass = stroke; }, useProvider: (next) => { provider = next; },
     exportImage: () => c.renderCurrentImageDataForExport({ format: 'png', bitDepth: 8 }) };
 }
 const counts = (f) => ({ dust: f.calls.dust, strokes: f.calls.strokes });
@@ -245,6 +263,38 @@ for (const [label, mutate, rerun] of negatives) {
   assert.deepEqual(counts(f), { dust: 1, strokes: 2 }, 'different strokes are repaired again, on the kept dust pass');
 }
 
+// A release keeps the revision, so a settled repair is still the result of
+// the inpainter its recipe names: export takes it without a load or an
+// inference, and a fresh detection of the same content restores the kept
+// dust pass. A reload on the same provider keeps the revision; one that
+// lands on another provider (WebGPU and WASM differ) is another inpainter.
+{
+  const f = fixture();
+  await f.c.runDustDetection();
+  const committed = f.state.dustRemoval.inpaintedImageData;
+  assert.equal(await f.c.releaseAiRepairSession(), true);
+  assert.deepEqual([f.c.aiRepair.status, f.c.aiRepair.run, f.c.aiRepair.revision], ['idle', null, 4]);
+  assert.equal(await f.exportImage(), committed, 'released: exported as it is');
+  assert.deepEqual(counts(f), { dust: 1, strokes: 1 }, 'released: 0 inferences');
+  assert.equal(f.calls.loads, 0, 'released: no load');
+  await f.c.runDustDetection();
+  assert.deepEqual(counts(f), { dust: 1, strokes: 2 }, 'released: the kept dust pass is restored');
+  assert.equal(f.calls.loads, 0);
+  const recommitted = f.state.dustRemoval.inpaintedImageData;
+  assert.equal(await f.exportImage(), recommitted);
+  assert.deepEqual(counts(f), { dust: 1, strokes: 2 }, 'released: the restored commit is stamped');
+  await f.c.loadAiRepairModel(...f.c.aiRepairLoadArgs({ refresh: false }));
+  assert.deepEqual([f.calls.loads, f.c.aiRepair.status, f.c.aiRepair.revision], [1, 'ready', 4], 'same provider, same revision');
+  assert.equal(await f.exportImage(), recommitted);
+  assert.deepEqual(counts(f), { dust: 1, strokes: 2 }, 'reloaded: 0 inferences');
+  assert.equal(await f.c.releaseAiRepairSession(), true);
+  f.useProvider('webgpu');
+  await f.c.loadAiRepairModel(...f.c.aiRepairLoadArgs({ refresh: false }));
+  assert.deepEqual([f.c.aiRepair.provider, f.c.aiRepair.revision], ['webgpu', 5], 'another provider, another revision');
+  await f.exportImage();
+  assert.deepEqual(counts(f), { dust: 2, strokes: 3 }, 'another provider repairs again');
+}
+
 // A dust-brush stroke that lands between the tiles of a dust pass patches
 // the live mask in place and forgets its summary (#259). The pass read two
 // masks, so it is not kept under the hash it started with, and the next
@@ -264,4 +314,4 @@ for (const [label, mutate, rerun] of negatives) {
   assert.notEqual(f.c.dustPassCache, null, 'which is kept');
 }
 
-console.log('repairCommitReuse: settled commits export with 0 passes; unchanged dust content skips the dust pass; recipe changes, reloads and stand-ins re-run; a stroke during a dust pass leaves nothing kept');
+console.log('repairCommitReuse: settled commits export with 0 passes; unchanged dust content skips the dust pass; recipe changes, reloads and stand-ins re-run; a released model reuses settled work; a stroke during a dust pass leaves nothing kept');

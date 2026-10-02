@@ -9066,7 +9066,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         dustMask: dustEnabled ? state.dustRemoval.mask : null,
         dustRevision: dustEnabled ? state.dustRemoval.revision : null, strokes: state.repairStrokes,
         lensMapping: state.conversionSourceImageData?.__lensMapping || null,
-        revision: aiRepair.revision, dustUsedAi: aiRepairReady() };
+        revision: aiRepair.revision, dustUsedAi: dustPassUsesAi() };
     }
 
     // Stamps a committed repair unless the model changed while it ran (a
@@ -9099,13 +9099,16 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // the live mask in place, between the tiles of a pass (#259), and forgets
     // its summary: such a pass mixed two masks, so it is kept only while
     // `maskUnchanged` holds (the export's private copy always does).
+    // A model released by #236 or #241 is still the inpainter of the pass
+    // kept with its revision (dustPassUsesAi); a load in flight decides first.
     async function commitDustPass(source, mask, isCurrent = () => true, info = dustMaskInfo(mask),
       maskUnchanged = () => dustMaskInfo(mask) === info) {
-      const deciding = state.dustRemoval.ai && (aiRepair.status === 'idle' || aiRepair.status === 'loading');
-      const key = { source, maskHash: info?.hash, usedAi: aiRepairReady(), revision: aiRepair.revision };
-      if (info && !deciding && dustPassMatches(dustPassCache, key)) {
+      if (state.dustRemoval.ai && aiRepair.status === 'loading') await settleAiRepairModel({ load: false, isCurrent });
+      const usedAi = dustPassUsesAi();
+      const key = { source, maskHash: info?.hash, usedAi, revision: aiRepair.revision };
+      if (info && usedAi !== null && dustPassMatches(dustPassCache, key)) {
         const imageData = await restoreDustPass(dustPassCache, source, { check: () => assertRepairCurrent(isCurrent) });
-        if (imageData) return { imageData, usedAi: key.usedAi };
+        if (imageData) return { imageData, usedAi };
       }
       const report = {};
       const imageData = await inpaintForCommit(source, mask, isCurrent, null, { report });
@@ -24674,6 +24677,19 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       return Boolean(state.dustRemoval.ai && aiRepair.status === 'ready' && typeof aiRepair.run === 'function');
     }
 
+    // The dust inpainter in a repair recipe's terms (#246): MI-GAN (true)
+    // while AI repair is on and its model is ready or was released by #236
+    // or #241, TELEA (false) when AI repair is off or its model failed, null
+    // while a first load decides. A released model is the same inpainter: it
+    // comes back as the same model on the same provider under the same
+    // `revision`, and a reload that lands on another provider moves the
+    // revision (performAiRepairModelLoad), so the revision keys all three.
+    function dustPassUsesAi() {
+      if (!state.dustRemoval.ai) return false;
+      if (aiRepairReady() || (aiRepair.status === 'idle' && aiRepair.released)) return true;
+      return aiRepair.status === 'error' ? false : null;
+    }
+
     function updateAiRepairUI() {
       const status = document.getElementById('dustAiStatus');
       const enabled = document.getElementById('dustAiEnabled');
@@ -24990,6 +25006,16 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     function ensureAiRepairPreload() {
       if (aiRepair.status !== 'idle') return;
       void loadAiRepairModel(...aiRepairLoadArgs({ refresh: false }));
+    }
+    // The model a repair waits for, loaded the way inpaintForCommit loads it:
+    // the bundled one, or the one #236 or #241 released, on its provider.
+    // Waits out a load in flight; `load: false` only waits.
+    async function settleAiRepairModel({ load = true, isCurrent = () => true } = {}) {
+      if (load && aiRepair.status === 'idle') await loadAiRepairModel(...aiRepairLoadArgs({ refresh: false }));
+      while (aiRepair.status === 'loading') {
+        await new Promise(resolve => setTimeout(resolve, 50));
+        assertRepairCurrent(isCurrent);
+      }
     }
     function scheduleAiRepairPreloadForRecipe() {
       if (!state.repairStrokes.length || aiRepair.status !== 'idle') return;
