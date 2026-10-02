@@ -11,7 +11,7 @@ import { tryNefJpegPreview, createEmbeddedPreviewSource, decodeNefPreviewJpeg } 
 import { sniffImageKind, loadStandardImage, loadPngImageData } from './imageFileLoaders.js';
 import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
 import { createRawDecoder } from './nativeRawDecoder.js';
-import { halfDecodeFullSize, RAW_SIZE_HEAVY, isIPhoneDngHeader } from './imageDimensions.js';
+import { halfDecodeFullSize, parseImageDimensions, RAW_SIZE_HEAVY, isIPhoneDngHeader } from './imageDimensions.js';
 export { estimateRawDecodeBytes };
 export { rawResultToRgb16 } from './rawResultToRgb16.js';
 
@@ -125,12 +125,11 @@ function throwIfAborted(signal) {
   if (signal?.aborted) throw abortError(signal);
 }
 
-// The decode came back at the size LibRaw's metadata reports (either way
-// round), i.e. `half_size` was not applied.
-function matchesFullSize(width, height, metaWidth, metaHeight) {
-  if (!(metaWidth > 0 && metaHeight > 0)) return false;
-  const near = (w, h) => Math.abs(width - w) <= 1 && Math.abs(height - h) <= 1;
-  return near(metaWidth, metaHeight) || near(metaHeight, metaWidth);
+// The largest CFA or LinearRaw IFD of a TIFF-based RAW (its size and
+// PhotometricInterpretation), from the buffer; null for other containers.
+function rawHeaderSize(buffer) {
+  try { return parseImageDimensions(buffer, { raw: true }); }
+  catch { return null; }
 }
 
 function withTimeout(promise, ms, onTimeout) {
@@ -228,7 +227,9 @@ async function loadTiffBuffer(buffer, signal = null, sharedPlanes = false) {
  * defaults are full size and 16 bits whatever the file's size. `preview:
  * true` only shortens the timeouts of a stand-in decode. A half-size result
  * carries `__decodeScale` 0.5 and `__fullSize`; one LibRaw returned at full
- * size anyway (LinearRaw DNGs cannot be shrunk) carries neither.
+ * size anyway (LinearRaw DNGs cannot be shrunk) carries neither. The full
+ * size is checked against LibRaw's metadata size, or, when the metadata has
+ * none, the file header's raw IFD (halfDecodeFullSize).
  * `onLibRawReleased()` is called once, when this decode's LibRaw worker and
  * its WASM heap are gone (after imageData(), on a fallback, an error or an
  * abort): the two-stage import starts its full decode there on devices that
@@ -330,6 +331,10 @@ export async function loadRawFile(buffer, fileName, options = {}) {
   // light-table tile decode (#247) and the two-stage import's stand-in (#255).
   const useHalfSize = options.halfSize === true;
   const use8Bit = options.outputBps === 8;
+  // What a half-size result is checked against when LibRaw's metadata gives
+  // no size: the header's raw IFD (TIFF-based RAWs), read before LibRaw
+  // takes the buffer (#229 review R1-080).
+  const headerSize = useHalfSize ? rawHeaderSize(buffer) : null;
 
   const openTimeoutMs = fastPreview
     ? Math.min(bufBytes > RAW_SIZE_HUGE ? RAW_OPEN_TIMEOUT_MS_HUGE : RAW_OPEN_TIMEOUT_MS, 15_000)
@@ -488,6 +493,14 @@ export async function loadRawFile(buffer, fileName, options = {}) {
     // be killed mid-allocation on a memory-constrained device.
     const metaWidth = Number(rawMetadata?.width) || 0;
     const metaHeight = Number(rawMetadata?.height) || 0;
+    // The size the recipe's crop, strokes and analysis area refer to, for a
+    // half-size result that really was halved; null for one LibRaw returned
+    // unshrunk (LibRaw shrinks only mosaic data).
+    const halvedFullSize = (width, height) => {
+      const report = metaWidth > 0 && metaHeight > 0 ? { width: metaWidth, height: metaHeight } : headerSize || {};
+      const full = halfDecodeFullSize(width, height, report.width || 0, report.height || 0, { photometric: report.photometric ?? null });
+      return full.width !== width || full.height !== height ? full : null;
+    };
     if (metaWidth > 0 && metaHeight > 0) {
       const scale = useHalfSize ? 0.5 : 1;
       const budget = checkRawDecodeBudget(metaWidth * scale, metaHeight * scale, readDeviceMemoryGb(), { ramBytes: options.ramBytes ?? null });
@@ -579,11 +592,8 @@ export async function loadRawFile(buffer, fileName, options = {}) {
     // A roll lane's worker keeps the planes and analyses them there (#252).
     // A half-size one carries its full size, as a half-size image does below.
     if (outcome.held) {
-      return {
-        held: true, width: outcome.width, height: outcome.height,
-        ...(useHalfSize && !matchesFullSize(outcome.width, outcome.height, metaWidth, metaHeight)
-          ? { fullSize: halfDecodeFullSize(outcome.width, outcome.height, metaWidth, metaHeight) } : {})
-      };
+      const fullSize = useHalfSize ? halvedFullSize(outcome.width, outcome.height) : null;
+      return { held: true, width: outcome.width, height: outcome.height, ...(fullSize ? { fullSize } : {}) };
     }
 
     if (outcome.garbled) {
@@ -619,10 +629,12 @@ export async function loadRawFile(buffer, fileName, options = {}) {
     markDerivedEightBit(imageData);
     if (outcome.filmStats) primeFilmStats(imageData, outcome.filmStats);
     // The size the recipe's crop, strokes and analysis area refer to. LibRaw
-    // shrinks only mosaic data: a result at the metadata's full size was not
-    // halved (the two-stage import logs that and still decodes stage 2).
-    if (useHalfSize && !matchesFullSize(outcome.width, outcome.height, metaWidth, metaHeight)) {
-      imageData.__fullSize = halfDecodeFullSize(outcome.width, outcome.height, metaWidth, metaHeight);
+    // shrinks only mosaic data: a result at the reported full size, or of a
+    // LinearRaw IFD, was not halved (the two-stage import logs that and still
+    // decodes stage 2).
+    const fullSize = useHalfSize ? halvedFullSize(outcome.width, outcome.height) : null;
+    if (fullSize) {
+      imageData.__fullSize = fullSize;
       imageData.__decodeScale = 0.5;
     }
     return imageData;

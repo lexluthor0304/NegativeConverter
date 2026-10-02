@@ -292,13 +292,22 @@ export async function importPixelsForRoll(files, { siblings = files } = {}) {
 }
 
 /**
- * The full size behind a half-size LibRaw decode: LibRaw halves each side
- * rounding up, and its metadata reports the oriented full size. Without a
- * matching report the size is twice the decode's (within one pixel).
+ * The full size behind a half-size LibRaw decode of `width` x `height`.
+ * LibRaw halves only mosaic (CFA) data, each side rounding up; LinearRaw,
+ * monochrome-sensor and sRAW data come back at full size. `metaWidth` x
+ * `metaHeight` is the full size LibRaw's metadata reports (either way
+ * round), or a file header's raw IFD when the metadata has none, with that
+ * IFD's `photometric`. A decode at the reported size, or of a LinearRaw IFD,
+ * is its own full size (#229 review R1-080: never doubled); one at half the
+ * reported size has that size; without a matching report the size is twice
+ * the decode's (within one pixel).
  */
-export function halfDecodeFullSize(width, height, metaWidth = 0, metaHeight = 0) {
-  const halves = (w, h) => Math.abs(width - Math.ceil(w / 2)) <= 1 && Math.abs(height - Math.ceil(h / 2)) <= 1;
+export function halfDecodeFullSize(width, height, metaWidth = 0, metaHeight = 0, { photometric = null } = {}) {
+  if (photometric === PHOTOMETRIC_LINEAR_RAW) return { width, height };
   if (metaWidth > 0 && metaHeight > 0) {
+    const near = (w, h) => Math.abs(width - w) <= 1 && Math.abs(height - h) <= 1;
+    if (near(metaWidth, metaHeight) || near(metaHeight, metaWidth)) return { width, height };
+    const halves = (w, h) => Math.abs(width - Math.ceil(w / 2)) <= 1 && Math.abs(height - Math.ceil(h / 2)) <= 1;
     if (halves(metaWidth, metaHeight)) return { width: metaWidth, height: metaHeight };
     if (halves(metaHeight, metaWidth)) return { width: metaHeight, height: metaWidth };
   }

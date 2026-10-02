@@ -328,6 +328,41 @@ await expectPreviewFallback('garbled output', { result: makeRawResult({ width: 6
   assert.equal(released.length, 1);
 }
 {
+  // #229 review R1-080: a half-size request on the app's own LinearRaw DNG
+  // (240x160). LibRaw cannot halve LinearRaw data and returns the frame at
+  // 240x160 (libraw-wasm 1.6.0 reports width 240, filters 0). With LibRaw's
+  // size, and without one (the header's LinearRaw IFD stands in, where twice
+  // the decode was assumed), the result is not a half-size frame.
+  const { buildLinearDngParts } = await import('./linearDng.js');
+  const parts = buildLinearDngParts({ width: 240, height: 160, data: new Uint16Array(240 * 160 * 3).fill(30000) });
+  const dng = new Uint8Array(parts.reduce((n, part) => n + part.length, 0));
+  let at = 0;
+  for (const part of parts) { dng.set(part, at); at += part.length; }
+  const unshrunk = makeRawResult({ width: 240, height: 160, seed: 23, channels: 3, bits: 16 });
+  const holding = {
+    async run(result) { return { garbled: false, held: true, width: result.width, height: result.height }; },
+    terminate() {}
+  };
+  for (const [metaWidth, metaHeight] of [[240, 160], [0, 0]]) {
+    const label = metaWidth ? 'LibRaw\'s size' : 'the header\'s size';
+    reset({ result: cloneRawResult(unshrunk), metaWidth, metaHeight });
+    const imageData = await loadRawFile(dng.slice().buffer, 'scan.dng', { halfSize: true, outputBps: 16, suppressSensorDefects: false });
+    assert.equal(scene.openOptions.halfSize, true);
+    assert.deepEqual([imageData.width, imageData.height], [240, 160]);
+    assert.equal(imageData.__fullSize, undefined, `${label}: its own full size`);
+    assert.equal(imageData.__decodeScale, undefined, label);
+    reset({ result: cloneRawResult(unshrunk), metaWidth, metaHeight });
+    const held = await loadRawFile(dng.slice().buffer, 'scan.dng', { postDecode: holding, halfSize: true, outputBps: 16, suppressSensorDefects: false });
+    assert.deepEqual(held, { held: true, width: 240, height: 160 }, `${label}: a held frame without a fullSize`);
+  }
+  // A RAW with neither (no TIFF header, no size in LibRaw's metadata) is
+  // still taken as halved: LibRaw halves the mosaic data most RAWs carry.
+  reset({ result: cloneRawResult(fixture), metaWidth: 0, metaHeight: 0 });
+  const mosaic = await loadRawFile(makeContainer().buffer, 'frame.nef', { halfSize: true, outputBps: 16, suppressSensorDefects: false });
+  assert.deepEqual(mosaic.__fullSize, { width: 128, height: 96 });
+  assert.equal(mosaic.__decodeScale, 0.5);
+}
+{
   // A failed decode still reports the release (sequential stage 2 starts there).
   reset({ result: {} });
   const released = [];

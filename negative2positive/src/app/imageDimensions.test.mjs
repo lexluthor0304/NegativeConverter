@@ -1,6 +1,14 @@
 import assert from 'node:assert/strict';
-import { parseImageDimensions, imagePixelsForBatch, imagePixelsWithSiblings, rememberImageDimensions, UNKNOWN_IMAGE_PIXELS } from './imageDimensions.js';
+import {
+  parseImageDimensions, readImageHeaderDimensions, imagePixelsForBatch, imagePixelsWithSiblings, rememberImageDimensions,
+  halfDecodeFullSize, UNKNOWN_IMAGE_PIXELS, PHOTOMETRIC_CFA, PHOTOMETRIC_LINEAR_RAW
+} from './imageDimensions.js';
 import { planBatchParallelism } from './batchExportScheduler.js';
+import { buildLinearDngParts } from './linearDng.js';
+globalThis.ImageData ||= class ImageData {
+  constructor(data, width, height) { this.data = data; this.width = width; this.height = height; }
+};
+const { reducedTileGeometry, renderReducedGeometry } = await import('./reducedGeometry.js');
 const png = new Uint8Array(24);
 const pv = new DataView(png.buffer);
 pv.setUint32(0, 0x89504e47); pv.setUint32(4, 0x0d0a1a0a);
@@ -44,4 +52,72 @@ assert.equal(await imagePixelsForBatch(unknown), 12_000_000);
 let bytesRead = 0;
 await imagePixelsForBatch({name:'large.png', slice(start,end) { bytesRead += end-start; return new Blob([png]); }});
 assert.equal(bytesRead, 256*1024);
+
+// The full size behind a half-size LibRaw decode (#229 review R1-080). LibRaw
+// halves only mosaic data: a decode at the reported size (LibRaw's metadata,
+// or the header's raw IFD), or of a LinearRaw IFD, is its own full size,
+// never twice it; one at half the reported size has that size.
+assert.deepEqual(halfDecodeFullSize(6000, 4000, 6000, 4000), { width: 6000, height: 4000 }, 'unshrunk: not doubled');
+assert.deepEqual(halfDecodeFullSize(4000, 6000, 6000, 4000), { width: 4000, height: 6000 }, 'unshrunk, the report the other way round');
+assert.deepEqual(halfDecodeFullSize(6001, 3999, 6000, 4000), { width: 6001, height: 3999 }, 'within a pixel');
+assert.deepEqual(halfDecodeFullSize(3000, 2000, 6000, 4000), { width: 6000, height: 4000 }, 'halved');
+assert.deepEqual(halfDecodeFullSize(2000, 3000, 6000, 4000), { width: 4000, height: 6000 }, 'halved, the report the other way round');
+assert.deepEqual(halfDecodeFullSize(3000, 2000), { width: 6000, height: 4000 }, 'no report: taken as halved');
+assert.deepEqual(halfDecodeFullSize(240, 160, 0, 0, { photometric: PHOTOMETRIC_LINEAR_RAW }), { width: 240, height: 160 }, 'a LinearRaw IFD is never halved');
+assert.deepEqual(halfDecodeFullSize(120, 80, 240, 160, { photometric: PHOTOMETRIC_CFA }), { width: 240, height: 160 }, 'a CFA IFD is');
+
+// The app's own LinearRaw DNG export, 240x160, re-imported with a recipe
+// whose tile takes a half-size decode (#247 1b). LibRaw cannot halve it and
+// returns the 240x160 frame (libraw-wasm 1.6.0: metadata 240x160, filters 0),
+// so the decode is the full frame, with LibRaw's size or the header's, and
+// the tile shows the recipe's crop. A doubled base size (twice the decode,
+// what was assumed) framed the region at half the crop's offset and size.
+{
+  const width = 240, height = 160;
+  const linear = new Uint16Array(width * height * 3);
+  const rgba16 = new Uint16Array(width * height * 4);
+  const rgba8 = new Uint8ClampedArray(width * height * 4);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const rgb = [x * 256, y * 256, 4096];
+      for (let c = 0; c < 3; c++) {
+        linear[(y * width + x) * 3 + c] = rgb[c];
+        rgba16[(y * width + x) * 4 + c] = rgb[c];
+        rgba8[(y * width + x) * 4 + c] = rgb[c] >>> 8;
+      }
+      rgba16[(y * width + x) * 4 + 3] = 65535;
+      rgba8[(y * width + x) * 4 + 3] = 255;
+    }
+  }
+  const parts = buildLinearDngParts({ width, height, data: linear });
+  const dng = new Uint8Array(parts.reduce((n, part) => n + part.length, 0));
+  let at = 0;
+  for (const part of parts) { dng.set(part, at); at += part.length; }
+  const header = parseImageDimensions(dng.buffer, { raw: true });
+  assert.deepEqual(header, { width, height, photometric: PHOTOMETRIC_LINEAR_RAW });
+  assert.deepEqual(await readImageHeaderDimensions(new File([dng], 'L1000617-positive.dng'), { raw: true }), header);
+  // LibRaw's half-size result: the frame itself (here its RGBA planes).
+  const decoded = new ImageData(rgba8, width, height);
+  decoded.__image16 = { width, height, data: rgba16 };
+  const recipe = { rotationAngle: 0, mirrored: false, cropRegion: { left: 60, top: 40, width: 96, height: 64 } };
+  const tileOf = (baseSize) => {
+    const frame = reducedTileGeometry(baseSize, recipe, 288);
+    return renderReducedGeometry(decoded, recipe, { step: frame.step, fullWidth: baseSize.width, fullHeight: baseSize.height });
+  };
+  for (const [label, full] of [
+    ['LibRaw\'s size', halfDecodeFullSize(width, height, width, height)],
+    ['the header\'s size', halfDecodeFullSize(width, height, header.width, header.height, { photometric: header.photometric })]
+  ]) {
+    assert.deepEqual(full, { width, height }, `${label}: the decode is the full frame`);
+    const tile = tileOf(full);
+    assert.deepEqual([tile.width, tile.height], [96, 64], `${label}: the crop's size`);
+    for (const [x, y] of [[0, 0], [95, 0], [0, 63], [95, 63], [40, 30]]) {
+      const i = (y * tile.width + x) * 4;
+      assert.deepEqual([tile.__image16.data[i], tile.__image16.data[i + 1]], [(60 + x) * 256, (40 + y) * 256], `${label}: tile pixel ${x},${y}`);
+    }
+  }
+  const doubled = tileOf({ width: width * 2, height: height * 2 });
+  assert.deepEqual([doubled.width, doubled.height], [48, 32], 'a doubled base size frames half the crop');
+  assert.deepEqual([doubled.__image16.data[0], doubled.__image16.data[1]], [30 * 256, 20 * 256], 'at half its offset');
+}
 console.log('Batch dimensions: compressed images, TIFF endianness/RAW previews, truncated headers and bounded IO passed');

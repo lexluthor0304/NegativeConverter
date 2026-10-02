@@ -52,7 +52,8 @@ stage 2 to crop mode or a failure.
   runs it. `loadRawFile` no longer derives half size or 8-bit output from the
   byte size or `preview`; the caller states them (`preview` only shortens the
   timeouts). The result carries `__decodeScale` 0.5 and `__fullSize` (LibRaw's
-  metadata size, else twice its own). A result LibRaw did not halve (LinearRaw)
+  metadata size, else the file header's raw IFD, else twice its own). A result
+  LibRaw did not halve (LinearRaw: at the reported size, or of a LinearRaw IFD)
   carries neither. It is logged and still provisional, since it had no defect
   pass.
 - **Stage 2**: a full decode (`loadRawImageData`) of a second
