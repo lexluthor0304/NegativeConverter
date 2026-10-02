@@ -976,8 +976,9 @@ for (const [format, bitDepth] of [['jpeg', 8], ['png', 8], ['tiff', 16], ['png',
     return pool;
   };
   const negativeSettings = { filmType: 'color', colorModel: 'standard', filmBase: { r: 210, g: 140, b: 90 } };
-  const run = async ({ format, bitDepth, mode, gainMap = 'off', frames = 1, role = 'derived' }) => {
-    const f = createContext({ gainMap });
+  // `f`: a page that ran batches before (the context of an earlier run).
+  const run = async ({ format, bitDepth, mode, gainMap = 'off', frames = 1, role = 'derived', f: page = null }) => {
+    const f = page || createContext({ gainMap });
     f.context.safeStorageGet = (key) => (key === 'nc_batch_pipeline_v1' ? mode : key === 'nc_hdr_gain_map_v1' ? gainMap : null);
     // Each lane decodes its own frame here: no decode-ahead, whichever of a
     // lane's admission (#258's memory budget) and the next frame's offer
@@ -1006,7 +1007,7 @@ for (const [format, bitDepth] of [['jpeg', 8], ['png', 8], ['tiff', 16], ['png',
     const written = [];
     const result = await f.context.runBatchExport(jobs, { exportInfo, sink: async (job, blob) => { written.push(await stubBlobText(blob)); } });
     assert.equal(result.successCount, frames);
-    return { written, kinds, diagnostics: f.context.batchPipelineDiagnostics };
+    return { written, kinds, diagnostics: f.context.batchPipelineDiagnostics, f };
   };
   try {
     for (const [format, bitDepth, gainMap, expectKind] of [
@@ -1023,6 +1024,29 @@ for (const [format, bitDepth] of [['jpeg', 8], ['png', 8], ['tiff', 16], ['png',
       assert.deepEqual(banded.kinds, [expectKind], label);
       if (expectKind === 'resident') assert.equal(banded.diagnostics.residentFrames, 1, `${label}: Step 3 on the resident bands`);
       assert.ok(same(banded.written[0], serial.written[0]), `${label}: bytes == serial`);
+    }
+    // `residentFrames` and `bands` describe the last batch, as `last` does
+    // (the batch-pipeline smoke fails on a staged batch that kept no frame's
+    // bands, #229 review R2-066): in one page, a batch whose frame is
+    // assembled after one that kept its bands reports none, and a batch
+    // without the band pool reports no pool; `batches` adds up.
+    {
+      created.length = 0;
+      const resident = await run({ format: 'tiff', bitDepth: 16, mode: null });
+      assert.deepEqual(resident.kinds, ['resident']);
+      assert.equal(resident.diagnostics.residentFrames, 1);
+      assert.equal(resident.diagnostics.bands.resident, 1);
+      const assembled = await run({ format: 'jpeg', bitDepth: 8, mode: null, gainMap: 'on', f: resident.f });
+      assert.deepEqual(assembled.kinds, ['assembled']);
+      assert.equal(assembled.diagnostics.batches, 2, 'one page, two batches');
+      assert.equal(assembled.diagnostics.residentFrames, 0, 'the last batch ran no Step 3 on resident bands');
+      assert.equal(assembled.diagnostics.bands.frames, 1, 'the last batch\'s pool converted its frame');
+      assert.equal(assembled.diagnostics.bands.resident, 0, 'and kept none');
+      const serial = await run({ format: 'tiff', bitDepth: 16, mode: 'serial', f: resident.f });
+      assert.equal(serial.diagnostics.batches, 3);
+      assert.equal(serial.diagnostics.bands, null, 'the last batch had no band pool');
+      assert.equal(serial.diagnostics.residentFrames, 0);
+      assert.equal(created.length, 2, 'a pool for each staged batch');
     }
     // A band worker crash: the lane converts the frame, and the pool is not
     // used for the next one. The base (not released) was only lent.
