@@ -3,7 +3,9 @@
 // outlives the worker that made it, or that a transferred plane really leaves
 // the page. Part 1 runs the real bridge and worker; part 2 exports through the
 // Studio on a generated 3.8 MP 16-bit frame (above the 1 MP worker
-// threshold, and large enough for a separate display preview).
+// threshold, and large enough for a separate display preview); part 3 exports
+// a tilted frame that the import straightens and crops, whose whole rotated
+// frame no export and no plane-release probe may build (#244, #250).
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -11,24 +13,17 @@ import { crc32, deflateSync } from 'node:zlib';
 
 const ready = `document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy`;
 
-// A 16-bit RGB PNG, so the frame carries a genuine 16-bit plane (8-bit
-// sources are never handed to the conversion lane).
-function writeNegativeFixture(dir) {
-  const width = 2400;
-  const height = 1600;
+// A 16-bit RGB PNG (filter 0 rows) from a per-pixel function.
+function writePng16(path, width, height, pixel) {
   const raw = Buffer.alloc((width * 6 + 1) * height);
   for (let y = 0; y < height; y++) {
     const row = y * (width * 6 + 1);
-    raw[row] = 0;
     for (let x = 0; x < width; x++) {
-      const t = x / (width - 1) * 0.65 + y / (height - 1) * 0.35;
-      // An orange-masked negative with a soft vignette and some texture.
-      const v = 1 - 0.18 * (((x - width / 2) / width) ** 2 + ((y - height / 2) / height) ** 2);
-      const grain = ((x * 7919 + y * 104729) % 97) - 48;
+      const [r, g, b] = pixel(x, y);
       const o = row + 1 + x * 6;
-      raw.writeUInt16BE(Math.max(0, Math.min(65535, Math.round((60000 - t * 30000) * v + grain))), o);
-      raw.writeUInt16BE(Math.max(0, Math.min(65535, Math.round((43000 - t * 24000) * v + grain))), o + 2);
-      raw.writeUInt16BE(Math.max(0, Math.min(65535, Math.round((30000 - t * 17000) * v + grain))), o + 4);
+      raw.writeUInt16BE(r, o);
+      raw.writeUInt16BE(g, o + 2);
+      raw.writeUInt16BE(b, o + 4);
     }
   }
   const chunk = (type, data) => {
@@ -44,16 +39,84 @@ function writeNegativeFixture(dir) {
   ihdr.writeUInt32BE(height, 4);
   ihdr[8] = 16; // bit depth
   ihdr[9] = 2; // RGB
-  const png = Buffer.concat([
+  writeFileSync(path, Buffer.concat([
     Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
     chunk('IHDR', ihdr),
     chunk('IDAT', deflateSync(raw, { level: 3 })),
     chunk('IEND', Buffer.alloc(0))
-  ]);
-  const path = join(dir, 'ownership-negative-16.png');
-  writeFileSync(path, png);
+  ]));
   return path;
 }
+
+// A 16-bit RGB PNG, so the frame carries a genuine 16-bit plane (8-bit
+// sources are never handed to the conversion lane).
+function writeNegativeFixture(dir) {
+  const width = 2400;
+  const height = 1600;
+  const clamp = value => Math.max(0, Math.min(65535, Math.round(value)));
+  return writePng16(join(dir, 'ownership-negative-16.png'), width, height, (x, y) => {
+    const t = x / (width - 1) * 0.65 + y / (height - 1) * 0.35;
+    // An orange-masked negative with a soft vignette and some texture.
+    const v = 1 - 0.18 * (((x - width / 2) / width) ** 2 + ((y - height / 2) / height) ** 2);
+    const grain = ((x * 7919 + y * 104729) % 97) - 48;
+    return [clamp((60000 - t * 30000) * v + grain), clamp((43000 - t * 24000) * v + grain), clamp((30000 - t * 17000) * v + grain)];
+  });
+}
+
+// The geometry smoke's scan: an orange rebate around a dark, textured frame
+// turned by 4 degrees, which the import straightens and crops.
+function writeTiltedFixture(dir) {
+  const W = 2400, H = 1700, frameW = 1800, frameH = 1200, angle = 4 * Math.PI / 180;
+  const cos = Math.cos(angle), sin = Math.sin(angle);
+  return writePng16(join(dir, 'ownership-tilted-16.png'), W, H, (x, y) => {
+    const dx = x + 0.5 - W / 2, dy = y + 0.5 - H / 2;
+    const u = dx * cos + dy * sin, v = -dx * sin + dy * cos;
+    if (Math.abs(u) < frameW / 2 && Math.abs(v) < frameH / 2) {
+      const n = ((Math.floor(u / 6) * 17 + Math.floor(v / 6) * 23) % 90 + 90) % 90;
+      return [(40 + n) * 257 + (x % 97), Math.round((22 + n / 2) * 257) + (y % 89), Math.round((18 + n / 3) * 257) + ((x + y) % 83)];
+    }
+    return [232 * 257 + (y % 61), 155 * 257 + (x % 53), 91 * 257 + 7];
+  });
+}
+
+// Records the export requests, the downloads and the export workers the
+// page creates (window.__ownershipProbe); `restore()` takes it out again.
+const INSTALL_OWNERSHIP_PROBE = `(() => {
+  const probe = window.__ownershipProbe = { requests: [], downloads: [], exportWorkers: [] };
+  try { delete window.showSaveFilePicker; } catch {}
+  window.showSaveFilePicker = undefined;
+  const OriginalWorker = window.Worker;
+  window.Worker = class extends OriginalWorker {
+    constructor(url, options) {
+      super(url, options);
+      if (String(url).includes('exportWorker')) probe.exportWorkers.push(this);
+    }
+  };
+  const post = OriginalWorker.prototype.postMessage;
+  OriginalWorker.prototype.postMessage = function (message, transfers) {
+    if (message && typeof message.type === 'string') {
+      const list = Array.isArray(transfers) ? transfers : (transfers && transfers.transfer) || [];
+      probe.requests.push({ type: message.type, gain: Boolean(message.gainMap), transfers: list.length,
+        handoff: message.returnSource ? 'lend' : message.options && message.options.ownedSource ? 'consume' : null,
+        releaseAfter: Boolean(message.releaseAfter) });
+    }
+    return post.apply(this, arguments);
+  };
+  const terminate = OriginalWorker.prototype.terminate;
+  OriginalWorker.prototype.terminate = function () { this.__terminated = true; return terminate.call(this); };
+  const click = HTMLAnchorElement.prototype.click;
+  HTMLAnchorElement.prototype.click = function () {
+    if (!this.download || !this.href.startsWith('blob:')) return click.call(this);
+    probe.downloads.push(fetch(this.href).then(r => r.blob()));
+  };
+  probe.restore = () => {
+    window.Worker = OriginalWorker;
+    OriginalWorker.prototype.postMessage = post;
+    OriginalWorker.prototype.terminate = terminate;
+    HTMLAnchorElement.prototype.click = click;
+  };
+  try { localStorage.setItem('nc_hdr_gain_map_v1', 'on'); } catch {}
+})()`;
 
 export async function runExportOwnershipSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port }) {
   await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en` });
@@ -188,6 +251,44 @@ export async function runExportOwnershipSmoke({ send, evaluate, waitFor, wait, f
   if (!worker.pngBytesEqual || !worker.jpegBytesEqual) console.log('note: Chrome worker encodes differ in file bytes only (decoded pixels equal)');
   if (worker.jpegIccProfiles > 1) console.log(`note: JPEG carries ${worker.jpegIccProfiles} ICC profiles on the worker and canvas paths alike (pre-existing, audit backlog)`);
 
+  // The page's accessibility bridge mirrors the bit-depth buttons' `disabled`
+  // class into the `disabled` property on the next animation frame, so after
+  // a JPEG the 16-bit button stays disabled for a frame: a click before that
+  // would be ignored.
+  const setFormat = (format, depth) => evaluate(`(async () => {
+    document.querySelector('.format-btn[data-format="${format}"]').click();
+    const depth = document.querySelector('.bitdepth-btn[data-bitdepth="${depth}"]');
+    for (let i = 0; i < 50 && depth && depth.disabled && !depth.classList.contains('disabled'); i++) {
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    if (depth && !depth.classList.contains('disabled')) depth.click();
+    return document.querySelector('.bitdepth-btn.active')?.dataset.bitdepth;
+  })()`);
+  const exportOnce = async (label, button = 'exportSingleBtn') => {
+    const index = await evaluate(`(() => { const p = window.__ownershipProbe; p.requests = []; p.workersBefore = p.exportWorkers.length; document.getElementById('${button}').click(); return p.downloads.length; })()`);
+    await waitFor(label, `window.__ownershipProbe.downloads.length > ${index} && !document.getElementById('exportSingleBtn').disabled && !document.body.dataset.studioBusy`, 180_000);
+    await wait(1200);
+    return evaluate(`(async () => {
+      const p = window.__ownershipProbe;
+      const blob = await p.downloads[${index}];
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+      let hash = 0;
+      for (let i = 0; i < bytes.length; i++) hash = (Math.imul(hash, 31) + bytes[i]) | 0;
+      const created = p.exportWorkers.slice(p.workersBefore);
+      const geometry = window.__ncGeometry?.diagnostics;
+      return {
+        type: blob.type, size: bytes.length, hash,
+        requests: p.requests.map(r => r.type + (r.gain ? '+gain' : '')),
+        conversions: p.requests.filter(r => r.type === 'convert').map(r => ({ transfers: r.transfers, handoff: r.handoff, releaseAfter: r.releaseAfter })),
+        encodeTransfers: p.requests.filter(r => r.type === 'encodeImage').map(r => r.transfers),
+        workersCreated: created.length,
+        workersAlive: created.filter(w => !w.__terminated).length,
+        frameSyncReads: geometry ? geometry.frameSyncReads : null,
+        mainRotations: geometry ? geometry.mainRotations : null
+      };
+    })()`);
+  };
+
   // ---- 2. Studio exports ----
   const dir = mkdtempSync(join(tmpdir(), 'nc-ownership-'));
   try {
@@ -196,76 +297,7 @@ export async function runExportOwnershipSmoke({ send, evaluate, waitFor, wait, f
     const input = await send('DOM.querySelector', { nodeId: doc.result.root.nodeId, selector: '#fileInput' });
     await send('DOM.setFileInputFiles', { files: [fixture], nodeId: input.result.nodeId });
     await waitFor('ownership fixture ready', ready, 180_000);
-    await evaluate(`(() => {
-      const probe = window.__ownershipProbe = { requests: [], downloads: [], exportWorkers: [] };
-      try { delete window.showSaveFilePicker; } catch {}
-      window.showSaveFilePicker = undefined;
-      const OriginalWorker = window.Worker;
-      window.Worker = class extends OriginalWorker {
-        constructor(url, options) {
-          super(url, options);
-          if (String(url).includes('exportWorker')) probe.exportWorkers.push(this);
-        }
-      };
-      const post = OriginalWorker.prototype.postMessage;
-      OriginalWorker.prototype.postMessage = function (message, transfers) {
-        if (message && typeof message.type === 'string') {
-          const list = Array.isArray(transfers) ? transfers : (transfers && transfers.transfer) || [];
-          probe.requests.push({ type: message.type, gain: Boolean(message.gainMap), transfers: list.length,
-            handoff: message.returnSource ? 'lend' : message.options && message.options.ownedSource ? 'consume' : null,
-            releaseAfter: Boolean(message.releaseAfter) });
-        }
-        return post.apply(this, arguments);
-      };
-      const terminate = OriginalWorker.prototype.terminate;
-      OriginalWorker.prototype.terminate = function () { this.__terminated = true; return terminate.call(this); };
-      const click = HTMLAnchorElement.prototype.click;
-      HTMLAnchorElement.prototype.click = function () {
-        if (!this.download || !this.href.startsWith('blob:')) return click.call(this);
-        probe.downloads.push(fetch(this.href).then(r => r.blob()));
-      };
-      probe.restore = () => {
-        window.Worker = OriginalWorker;
-        OriginalWorker.prototype.postMessage = post;
-        OriginalWorker.prototype.terminate = terminate;
-        HTMLAnchorElement.prototype.click = click;
-      };
-      try { localStorage.setItem('nc_hdr_gain_map_v1', 'on'); } catch {}
-    })()`);
-    // The page's accessibility bridge mirrors the bit-depth buttons' `disabled`
-    // class into the `disabled` property on the next animation frame, so after
-    // a JPEG the 16-bit button stays disabled for a frame: a click before that
-    // would be ignored.
-    const setFormat = (format, depth) => evaluate(`(async () => {
-      document.querySelector('.format-btn[data-format="${format}"]').click();
-      const depth = document.querySelector('.bitdepth-btn[data-bitdepth="${depth}"]');
-      for (let i = 0; i < 50 && depth && depth.disabled && !depth.classList.contains('disabled'); i++) {
-        await new Promise(resolve => setTimeout(resolve, 20));
-      }
-      if (depth && !depth.classList.contains('disabled')) depth.click();
-      return document.querySelector('.bitdepth-btn.active')?.dataset.bitdepth;
-    })()`);
-    const exportOnce = async (label, button = 'exportSingleBtn') => {
-      const index = await evaluate(`(() => { const p = window.__ownershipProbe; p.requests = []; p.workersBefore = p.exportWorkers.length; document.getElementById('${button}').click(); return p.downloads.length; })()`);
-      await waitFor(label, `window.__ownershipProbe.downloads.length > ${index} && !document.getElementById('exportSingleBtn').disabled && !document.body.dataset.studioBusy`, 180_000);
-      await wait(1200);
-      return evaluate(`(async () => {
-        const p = window.__ownershipProbe;
-        const blob = await p.downloads[${index}];
-        const bytes = new Uint8Array(await blob.arrayBuffer());
-        let hash = 0;
-        for (let i = 0; i < bytes.length; i++) hash = (Math.imul(hash, 31) + bytes[i]) | 0;
-        const created = p.exportWorkers.slice(p.workersBefore);
-        return {
-          type: blob.type, size: bytes.length, hash,
-          requests: p.requests.map(r => r.type + (r.gain ? '+gain' : '')),
-          conversions: p.requests.filter(r => r.type === 'convert').map(r => ({ transfers: r.transfers, handoff: r.handoff, releaseAfter: r.releaseAfter })),
-          encodeTransfers: p.requests.filter(r => r.type === 'encodeImage').map(r => r.transfers),
-          workersCreated: created.length,
-          workersAlive: created.filter(w => !w.__terminated).length
-        };
-      })()`);
-    };
+    await evaluate(INSTALL_OWNERSHIP_PROBE);
     const exportTypes = (result) => result.requests.filter(t => !['convert', 'detectDust', 'progress'].includes(t));
     const evictable = () => evaluate(`(async () => {
       const { listEvictablePlanes } = await import('/src/app/evictablePlanes.js');
@@ -328,4 +360,73 @@ export async function runExportOwnershipSmoke({ send, evaluate, waitFor, wait, f
     rmSync(dir, { recursive: true, force: true });
   }
   console.log('ok: PNG8/JPEG encode in the worker with canvas parity; fused TIFF16; per-export workers end with the export; planes are handed over and released');
+
+  // ---- 3. A tilted photo, straightened and cropped on import ----
+  // Beside the crop state.originalImageData is a frame descriptor (#244):
+  // reading its pixels builds the whole rotated frame on the main thread
+  // (renderGeometryFrame, seconds at 60 MP) and keeps it. Every export ends
+  // by releasing its planes and every transferPlane hand-off asks the
+  // plane-release probe (#250) what the editor holds; neither may build the
+  // frame. frameSyncReads and mainRotations stay where the import left them,
+  // so renderGeometryFrame never runs (no long task from it), and no plane
+  // of the rotated frame's size is kept. The files are listed by hash: a
+  // build whose probe built the frame writes the same bytes.
+  const tiltedDir = mkdtempSync(join(tmpdir(), 'nc-ownership-tilted-'));
+  try {
+    const fixture = writeTiltedFixture(tiltedDir);
+    await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en` });
+    await waitFor('tilted ownership boot', `!!document.getElementById('studioImportAutoCrop') && !!window.__ncGeometry`);
+    await installDialogAutoAccept();
+    await wait(300);
+    await evaluate(`(() => { const crop = document.getElementById('studioImportAutoCrop'); if (!crop.checked) crop.click(); })()`);
+    const doc = await send('DOM.getDocument');
+    const input = await send('DOM.querySelector', { nodeId: doc.result.root.nodeId, selector: '#fileInput' });
+    await send('DOM.setFileInputFiles', { files: [fixture], nodeId: input.result.nodeId });
+    await waitFor('tilted fixture straightened and converted', `${ready} && !window.__ncGeometry.pending() && document.getElementById('studioFilename').textContent === 'ownership-tilted-16.png'`, 180_000);
+    await wait(500);
+    const inspectTilted = `({ geometry: window.__ncGeometry.inspect(), diagnostics: { ...window.__ncGeometry.diagnostics },
+      status: document.getElementById('studioFrameNotice').dataset.status })`;
+    const imported = await evaluate(inspectTilted);
+    if (imported.status !== 'crop' || !imported.geometry.descriptor || Math.abs(Math.abs(imported.geometry.rotationAngle) - 4) > 0.5) {
+      fail('the tilted fixture was not straightened and cropped on import: ' + JSON.stringify(imported));
+    }
+    await evaluate(INSTALL_OWNERSHIP_PROBE);
+    const exports = {};
+    await setFormat('png', 8);
+    exports.png8 = await exportOnce('tilted PNG8 export');
+    await setFormat('jpeg', 8);
+    exports.jpeg = await exportOnce('tilted JPEG export');
+    if (await setFormat('tiff', 16) !== '16') fail('could not select a 16-bit TIFF export');
+    exports.tiff16 = await exportOnce('tilted TIFF16 export');
+    await setFormat('png', 8);
+    exports.batch = await exportOnce('tilted batch export', 'exportAllBtn');
+    exports.contactSheet = await exportOnce('tilted contact sheet', 'exportContactSheetBtn');
+    const after = await evaluate(inspectTilted);
+    // Everything is printed before it is checked, so a failing build still
+    // lists its file hashes for comparison.
+    const files = Object.fromEntries(Object.entries(exports).map(([name, r]) => [name, { type: r.type, size: r.size, hash: r.hash }]));
+    console.log('tilted exports:', JSON.stringify(files));
+    const counts = Object.fromEntries(Object.entries(exports).map(([name, r]) => [name, [r.frameSyncReads, r.mainRotations]]));
+    console.log('tilted geometry (frameSyncReads, mainRotations after each export):', JSON.stringify({
+      imported: [imported.diagnostics.frameSyncReads, imported.diagnostics.mainRotations], ...counts,
+      frameSized: after.geometry.frameSized, descriptor: after.geometry.descriptor
+    }));
+    const kinds = { png8: /png/, jpeg: /jpeg/, tiff16: /tiff/, batch: /png/, contactSheet: /png/ };
+    for (const [name, r] of Object.entries(exports)) {
+      if (!kinds[name].test(r.type) || !(r.size > 0)) fail(`the tilted ${name} export failed: ` + JSON.stringify(r));
+    }
+    if (!exports.jpeg.requests.includes('encodeImage+gain')) fail('the tilted JPEG did not carry its gain map: ' + JSON.stringify(exports.jpeg));
+    if (!exports.tiff16.requests.includes('adjust16AndEncode')) fail('the tilted TIFF16 did not use the fused request: ' + JSON.stringify(exports.tiff16));
+    for (const [name, r] of Object.entries(exports)) {
+      if (r.frameSyncReads !== imported.diagnostics.frameSyncReads || r.mainRotations !== imported.diagnostics.mainRotations) {
+        fail(`the tilted ${name} export built the rotated frame on the main thread: ` + JSON.stringify({ imported: imported.diagnostics, after: after.diagnostics }));
+      }
+    }
+    if (after.diagnostics.pendingReads !== imported.diagnostics.pendingReads) fail('an export read geometry planes while a build was pending: ' + JSON.stringify(after.diagnostics));
+    if (!after.geometry.descriptor || after.geometry.frameSized !== 0) fail('a plane of the rotated frame stayed reachable after the exports: ' + JSON.stringify(after.geometry));
+  } finally {
+    await evaluate(`(() => { window.__ownershipProbe?.restore(); document.querySelector('.format-btn[data-format="png"]').click(); })()`).catch(() => {});
+    rmSync(tiltedDir, { recursive: true, force: true });
+  }
+  console.log('ok: a straightened, cropped photo exports PNG8, JPEG, TIFF16, Export All and a contact sheet without building its rotated frame');
 }
