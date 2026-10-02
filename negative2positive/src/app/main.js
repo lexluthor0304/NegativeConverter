@@ -5411,10 +5411,14 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
     // Step 3: the adjusted frame on screen in CPU modes, never the unadjusted
     // positive; null while WebGL presents or before a CPU frame is drawn.
-    // Steps 1-2: the negative.
+    // Steps 1-2: the negative. Null when the working planes have no pixels
+    // to count (R1-068): the size-only stand-in a photo switch leaves while
+    // the next photo decodes, or a frame descriptor (#244), whose pixels
+    // would be built on this thread. The last histogram stays then.
     function getCurrentHistogramSource() {
       if (state.currentStep >= 3 && state.processedImageData) return state.displayImageData || null;
-      return state.croppedImageData || state.originalImageData || null;
+      const negative = state.croppedImageData || state.originalImageData;
+      return negative && !isReleasedPlane(negative) && !isGeometryFrame(negative) ? negative : null;
     }
 
     function redrawHistogramIfPossible() {

@@ -624,4 +624,39 @@ for (const step of [1, 3]) {
   assert.equal(paints.plain, 0, 'every paint went through the border');
 }
 
+// ---- A histogram redraw (a window resize) while the planes have no pixels
+// (R1-068): the last histogram stays ----
+{
+  const { Histogram } = await import('../silvercore/ui/Histogram.js');
+  const base = makeBase(64, 44, 53);
+  const h = createHarness(base), c = h.context;
+  // main.js's histogram, drawing into a canvas that ignores the strokes.
+  const histogram = new Histogram({ width: 256, height: 64, getContext: () => new Proxy({}, { get: () => () => {} }) });
+  const draw = histogram.draw.bind(histogram);
+  let draws = 0;
+  histogram.draw = image => { draws++; return draw(image); };
+  h.target.histogram = histogram;
+  vm.runInContext(['getCurrentHistogramSource', 'redrawHistogramIfPossible', 'renderHistogram'].map(functionSource).join('\n'), c);
+  c.restoreSettings({ rotationAngle: 1.3, mirrored: false, cropRegion: crop(5, 4) });
+  await h.state.geometryReady;
+  c.redrawHistogramIfPossible();
+  assert.equal(draws, 1, 'the negative is drawn');
+  const cold = { ...c.captureSnapshot('photoSession'), refs: { cold: true } };
+  // A photo switch's decode: the outgoing planes are a size-only stand-in.
+  c.releaseOutgoingPhotoPlanes();
+  c.redrawHistogramIfPossible();
+  assert.equal(draws, 1, 'a released stand-in is not read');
+  // A session kept without its planes reopens: a whole-frame descriptor
+  // while the pool rebuilds the crop.
+  const restoring = c.restoreSnapshot(cold);
+  assert.ok(c.isGeometryFrame(h.state.originalImageData) && !h.state.croppedImageData);
+  c.redrawHistogramIfPossible();
+  assert.equal(draws, 1, 'a frame descriptor is not read');
+  assert.equal(h.target.geometryDiagnostics.frameSyncReads, 0, 'its frame was not built on this thread');
+  await restoring;
+  c.redrawHistogramIfPossible();
+  assert.equal(draws, 2, 'the rebuilt planes are drawn');
+  assert.equal(h.target.geometryDiagnostics.frameSyncReads, 0);
+}
+
 console.log('geometry history tests passed');
