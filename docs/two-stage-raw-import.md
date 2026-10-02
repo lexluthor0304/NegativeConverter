@@ -166,7 +166,7 @@ the stand-in:
 | single export (DNG included), `ensureFullResolutionReadyForExport` (dust detection, AI brush plane) | waits behind the export overlay |
 | Export All, ZIP export, contact sheet, settings sync, roll reference, Save settings | wait before reading the current photo's recipe |
 | Analyze roll, Auto Frame and Auto Frame Selected, Apply film type to roll, Save Project | wait with "Preparing full resolution…" before they persist the current photo's recipe (`persistCurrentFileSettings` refuses in the window) and read it back or detect its frame |
-| AI brush, dust brush, "Use as flat field" | wait with "Preparing full resolution…" |
+| AI brush, dust brush, "Use as flat field", and "Apply flat field to selected" (and "Find blank frame") when a photo without settings gets defaults measured on the open frame (`flatFieldDefaultsImage`) | wait with "Preparing full resolution…" |
 | automatic roll analysis, "These are positives", lanes, prefetch | `studioBackgroundReady` / `foregroundBusyForBackground` wait |
 | photo sessions, roll samples | refuse the stand-in (`rememberPhotoSession`, `rememberPhotoBase`, `canReuseLoadedRollSource`) |
 
@@ -226,7 +226,8 @@ quiet.
   Selected, Apply film type to roll and Save Project clicked in the window
   wait for the exact photo and end as on one decode (on one decode as
   before); crop mode and the automatic roll import (fake timers) still
-  complete. Each window case has a control without the fix.
+  complete. Apply flat field to selected measures new photos' defaults on
+  the full decode. Each window case has a control without the fix.
 - `restartRender.test.mjs`: the provisional pass holds its side effects back;
   switch-back to a photo left in the window decides as its pass began.
 - `processFileWithSettings.parity.test.mjs`: Export All of a photo left in

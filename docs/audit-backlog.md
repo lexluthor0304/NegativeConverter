@@ -93,7 +93,7 @@ Remaining performance proposals below are not claims of completed work.
 - **medium/bug** — "Find blank frame in selection" never runs: detectBlankFrameInSelection reads `items` and `automatic`, which it does not declare, and throws a ReferenceError on every click  
   `negative2positive/src/app/main.js detectBlankFrameInSelection`  
   Its first lines (`const selectedItems = items || state.fileQueue.filter(...)`, `selectedItems.length < (automatic ? 3 : 2)`) come from runRollAnalysis's signature, but the function takes no parameters, so the promise the click handler drops rejects before anything is selected or decoded; the button shows no result and no message. Present at 1703835. Found while auditing the persist-then-read flows of #255 (review R2-029).  
-  _Suggested fix:_ `const selectedItems = state.fileQueue.filter(item => item.selected); if (selectedItems.length < 2) return;`, a test that runs it with two selected frames, and (#255, review R2-034) the full-decode barrier before flatFieldDefaultsImage reads the open frame.
+  _Suggested fix:_ `const selectedItems = state.fileQueue.filter(item => item.selected); if (selectedItems.length < 2) return;` and a test that runs it with two selected frames. Its full-decode barrier is in place: flatFieldDefaultsImage waits for a two-stage import's full decode before it reads the open frame (#255, review R2-034).
 
 - **medium/quality** — main.js refactor map: 10,779 lines decompose into ~20 cohesive blocks; six can be extracted with almost no coupling _(verified)_  
   `negative2positive/src/app/main.js:76`  

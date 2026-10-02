@@ -26998,10 +26998,14 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     // Files without settings get defaults measured on the open frame; beside
-    // a crop that frame is built in the pool first (#244).
+    // a crop that frame is built in the pool first (#244). It is the full
+    // decode, never a two-stage stand-in (#255): false when that could not be
+    // had (the photo was left, or its full decode failed twice).
     async function flatFieldDefaultsImage(items, sourceFile = null) {
       const needed = items.some(item => !(sourceFile && item.file === sourceFile) && item.file !== state.loadedFile && !item.settings);
-      return needed && state.originalImageData ? geometryFramePixels() : null;
+      if (!needed || !state.originalImageData) return null;
+      if (!await ensureFullDecodeWithNotice('flat-field')) return false;
+      return geometryFramePixels();
     }
 
     async function useCurrentAsFlatField() {
@@ -27024,7 +27028,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (!map) return;
       const targets = state.fileQueue.filter((item) => item.selected && item.file !== currentItem?.file);
       const defaultsImage = await flatFieldDefaultsImage(targets, currentItem?.file || null);
-      if (getCurrentQueueItem() !== currentItem) return;
+      if (defaultsImage === false || getCurrentQueueItem() !== currentItem) return;
       pushUndo('flatField');
       registerFlatField(map);
       const count = applyFlatFieldToItems(map.id, targets, { sourceFile: currentItem?.file || null, defaultsImage });
@@ -27072,7 +27076,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           return;
         }
         const defaultsImage = await flatFieldDefaultsImage(selectedItems, best.item.file);
-        if (!isCurrentLoad(generation)) return;
+        if (defaultsImage === false || !isCurrentLoad(generation)) return;
         pushUndo('flatField');
         const map = buildFlatFieldMap(best.imageData, { source: best.item.file.name });
         registerFlatField(map);
@@ -27097,7 +27101,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const targets = state.fileQueue.filter((item) => item.selected && item.file.name !== source);
       const generation = loadGeneration;
       const defaultsImage = await flatFieldDefaultsImage(targets);
-      if (!isCurrentLoad(generation) || state.flatFieldActiveId !== id) return;
+      if (defaultsImage === false || !isCurrentLoad(generation) || state.flatFieldActiveId !== id) return;
       pushUndo('flatField');
       const count = applyFlatFieldToItems(id, targets, { defaultsImage });
       updateFlatFieldUI();

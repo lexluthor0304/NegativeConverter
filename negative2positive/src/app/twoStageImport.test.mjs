@@ -23,7 +23,9 @@
 //   one decode's recipe plus the edit;
 // - Analyze roll, Auto Frame Selected, Apply film type to roll and Save
 //   Project clicked in the window wait for the exact photo and end as on one
-//   decode; crop mode and the automatic roll import still complete.
+//   decode; crop mode and the automatic roll import still complete;
+// - Apply flat field to selected in the window measures new photos'
+//   defaults on the full decode, as one decode does (control without the fix).
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
@@ -990,6 +992,63 @@ async function automaticRollInWindow({ click }) {
   // photo is exact and supersedes the import, which ends without running.
   const manual = await automaticRollInWindow({ click: true });
   assert.deepEqual([manual.marker.begins, manual.f.target.automaticRollRevision], [0, 1]);
+}
+
+// ---- Apply flat field to selected in the window (#255 review R2-034) -----------------------------
+// Photos without settings get defaults measured on the open frame. In the
+// window that waits for the full decode, so their film base is the full
+// decode's (205 here, the stand-in's 190), as on one decode.
+const OLD_FLAT_FIELD_DEFAULTS = `async function flatFieldDefaultsImage(items, sourceFile = null) {
+      const needed = items.some(item => !(sourceFile && item.file === sourceFile) && item.file !== state.loadedFile && !item.settings);
+      return needed && state.originalImageData ? geometryFramePixels() : null;
+    }`;
+function flatFieldFixture({ twoStage, old = false }) {
+  const f = fixture({ search: twoStage ? '?twoStageMinMp=40&twoStageMode=sequential' : '' });
+  Object.assign(f.state, { flatFields: { ff: { id: 'ff', source: 'blank.dng' } }, flatFieldActiveId: 'ff', flatFieldId: null });
+  f.item.selected = true;
+  f.others = ['B.DNG', 'blank.dng', 'C.DNG'].map(name => ({ file: { name, size: 1 }, selected: true, settings: null, isDirty: false }));
+  f.others[2].settings = { filmBase: { r: 1, g: 1, b: 1 } };
+  f.state.fileQueue.push(...f.others);
+  Object.assign(f.target, {
+    // The working frame of the loaded base (the pool builds it from the base).
+    geometryFramePixels: async () => f.state.loadedBaseImageData,
+    getInterpolatedText: (_key, _values, fallback) => fallback
+  });
+  vm.runInContext(['applyFlatFieldToSelected', 'applyFlatFieldToItems', 'flatFieldDefaultsImage'].map(functionSource).join('\n'), f.context);
+  if (old) vm.runInContext(OLD_FLAT_FIELD_DEFAULTS, f.context);
+  return f;
+}
+{
+  const one = flatFieldFixture({ twoStage: false });
+  await loadedSingle(one);
+  await one.context.applyFlatFieldToSelected();
+  assert.deepEqual([one.others[0].settings.filmBase.r, one.others[0].settings.flatFieldId], [205, 'ff'], 'one decode: defaults measured on the full decode');
+  const f = flatFieldFixture({ twoStage: true });
+  const stage2 = await loadedStandIn(f);
+  f.state.provisional.start = { fresh: false, snapshot: f.context.extractCurrentSettings(), detectFrame: false, readEdge: false };
+  f.state.provisional.settledSnapshot = f.context.extractCurrentSettings();
+  const applying = f.context.applyFlatFieldToSelected();
+  await flush();
+  assert.equal(f.state.fullDecode.status, 'running', 'it waits for stage 2');
+  assert.equal(f.others[0].settings, null, 'nothing is measured on the stand-in');
+  assert.ok(f.toasts.includes('Preparing full resolution…'));
+  stage2.resolve(image(FULL));
+  await applying;
+  assert.equal(f.context.currentPhotoExact(), true);
+  assert.equal(JSON.stringify(f.others[0].settings), JSON.stringify(one.others[0].settings), 'Apply flat field to selected in the window gives one decode\'s defaults');
+  assert.equal(f.others[1].settings, null, 'never on the blank itself');
+  assert.deepEqual([f.others[2].settings.filmBase.r, f.others[2].settings.flatFieldId, f.state.flatFieldId], [1, 'ff', 'ff']);
+  // Nothing needs the open frame: no wait.
+  const settled = flatFieldFixture({ twoStage: true });
+  await loadedStandIn(settled);
+  settled.others[0].selected = false;
+  await settled.context.applyFlatFieldToSelected();
+  assert.deepEqual([settled.state.fullDecode.status, settled.others[2].settings.flatFieldId], ['running', 'ff'], 'photos with settings need no full decode');
+  // Before the barrier the defaults came from the stand-in.
+  const control = flatFieldFixture({ twoStage: true, old: true });
+  await loadedStandIn(control);
+  await control.context.applyFlatFieldToSelected();
+  assert.equal(control.others[0].settings.filmBase.r, 190, 'control: measured on the stand-in');
 }
 
 console.log('twoStageImport: header routing, stage options and start, abort on switch, barrier, retry, exact crop across the swap, history rebase, window edits and the ledger\'s open photo passed');
