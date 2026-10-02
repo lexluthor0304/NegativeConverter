@@ -82,7 +82,7 @@ acceptance extremes, both with strict fp32 and with wider intermediates.
 
 | message | when | returns |
 |---|---|---|
-| `prepare` | a new display preview, film base, flat field or strokes (at idle after an exact frame, or when a draw finds its texture stale) | the pristine plane (film base / flat field) or nothing, the stops, and point samples of both (≤ 24,576 px) for the histogram; for a display target (#248) without compensation, a copy of the display negative the worker resampled from the level, since main holds none |
+| `prepare` | a new display preview, film base, flat field or strokes (at idle after an exact frame, or when a tick or a draw finds its texture stale) | the pristine plane (film base / flat field) or nothing, the stops, and point samples of both (≤ 24,576 px) for the histogram; for a display target (#248) without compensation, a copy of the display negative the worker resampled from the level, since main holds none |
 | `analyze` | the analysis key changed (source, reference sample, border buffer, colour model, pre-saturation, B&W mix, override, film base) | `channelData`, `autoColor`, `positiveAnalysis` |
 | `convert` | the settle frame, every excluded mode, and whenever the GPU cannot draw | today's exact conversion, unchanged |
 
@@ -112,25 +112,42 @@ table is a cached import), `Engine.previewPlan` on an engine seeded from `analyz
 the tone LUT packed into a kept buffer and uploaded with `texSubImage2D` (512 KB), the
 paper LUT, ramps and 3D profile only when they change, uniforms, one draw. The 3D
 profile is fetched and baked at idle (the preset's) or on a preset change, never in
-the draw; a draw that lacks something asks for it and settles with the exact frame.
+the draw.
+
+The GPU takes only a tick it can draw. A texture prepared for another film base,
+flat field, mode or strokes, an analysis of another mode, or a 3D profile not loaded
+make `gpuPreviewCanTake` decline the tick: the worker converts it, as before #239,
+and the missing input is asked for. A profile load or an `analyze` that failed is
+asked again after `GPU_INPUT_RETRY_MS` (5 s), a profile at once when a preset is
+picked and an analysis at once for another key; meanwhile those ticks convert. A draw
+that still fails (a stage that reads neighbours, for one) settles with the exact frame.
 
 The paper LUT build caches its strength-independent part per paper and toning
 (exact), so a toning-strength drag rebuilds it in about 1 ms instead of 5–6 ms.
 
 ## Settle, state and histogram
 
-- The exact frame of the newest settings leaves on commit (slider release, value box,
-  paper and toning selects), 150 ms after the last input, and at once from
-  `flushScheduledCoreReprocess` (every export barrier). When it lands it is applied as
-  before and step3Program takes over.
+- The exact frame of the newest settings leaves on commit, 150 ms after the last
+  input, and at once from `flushScheduledCoreReprocess` (every export barrier) and
+  from a photo switch. Every discrete change is a commit: a slider's release and value
+  box (the enlarger head's too), the paper, toning, film preset, colour model and
+  positive-mode selects, the film-type buttons, a console key or reset, a test-strip
+  patch, Studio's style and colour reset, a recipe, a detected film's preset, and the
+  immediate refreshes (film base, flat field, roll frame, border buffer). When it
+  lands it is applied as before and step3Program takes over.
 - Until then `coreReprocessBusy()` is true (an armed settle or a GPU frame ahead of
   its exact frame), so exports, the photo-session capture and every other barrier wait
-  for the exact frame.
-- An older exact frame never replaces a newer GPU frame. A settle that cannot apply
-  (another photo, a restart, a failure) returns the display to its exact frame.
+  for the exact frame. A photo switch sends it at once and waits, so the photo being
+  left is remembered settled.
+- An older exact frame never replaces a newer GPU frame. After a draw that failed the
+  screen still shows the exact frame, so a superseded exact frame is applied as before
+  #239. A settle that cannot apply (another photo, a restart, a failure) returns the
+  display to its exact frame.
 - GPU frames never reach `processedImageData`, `previewSourceImageData`, the session
   cache, the active tile or the samplers; the retained 16-bit plane (#233) is not
-  committed during a GPU drag.
+  committed during a GPU drag. A release or a commit asks for the plane of the frame
+  that settles it, which is committed as that frame lands, not after the 150 ms idle
+  commit.
 - The histogram of a GPU frame is the CPU chain over the prepared point samples (the
   exact frame's pixels at those points, all stages being pointwise), then Step 3, at
   the same 260 ms throttle.
@@ -209,7 +226,9 @@ fallback keeps one worker; #256 splits export conversions).
 ## Verification
 
 - Node: `silverAdapter.preview.test.mjs`, `conversionWorker.preview.test.mjs`,
-  `conversionWorkerClient.test.mjs`, `gpuPreviewScheduler.test.mjs`, the GPU scenarios
+  `conversionWorkerClient.test.mjs`, `gpuPreviewScheduler.test.mjs` (also main.js's
+  take test, failed draws, retries and every discrete commit, on
+  `gpuSettleHarness.mjs`), `settleOnSwitch.test.mjs`, the GPU scenarios
   in `coreReprocessDispatcher.test.mjs`, `previewShader.test.mjs` (glslc compile when
   installed, the fp32 model sweep), `PaperProfiles.test.mjs`.
 - Chrome: `node scripts/smoke-test.mjs --gpu-preview-only` (offscreen self-test and

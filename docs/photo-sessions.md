@@ -303,7 +303,10 @@ reduced preview-tier drag or a reduced frame still waiting for its normal-size
 tick (#263), nor a full-resolution plane kept while its render waits for idle
 (#237's idle repair window: the plane lags its settings and its repairs are
 owed). A display preview waiting for its render (a photo just opened or
-restored) is settled. Preview-only
+restored) is settled. A photo left while a GPU preview frame (#239) is ahead of
+its exact frame sends that frame at once, and the switch waits for it and its
+16-bit plane as it does for a dragged frame's retained plane (#233), so the
+photo is remembered settled. Preview-only
 restoration keeps the full-resolution pending flag: export must still pass the
 existing full-resolution barrier. Every snapshot records whether its plane is a
 display preview and whether it lags its settings (#237); a session that swaps
