@@ -1571,7 +1571,11 @@ async function automaticRollAfterFailure({ old = false } = {}) {
       scheduleImportFilmTypeUpdate: (_record, ms) => calls.push(`schedule ${ms}`),
       setTimeout: (_fn, ms) => calls.push(`retry ${ms}`), clearTimeout() {},
       persistCurrentFileSettings: () => { calls.push('persist'); return !failed; },
-      retypeImportItem: () => calls.push('retype'), pushUndo: label => calls.push(`undo ${label}`),
+      // The retype changes the film type, so the photo converts again (a
+      // change of the detection descriptions only would not, R1-015).
+      retypeImportItem: (_record, retyped, next) => { calls.push('retype'); retyped.settings = { ...retyped.settings, filmType: next.filmType }; },
+      conversionKey: settings => settings.filmType, applyImportMetaToState: () => calls.push('meta'), updateStudioThumbnail() {},
+      pushUndo: label => calls.push(`undo ${label}`),
       restoreSettings: () => calls.push('restore'), processNegative: async () => { calls.push('convert'); },
       invalidateSilverCoreCache() {}, usesSilverCoreConversion: () => false, schedulePreviewUpdate() {}, updateFileListUI() {},
       updateRollAnalysisUI() {}, scheduleProjectRecovery() {}, showToast() {}, getInterpolatedText: () => ''

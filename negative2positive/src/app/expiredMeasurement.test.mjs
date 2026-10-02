@@ -21,6 +21,7 @@ import vm from 'node:vm';
 import { createHarness, makeBase, functionSource, settle } from './geometryTestHarness.mjs';
 import { applyAutomaticFilmType, applyFilmTypeOverride, sanitizeFilmTypeOverride } from './filmTypeOverride.js';
 import { ROLL_MONOCHROME } from './rollFilmType.js';
+import { importConversionKey } from './importDetection.js';
 import { withoutLearnedDefaults } from './learnedDefaults.js';
 import { resolveAnalysisRegion, analysisPixelBounds } from './analysisRegion.js';
 import { downsampleImageDataForMaxPixels } from './imageDataOps.js';
@@ -328,6 +329,9 @@ async function openRescued(filmType, { filmTypeReason = filmType === 'positive' 
     runExpiredSpatialAnalysis: () => Promise.resolve(false),
     usesSilverCoreConversion: () => true, studioBackgroundReady: () => true, importFilmTypeActive: () => true,
     importFilmTypeTarget: () => record.typed.get(item) || null, relearnImportSettings: settings => settings,
+    // What converts: a flip that changes only the detection descriptions
+    // skips the conversion (#229 review R1-015); a type change converts.
+    conversionKey: settings => importConversionKey({ router: settings, adjustment: settings, meta: settings.autoFrameMeta || null }),
     automaticRollItemKey: () => '', automaticRollRevision: 0,
     persistCurrentFileSettings: () => { item.settings = Object.fromEntries(RECIPE_KEYS.map(key => [key, structuredClone(h.state[key])])); return true; },
     convertFromCurrentSource: async () => {

@@ -9,6 +9,7 @@ import { aggregateRollAnalysis, groupAutomaticRollFrames, sanitizeRollFrameForSe
 import { decideRollFilmType, mergeRollDecision, ownFilmTypeVerdict, rollDecisionFrame, rollFilmTypeTarget, ROLL_MONOCHROME } from './rollFilmType.js';
 import { applyAutomaticFilmType, applyFilmTypeOverride, sanitizeFilmTypeOverride } from './filmTypeOverride.js';
 import { applyLearnedDefaults, learnedDefaultsKey, withoutLearnedDefaults, LEARNED_NUMERIC_KEYS, LEARNED_CATEGORY_KEYS } from './learnedDefaults.js';
+import { importConversionKey } from './importDetection.js';
 import { canPublishThumbnail } from './thumbnailRank.js';
 import { createSharedDecodes } from './sharedDecodes.js';
 import { pickBackgroundJob, travelDirection, displayDistance } from './backgroundPhotoScheduler.js';
@@ -72,7 +73,7 @@ function fixture({ count = 4, prepared = false, realRoll = false, verdicts = nul
     importFilmTypeAuto: true, cropping: false, positiveMode: 'correct', rollMetadata: {},
     autoFrame: { enabled: true }
   };
-  const timers = new Map(), decoded = [], analyzed = [], groups = [], stores = [], restored = [], renders = [], undos = [];
+  const timers = new Map(), decoded = [], analyzed = [], groups = [], stores = [], restored = [], renders = [], undos = [], metaApplied = [];
   const markerMap = new Map();
   const markerStorage = { get: key => markerMap.get(key) ?? null, set: (key, value) => markerMap.set(key, value), remove: key => markerMap.delete(key) };
   const toasts = [], frameTypes = [], samplesBuilt = [], importRequests = [];
@@ -111,10 +112,11 @@ function fixture({ count = 4, prepared = false, realRoll = false, verdicts = nul
     extractCurrentSettings: () => state.liveSettings || make(state.currentFileIndex),
     persistCurrentFileSettings: () => {
       const item = items[state.currentFileIndex];
-      if (item.file !== state.loadedFile) return;
+      if (item.file !== state.loadedFile) return false;
       item.settings ||= make(item.id);
       if (item.isDirty && state.liveSettings) item.settings = structuredClone(state.liveSettings);
       item.isDirty = false;
+      return true;
     },
     canReuseLoadedRollSource: item => item === items[state.currentFileIndex],
     createAnalysisSampleStore: () => {
@@ -187,6 +189,14 @@ function fixture({ count = 4, prepared = false, realRoll = false, verdicts = nul
     captureSnapshot: label => ({ label, file: state.loadedFile }),
     commitUndoSnapshot: entry => { undos.push(entry); return entry; },
     cancelCropDetection: noop, LEARNED_NUMERIC_KEYS, LEARNED_CATEGORY_KEYS,
+    // What converts (importDetection.js: the detection descriptions are left
+    // out), and the meta-only settle of the open photo (R1-015).
+    conversionKey: settings => importConversionKey({ router: settings, adjustment: settings, meta: settings.autoFrameMeta || null }),
+    applyImportMetaToState: settings => {
+      metaApplied.push(settings.id);
+      for (const key of ['filmTypeSource', 'filmTypeConfidence', 'filmTypeReason']) state[key] = settings[key];
+    },
+    updateStudioThumbnail: noop,
     invalidateSilverCoreCache: noop,
     restoreSettings: settings => {
       restored.push(settings.id);
@@ -268,7 +278,7 @@ function fixture({ count = 4, prepared = false, realRoll = false, verdicts = nul
     items[index].settings = settings;
     for (const key of ['filmType', 'filmTypeSource', 'filmTypeConfidence', 'filmTypeReason']) state[key] = settings[key];
   };
-  return { context, state, items, timers, decoded, analyzed, groups, stores, restored, renders, undos, toasts, frameTypes, samplesBuilt, importRequests, fire, navigate, make, prepareForeground, marker,
+  return { context, state, items, timers, decoded, analyzed, groups, stores, restored, renders, undos, metaApplied, toasts, frameTypes, samplesBuilt, importRequests, fire, navigate, make, prepareForeground, marker,
     frameRenders, flushed, frameWorkersDisposed: () => frameWorkersDisposed, tileSources, laneStarts, tileRenders, analyzerPools, rollPools, idleHolds };
 }
 
@@ -665,6 +675,30 @@ const exportRecipe = item => JSON.stringify([item.settings, item.filmTypeOverrid
   while (reference.timers.size) await reference.fire();
   assert.deepEqual(reference.restored.slice(0, 1), [0], 'reference: the leader flips in place');
   assert.deepEqual(f.items.map(exportRecipe), reference.items.map(exportRecipe), 'the recipes of the import without crop mode');
+}
+
+// #229 review R1-015: a decision that only confirms the open photo's type
+// (bw/low/monochrome -> bw/medium/rollMonochrome) changes what the detection
+// describes, not what converts: the status follows without restoreSettings
+// or processNegative (5f23eb0 converted the open photo again). The recipe is
+// the one the full flip persisted.
+{
+  const f = fixture({ verdicts: ['mono', 'mono', 'mono', 'mono', 'mono'] });
+  f.context.scheduleAutomaticRollImport(f.items);
+  f.prepareForeground(0);
+  const opened = structuredClone(f.items[0].settings);
+  assert.equal(opened.filmTypeConfidence, 'low');
+  await f.fire(1200);
+  assert.equal(f.restored.length, 0, 'no restoreSettings of the open photo');
+  assert.equal(f.renders.length, 0, 'no processNegative of the open photo');
+  assert.deepEqual(f.metaApplied, [0], 'its status follows');
+  assert.deepEqual([f.state.filmType, f.state.filmTypeConfidence, f.state.filmTypeReason], ['bw', 'medium', 'rollMonochrome']);
+  const { rollFrame, ...recipe } = f.items[0].settings;
+  assert.deepEqual(rollFrame, { rollId: 'complete' }, 'then the roll analysis');
+  assert.equal(JSON.stringify(recipe), JSON.stringify(applyAutomaticFilmType(opened, ROLL_MONOCHROME)), 'the recipe a full flip persisted');
+  assert.ok(f.items.every(item => item.settings.filmTypeReason === 'rollMonochrome'));
+  assert.deepEqual(f.groups, [[0, 1, 2, 3, 4]]);
+  assert.equal(f.undos.length, 0);
 }
 
 // Per-frame analysis thumbnails: each measured frame gets a converted tile

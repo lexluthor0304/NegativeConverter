@@ -28953,10 +28953,21 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           await new Promise(resolve => setTimeout(resolve, 250));
         }
         if (!current()) return false;
-        persistCurrentFileSettings({ silent: true, force: true });
+        const persisted = persistCurrentFileSettings({ silent: true, force: true });
         const target = importFilmTypeTarget(record, item);
         if (!target || !item.settings) return false;
+        const shown = persisted ? conversionKey(item.settings) : null;
         retypeImportItem(record, item, target);
+        if (shown !== null && conversionKey(item.settings) === shown) {
+          // A confirmation (bw/low -> bw/medium) changes only what the
+          // detection describes: the photo converts to the same pixels, so
+          // only its status follows, as in prepareStudioPhoto's meta-only
+          // settle (#229 review R1-015). Its tile takes the new recipe's key.
+          applyImportMetaToState(item.settings);
+          updateStudioThumbnail();
+          updateFileListUI();
+          return true;
+        }
         restoreSettings(item.settings, { refreshDisplay: false });
         updateFileListUI();
         await processNegative({ quiet: true });
