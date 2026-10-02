@@ -13,6 +13,13 @@
 // - With the expired rescue on, the conversion waits for the detection.
 // - The hit's conversion supersedes a full-resolution render the provisional
 //   pass armed: the exact plane installed is the hit's (R1-070).
+// - History taken while the detection ran (an edit after Apply, a slider
+//   drag across the hit) gets the hit and its auto white balance on undo or
+//   redo, as the single pass's entries had them; an undo of such an edit
+//   before the reply keeps the detection; entries of another Apply, or taken
+//   before Apply, are left alone (R1-072, R1-134).
+// - Applying, editing at once and exporting gives what applying, waiting for
+//   the detection, editing and exporting gives (synthetic parity).
 
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
@@ -33,7 +40,12 @@ function headMissMeta(previous, state, cropRegion, nextGeometry) {
   return meta;
 }
 
-function setup({ expired = false, step = 3, points = null, immediate = false, previous = { analysisArea: null, imageArea: null, method: 'import' } } = {}) {
+// The white balance the stand-in auto white balance sets (below).
+const HIT_WB = { wbR: 1.08, wbG: 1, wbB: 0.93, wbAutoConfidence: 'high' };
+const whiteBalanceOf = state => ({ wbR: state.wbR, wbG: state.wbG, wbB: state.wbB, wbAutoConfidence: state.wbAutoConfidence ?? null });
+const NO_WB = whiteBalanceOf({ wbR: 1, wbG: 1, wbB: 1 });
+
+function setup({ expired = false, step = 3, points = null, immediate = false, autoWb = false, previous = { analysisArea: null, imageArea: null, method: 'import' } } = {}) {
   const h = createHarness(base);
   const c = h.context;
   const conversions = [];
@@ -66,6 +78,10 @@ function setup({ expired = false, step = 3, points = null, immediate = false, pr
         conversions.push({ start, end: structuredClone(h.state.autoFrame.lastDiagnostics), options });
         h.state.processedImageData = h.state.croppedImageData || h.state.originalImageData;
         h.state.currentStep = 3;
+        // maybeAutoWhiteBalance's gates, at the end of the conversion.
+        const s = h.state;
+        if (autoWb && options.automatic !== false && !s.expiredEnabled && !s.grayPointSampled && !s.wbUserOverride
+          && !s.wbSemanticApplied && !s.autoFrame.lastDiagnostics?.analysisNeedsReview) Object.assign(s, HIT_WB);
       })();
       h.target.processNegativeInFlight = promise;
       return promise.finally(() => { if (h.target.processNegativeInFlight === promise) h.target.processNegativeInFlight = null; });
@@ -248,6 +264,184 @@ for (const cancel of ['undo', 'apply', 'load']) {
   assert.equal(t.conversions.length, 0);
   assert.equal(t.h.state.autoFrame.lastDiagnostics.method, 'manual-image-window');
   assert.equal(normalizeAngleDegrees(t.h.state.rotationAngle), 0);
+}
+
+// ---- History taken while the detection ran (R1-072, R1-134) ----
+// Before #245 the hit was in place before any edit could be made, so every
+// entry taken after Apply held it and its auto white balance. An entry taken
+// while the detection runs gets them when it is restored after the hit.
+const applyAndConvert = async t => {
+  t.openDraft();
+  const applying = t.c.applyCropHandler();
+  await t.finishConversion();
+  await applying;
+};
+const hitLands = async t => {
+  await t.answer();
+  await t.finishConversion();
+  await t.c.settlePendingCropDetection();
+};
+const view = state => ({ exposure: state.exposure, wb: whiteBalanceOf(state), meta: structuredClone(state.autoFrame.lastDiagnostics) });
+{
+  const t = setup({ points: hitPoints, autoWb: true });
+  await applyAndConvert(t);
+  assert.deepEqual(whiteBalanceOf(t.h.state), NO_WB, 'the miss outcome skips auto white balance');
+  t.c.pushUndo('exposure');
+  t.h.state.exposure = 0.5;
+  await hitLands(t);
+  const hit = view(t.h.state);
+  assert.equal(hit.meta.method, 'manual-image-window');
+  assert.deepEqual(hit.wb, HIT_WB, 'the hit ran auto white balance');
+  t.c.performUndo();
+  const undone = view(t.h.state);
+  assert.equal(undone.exposure, 0, 'the edit is undone');
+  assert.equal(undone.meta.analysisNeedsReview, false, 'undoing an edit made while the detection ran keeps the hit');
+  assert.equal(undone.meta.method, 'manual-image-window');
+  assert.deepEqual(undone.meta.imageArea, hit.meta.imageArea);
+  assert.deepEqual(undone.wb, HIT_WB, '...and its white balance');
+  t.c.performRedo();
+  assert.deepEqual(view(t.h.state), hit, 'redo brings the edit back over the hit');
+  // Apply's own entry still holds the frame before Apply.
+  t.c.performUndo();
+  t.c.performUndo();
+  assert.equal(t.h.state.cropRegion, null, 'undoing Apply restores the uncropped frame');
+  assert.equal(t.h.state.autoFrame.lastDiagnostics.method, 'import', '...with the diagnostics before Apply');
+  assert.deepEqual(whiteBalanceOf(t.h.state), NO_WB);
+}
+
+// ---- An undo before the reply keeps the detection; the hit reaches both entries ----
+{
+  const t = setup({ points: hitPoints, autoWb: true });
+  await applyAndConvert(t);
+  t.c.pushUndo('exposure');
+  t.h.state.exposure = 0.5;
+  t.c.performUndo();
+  assert.ok(t.c.hasPendingCropDetection(), 'undoing an edit made after Apply does not end the detection');
+  assert.equal(t.h.state.exposure, 0);
+  await hitLands(t);
+  const undone = view(t.h.state);
+  assert.equal(undone.meta.method, 'manual-image-window', 'the hit applies to the restored state');
+  assert.equal(undone.meta.analysisNeedsReview, false);
+  assert.deepEqual(undone.wb, HIT_WB);
+  assert.equal(t.h.target.cropDetectionStats.reconversions, 1);
+  t.c.performRedo();
+  const redone = view(t.h.state);
+  assert.equal(redone.exposure, 0.5);
+  assert.deepEqual({ ...redone, exposure: 0 }, undone, 'the redo entry has the hit too');
+  // Undo of Apply itself still ends a pending detection (the accepted edge
+  // case: its redo brings the miss outcome back).
+  const u = setup({ points: hitPoints, autoWb: true });
+  await applyAndConvert(u);
+  u.c.performUndo();
+  assert.equal(u.c.hasPendingCropDetection(), false, 'undoing Apply ends the detection');
+}
+
+// ---- A white balance the user set while the detection ran wins, in history too ----
+{
+  const t = setup({ points: hitPoints, autoWb: true });
+  await applyAndConvert(t);
+  t.c.pushUndo('exposure');
+  t.h.state.exposure = 0.5;
+  t.c.pushUndo('wbR');
+  Object.assign(t.h.state, { wbR: 1.3, wbUserOverride: true, wbAutoConfidence: null });
+  await hitLands(t);
+  assert.equal(t.h.state.wbR, 1.3, 'the user\'s white balance wins over the hit\'s');
+  assert.equal(t.h.state.autoFrame.lastDiagnostics.method, 'manual-image-window');
+  t.c.performUndo();
+  assert.equal(t.h.state.wbR, 1, 'no auto white balance ran, so the entry keeps what it held');
+  assert.equal(t.h.state.autoFrame.lastDiagnostics.method, 'manual-image-window', 'but it has the hit');
+}
+
+// ---- Entries of another Apply are left alone ----
+{
+  // Apply A's detection is still pending when the user edits and applies B,
+  // which ends it; then A's late hit and B's hit come in. Neither A's edit
+  // nor B's own 'crop' entry (both hold A's miss outcome) gets a hit.
+  const t = setup({ points: hitPoints, autoWb: true });
+  await applyAndConvert(t);
+  for (let i = 0; i < 50 && !t.detection.resolve; i++) await tick();
+  const answerA = t.detection.resolve;
+  t.detection.resolve = null;
+  assert.ok(answerA && t.c.hasPendingCropDetection(), 'A\'s detection is pending');
+  t.c.pushUndo('exposure');
+  t.h.state.exposure = 0.25;
+  const missA = structuredClone(t.h.state.autoFrame.lastDiagnostics);
+  const cropA = { ...t.h.state.cropRegion };
+  t.openDraft({ left: 5, top: 5, width: 50, height: 35 });
+  const applyingB = t.c.applyCropHandler();
+  await t.finishConversion();
+  await applyingB;
+  t.c.pushUndo('exposure');
+  t.h.state.exposure = 0.5;
+  answerA();
+  await settle();
+  assert.equal(t.h.target.cropDetectionStats.stale, 1, 'A\'s hit is stale');
+  await hitLands(t);
+  assert.equal(t.h.state.autoFrame.lastDiagnostics.method, 'manual-image-window', 'B hit');
+  assert.deepEqual(t.h.target.undoStack.map(entry => entry.label), ['crop', 'exposure', 'crop', 'exposure']);
+  t.c.performUndo();
+  assert.equal(t.h.state.exposure, 0.25);
+  assert.equal(t.h.state.autoFrame.lastDiagnostics.method, 'manual-image-window', 'B\'s edit gets B\'s hit');
+  assert.deepEqual(whiteBalanceOf(t.h.state), HIT_WB);
+  t.c.performUndo();
+  assert.deepEqual({ ...t.h.state.cropRegion }, cropA, 'undoing B brings A\'s frame back');
+  assert.deepEqual(t.h.state.autoFrame.lastDiagnostics, missA, 'B\'s crop entry keeps A\'s miss outcome');
+  assert.deepEqual(whiteBalanceOf(t.h.state), NO_WB, '...and its white balance');
+  t.c.performUndo();
+  assert.equal(t.h.state.exposure, 0);
+  assert.deepEqual(t.h.state.autoFrame.lastDiagnostics, missA, 'A\'s edit keeps A\'s miss outcome');
+  assert.deepEqual(whiteBalanceOf(t.h.state), NO_WB);
+  t.c.performUndo();
+  assert.equal(t.h.state.autoFrame.lastDiagnostics.method, 'import', 'A\'s crop entry holds the frame before A');
+}
+
+// ---- A slider drag across the hit, and a stale pre-drag snapshot ----
+{
+  // The slider takes its entry at pointerdown and commits it on release
+  // (setupSlider): a drag started while the detection ran commits after the
+  // hit landed, and its entry still gets the hit (R1-134).
+  const t = setup({ points: hitPoints, autoWb: true });
+  await applyAndConvert(t);
+  const preDrag = t.c.captureSnapshot('exposure');
+  t.h.state.exposure = 0.5;
+  await hitLands(t);
+  t.c.commitUndoSnapshot(preDrag);
+  t.c.performUndo();
+  assert.equal(t.h.state.exposure, 0);
+  assert.equal(t.h.state.autoFrame.lastDiagnostics.method, 'manual-image-window', 'a drag across the hit keeps it on undo');
+  assert.deepEqual(whiteBalanceOf(t.h.state), HIT_WB);
+  // An entry taken before Apply (a pointerdown that never committed, then a
+  // keyboard change) is the frame before Apply: it gets no hit.
+  const u = setup({ points: hitPoints, autoWb: true });
+  const stale = u.c.captureSnapshot('cyan');
+  await applyAndConvert(u);
+  u.c.commitUndoSnapshot(stale);
+  await hitLands(u);
+  u.c.performUndo();
+  assert.equal(u.h.state.cropRegion, null);
+  assert.equal(u.h.state.autoFrame.lastDiagnostics.method, 'import', 'an entry taken before Apply gets no hit');
+  assert.deepEqual(whiteBalanceOf(u.h.state), NO_WB);
+}
+
+// ---- Parity: edit at once vs wait for the detection (synthetic) ----
+// The same user actions, Apply then an exposure edit, export, undo, export,
+// redo, give the same state whether the edit came before or after the hit.
+{
+  const run = async immediate => {
+    const t = setup({ points: hitPoints, autoWb: true });
+    await applyAndConvert(t);
+    if (!immediate) await hitLands(t);
+    t.c.pushUndo('exposure');
+    t.h.state.exposure = 0.5;
+    if (immediate) await hitLands(t);
+    const states = [view(t.h.state)];
+    t.c.performUndo();
+    states.push(view(t.h.state));
+    t.c.performRedo();
+    states.push(view(t.h.state));
+    return states;
+  };
+  assert.deepEqual(await run(true), await run(false), 'an edit made while the detection ran leaves history as waiting would');
 }
 
 // ---- A full-resolution render in flight when the hit lands (R1-070) ----

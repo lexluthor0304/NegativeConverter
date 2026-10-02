@@ -183,7 +183,7 @@ function fixture({ large = true, repairs = false, strokes = 0, aiBrush = false, 
     // (#236), no pending geometry build (#244) and the dust bookkeeping of #259.
     getCurrentQueueItem: () => null, cancelGeometryJob: noop, whenGeometrySettled: noop,
     // No pending crop-area detection (#245).
-    cancelCropDetection: noop, settlePendingCropDetection: async () => {},
+    cropDetection: null, cancelCropDetection: noop, settlePendingCropDetection: async () => {},
     // The background lanes' gate (#243).
     backgroundGate: { bump: noop },
     noteDustReplaced: noop, syncDustWorkerPin: noop,

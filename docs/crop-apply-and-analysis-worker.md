@@ -57,10 +57,24 @@ worker meanwhile (`startCropDetection`):
 - With the expired rescue on, Apply still waits for the detection before
   converting (the rescue measures once per source, whatever the area), now
   after the paint and off the main thread.
-- The pending detection ends on undo or redo, a new geometry edit or a
-  second Apply (`pushUndo` with a geometry label), a new load and closing
-  the session. It is current only while the diagnostics object and the
-  geometry Apply installed are still in place.
+- The pending detection ends on a new geometry edit or a second Apply
+  (`pushUndo` with a geometry label), a new load, closing the session, and
+  an undo or redo, except one that restores an entry taken while the
+  detection ran (an edit made after Apply, or the undo or redo entry of
+  one): that entry holds the frame being detected, so the detection goes on
+  and follows the diagnostics the restore installs. It is current only while
+  the geometry Apply installed and those diagnostics are in place.
+- History taken while the detection runs holds the miss outcome and the
+  white balance before the hit. Before #245 the hit was in place before any
+  such entry, so every entry taken while the detection is pending carries
+  its token (`captureSnapshot`), a slider entry taken at pointerdown and
+  committed after the hit included. A hit records itself on the token, and
+  restoring such an entry applies it (`restoreSnapshot`): the image area and
+  review flags, and the white balance its auto white balance set where the
+  entry held the white balance it started from. White balance the user set
+  while the detection ran wins (no auto white balance ran then), so an entry
+  taken before that edit gets the hit without an auto white balance. Entries
+  of another Apply carry that Apply's token.
 - On a two-stage import's half-size stand-in (#255) the detection samples
   provisional pixels. The swap to the full decode ends it, applies the crop
   again on the full base with the same rule (`appliedCropDiagnostics`, the
@@ -72,11 +86,16 @@ worker meanwhile (`startCropDetection`):
   the contact sheet, project save, the photo switch (it waits rather than
   cancels, so the leaving photo is persisted with the outcome), roll sync,
   apply to selected and the roll reference.
-- Known edge case, accepted: redo right after an undo that ended a pending
-  detection restores the provisional (miss) diagnostics.
+- Known edge cases, accepted: redo right after an undo of Apply that ended a
+  pending detection restores the provisional (miss) diagnostics, and so does
+  an undo of a geometry edit or a second Apply made while the detection ran
+  (that edit ended it; 1703835 had the hit in place before it).
 - A visible difference: a hit (rare on the M11 roll) shows the positive
   first with the miss outcome and changes colour or white balance once, when
   the second conversion lands. White balance the user set before that wins.
+  Its auto white balance is measured on that second conversion, so a
+  conversion setting changed before it lands (core exposure, a film preset)
+  is part of what it measures; a Step-3 edit (C/M/Y, curves, gains) is not.
 
 ## The page's OpenCV analyses in the warm worker
 

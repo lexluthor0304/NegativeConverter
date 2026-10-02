@@ -3043,6 +3043,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       settings.expiredAnalysis = state.expiredAnalysis ? structuredClone(state.expiredAnalysis) : null;
       settings.frameMetadata = sanitizeFrameMetadata(state.frameMetadata);
       settings.autoFrameMeta = state.autoFrame.lastDiagnostics ? structuredClone(state.autoFrame.lastDiagnostics) : null;
+      // Taken while Apply's crop-area detection runs (#245): the entry holds
+      // its miss outcome and gets a hit when restored (restoreSnapshot).
+      if (cropDetection && state.autoFrame.lastDiagnostics === cropDetection.meta) settings.cropDetectionToken = cropDetection.token;
       // On a half-size stand-in (#255) the crop above is in its units; the
       // entry also keeps the exact geometry, which the swap installs.
       if (provisionalUnits()) {
@@ -3105,9 +3108,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       coreReprocessToken += 1;
       abortSupersededFullResolutionConversion();
       // A pending geometry build belongs to the state being replaced, and so
-      // does a pending crop-area detection (undo, redo).
+      // does a pending crop-area detection (undo, redo), unless the entry
+      // was taken while it ran (cancelCropDetection).
       cancelGeometryJob();
-      cancelCropDetection();
+      const keptDetection = cancelCropDetection({ keepFor: snapshot });
 
       // Restore Category A
       const s = snapshot.settings;
@@ -3167,6 +3171,18 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       updateExpiredRescueUI();
       updateMetadataUI();
       state.autoFrame.lastDiagnostics = s.autoFrameMeta ? structuredClone(s.autoFrameMeta) : null;
+      if (keptDetection) keptDetection.meta = state.autoFrame.lastDiagnostics;
+      // An entry taken while Apply's crop-area detection ran holds the miss
+      // outcome. The single pass before #245 had the hit in place before any
+      // such entry: a hit that has landed applies here, with the white
+      // balance its auto white balance set where the entry held the one it
+      // started from (R1-072).
+      const cropHit = s.cropDetectionToken?.hit;
+      if (cropHit && state.autoFrame.lastDiagnostics) {
+        Object.assign(state.autoFrame.lastDiagnostics, structuredClone(cropHit.fields));
+        const wb = cropHit.whiteBalance;
+        if (wb && Object.keys(wb.before).every(key => state[key] === wb.before[key])) Object.assign(state, wb.result);
+      }
 
       // Restore Category B refs
       const r = snapshot.refs;
@@ -17600,8 +17616,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // the area, so with the rescue on Apply still waits for the detection.
     //
     // Undo, redo, a new geometry edit or a second Apply, a new load and a
-    // photo switch end the pending detection. Everything that reads or copies
-    // the photo's settings for output awaits settlePendingCropDetection().
+    // photo switch end the pending detection; an undo or redo of an edit made
+    // while it ran does not. Everything that reads or copies the photo's
+    // settings for output awaits settlePendingCropDetection().
     const CROP_DETECTION_TARGETS = Object.entries(AUTO_FRAME_FORMAT_RATIOS).map(([key, ratio]) => ({ key, ratio }));
 
     function hasPendingCropDetection() {
@@ -17612,11 +17629,19 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       cropDetectionStats.conversions++;
     }
 
-    function cancelCropDetection() {
+    // `keepFor`: the history entry an undo or redo restores. One taken while
+    // the detection ran (an edit made after Apply, or the undo or redo entry
+    // of one) holds the frame being detected, so the detection goes on and
+    // its hit applies to what the entry restores (R1-072); restoreSnapshot
+    // hands it the restored diagnostics. Returns the detection kept.
+    function cancelCropDetection({ keepFor = null } = {}) {
       const detection = cropDetection;
-      if (!detection) return;
+      if (!detection) return null;
+      const s = keepFor?.settings;
+      if (s?.cropDetectionToken === detection.token && isCurrentLoad(detection.generation) && detection.isFrame(s)) return detection;
       cropDetection = null;
       detection.finish();
+      return null;
     }
 
     function sameCropRect(a, b) {
@@ -17625,13 +17650,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     // Current while it is the pending detection of this photo and the frame
-    // and diagnostics Apply installed are still in place.
+    // and diagnostics Apply installed are still in place (or diagnostics an
+    // undo or redo restored from an entry taken while it ran).
     function isCurrentCropDetection(detection) {
       return cropDetection === detection && isCurrentLoad(detection.generation)
-        && state.autoFrame.lastDiagnostics === detection.meta
-        && effectiveGeometryAngle(state.rotationAngle) === effectiveGeometryAngle(detection.geometry.rotationAngle)
-        && Boolean(state.mirrored) === Boolean(detection.geometry.mirrored)
-        && sameCropRect(state.cropRegion, detection.geometry.cropRegion);
+        && state.autoFrame.lastDiagnostics === detection.meta && detection.isFrame(state);
     }
 
     // Resolves once no crop-area detection is pending, a hit's conversion
@@ -17646,11 +17669,19 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     function startCropDetection({ meta, base, frame, cropRegion, ready }) {
       cancelCropDetection();
       let resolveSettled;
+      const geometry = { rotationAngle: state.rotationAngle, mirrored: state.mirrored, cropRegion: state.cropRegion ? { ...state.cropRegion } : null };
       const detection = {
-        meta, base,
-        geometry: { rotationAngle: state.rotationAngle, mirrored: state.mirrored, cropRegion: state.cropRegion ? { ...state.cropRegion } : null },
+        meta, base, geometry,
         generation: loadGeneration,
         conversions: cropDetectionStats.conversions,
+        // Carried by every history entry taken while this is pending
+        // (captureSnapshot). A hit records itself here, and an undo or redo
+        // of such an entry applies it (restoreSnapshot). It holds no pixels,
+        // so history keeps no image alive through it.
+        token: { hit: null },
+        // Whether the state, or a history entry's settings, has this frame.
+        isFrame: s => effectiveGeometryAngle(s.rotationAngle) === effectiveGeometryAngle(geometry.rotationAngle)
+          && Boolean(s.mirrored) === Boolean(geometry.mirrored) && sameCropRect(s.cropRegion, geometry.cropRegion),
         settled: new Promise(resolve => { resolveSettled = resolve; })
       };
       detection.finish = () => {
@@ -17700,11 +17731,14 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         if (!isCurrentCropDetection(detection)) { cropDetectionStats.stale++; return; }
       }
       cropDetectionStats.hits++;
-      const { meta } = detection;
-      meta.imageArea = workingPointsToBase(points, detection.geometry, detection.base);
-      meta.analysisNeedsReview = false;
-      meta.frameIncomplete = false;
-      meta.method = 'manual-image-window';
+      const fields = {
+        imageArea: workingPointsToBase(points, detection.geometry, detection.base),
+        analysisNeedsReview: false, frameIncomplete: false, method: 'manual-image-window'
+      };
+      Object.assign(detection.meta, structuredClone(fields));
+      // History taken while this ran holds the miss outcome; it gets the hit
+      // when it is restored (restoreSnapshot).
+      const hit = detection.token.hit = { fields };
       markCurrentFileDirty();
       // A conversion that has not started yet reads the hit (one pass). One
       // that ran with the miss outcome is redone in full: the analysis area,
@@ -17722,7 +17756,19 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         const { processedImageDataIsPreview, fullResolutionPending } = state;
         clearFullResolutionRenderState();
         Object.assign(state, { processedImageDataIsPreview, fullResolutionPending });
+        // What auto white balance writes, and the state that decides whether
+        // it runs (maybeAutoWhiteBalance).
+        const written = ['wbR', 'wbG', 'wbB', 'wbAutoConfidence'];
+        const gates = ['filmType', 'expiredEnabled', 'grayPointSampled', 'wbUserOverride', 'wbSemanticApplied'];
+        const before = Object.fromEntries([...written, ...gates].map(key => [key, state[key]]));
         await processNegative({ quiet: true });
+        // Its auto white balance reaches those entries too, where they hold
+        // the white balance it started from, as it reached the single pass's
+        // entries. White balance the user set meanwhile wins: none ran then.
+        if (isCurrentCropDetection(detection) && gates.every(key => state[key] === before[key])
+          && written.some(key => state[key] !== before[key])) {
+          hit.whiteBalance = { before, result: Object.fromEntries(written.map(key => [key, state[key]])) };
+        }
       }
     }
 

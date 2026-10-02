@@ -682,7 +682,7 @@ for (const earlyPost of [false, true]) {
     localExposure: null, look: null, expiredAnalysis: null, frameMetadata: null, autoFrame: { lastDiagnostics: null } });
   Object.assign(f.context, { SNAPSHOT_SCALAR_KEYS: ['coreExposure'], SNAPSHOT_REF_KEYS: ['processedImageData'],
     structuredClone, createSprocketEdgeSettings: () => null, sanitizeFrameMetadata: () => null,
-    flushDisplayPreviewRebuild: () => {}, dustStateSettled: () => false });
+    flushDisplayPreviewRebuild: () => {}, dustStateSettled: () => false, cropDetection: null });
   vm.runInContext(functionSource('captureSnapshot'), f.context);
   const snapshot = f.context.captureSnapshot('coreExposure');
   assert.equal(f.commits.length, 1, 'taking a snapshot commits the plane');
