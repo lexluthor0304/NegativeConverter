@@ -11135,7 +11135,17 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         }),
         log: () => memoryEvents.slice(),
         clearLog: () => { memoryEvents.length = 0; },
-        runIdleCheck: () => runMemoryIdleCheck()
+        runIdleCheck: () => runMemoryIdleCheck(),
+        // The pixel buffers the open photo (state, history) and the budgeted
+        // photo caches hold: the photo-session smoke's retained-plane check
+        // (#234) finds every other live plane through the heap.
+        held: () => {
+          const held = backingBuffers([state, undoStack, redoStack]);
+          for (const cache of [photoSessions, photoPrefetch, photoPreviews]) {
+            for (const buffer of cache.buffers()) held.add(buffer);
+          }
+          return held;
+        }
       };
     }
 
