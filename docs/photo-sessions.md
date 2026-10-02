@@ -254,17 +254,21 @@ through `src-tauri/src/display_proxy_store.rs` (chunked atomic writes and
 reads, the volume's free space, `CACHEDIR.TAG` and Time Machine's exclusion;
 the spill of an earlier run is removed at start), so no pixels reach WebKit's
 origin storage; the web keeps them in the origin-private file system from the
-worker (IndexedDB where sync access handles are missing). The tabs of an
-origin share those records, and each keeps a copy of their index: every
-change of it (a put, `has`, a purge after a failed self-check, a trim,
-**Clear cache** and a tab's first load, which drops entries without a record
-and deletes records without an entry) runs under a Web Lock on the index as
-the records hold it, with the last uses and purges of the tab's own reads
-merged in (reads take no lock). No tab writes over another tab's entries or
-deletes its records as orphans, and the budget and LRU count every tab's
-records (R2-010). An index that cannot be read is not a lost one: nothing is
-deleted or written over it. Without Web Locks (Safari before 15.4) only
-orphans older than an hour are deleted. The budget is
+worker (IndexedDB where sync access handles are missing). WebKit before
+Safari 17 returns promises from four of a sync access handle's methods
+(`getSize`, `truncate`, `flush` and `close`): they are awaited, and a record
+that exists but cannot be read rejects instead of reading as absent (R2-067:
+Safari 16 read every record as empty, and the next start deleted them all).
+The tabs of an origin share those records, and each keeps a copy of their
+index: every change of it (a put, `has`, a purge after a failed self-check,
+a trim, **Clear cache** and a tab's first load, which drops entries without
+a record and deletes records without an entry) runs under a Web Lock on the
+index as the records hold it, with the last uses and purges of the tab's own
+reads merged in (reads take no lock). No tab writes over another tab's
+entries or deletes its records as orphans, and the budget and LRU count
+every tab's records (R2-010). An index that cannot be read is not a lost
+one: nothing is deleted or written over it. Without Web Locks (Safari before
+15.4) only orphans older than an hour are deleted. The budget is
 `min(setting, 25 % of the free space above 10 GiB)` of the desktop's volume,
 off below that floor; on the web, which knows only the origin's quota left
 (`navigator.storage.estimate()`: Firefox caps an origin at 10 GiB, Chrome

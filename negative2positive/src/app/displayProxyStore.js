@@ -439,7 +439,13 @@ export function namedRecords(records, nameOf = key => sha256Hex(String(key))) {
 }
 
 // Records in the worker's origin-private file system (sync access handles):
-// write(name, bytes), read(name), delete(name), clear(), list().
+// write(name, bytes), read(name), delete(name), clear(), list(). WebKit
+// before Safari 17 (15.2-16.x) returns promises from getSize(), truncate(),
+// flush() and close(): all four are awaited, which costs nothing where they
+// return at once (R2-067: unawaited, every read came back empty, the index
+// with it, and each start deleted every record as an orphan). Only a record
+// that does not exist reads as null: a size that is no byte count or a short
+// read rejects, so an unreadable index is never taken for a lost one.
 export function createOpfsRecords(getDirectory = () => globalThis.navigator?.storage?.getDirectory?.()) {
   let folder = null;
   const directory = async () => {
@@ -458,26 +464,32 @@ export function createOpfsRecords(getDirectory = () => globalThis.navigator?.sto
       const handle = await dir.getFileHandle(fileName(name), { create: true });
       const access = await handle.createSyncAccessHandle();
       try {
-        access.truncate(0);
-        access.write(bytes, { at: 0 });
-        access.flush();
+        await access.truncate(0);
+        if (await access.write(bytes, { at: 0 }) !== bytes.byteLength) throw new Error('Display proxy record not written in full');
+        await access.flush();
       } finally {
-        access.close();
+        await access.close();
       }
       return bytes.byteLength;
     },
     async read(name) {
       const dir = await directory();
       let handle;
-      try { handle = await dir.getFileHandle(fileName(name)); } catch { return null; }
+      try {
+        handle = await dir.getFileHandle(fileName(name));
+      } catch (error) {
+        if (error?.name === 'NotFoundError') return null;
+        throw error;
+      }
       const access = await handle.createSyncAccessHandle();
       try {
-        const size = access.getSize();
+        const size = await access.getSize();
+        if (!Number.isSafeInteger(size) || size < 0) throw new Error('Display proxy record size unreadable');
         const bytes = new Uint8Array(size);
-        access.read(bytes, { at: 0 });
+        if (await access.read(bytes, { at: 0 }) !== size) throw new Error('Display proxy record not read in full');
         return bytes.buffer;
       } finally {
-        access.close();
+        await access.close();
       }
     },
     async delete(name) {

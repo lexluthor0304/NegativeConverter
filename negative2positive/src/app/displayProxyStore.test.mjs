@@ -3,8 +3,9 @@
 // store's min(setting, 25 % of the free space above 10 GiB) on a volume and
 // half of the quota left on the web), LRU eviction, corrupted and truncated
 // records, the index across restarts, Clear cache, and the desktop records'
-// chunked IPC. Two tabs share one store over a fake origin-private file
-// system (R2-010).
+// chunked IPC. The origin-private file system's records run on a fake
+// directory whose sync access handles behave as WebKit's before Safari 17 or
+// as the standard ones (R2-067), and two tabs share one store (R2-010).
 import assert from 'node:assert/strict';
 
 globalThis.ImageData = class ImageData {
@@ -229,8 +230,8 @@ for (const stored of [0, 0.5 * GiB, 1 * GiB, 1.4 * GiB]) {
 // are synchronous. A file has one sync access handle at a time, and
 // `onAccess(fileName)` hears each one opened; `beforeOpen(fileName)`, when
 // set, is awaited first. `sizeOf` stands for an engine whose getSize() is no
-// byte count, `openError` for a getFileHandle() that fails for another
-// reason than a missing file.
+// byte count, `readCap` for one whose read() stops short, `openError` for a
+// getFileHandle() that fails for another reason than a missing file.
 function fakeOpfs({ webkit16 = false, onAccess = () => {} } = {}) {
   let clock = 0;
   let root = null;
@@ -251,7 +252,7 @@ function fakeOpfs({ webkit16 = false, onAccess = () => {} } = {}) {
         truncate: size => { live(); return later(() => { node.bytes = node.bytes.slice(0, size); node.modified = ++clock; }); },
         read: (buffer, { at = 0 } = {}) => {
           live();
-          const part = node.bytes.subarray(at, at + buffer.byteLength);
+          const part = node.bytes.subarray(at, at + Math.min(buffer.byteLength, root.readCap ?? Infinity));
           buffer.set(part);
           return part.byteLength;
         },
@@ -311,6 +312,77 @@ const recordFiles = async root => {
   const folder = await root.getDirectoryHandle('display-proxies');
   return new Map([...folder.children].map(([name, node]) => [name, node]));
 };
+// ---- The worker's records in the origin-private file system (R2-067):
+// WebKit before Safari 17 returns promises from four of the sync access
+// handle's methods; awaited, a record and the index round-trip across a
+// reload there as with the standard handles, and an index that cannot be
+// read is never taken for a lost one ----
+{
+  const image = proxyImage();
+  const sample = { width: 3, height: 2, data: Uint16Array.from({ length: 24 }, (_, i) => i * 777) };
+  const file = { size: 4321, lastModified: 17 };
+  const jpeg = Uint8Array.from({ length: 3000 }, (_, i) => (i * 29) & 255);
+  for (const webkit16 of [true, false]) {
+    const label = webkit16 ? 'WebKit before Safari 17' : 'standard sync access handles';
+    const root = fakeOpfs({ webkit16 });
+    const store = opfsTab(root);
+    assert.equal(await store.put('file-a', 'proxy-1', { file, image, sample, meta: { base: { width: 120, height: 72 } } }), true, `${label}: stored`);
+    assert.equal(await store.putBytes('file-a', 'recipe-1', jpeg, { file }), true, `${label}: preview stored`);
+    await store.settled();
+    const written = await recordFiles(root);
+    assert.equal(written.size, 3, `${label}: two records and the index`);
+    for (const [name, node] of written) {
+      assert.ok(node.bytes.byteLength > 0, `${label}: ${name} written in full`);
+      assert.equal(node.open, false, `${label}: ${name} closed`);
+    }
+    // A reload: another worker and store over the same directory.
+    const reloaded = opfsTab(root);
+    await reloaded.load();
+    assert.deepEqual([...(await recordFiles(root)).keys()].sort(), [...written.keys()].sort(), `${label}: no record deleted as an orphan`);
+    assert.equal(reloaded.hasCandidate(file), true, `${label}: the index came back`);
+    const [entry] = await reloaded.find('file-a');
+    const back = await reloaded.read(entry.name);
+    same(back.image, image, `${label}: the proxy round-trips`);
+    assert.deepEqual(back.sample, sample, `${label}: with its sample`);
+    assert.deepEqual(back.meta, { base: { width: 120, height: 72 } });
+    assert.deepEqual([...(await reloaded.readBytes('file-a', 'recipe-1'))], [...jpeg], `${label}: the preview round-trips`);
+    assert.equal(reloaded.stats.corrupt + reloaded.stats.misses + reloaded.stats.failures, 0, `${label}: no miss, purge or failure`);
+    // A put of another proxy rewrites the index right after its record.
+    assert.equal(await reloaded.put('file-b', 'proxy-1', { file: { size: 9, lastModified: 9 }, image }), true, `${label}: a second put`);
+    await reloaded.settled();
+    const again = opfsTab(root);
+    assert.equal((await again.find('file-b')).length, 1, `${label}: the rewritten index lists it`);
+    same((await again.read((await again.find('file-a'))[0].name)).image, image, `${label}: the first proxy is still there`);
+  }
+  // An engine whose getSize() is no byte count: the index cannot be read, so
+  // nothing is deleted and nothing written over it (it read as lost, and
+  // every record as an orphan, before).
+  const root = fakeOpfs();
+  const store = opfsTab(root);
+  assert.equal(await store.put('file-a', 'proxy-1', { file, image }), true);
+  await store.settled();
+  const kept = [...(await recordFiles(root)).keys()].sort();
+  root.sizeOf = () => ({});
+  const unreadable = opfsTab(root);
+  await unreadable.load();
+  assert.deepEqual([...(await recordFiles(root)).keys()].sort(), kept, 'an unreadable index deletes nothing');
+  assert.equal(await unreadable.put('file-c', 'proxy-1', { file, image }), false, 'nor is anything written over it');
+  assert.ok(unreadable.stats.failures >= 2, 'the failures are counted');
+  root.sizeOf = node => node.bytes.byteLength;
+  // Nor when a read stops short, or the file cannot be opened for another
+  // reason than its absence.
+  root.readCap = 10;
+  await opfsTab(root).load();
+  assert.deepEqual([...(await recordFiles(root)).keys()].sort(), kept, 'an index read short deletes nothing');
+  root.readCap = null;
+  root.openError = 'SecurityError';
+  await opfsTab(root).load();
+  assert.deepEqual([...(await recordFiles(root)).keys()].sort(), kept, 'an index that cannot be opened deletes nothing');
+  root.openError = null;
+  const readable = opfsTab(root);
+  assert.equal((await readable.find('file-a')).length, 1, 'readable again, the records are all there');
+}
+
 // ---- Two tabs share one store (R2-010): each keeps a copy of the index;
 // every change of it runs under the store's Web Lock on the index the
 // records hold, so neither writes over the other's entries nor deletes its
@@ -414,6 +486,7 @@ async function sharedByTwoTabs({ webkit16 = false } = {}) {
   assert.equal(b.size, 1, `${label}: the other tab's copy is the records' index again`);
 }
 await sharedByTwoTabs();
+await sharedByTwoTabs({ webkit16: true });
 // The budget and the LRU count every tab's records: room for about two
 // proxies in all, three puts from each of two tabs leave two.
 {
@@ -538,4 +611,4 @@ await sharedByTwoTabs();
   assert.equal(files.get('c'.repeat(64)).byteLength, 0, 'an empty record still renames into place');
 }
 
-console.log('displayProxyStore: spill, persistent store, budgets, LRU, checksum purge, index restart, Clear cache, two tabs and desktop chunks passed');
+console.log('displayProxyStore: spill, persistent store, budgets, LRU, checksum purge, index restart, Clear cache, OPFS sync access handles, two tabs and desktop chunks passed');
