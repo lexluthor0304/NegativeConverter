@@ -43,6 +43,8 @@ export function displaySessionStubs(overrides = {}) {
     colorAnalysisSampleMissing: () => false, ensureColorAnalysisSample: async () => true,
     colorAnalysisSampleMisses: new WeakSet(), analysisSamplesFor: () => new Map(), autoWbFromRecords: new WeakSet(),
     forgetDisplayProxies: () => {}, readSpilledDisplaySession: async () => null,
+    // The planes are always the geometry the settings name (R1-065).
+    geometryOutOfStep: () => false,
     fillDisplayProxy: async () => false, displayProxyFillPlan: () => null,
     // Part 3: no persistent store.
     displayProxyStore: null, persistDisplayProxy: async () => false, readStoredDisplaySession: async () => null,

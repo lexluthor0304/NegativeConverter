@@ -77,7 +77,8 @@ export const settle = async () => { for (let i = 0; i < 8; i++) await yieldToEve
 
 const FUNCTIONS = [
   'geometryBaseId', 'effectiveGeometryAngle', 'geometryFrameSize', 'geometryKeyFor', 'sameGeometryKey',
-  'installedGeometryKey', 'hasExactPlane16', 'isGeometryFrame', 'takeAdoptedRotation', 'createGeometryFrame',
+  'installedGeometryKey', 'workingGeometryKey', 'geometryOutOfStep', 'rollBackFailedGeometry',
+  'hasExactPlane16', 'isGeometryFrame', 'takeAdoptedRotation', 'createGeometryFrame',
   'materializeGeometryFrame', 'geometryPlanFor', 'renderGeometryFrame', 'buildGeometryPlanes',
   'installGeometryPlanes', 'holdGeometryBusy', 'releaseGeometryBusy', 'endGeometryJob', 'cancelGeometryJob',
   'whenGeometrySettled', 'noteGeometryPixelRead', 'startGeometryJob', 'applyGeometryFromBase', 'afterGeometry',
@@ -162,7 +163,7 @@ export function createHarness(base, { historyBudget = 768 * 1024 * 1024, session
     geometryMemo: new WeakMap(), geometryBaseIds: new WeakMap(), nextGeometryBaseId: 1,
     pendingImportRotation: null, geometryToken: 0, geometryJob: null, geometryBusyOwner: null,
     interimGeometry: null, loadGeneration: 1, DEBUG_UI: false, manualEditRevision: 0,
-    geometryDiagnostics: { pendingReads: 0, frameSyncReads: 0, adoptedRotations: 0, workerRotations: 0, mainRotations: 0, coldRestores: 0, coldSessions: false },
+    geometryDiagnostics: { pendingReads: 0, frameSyncReads: 0, adoptedRotations: 0, workerRotations: 0, mainRotations: 0, coldRestores: 0, rollbacks: 0, coldSessions: false },
     undoStack: [], redoStack: [], MAX_UNDO: 30, HISTORY_MEMORY_BUDGET_BYTES: historyBudget,
     processNegativeInFlight: null, coreReprocessTimer: null, coreReprocessToken: 0, coreReprocessGeneration: 0,
     studioAutoFrameRunning: false, singleExportActive: false, studioThumbnailUpdateFrame: 0, expiredAnalysisKey: null,
@@ -182,6 +183,8 @@ export function createHarness(base, { historyBudget = 768 * 1024 * 1024, session
     canvasContainer: { clientWidth: 620, clientHeight: 520, classList: { add() {}, remove() {} } },
     zoomIndicator: { style: {} },
     console: { warn() {}, error() {}, info() {} },
+    // The messages shown to the user (a failed geometry build, R1-065).
+    toasts: [], showToast: message => { target.toasts.push(message); },
     displayNegative: image => { displayed.push(image); context.settleInterimGeometryDisplay(); },
     // The real conversion waits for geometry the same way.
     processNegative: async (options = {}) => {

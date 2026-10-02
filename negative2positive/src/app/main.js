@@ -2695,7 +2695,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // worker, and full-resolution rotations built on the main thread. The
     // pool counts its own jobs (window.__ncGeometry.pool).
     const geometryDiagnostics = {
-      pendingReads: 0, frameSyncReads: 0, adoptedRotations: 0, workerRotations: 0, mainRotations: 0, coldRestores: 0,
+      pendingReads: 0, frameSyncReads: 0, adoptedRotations: 0, workerRotations: 0, mainRotations: 0, coldRestores: 0, rollbacks: 0,
       // Smoke-run switch: cache photo sessions without their planes, as a
       // 60 MP session that does not fit the budget is.
       coldSessions: false
@@ -3360,11 +3360,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     function commitUndoSnapshot(snapshot) {
-      undoStack.push(trimHistorySnapshot(snapshot));
+      const entry = trimHistorySnapshot(snapshot);
+      undoStack.push(entry);
       if (undoStack.length > MAX_UNDO) undoStack.shift();
       pruneHistoryForMemory();
       redoStack.length = 0;
       updateUndoRedoButtons();
+      return entry;
     }
 
     function noteManualEdit(label) {
@@ -3377,14 +3379,17 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       }
     }
 
+    // Returns the entry it pushed: a geometry edit hands it to its build,
+    // which takes it back if the build fails (rollBackFailedGeometry).
     function pushUndo(label) {
       noteManualEdit(label);
-      commitUndoSnapshot(captureSnapshot(label));
+      const entry = commitUndoSnapshot(captureSnapshot(label));
       if (['crop', 'rotation', 'mirror', 'autoFrame', 'restoreFullFrame'].includes(label)) {
         state.semanticMap = null;
         // A new frame (or a second Apply) ends a pending crop-area detection.
         cancelCropDetection();
       }
+      return entry;
     }
 
     // A dust-brush stroke: the entry holds the bytes it changed (see
@@ -8791,8 +8796,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       else if (colorAnalysisSampleMissing() && !(await ensureColorAnalysisSample())) {
         throw new Error(getLocalizedText('loadError', 'Error loading file'));
       }
-      // Export reads the planes of the current geometry.
+      // Export reads the planes of the current geometry, never planes the
+      // settings do not name (R1-065: a failed build is rolled back).
       await whenGeometrySettled();
+      if (geometryOutOfStep()) throw new Error(getLocalizedText('geometryNotApplied', "The photo's rotation, mirror or crop could not be applied, so it was not exported."));
       // Crop/analysis confirmation also runs processNegative directly. Its
       // preview may be temporarily cleared even though no debounced render is
       // pending, so export must settle that conversion before choosing pixels.
@@ -9011,6 +9018,14 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         // Convert the planes of the current geometry, never the previous one;
         // a build superseded while this waited is converted by its successor.
         if (!(await whenGeometrySettled()) || !isCurrentLoad(generation)) return;
+        // Settings that name another geometry than the planes' are built
+        // first (R1-065). A failed build is rolled back, so only planes no
+        // rollback could reach get here (a two-stage import's stand-in after
+        // its swap); a build that fails again converts nothing.
+        if (geometryOutOfStep()) {
+          await applyGeometryFromBase({ cropRegion: state.cropRegion });
+          if (!(await whenGeometrySettled()) || !isCurrentLoad(generation) || geometryOutOfStep()) return;
+        }
         // A session without its base (#249) converts with the colour-analysis
         // sample a decoded base gives, waiting for the base when its
         // descriptor has none for the area.
@@ -15197,6 +15212,31 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       return installed && !installed.released ? geometryMemo.get(installed) || null : null;
     }
 
+    // The geometry of the planes in state, stand-ins included: their memo,
+    // the recipe of a whole-frame descriptor, or none at all when the base
+    // itself is the working image (as a load leaves it). Null when it is not
+    // known: an 8-bit frame the Auto Frame worker rotated is not memoised.
+    function workingGeometryKey() {
+      const planes = state.croppedImageData || state.originalImageData;
+      if (!planes) return null;
+      const memo = geometryMemo.get(planes);
+      if (memo) return memo;
+      if (isGeometryFrame(planes)) return planes.__geometryFrame.key;
+      return planes === state.loadedBaseImageData ? geometryKeyFor(planes) : null;
+    }
+
+    // Whether the settings name another geometry than the planes in state
+    // were built with (R1-065). A failed build is rolled back
+    // (rollBackFailedGeometry), so they part only when the planes belong to
+    // another base (a two-stage import's stand-in after its swap, #255) or
+    // something else left them apart: processNegative builds the planes
+    // again first, an export refuses.
+    function geometryOutOfStep() {
+      const planes = workingGeometryKey();
+      const base = state.loadedBaseImageData || state.baseDescriptor;
+      return Boolean(planes && base && !sameGeometryKey(planes, geometryKeyFor(base, state)));
+    }
+
     function hasExactPlane16(image) {
       const plane = image?.__image16;
       return Boolean(plane && plane.data instanceof Uint16Array && plane.width === image.width
@@ -15369,12 +15409,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (DEBUG_UI) console.error(`Geometry planes read while a build is pending: ${reader}`);
     }
 
-    function startGeometryJob(base, key, adopted, refreshDisplay, holdBusy = true) {
+    // `edit`: the undo entry the edit that asked for this geometry pushed.
+    function startGeometryJob(base, key, adopted, refreshDisplay, holdBusy = true, edit = null) {
       cancelGeometryJob({ keepInterim: true });
       const token = geometryToken;
       const generation = loadGeneration;
       let finish;
-      const job = { token, key, base, refreshDisplay, settled: false };
+      const job = { token, key, base, refreshDisplay, edit, generation, settled: false };
       job.done = new Promise(resolve => { finish = resolve; });
       job.finish = installed => {
         if (job.settled) return;
@@ -15386,29 +15427,87 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       state.geometryReady = job.done;
       if (holdBusy) holdGeometryBusy(job);
       const isCurrent = () => geometryJob === job && token === geometryToken && isCurrentLoad(generation);
+      // A build that ends without planes while it is still the current one
+      // failed (it was not superseded): it is rolled back once it has ended.
+      let failed = false;
       // A session restored without its base (#249) builds once ensureBase()
       // has decoded it; the base is registered under the descriptor's id.
       const decoded = base?.released ? ensureBase() : Promise.resolve(base);
       decoded.then(real => (real && isCurrent() ? buildGeometryPlanes(real, key, adopted, isCurrent) : null)).then(planes => {
-        if (!planes || !isCurrent()) return false;
+        if (!planes || !isCurrent()) {
+          // No base (it could not be decoded again), or no planes.
+          failed = isCurrent();
+          return false;
+        }
         installGeometryPlanes(key, planes, { memo: !adopted || adopted.exact });
         if (job.refreshDisplay) displayNegative(state.croppedImageData || state.originalImageData);
         return true;
       }).catch(error => {
         console.error('Geometry build failed:', error);
+        failed = isCurrent();
         return false;
       }).then(installed => {
         endGeometryJob(job);
         job.finish(installed);
+        if (failed && !installed) rollBackFailedGeometry(job);
       });
       return job.done;
+    }
+
+    // A build that failed while it was still the current one (R1-065,
+    // R2-005): a plane the pool or the canvas could not allocate, or the
+    // original of a session restored without it that could not be decoded
+    // again. The settings must never name a geometry the planes were not
+    // built with, which a conversion, an export and the saved recipe would
+    // pair with them, so the edit is undone: its own undo entry, while it
+    // still holds the planes on screen, is restored as Undo restores it
+    // (without a redo step); otherwise rotationAngle, mirrored and
+    // cropRegion are taken from the planes and the photo is converted
+    // again. Planes of another base (a two-stage import's stand-in, #255)
+    // name no geometry of this base: the settings stay, and the conversion
+    // and export barriers refuse them (geometryOutOfStep).
+    function rollBackFailedGeometry(job) {
+      // Superseded since it failed: its successor owns the settings.
+      if (job.token !== geometryToken || !isCurrentLoad(job.generation)) return;
+      clearInterimGeometryDisplay();
+      const planes = workingGeometryKey();
+      if (sameGeometryKey(planes, job.key)) return;
+      geometryDiagnostics.rollbacks++;
+      showToast(getLocalizedText('geometryEditFailed', 'The rotation, mirror or crop could not be applied.'), 5000);
+      const entry = job.edit && undoStack.at(-1) === job.edit ? job.edit : null;
+      if (entry && !entry.refs?.cold) {
+        undoStack.pop();
+        updateUndoRedoButtons();
+        restoreSnapshot(entry);
+        return;
+      }
+      if (!planes || planes.baseId !== job.key.baseId) return;
+      if (entry) {
+        undoStack.pop();
+        updateUndoRedoButtons();
+      }
+      state.rotationAngle = planes.angle;
+      state.mirrored = planes.mirrored;
+      state.cropRegion = planes.crop ? { ...planes.crop } : null;
+      // What the edit changed besides the geometry.
+      if (entry) {
+        state.semanticMap = entry.settings.semanticMap;
+        state.autoFrame.lastDiagnostics = entry.settings.autoFrameMeta;
+      }
+      updateMirrorButtonState();
+      studioWorkspace?.sync();
+      // The edit dropped the conversion of these planes.
+      if (state.currentStep < 3) return;
+      const generation = loadGeneration;
+      void convertAfterGeometryEdit(() => isCurrentLoad(generation) && !geometryJob, { quiet: true, automatic: false })
+        .catch(error => console.error('Converting after a failed geometry build failed:', error));
     }
 
     // Builds (or keeps) the planes for state.rotationAngle / state.mirrored and
     // `cropRegion`, which is sanitised against the frame at once. Resolves true
     // when those planes are installed and still current.
-    function applyGeometryFromBase({ cropRegion = state.cropRegion, refreshDisplay = false, holdBusy = true } = {}) {
-      if (!state.loadedBaseImageData && state.baseDescriptor) return applyGeometryWithoutBase({ cropRegion, refreshDisplay, holdBusy });
+    function applyGeometryFromBase({ cropRegion = state.cropRegion, refreshDisplay = false, holdBusy = true, edit = null } = {}) {
+      if (!state.loadedBaseImageData && state.baseDescriptor) return applyGeometryWithoutBase({ cropRegion, refreshDisplay, holdBusy, edit });
       const base = state.loadedBaseImageData || state.originalImageData;
       if (!base || isGeometryFrame(base)) {
         cancelGeometryJob();
@@ -15422,6 +15521,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (geometryJob && geometryJob.base === base && sameGeometryKey(geometryJob.key, key)) {
         pendingImportRotation = null;
         if (refreshDisplay) geometryJob.refreshDisplay = true;
+        if (edit) geometryJob.edit = edit;
         return geometryJob.done;
       }
       if (sameGeometryKey(key, installedGeometryKey())) {
@@ -15438,7 +15538,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         if (refreshDisplay) displayNegative(base);
         return Promise.resolve(true);
       }
-      return startGeometryJob(base, key, takeAdoptedRotation(base, key.angle), refreshDisplay, holdBusy);
+      return startGeometryJob(base, key, takeAdoptedRotation(base, key.angle), refreshDisplay, holdBusy, edit);
     }
 
     // applyGeometryFromBase for a session restored without its base (#249):
@@ -15446,13 +15546,14 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // geometry id. The same geometry keeps the planes (or stand-ins) it has,
     // as a settings-only refresh must, instead of clearing the crop; another
     // one is built by a job that first decodes the base.
-    function applyGeometryWithoutBase({ cropRegion, refreshDisplay, holdBusy = true }) {
+    function applyGeometryWithoutBase({ cropRegion, refreshDisplay, holdBusy = true, edit = null }) {
       const descriptor = state.baseDescriptor;
       const key = geometryKeyFor(descriptor, { rotationAngle: state.rotationAngle, mirrored: state.mirrored, cropRegion });
       state.cropRegion = key.crop ? { ...key.crop } : null;
       if (geometryJob && geometryJob.base === descriptor && sameGeometryKey(geometryJob.key, key)) {
         pendingImportRotation = null;
         if (refreshDisplay) geometryJob.refreshDisplay = true;
+        if (edit) geometryJob.edit = edit;
         return geometryJob.done;
       }
       if (sameGeometryKey(key, sessionGeometryKey())) {
@@ -15463,7 +15564,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         return Promise.resolve(true);
       }
       pendingImportRotation = null;
-      return startGeometryJob(descriptor, key, null, refreshDisplay, holdBusy);
+      return startGeometryJob(descriptor, key, null, refreshDisplay, holdBusy, edit);
     }
 
     // Runs `then` once the planes an edit asked for are installed, unless a
@@ -15598,7 +15699,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
       if (state.cropping && rotateCropDraftBy(normalizedAngle)) return;
 
-      pushUndo('rotation');
+      const edit = pushUndo('rotation');
       // The new frame is the base rotated once by the total angle (#244), not
       // the current frame rotated again: restore and batch export build it
       // that way, so single export now matches them. A session without its
@@ -15613,7 +15714,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const mappedCrop = sourceCrop ? mapCropRegionAfterRotation(
         sourceCrop, sourceFrame.width, sourceFrame.height, frame.width, frame.height, normalizedAngle
       ) : null;
-      const ready = applyGeometryFromBase({ cropRegion: mappedCrop });
+      const ready = applyGeometryFromBase({ cropRegion: mappedCrop, edit });
       invalidateProcessedPipelineState();
       resetZoomPan();
       // The new framing shows at once; the exact planes follow from the pool.
@@ -15648,15 +15749,15 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       mirrorBtn.classList.toggle('active', on);
     }
 
-    function rebuildGeometryFromBase() {
+    function rebuildGeometryFromBase({ edit = null } = {}) {
       if (!baseSizeSource()) return Promise.resolve(false);
-      return applyGeometryFromBase();
+      return applyGeometryFromBase({ edit });
     }
 
     function applyMirror() {
       if (!state.originalImageData) return;
 
-      pushUndo('mirror');
+      const edit = pushUndo('mirror');
       state.mirrored = !state.mirrored;
       updateMirrorButtonState();
       // The crop box was drawn on the pre-mirror view, so flip it to keep the
@@ -15668,7 +15769,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           left: frameWidth - (state.cropRegion.left + state.cropRegion.width)
         };
       }
-      const ready = applyGeometryFromBase();
+      const ready = applyGeometryFromBase({ edit });
 
       invalidateProcessedPipelineState();
       resetZoomPan();
@@ -17523,13 +17624,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           previous: { rotationAngle: state.rotationAngle, mirrored: state.mirrored, cropRegion: state.cropRegion, frame: state.originalImageData }
         });
 
-        pushUndo('crop');
+        const edit = pushUndo('crop');
         state.autoFrame.lastDiagnostics = nextMeta;
         let ready = Promise.resolve(true);
         if (!draft.analysisOnly) {
           state.rotationAngle = nextGeometry.rotationAngle;
           // Only the crop window is resampled, in the pool.
-          ready = applyGeometryFromBase({ cropRegion });
+          ready = applyGeometryFromBase({ cropRegion, edit });
         }
         invalidateProcessedPipelineState();
         resetZoomPan();
@@ -28870,12 +28971,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         },
         onRestoreFrame: () => {
           if (!state.originalImageData || state.cropping || document.body.dataset.studioBusy) return;
-          pushUndo('restoreFullFrame');
+          const edit = pushUndo('restoreFullFrame');
           state.rotationAngle = 0;
           state.mirrored = false;
           state.cropRegion = null;
           if (state.autoFrame.lastDiagnostics) state.autoFrame.lastDiagnostics.appliedMode = 'none';
-          rebuildGeometryFromBase();
+          rebuildGeometryFromBase({ edit });
           markCurrentFileDirty();
           void processNegative();
         },

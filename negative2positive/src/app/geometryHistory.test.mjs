@@ -266,4 +266,206 @@ for (const coldSessions of [false, true]) {
   assert.equal(h.target.document.body.dataset.studioBusy, undefined);
 }
 
+// ---- A failed build is rolled back (R1-065, R2-005) ----
+// The pool cannot allocate a plane (a RangeError at 60 MP under memory
+// pressure). The rotation, the mirror, Apply Crop and a settings refresh then
+// leave the settings on the geometry of the planes on screen: no interim turn
+// stays, the failed edit leaves no undo entry, the user is told, and a
+// conversion or an export reads planes and settings that agree.
+const failingRender = h => {
+  const render = h.pool.render;
+  h.pool.render = async () => { throw new RangeError('Array buffer allocation failed'); };
+  return () => { h.pool.render = render; };
+};
+const { functionSource } = await import('./geometryTestHarness.mjs');
+const vm = await import('node:vm');
+const withExportBarrier = h => {
+  vm.runInContext(functionSource('ensureFullResolutionReadyForExport'), h.context);
+  return h.context;
+};
+const NO_TURN = 'matrix(1, 0, 0, 1, 0, 0)';
+
+// (Restore full frame installs the base itself here, which cannot fail; on
+// a session without its base it waits for the original: displaySessions.)
+for (const edit of ['rotation', 'mirror']) {
+  const base = makeBase(64, 44, 31);
+  const h = createHarness(base, { realProcessNegative: true }), c = withExportBarrier(h);
+  c.restoreSettings({ rotationAngle: 1.3, mirrored: false, cropRegion: crop(5, 4) });
+  await h.state.geometryReady;
+  await c.processNegative({ quiet: true });
+  const installed = h.state.croppedImageData;
+  const converted = h.state.processedImageData;
+  const recipe = settingsFor(h.state);
+  c.pushUndo('exposure');
+  const depth = h.target.undoStack.length;
+  const conversions = h.conversions.length;
+  const restore = failingRender(h);
+  const editing = edit === 'rotation' ? c.applyRotation(90) : c.applyMirror();
+  const pushed = h.target.undoStack.at(-1);
+  assert.equal(h.target.undoStack.length, depth + 1, `${edit}: the edit pushed its entry`);
+  assert.notEqual(h.target.canvasTransformWrapper.style.transform, NO_TURN, `${edit}: the interim turn shows while the build runs`);
+  await editing;
+  await settle();
+  restore();
+  assert.deepEqual(settingsFor(h.state), recipe, `${edit}: the settings are the installed geometry again`);
+  assert.equal(c.geometryOutOfStep(), false);
+  assert.equal(h.state.croppedImageData, installed, `${edit}: the planes on screen stay`);
+  assert.equal(h.state.processedImageData, converted, `${edit}: the edit's entry gave their conversion back (as Undo does)`);
+  assert.equal(h.target.canvasTransformWrapper.style.transform, NO_TURN, `${edit}: no interim turn is left`);
+  assert.equal(h.target.undoStack.length, depth, `${edit}: the failed edit leaves no undo entry`);
+  assert.ok(!h.target.undoStack.includes(pushed));
+  assert.equal(h.target.redoStack.length, 0, `${edit}: and no redo entry`);
+  assert.equal(h.target.toasts.length, 1, `${edit}: the user is told`);
+  assert.equal(h.target.geometryDiagnostics.rollbacks, 1);
+  assert.equal(h.target.document.body.dataset.studioBusy, undefined, `${edit}: editing is unlocked`);
+  // A conversion reads the installed planes under their own settings; an
+  // export of them is the chain of those settings (what batch export builds).
+  await c.processNegative({ quiet: true });
+  assert.equal(h.conversions.length, conversions + 1, `${edit}: converted once`);
+  assert.equal(h.conversions.at(-1).source, installed);
+  samePixels(installed, exportChain(base, settingsFor(h.state)), `${edit}: single export == batch export of the saved settings`);
+  await c.ensureFullResolutionReadyForExport();
+  // Undo still steps back over the exposure entry, not into the failed edit.
+  c.performUndo();
+  assert.deepEqual(settingsFor(h.state), recipe);
+}
+
+// Apply Crop (a straightened crop, with its crop-area detection pending).
+{
+  const { applyCropHandlerSource } = await import('./geometryTestHarness.mjs');
+  const { imageAreaFromWorkingRect } = await import('./analysisRegion.js');
+  const { isSameAnalysisFrame, workingPointsToBase, buildCropDetectionInput } = await import('./cropColorAnalysis.js');
+  const geometryCore = await import('./imageGeometry.js');
+  const base = makeBase(90, 64, 33);
+  const h = createHarness(base, { realProcessNegative: true }), c = withExportBarrier(h);
+  c.restoreSettings({ rotationAngle: 1.3, mirrored: false, cropRegion: { left: 6, top: 5, width: 70, height: 45 } });
+  await h.state.geometryReady;
+  await c.processNegative({ quiet: true });
+  const meta = { appliedMode: 'crop', imageArea: [{ x: 0.1, y: 0.1 }, { x: 0.9, y: 0.1 }, { x: 0.9, y: 0.9 }, { x: 0.1, y: 0.9 }] };
+  h.state.autoFrame.lastDiagnostics = structuredClone(meta);
+  const installed = h.state.croppedImageData;
+  const recipe = settingsFor(h.state);
+  Object.assign(h.target, {
+    applyCropBtn: { disabled: false }, cancelCropBtn: { disabled: false },
+    getLoadingOverlay: () => ({ show: async () => {}, hide() {} }),
+    requestAnimationFrame: callback => setTimeout(callback, 0),
+    studioWorkspace: { sync() {}, text: key => key },
+    imageAreaFromWorkingRect, isSameAnalysisFrame, workingPointsToBase, buildCropDetectionInput,
+    runOpenCvTask: async (type, task) => { await task.build(); return null; },
+    exitCropMode: () => { h.state.cropping = false; h.state.cropDraft = null; }
+  });
+  vm.runInContext(applyCropHandlerSource(), c);
+  const preview = c.renderFrameSample(700_000);
+  const rotatedPreview = geometryCore.applyRotationToImageData(preview, -0.5);
+  h.state.cropping = true;
+  h.state.cropDraft = {
+    sourceImageData: h.state.originalImageData, rotatedSize: { width: rotatedPreview.width, height: rotatedPreview.height },
+    rect: { left: 11.3, top: 7.8, width: 52.4, height: 37.1 }, rotationBase: 0, straightenAngle: -0.5
+  };
+  const depth = h.target.undoStack.length;
+  const restore = failingRender(h);
+  await c.applyCropHandler();
+  await settle();
+  restore();
+  assert.deepEqual(settingsFor(h.state), recipe, 'Apply Crop: the settings are the installed geometry again');
+  assert.equal(h.state.croppedImageData, installed);
+  assert.deepEqual(h.state.autoFrame.lastDiagnostics, meta, 'Apply Crop: the frame record it replaced is back');
+  assert.equal(h.target.cropDetection, null, 'Apply Crop: its crop-area detection ended');
+  assert.equal(h.target.undoStack.length, depth, 'Apply Crop: no undo entry');
+  assert.equal(h.target.toasts.length, 1);
+  assert.equal(c.geometryOutOfStep(), false);
+  assert.equal(h.target.document.body.dataset.studioBusy, undefined);
+  assert.equal(h.target.studioAutoFrameRunning, false);
+  await c.processNegative({ quiet: true });
+  assert.equal(h.conversions.at(-1).source, installed);
+  samePixels(installed, exportChain(base, settingsFor(h.state)), 'Apply Crop: single export == batch export of the saved settings');
+  await c.ensureFullResolutionReadyForExport();
+}
+
+// Parity, old vs new: the old code kept the edit's settings over the old
+// planes, so single export (the planes) and batch export or a reopen (the
+// chain of the saved settings) differed; now they are the same pixels.
+{
+  const base = makeBase(64, 44, 32);
+  const h = createHarness(base), c = h.context;
+  c.restoreSettings({ rotationAngle: 1.3, mirrored: false, cropRegion: crop(5, 4) });
+  await h.state.geometryReady;
+  const installed = h.state.croppedImageData;
+  const restore = failingRender(h);
+  const rotating = c.applyRotation(90);
+  const old = settingsFor(h.state);
+  await rotating;
+  await settle();
+  restore();
+  assert.notEqual(exportChain(base, old).width, installed.width, 'old: the saved settings name another frame than the exported planes');
+  samePixels(exportChain(base, settingsFor(h.state)), installed, 'new: the saved settings name the exported planes');
+}
+
+// ---- A settings refresh (restoreSettings) whose build fails ----
+{
+  // On a load's planes (the base itself, nothing memoised): back to no geometry.
+  const base = makeBase(64, 44, 35);
+  const h = createHarness(base, { realProcessNegative: true }), c = withExportBarrier(h);
+  const restore = failingRender(h);
+  c.restoreSettings({ rotationAngle: 1.3, mirrored: true, cropRegion: crop(5, 4) });
+  await h.state.geometryReady;
+  await settle();
+  restore();
+  assert.deepEqual(settingsFor(h.state), { rotationAngle: 0, mirrored: false, cropRegion: null }, 'the base\'s own geometry again');
+  assert.equal(h.state.originalImageData, base);
+  assert.equal(c.geometryOutOfStep(), false);
+  assert.equal(h.target.undoStack.length, 0, 'no undo entry');
+  assert.equal(h.target.toasts.length, 1);
+  assert.doesNotMatch(String(h.target.canvasTransformWrapper.style.transform), /rotate|scaleX\(-1\)/);
+  await c.processNegative({ quiet: true });
+  assert.equal(h.conversions.at(-1).source, base, 'the conversion reads the planes its settings name');
+  await c.ensureFullResolutionReadyForExport();
+}
+{
+  // On a converted photo (a roll commit's refresh): back to its installed
+  // crop, which is converted again.
+  const base = makeBase(64, 44, 36);
+  const h = createHarness(base, { realProcessNegative: true }), c = withExportBarrier(h);
+  c.restoreSettings({ rotationAngle: 1.3, mirrored: false, cropRegion: crop(5, 4) });
+  await h.state.geometryReady;
+  await c.processNegative({ quiet: true });
+  const installed = h.state.croppedImageData;
+  const recipe = settingsFor(h.state);
+  const conversions = h.conversions.length;
+  const restore = failingRender(h);
+  c.restoreSettings({ rotationAngle: -2, mirrored: false, cropRegion: crop(8, 6) });
+  await h.state.geometryReady;
+  await settle();
+  restore();
+  assert.deepEqual(settingsFor(h.state), recipe);
+  assert.equal(h.state.croppedImageData, installed);
+  assert.equal(h.conversions.length, conversions + 1, 'converted again');
+  assert.equal(h.conversions.at(-1).source, installed);
+  await c.ensureFullResolutionReadyForExport();
+}
+
+// ---- Planes no rollback can reach (a two-stage import's stand-in after
+// its swap, #255): the conversion builds the planes the settings name
+// first, and converts nothing when that fails too; an export refuses ----
+{
+  const standIn = makeBase(64, 44, 37), full = makeBase(64, 44, 38);
+  const h = createHarness(standIn, { realProcessNegative: true }), c = withExportBarrier(h);
+  c.restoreSettings({ rotationAngle: 1.3, mirrored: false, cropRegion: crop(5, 4) });
+  await h.state.geometryReady;
+  h.state.loadedBaseImageData = full;
+  assert.equal(c.geometryOutOfStep(), true);
+  await assert.rejects(c.ensureFullResolutionReadyForExport(), /not exported/, 'an export refuses them');
+  const restore = failingRender(h);
+  const conversions = h.conversions.length;
+  await c.processNegative({ quiet: true });
+  await settle();
+  assert.equal(h.conversions.length, conversions, 'a build that fails again converts nothing');
+  assert.deepEqual(settingsFor(h.state), { rotationAngle: 1.3, mirrored: false, cropRegion: crop(5, 4) }, 'the settings stay');
+  restore();
+  await c.processNegative({ quiet: true });
+  samePixels(h.state.croppedImageData, exportChain(full, settingsFor(h.state)), 'built from the base the settings belong to');
+  assert.equal(h.conversions.at(-1).source, h.state.croppedImageData);
+  await c.ensureFullResolutionReadyForExport();
+}
+
 console.log('geometry history tests passed');

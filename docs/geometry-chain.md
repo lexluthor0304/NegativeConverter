@@ -73,6 +73,22 @@ In `main.js` the scalars change synchronously and the planes follow:
 - Rotate 90° and mirror turn or flip the current display with CSS at once
   (UI only; composed when edits follow each other); the first paint of the
   new planes removes it.
+- A build that fails while it is still the current one (a plane the pool or
+  the canvas cannot allocate, the original of a photo restored without it
+  that cannot be decoded again, #249) is rolled back, so the settings never
+  name a geometry the planes were not built with (a conversion, an export and
+  the saved recipe would pair them). The edit that asked for it hands its
+  undo entry to the build: while that entry still holds the planes on screen
+  it is restored as Undo restores it, without a redo step; otherwise
+  `rotationAngle`, `mirrored` and `cropRegion` are taken from the planes'
+  key and the photo is converted again. The interim CSS goes, and a toast
+  says the rotation, mirror or crop could not be applied. A settings refresh
+  (`restoreSettings`: a switch, a roll commit) that fails the same way keeps
+  the planes' geometry too, and leaving the photo saves that. Only planes of
+  another base (a two-stage import's stand-in after its swap) cannot be
+  rolled back: `processNegative` builds the planes the settings name first
+  and converts nothing when that fails again, and an export refuses
+  (`geometryOutOfStep`).
 - A tilted import rotates once, in the pool: the auto-frame worker returns
   the rotated frame's size only (#251). Only the Auto Frame button still
   gets the worker's rotated planes, and the build adopts them when base and
