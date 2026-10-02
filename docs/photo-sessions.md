@@ -316,7 +316,17 @@ curve, brush, zoom step) re-arms a trailing timer, so the tile settles about
 250 ms after the last one; a full render updates it in the next frame. When
 the timer fires, the tile is rebuilt only if its inputs changed: the converted
 preview source it samples and an exact signature of the adjustment settings.
-Zoom, pan and resize change neither; the display-preview refinement after a
+The source is recorded as an identity (a number per raster object, from a
+`WeakMap`), never held, so a photo's converted frame (up to 240 MB + 480 MB
+at 60 MP) does not outlive its session, its eviction or the next decode for
+the sake of its tile. Dust-brush strokes, their undo and redo, and MI-GAN's
+refresh of the stroked rects patch that frame in place (#259): they move a
+pixel revision the inputs record as well, so the tile is rebuilt from the
+patched pixels before its key is stamped again. Only the open photo's inputs
+are kept: an activation (`invalidatePhotoActivation`: a switch, a load, New
+session, a hidden-window park) forgets them, after the switch's persist has
+restamped the outgoing tile. Zoom, pan and resize change neither input; the
+display-preview refinement after a
 zoom converts the same settings at another size and carries the tile over
 instead of rebuilding it. The request records what the tile was sampled from
 before it marks the full-resolution pixels pending, and the tile is carried
@@ -335,7 +345,13 @@ the cold-switch feedback paints, or at the end of a warm switch. The 1200 px
 proxy for revisits after eviction is sampled in the click and adjusted after
 the next paint; it is stored only while the photo is still queued under the
 same key. Row refreshes compute one key per row and touch only their row when
-a single tile changes.
+a single tile changes. The first edit of a clean photo (a restored or just
+saved one) marks its own row unsaved in place (`setFileListRowDirty`; the
+unsaved marker is not part of a row's signature, so no render rebuilds a row
+for it). The list render for whatever else that edit may change (review and
+film badges) waits until edits pause for 250 ms: every input of a drag
+re-arms it, so the first drag after a switch or an export renders no list
+while the pointer moves.
 
 Other photos get their tiles from the background photo lanes (below) through
 `processFileWithSettings`, with bounded output size and stale-result guards. The previous tile stays visible
@@ -485,6 +501,7 @@ photo is a separate, later decode and is not counted.
 ```sh
 npm test
 PORT=5214 CDP_PORT=9238 npm run test:smoke -- --photo-session-only
+PORT=5214 CDP_PORT=9238 npm run test:smoke -- --photo-heap-only
 PORT=5214 CDP_PORT=9238 npm run test:smoke -- --photo-activation-only
 PORT=5214 CDP_PORT=9238 npm run test:smoke -- --light-table-only
 PORT=5214 CDP_PORT=9238 npm run test:smoke -- --display-session-only
@@ -500,9 +517,18 @@ pixels. Zoom steps are a compositor transform: they must not draw, and only a
 display preview of a new size repaints, at its texture's size (since #248 zoom
 does not change the display size; the detail layer covers it). It also checks active CMY thumbnail changes, identical unopened
 negative previews, whole-roll black-and-white pending-to-ready transitions,
-and a delayed cold-file read losing to a newer selection. Cold navigation
-also checks synchronous target feedback, accessible visible loading state,
-successful completion and read-failure recovery. The light-table regression
+and a delayed cold-file read losing to a newer selection. Its drag check
+observes the active row's own element: no tile encode, no tile write and no
+list render while the slider moves, the row marked unsaved in place, and one
+tile update within 500 ms of release. Cold navigation also checks
+synchronous target feedback, accessible visible loading state,
+successful completion and read-failure recovery. The same step ends with a
+heap check (`scripts/photo-heap-smoke.mjs`, alone with `--photo-heap-only`):
+ten frames made large with `?largeImagePixels` are opened one after another,
+three of them exported, with the sessions of the photos left forced to their
+display form; after a forced GC, every live full-resolution `ImageData` must
+be held by the open photo or a budgeted photo cache
+(`window.__ncMemory.held()`, `?debug=1`). The light-table regression
 imports 39 photos and checks full-height occupancy, final-tile access,
 mobile sizing, short landscapes and collapsed/reopened layouts. Synthetic fixtures
 are used; private user photographs are not published.
