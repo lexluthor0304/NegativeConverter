@@ -2,7 +2,7 @@
 // The RAW files are not in the repository, so the reference values are
 // recorded from a HEAD build and compared on this one:
 //
-//   # on a checkout of the reference commit, with this script copied in
+//   # on a checkout of the reference commit, with this branch's scripts/ copied in
 //   IMPORT_PARITY_FILES=/raw/_DSC3111.NEF:/raw/L1009967.dng IMPORT_PARITY_OUT=head.json \
 //     node scripts/smoke-test.mjs --import-parity-only
 //   # on this branch
@@ -11,8 +11,26 @@
 //
 // For each file (one fresh import each) it records the settled recipe the
 // app saves for the photo (a saved project's settings, i.e.
-// extractCurrentSettings after settling) and the SHA-256 of 8- and 16-bit
-// PNG and TIFF exports, then fails on any difference from the baseline.
+// extractCurrentSettings after settling) and the parity digests of its 8- and
+// 16-bit PNG and TIFF exports and of a JPEG export (export-parity-digest.mjs:
+// PNG by decoded samples, IHDR and metadata chunks, so #257's flagged PNG16
+// band stream compares equal; TIFF by file; JPEG by the decoded primary, its
+// metadata and the gain-map bytes), then fails on any difference from the
+// baseline. A baseline recorded before R1-100 (whole-file hashes) is refused:
+// record it again on the reference build.
+//
+// Flagged #229 changes (issues/229.md, "Constraints for every child") that a
+// 1703835 baseline cannot match are excluded per file, never by default:
+// IMPORT_PARITY_FLAGGED='<file>=<flag>[+<flag>],...' names the file and the
+// flag that moves it, for example the M11 frames #231 types inverted B&W
+// ('L1009967.dng=#231') or a photo larger than the display, whose auto WB
+// #248 estimates on another sample ('_DSC3111.NEF=#248'). FLAGGED_CHANGES
+// below says what each flag leaves out and what it still checks; the run
+// prints every exclusion and whether anything it left out differed. Photos
+// that fit the display need none. #251 part 4b (flagged, with a kill switch) is
+// switched off for every run, so the frame detector reads what 1703835 read.
+// #264's decoder rebuild is not in effect while libraw-wasm is 1.6.0; once it
+// ships, RAW baselines from 1703835 no longer apply.
 // Large files are heavy: run one 60 MP file at a time on a 16 GB machine.
 //
 // IMPORT_PARITY_CROP_DURING_SEMANTIC=1 (R1-037): the semantic colour worker's
@@ -46,10 +64,12 @@
 // expired-roll one.
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename } from 'node:path';
+import { PAGE_EXPORT_DIGEST } from './export-parity-digest.mjs';
 
 const ready = `document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy && !document.body.dataset.studioDetecting`;
 
 const CAPTURE = `(() => {
+  ${PAGE_EXPORT_DIGEST};
   window.showSaveFilePicker = undefined;
   window.__parityDownloads = [];
   const pending = new Set();
@@ -64,7 +84,9 @@ const CAPTURE = `(() => {
       const bytes = await blob.arrayBuffer();
       const digest = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))].map(b => b.toString(16).padStart(2, '0')).join('');
       const text = /json/.test(blob.type) ? new TextDecoder().decode(bytes) : null;
-      return { name, size: bytes.byteLength, sha256: digest, text };
+      // What the parity check compares (export-parity-digest.mjs); sha256 is the file's.
+      const parity = text === null ? await window.__ncExportDigest(new Uint8Array(bytes)) : null;
+      return { name, size: bytes.byteLength, sha256: digest, text, parity };
     }));
   };
 })()`;
@@ -101,6 +123,61 @@ function differences(expected, actual, path = '') {
   return [`${path}: ${JSON.stringify(expected)?.slice(0, 120)} -> ${JSON.stringify(actual)?.slice(0, 120)}`];
 }
 
+// What a flag leaves out for the files IMPORT_PARITY_FLAGGED names (paths in
+// the baseline row; a path covers what is under it), and what it still
+// checks. Each key is the flag's issue in issues/229.md.
+const EXPORT_PIXELS = ['png8.samples', 'png16.samples', 'tiff8.file', 'tiff16.file', 'jpeg8.pixels', 'jpeg8.gainMap', 'jpeg8.metadata']
+  .map(path => 'exports.' + path);
+const FLAGGED_CHANGES = {
+  '#231': {
+    flag: 'rebate-less monochrome frames default to inverted B&W',
+    // The frame converts in another mode: its whole recipe and every export
+    // move. The flagged outcome itself is still checked.
+    leaves: ['settings', 'exports'],
+    check: (reference, row) => (row.settings.filmType === 'bw' && reference.settings.filmType !== 'bw'
+      ? null : `not the flagged retype to B&W (filmType ${reference.settings.filmType} -> ${row.settings.filmType})`)
+  },
+  '#248': {
+    flag: 'the auto-WB sample no longer depends on the viewport',
+    // A photo larger than the display: the semantic anchors and the auto-WB
+    // gains are estimated on the 1024 px sample, and every export's pixels
+    // follow the gains (the JPEG's container XMP names the gain map's
+    // length). The rest of the recipe and every export's size, bit depth and
+    // PNG chunks still compare.
+    leaves: ['semanticMap', 'wbR', 'wbG', 'wbB', 'wbAutoConfidence', 'wbSemanticApplied'].map(key => 'settings.' + key).concat(EXPORT_PIXELS)
+  }
+};
+
+function flaggedChanges(files, fail) {
+  const flagged = new Map();
+  for (const item of (process.env.IMPORT_PARITY_FLAGGED || '').split(',').map(text => text.trim()).filter(Boolean)) {
+    const [file, flags = ''] = item.split('=');
+    if (!files.some(path => basename(path) === file)) fail(`IMPORT_PARITY_FLAGGED names ${file}, which IMPORT_PARITY_FILES does not list`);
+    for (const flag of flags.split('+')) {
+      if (!FLAGGED_CHANGES[flag]) fail(`IMPORT_PARITY_FLAGGED: ${flag || 'no flag'} for ${file} is not one of ${Object.keys(FLAGGED_CHANGES).join(', ')}`);
+      flagged.set(file, [...(flagged.get(file) || []), flag]);
+    }
+  }
+  return flagged;
+}
+
+// The baseline differences of one file, without what its flags leave out.
+function parityDifferences(name, reference, row, flags, fail) {
+  const lines = [...differences(reference.settings, row.settings).map(line => 'settings.' + line),
+    ...differences(reference.exports, row.exports).map(line => 'exports.' + line)];
+  const leftOut = new Set();
+  for (const key of flags) {
+    const change = FLAGGED_CHANGES[key];
+    const problem = change.check?.(reference, row);
+    if (problem) fail(`${name}: ${key} (${change.flag}): ${problem}`);
+    const covered = lines.filter(line => change.leaves.some(path => line.startsWith(path + ':') || line.startsWith(path + '.')));
+    covered.forEach(line => leftOut.add(line));
+    console.log(`import parity: ${name}: ${key} (${change.flag}) leaves out ${change.leaves.join(', ')}; `
+      + (covered.length ? `${covered.length} of those differ, e.g. ${covered[0]}` : 'none of those differ, the exclusion is not needed'));
+  }
+  return lines.filter(line => !leftOut.has(line));
+}
+
 export async function runImportParitySmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port,
   files = (process.env.IMPORT_PARITY_FILES || '').split(':').filter(Boolean),
   baselinePath = process.env.IMPORT_PARITY_BASELINE, outPath = process.env.IMPORT_PARITY_OUT,
@@ -113,6 +190,14 @@ export async function runImportParitySmoke({ send, evaluate, waitFor, wait, fail
     return runLaneRecipeParity({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port, files, baseline, outPath, expired, watch });
   }
   const rows = [];
+  const flagged = flaggedChanges(files, fail);
+  const stale = baseline?.find(entry => entry.file && Object.values(entry.exports || {}).some(value => typeof value === 'string'));
+  if (stale) fail(`the baseline entry for ${stale.file} holds whole-file hashes (recorded before R1-100): record it again on the reference build with this script`);
+  // #251 part 4b (flagged): its kill switch is read at boot, and stays set in
+  // this run's profile for every file below.
+  await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en` });
+  await waitFor('parity boot', `!!document.getElementById('studioImportAutoCrop')`);
+  await evaluate(`localStorage.setItem('nc_autoframe_neutral_lines_v1', 'off')`);
   for (const path of files) {
     if (!existsSync(path)) fail('parity file missing: ' + path);
     const name = basename(path);
@@ -166,25 +251,27 @@ export async function runImportParitySmoke({ send, evaluate, waitFor, wait, fail
     const settings = project.files.find(file => file.name === name)?.settings;
     if (!settings) fail('saved project has no settings for ' + name);
     const exports = {};
-    for (const [format, depth] of [['png', 8], ['png', 16], ['tiff', 8], ['tiff', 16]]) {
+    const fileHashes = {};
+    for (const [format, depth] of [['png', 8], ['png', 16], ['tiff', 8], ['tiff', 16], ['jpeg', 8]]) {
       await evaluate(`document.querySelector('.format-btn[data-format="${format}"]').click(); document.querySelector('.bitdepth-btn[data-bitdepth="${depth}"]').click()`);
       await wait(300);
       await evaluate(`document.getElementById('exportSingleBtn').click()`);
       const entry = await take(`parity export ${format}${depth} ${name}`);
-      exports[`${format}${depth}`] = entry.sha256;
+      exports[`${format}${depth}`] = entry.parity;
+      fileHashes[`${format}${depth}`] = entry.sha256.slice(0, 16);
       await waitFor('export settled', `!document.getElementById('exportSingleBtn').disabled`, 600_000);
     }
     const row = { file: name, settings, exports };
     if (cropDuringSemantic) row.semantic = await evaluate(`({ ...window.__paritySemantic, queued: undefined, release: undefined })`);
     rows.push(row);
-    console.log('import parity:', name, JSON.stringify(exports));
+    console.log('import parity:', name, JSON.stringify(exports), 'file SHA-256 (logged, not compared):', JSON.stringify(fileHashes));
     const reference = baseline?.find(entry => entry.file === name);
     if (baseline && !reference) fail('baseline has no entry for ' + name);
     if (reference) {
-      const diff = [...differences(reference.settings, settings).map(line => 'settings.' + line),
-        ...differences(reference.exports, exports).map(line => 'exports.' + line)];
+      const diff = parityDifferences(name, reference, row, flagged.get(name) || [], fail);
       if (diff.length) fail(`import parity differs for ${name}:\n${diff.join('\n')}`);
-      console.log('ok: settled settings and 8/16-bit PNG/TIFF exports match the baseline for', name);
+      console.log('ok: settled settings and 8/16-bit PNG/TIFF and JPEG exports match the baseline for', name,
+        flagged.has(name) ? `(apart from what ${flagged.get(name).join(' and ')} leave out)` : '');
     }
   }
   if (outPath) {

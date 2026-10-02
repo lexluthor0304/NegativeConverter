@@ -35,6 +35,8 @@ tests.push(join(scriptsDir, 'check-tauri-config.mjs'));
 tests.push(join(scriptsDir, 'check-third-party-notices.mjs'));
 // Its real check needs a build (CI runs it after `npm run build:web`).
 tests.push([join(scriptsDir, 'check-dist-asset-names.mjs'), '--self-test']);
+// The export digests the import parity and gain-map smokes compare.
+tests.push(join(scriptsDir, 'export-parity-digest.test.mjs'));
 
 // A test that leaves an open handle would otherwise hang the whole suite.
 const TIMEOUT_MS = 120_000;
