@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { createGpuPreviewScheduler, GPU_SETTLE_IDLE_MS, GPU_INPUT_RETRY_MS, DISABLED_GPU_PREVIEW_SCHEDULER } from './gpuPreviewScheduler.js';
-import { gpuSettleFixture, mainFunction, settle } from './gpuSettleHarness.mjs';
+import { gpuSettleFixture, mainFunction, mainSource, listenerFunction, settle } from './gpuSettleHarness.mjs';
 
 // #239: the GPU preview's own scheduling, on a fake clock: draws at the next frame
 // with the newest settings, the settle 150 ms after the last request (or at once),
@@ -142,7 +142,7 @@ for (const key of Object.keys(createGpuPreviewScheduler({ armFrame() {}, cancelF
 }
 assert.equal(DISABLED_GPU_PREVIEW_SCHEDULER.busy(), false);
 
-// ---- main.js on the scheduler (#229 review R1-046) ----
+// ---- main.js on the scheduler (#229 review R1-046, R1-047) ----
 
 const applies = f => f.log.filter(entry => entry.startsWith('apply:')).map(entry => Number(entry.slice(6)));
 const draws = f => f.log.filter(entry => entry.startsWith('gpu:'));
@@ -298,4 +298,127 @@ const draws = f => f.log.filter(entry => entry.startsWith('gpu:'));
   assert.equal(f.conversions.length, 1, 'meanwhile the worker converts the preset');
 }
 
-console.log('gpuPreviewScheduler: frame-paced draws, idle/commit/barrier settles, hand-over, abandon and cancel; in main.js the GPU takes only ticks it can draw, a failed draw keeps the exact frames coming, failed profiles and analyses are retried');
+// Every discrete SilverCore change the GPU draws sends its exact frame at once,
+// without the 150 ms settle timer, and the frame's 16-bit plane comes back as
+// soon as that lands (#233).
+async function assertSettlesAtOnce(f, label, change) {
+  const before = f.conversions.length;
+  await change();
+  await settle();
+  assert.equal(f.context.gpuPreviewScheduler.stats.requests > 0, true, `${label}: the GPU takes it`);
+  assert.equal(f.conversions.length, before + 1, `${label}: its exact frame leaves without the idle timer`);
+  assert.equal(f.conversions.at(-1).token, f.context.coreReprocessToken, `${label}: with the newest settings`);
+  assert.equal(f.context.gpuPreviewScheduler.settleArmed(), false, `${label}: no settle timer is left`);
+  await f.answer();
+  assert.equal(f.commits.length, 1, `${label}: its plane is committed as it lands`);
+  f.commits[0].resolve(new Uint16Array(4));
+  await settle();
+  assert.equal(f.context.coreReprocessBusy(), false, `${label}: settled`);
+}
+
+function studioHandler(marker, name, params) {
+  const start = mainSource.indexOf(marker);
+  assert.ok(start >= 0, `Studio handler exists: ${marker}`);
+  const body = start + marker.length;
+  return `function ${name}(${params}) {${mainSource.slice(body, mainSource.indexOf('\n        },', body))}\n    }`;
+}
+
+const noop = () => {};
+const discreteStubs = {
+  pushUndo: noop, markCurrentFileDirty: noop, syncSliderFromState: noop, schedulePreviewUpdate: noop,
+  updateEnlargerUI: noop, updateSlidersFromState: noop, updateWBSliders: noop, updateConsoleReadouts: noop,
+  showToast: noop, getInterpolatedText: () => '', formatAxisValue: () => '', setTestStripStep: noop,
+  readTestStripStep: () => 10, renderTestStrip: async () => {}, captureSnapshot: () => ({}), commitUndoSnapshot: noop,
+  enlargerSyncing: false, consoleChannelsEnabled: () => true, consoleColorKeysEnabled: () => true, CONSOLE_MAX_STEPS: 8,
+  CONSOLE_CHANNELS: { density: { stateKey: 'coreExposure', step: 10, commit: 'core', readoutId: 'consoleReadoutDensity' } },
+};
+function discreteFixture(functions, extra = '') {
+  const f = gpuSettleFixture();
+  Object.assign(f.context, discreteStubs, {
+    applyFilmPresetSettingsToState: async (presetId) => { f.state.coreFilmPreset = presetId; },
+  });
+  vm.runInContext(functions.map(mainFunction).join('\n') + '\n' + extra, f.context);
+  return f;
+}
+
+{
+  const f = discreteFixture(['consoleChannelSteps', 'commitConsoleChannel', 'nudgeConsoleChannel']);
+  await assertSettlesAtOnce(f, 'console density key', () => f.context.nudgeConsoleChannel('density', 1));
+}
+{
+  const f = discreteFixture(['resetConsoleChannels']);
+  f.state.coreExposure = 20;
+  await assertSettlesAtOnce(f, 'console reset', () => f.context.resetConsoleChannels());
+}
+{
+  const f = discreteFixture(['handleFilmPresetChange']);
+  await assertSettlesAtOnce(f, 'film preset', () => f.context.handleFilmPresetChange('kodak-portra-400'));
+}
+{
+  const f = discreteFixture(['handleCoreColorModelChange']);
+  await assertSettlesAtOnce(f, 'colour model', () => f.context.handleCoreColorModelChange());
+}
+{
+  const f = discreteFixture([], listenerFunction('positiveModeSelect', 'positiveModeChanged'));
+  Object.assign(f.state, { positiveMode: 'correct', wbAutoConfidence: null });
+  await assertSettlesAtOnce(f, 'positive mode', () => f.context.positiveModeChanged({ target: { value: 'edit' } }));
+}
+{
+  const f = discreteFixture(['applyTestStripValue']);
+  await assertSettlesAtOnce(f, 'test strip', () => f.context.applyTestStripValue({ key: 'coreExposure' }, 25));
+}
+{
+  const f = discreteFixture([], studioHandler('onStyle: model => {', 'studioStyle', 'model'));
+  await assertSettlesAtOnce(f, 'Studio style', () => f.context.studioStyle('frontier'));
+}
+{
+  // An immediate refresh (film base, flat field, roll frame, border buffer commit).
+  const f = discreteFixture([]);
+  await assertSettlesAtOnce(f, 'immediate refresh', () => f.context.scheduleSilverSourceRefresh({ immediate: true }));
+}
+{
+  // The enlarger head: a drag's ticks are GPU frames; the release, and a typed
+  // value, settle at once.
+  const f = discreteFixture(['bindEnlargerControl']);
+  const listeners = new Map();
+  const element = (id, extra) => ({ id, value: '0', ...extra,
+    addEventListener: (type, listener) => listeners.set(`${id}:${type}`, listener) });
+  const range = element('enlargerExposure');
+  const number = element('enlargerExposureValue', { tagName: 'INPUT' });
+  f.context.document = { getElementById: id => ({ enlargerExposure: range, enlargerExposureValue: number })[id] || null };
+  f.context.bindEnlargerControl('enlargerExposure', () => { f.state.coreExposure = Number(range.value) * 10; });
+  const fire = (target, type) => listeners.get(`${target.id}:${type}`)();
+  fire(range, 'pointerdown');
+  for (const value of ['1', '2']) {
+    f.clock.nextFrame();
+    range.value = value;
+    fire(range, 'input');
+    f.clock.runFrame();
+  }
+  assert.equal(f.conversions.length, 0, 'the drag converts nothing');
+  assert.deepEqual(draws(f), ['gpu:10', 'gpu:20']);
+  await assertSettlesAtOnce(f, 'enlarger release', () => fire(range, 'change'));
+  const g = discreteFixture(['bindEnlargerControl']);
+  g.context.document = f.context.document;
+  listeners.clear();
+  g.context.bindEnlargerControl('enlargerExposure', () => { g.state.coreExposure = Number(range.value) * 10; });
+  number.value = '3';
+  await assertSettlesAtOnce(g, 'enlarger value box', () => fire(number, 'change'));
+}
+
+{
+  // The other discrete changes ask the same way: Studio's colour reset, the
+  // film-type buttons, a recipe, a detected film's preset.
+  const reset = mainSource.includes('    function resetStudioColors(')
+    ? mainFunction('resetStudioColors') : studioHandler('onReset: () => {', 'studioReset', '');
+  const filmTypeStart = mainSource.indexOf("document.querySelectorAll('.film-type-btn').forEach(btn => {\n      btn.addEventListener('click'");
+  assert.ok(filmTypeStart >= 0, 'the film-type buttons are wired');
+  const filmType = mainSource.slice(filmTypeStart, mainSource.indexOf('\n    });', filmTypeStart));
+  for (const [label, body] of [['Studio reset', reset], ['film type', filmType],
+    ['recipe', mainFunction('applyRecipeToCurrent')], ['detected film', mainFunction('applyDetectedFilmToCurrent')]]) {
+    assert.match(body, /scheduleCoreReprocess\(\{ full: false, commit: true \}\)|scheduleSilverSourceRefresh\(\{ commit: true \}\)/, `${label} commits`);
+    assert.doesNotMatch(body, /scheduleCoreReprocess\(\{ full: false \}\)|scheduleSilverSourceRefresh\(\)/, `${label} asks for no idle settle`);
+  }
+}
+
+console.log('gpuPreviewScheduler: frame-paced draws, idle/commit/barrier settles, hand-over, abandon and cancel; in main.js the GPU takes only ticks it can draw, a failed draw keeps the exact frames coming, failed profiles and analyses are retried, and every discrete change settles at once');

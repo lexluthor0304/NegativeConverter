@@ -986,7 +986,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       markCurrentFileDirty();
       schedulePreviewUpdate();
       if (channel.commit === 'core') {
-        scheduleCoreReprocess({ full: false });
+        // A key press is a commit: its exact frame leaves at once (#239).
+        scheduleCoreReprocess({ full: false, commit: true });
       } else {
         scheduleFullUpdate();
       }
@@ -1023,7 +1024,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       }
       markCurrentFileDirty();
       schedulePreviewUpdate();
-      if (coreTouched) scheduleCoreReprocess({ full: false });
+      if (coreTouched) scheduleCoreReprocess({ full: false, commit: true });
       if (pixelTouched) scheduleFullUpdate();
       updateConsoleReadouts();
     }
@@ -8105,10 +8106,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       }, immediate ? 0 : 70);
     }
 
+    // `commit`, or `immediate` (a click, a choice), is a discrete change: in
+    // Step 3 its exact frame leaves at once, also when the GPU draws it (#239).
     function scheduleSilverSourceRefresh(options = {}) {
       if (!usesSilverCoreConversion(state)) return;
       if (state.currentStep >= 3) {
-        scheduleCoreReprocess({ full: false });
+        scheduleCoreReprocess({ full: false, commit: Boolean(options.commit || options.immediate) });
         return;
       }
       scheduleAutoConvertFromStep2(options);
@@ -14706,7 +14709,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
         markCurrentFileDirty();
         if (usesSilverCoreConversion(state)) {
-          scheduleSilverSourceRefresh();
+          scheduleSilverSourceRefresh({ commit: true });
         } else {
           schedulePreviewUpdate();
         }
@@ -14764,7 +14767,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         updateWBSliders();
       }
       markCurrentFileDirty();
-      scheduleSilverSourceRefresh();
+      scheduleSilverSourceRefresh({ commit: true });
     });
     setFilmTypeButtons(state.filmType);
 
@@ -15016,7 +15019,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
     function handleCoreColorModelChange() {
       state.frontierGuideStep2ChoiceTouched = true;
-      scheduleSilverSourceRefresh();
+      scheduleSilverSourceRefresh({ commit: true });
     }
 
     function handleFilmPresetChange(presetId) {
@@ -15024,7 +15027,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // A profile that failed to load gets another try with the new preset.
       gpuPreview.profile.failed.clear();
       void applyFilmPresetSettingsToState(presetId).then(() => {
-        scheduleSilverSourceRefresh();
+        scheduleSilverSourceRefresh({ commit: true });
       });
     }
 
@@ -24339,7 +24342,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       updateFilmEdgeUI();
       const label = edge.shortName || edge.filmName || edge.dxNumber;
       showToast(getInterpolatedText('filmEdgeAppliedPreset', { name: label }, `Applied the ${label} preset.`));
-      if (usesSilverCoreConversion(state)) scheduleSilverSourceRefresh();
+      if (usesSilverCoreConversion(state)) scheduleSilverSourceRefresh({ commit: true });
       else schedulePreviewUpdate();
     }
 
@@ -24435,12 +24438,15 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         apply();
         markCurrentFileDirty();
         updateEnlargerUI();
-        scheduleCoreReprocess({ full: false });
+        // A drag tick, or a typed value (a commit that settles at once, #239).
+        scheduleCoreReprocess({ full: false, commit: source !== range });
       };
       range.addEventListener('pointerdown', () => { preDragSnapshot = captureSnapshot('enlarger'); });
       range.addEventListener('input', () => commit(range));
       range.addEventListener('change', () => {
         if (preDragSnapshot) { commitUndoSnapshot(preDragSnapshot); preDragSnapshot = null; }
+        // The release settles the drag, as a core slider's does.
+        settleCoreInput();
       });
       if (number && number.tagName === 'INPUT') {
         number.addEventListener('change', () => { pushUndo('enlarger'); commit(number); });
@@ -24591,7 +24597,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       markCurrentFileDirty();
       syncSliderFromState(axis.key);
       updateEnlargerUI();
-      scheduleCoreReprocess({ full: false });
+      scheduleCoreReprocess({ full: false, commit: true });
       showToast(getInterpolatedText('testStripApplied', { label: formatAxisValue(axis, value) }, `Applied ${formatAxisValue(axis, value)}`));
       if (narrow) setTestStripStep(Math.max(1, Math.round(readTestStripStep(axis) / 2)));
       void renderTestStrip();
@@ -25628,7 +25634,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       updateSlidersFromState();
       renderCurve();
       markCurrentFileDirty();
-      scheduleCoreReprocess({ full: false });
+      scheduleCoreReprocess({ full: false, commit: true });
     }
 
     // After "Reset color" put back the defaults: strengths from this frame's
@@ -27458,7 +27464,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       updateLabMatchUI();
       updateExpiredRescueUI();
       markCurrentFileDirty();
-      if (filmTypeChanged || usesSilverCoreConversion(state)) scheduleSilverSourceRefresh();
+      if (filmTypeChanged || usesSilverCoreConversion(state)) scheduleSilverSourceRefresh({ commit: true });
       else schedulePreviewUpdate();
       showToast(getLocalizedText('recipeApplied', 'Recipe applied.'));
       updateRecipeUI();
@@ -29743,7 +29749,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           state.frontierGuideStep2ChoiceTouched = true;
           markCurrentFileDirty();
           updateSlidersFromState();
-          scheduleCoreReprocess({ full: false });
+          scheduleCoreReprocess({ full: false, commit: true });
         },
         onReset: () => {
           if (state.currentStep < 3) return;
