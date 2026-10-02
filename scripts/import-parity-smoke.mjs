@@ -14,6 +14,11 @@
 // extractCurrentSettings after settling) and the SHA-256 of 8- and 16-bit
 // PNG and TIFF exports, then fails on any difference from the baseline.
 // Large files are heavy: run one 60 MP file at a time on a 16 GB machine.
+//
+// IMPORT_PARITY_CROP_DURING_SEMANTIC=1 (R1-037): the semantic colour worker's
+// answer is held while crop mode is opened and cancelled (several 200 ms poll
+// ticks), then released, so the map lands after a crop mode the user left.
+// 1703835 checked only before and after the inference and applied it.
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename } from 'node:path';
 
@@ -39,6 +44,29 @@ const CAPTURE = `(() => {
   };
 })()`;
 
+// Holds the semantic worker's answers (the analyzer sets `onmessage`) until
+// release(); a worker terminated meanwhile never answers.
+const SEMANTIC_HOLD = `(() => {
+  const hold = window.__paritySemantic = { on: true, created: 0, terminated: 0, delivered: 0, queued: [] };
+  const NativeWorker = window.Worker;
+  window.Worker = class extends NativeWorker {
+    constructor(url, options) {
+      super(url, options);
+      if (!/semanticWorker/.test(String(url))) return;
+      hold.created++;
+      let handler = null, ended = false;
+      Object.defineProperty(this, 'onmessage', { configurable: true, get: () => handler, set: fn => { handler = fn; } });
+      this.addEventListener('message', event => {
+        const deliver = () => { if (!ended && handler) { hold.delivered++; handler.call(this, event); } };
+        if (hold.on) hold.queued.push(deliver); else deliver();
+      });
+      const terminate = this.terminate.bind(this);
+      this.terminate = () => { ended = true; hold.terminated++; terminate(); };
+    }
+  };
+  hold.release = () => { hold.on = false; for (const deliver of hold.queued.splice(0)) deliver(); };
+})()`;
+
 function differences(expected, actual, path = '') {
   if (JSON.stringify(expected) === JSON.stringify(actual)) return [];
   if (expected && actual && typeof expected === 'object' && typeof actual === 'object') {
@@ -50,7 +78,8 @@ function differences(expected, actual, path = '') {
 
 export async function runImportParitySmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port,
   files = (process.env.IMPORT_PARITY_FILES || '').split(':').filter(Boolean),
-  baselinePath = process.env.IMPORT_PARITY_BASELINE, outPath = process.env.IMPORT_PARITY_OUT }) {
+  baselinePath = process.env.IMPORT_PARITY_BASELINE, outPath = process.env.IMPORT_PARITY_OUT,
+  cropDuringSemantic = process.env.IMPORT_PARITY_CROP_DURING_SEMANTIC === '1' }) {
   if (!files.length) fail('IMPORT_PARITY_FILES lists no files');
   const baseline = baselinePath ? JSON.parse(readFileSync(baselinePath, 'utf8')) : null;
   const rows = [];
@@ -62,10 +91,23 @@ export async function runImportParitySmoke({ send, evaluate, waitFor, wait, fail
     await installDialogAutoAccept();
     await wait(500);
     await evaluate(CAPTURE);
+    if (cropDuringSemantic) await evaluate(SEMANTIC_HOLD);
     const doc = await send('DOM.getDocument');
     const input = await send('DOM.querySelector', { nodeId: doc.result.root.nodeId, selector: '#fileInput' });
     await send('DOM.setFileInputFiles', { files: [path], nodeId: input.result.nodeId });
     await waitFor('parity import ' + name, `${ready} && document.getElementById('studioFilename').textContent === ${JSON.stringify(name)}`, 600_000);
+    if (cropDuringSemantic) {
+      const cropMode = `document.getElementById('canvasContainer').classList.contains('crop-mode')`;
+      await waitFor('semantic inference started ' + name, `window.__paritySemantic.created > 0`, 120_000);
+      await evaluate(`document.getElementById('cropBtn').click()`);
+      await waitFor('crop mode during the inference', cropMode, 60_000);
+      await wait(1000);
+      await evaluate(`document.getElementById('cancelCropBtn').click()`);
+      await waitFor('crop mode cancelled', `!${cropMode}`, 60_000);
+      await wait(300);
+      const hold = await evaluate(`(() => { const h = window.__paritySemantic; h.release(); return { created: h.created, terminated: h.terminated, delivered: h.delivered }; })()`);
+      console.log('import parity: crop mode opened and cancelled during the semantic inference', JSON.stringify(hold));
+    }
     // Background passes that may still change the recipe (semantic colour).
     await wait(10_000);
     await waitFor('parity settled ' + name, ready, 120_000);
@@ -87,6 +129,7 @@ export async function runImportParitySmoke({ send, evaluate, waitFor, wait, fail
       await waitFor('export settled', `!document.getElementById('exportSingleBtn').disabled`, 600_000);
     }
     const row = { file: name, settings, exports };
+    if (cropDuringSemantic) row.semantic = await evaluate(`({ ...window.__paritySemantic, queued: undefined, release: undefined })`);
     rows.push(row);
     console.log('import parity:', name, JSON.stringify(exports));
     const reference = baseline?.find(entry => entry.file === name);
