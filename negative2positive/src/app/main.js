@@ -21,7 +21,7 @@ import { createMemoryBudget, createRetainedLedger, createMemoryClaim, createIdle
 import { createBackgroundGate, BACKGROUND_STEP_WAIT_CAP_MS, BACKGROUND_INPUT_QUIET_MS, BACKGROUND_BUSY_POLL_MS } from './backgroundGate.js';
 import { createSharedDecodes } from './sharedDecodes.js';
 import { pickBackgroundJob, travelDirection, displayDistance } from './backgroundPhotoScheduler.js';
-import { createJobMarker, readJobMarkers, clearJobMarker, matchJobFiles, planResumedExport, resumedJobMarker, jobNeedsSafeMode, jobMarkerRecordsOptions, interruptedJobMessage } from './jobMarker.js';
+import { createJobMarker, clearJobMarker, matchJobFiles, planResumedExport, resumedJobMarker, jobNeedsSafeMode, jobMarkerRecordsOptions, findInterruptedJobMarkers, markJobMarkerReported, interruptedJobMessage, JOB_HEARTBEAT_MS } from './jobMarker.js';
 import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
 import { createEmbeddedPreviewPool } from './scanDecodeClient.js';
 import { isTiffContainerRawName } from './rawEmbeddedPreview.js';
@@ -25811,18 +25811,29 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // ===========================================
     // Interrupted jobs: marker, boot message, resume (#241)
     // ===========================================
-    // A long job keeps a small marker in localStorage while it runs. A marker
-    // still there at boot means the page died mid-job: a WebKit memory kill,
-    // a renderer crash, a discarded tab. The page names the job, routes to the
+    // A long job keeps a small marker in localStorage while it runs, and
+    // holds a Web Lock named after it (a heartbeat in the marker without the
+    // API). A marker at boot whose lock is free, or whose heartbeat is stale,
+    // means the page died mid-job: a WebKit memory kill, a renderer crash, a
+    // discarded or closed tab. The page names the job once, routes to the
     // recovery copy (the originals must be added again: no queue item keeps a
-    // path) and, once the roll is restored, resumes it.
+    // path) and, once the roll is restored, resumes it. A marker whose owner
+    // is alive belongs to a job running in another tab and is left alone.
     const jobMarkerStorage = {
       get: key => safeStorageGet(key),
       set: (key, value) => { localStorage.setItem(key, value); },
-      remove: key => { localStorage.removeItem(key); }
+      remove: key => { localStorage.removeItem(key); },
+      locks: typeof navigator !== 'undefined' && navigator.locks?.request && navigator.locks?.query ? navigator.locks : null,
+      // The desktop app has one page: every marker at boot is interrupted.
+      heartbeatMs: isTauriDesktop() ? 0 : JOB_HEARTBEAT_MS,
+      // This page's own running jobs: never interrupted for itself.
+      running: new Set()
     };
-    // Markers found at boot, until their job is resumed or dismissed.
+    // Markers of interrupted jobs, until their job is resumed or dismissed.
     let interruptedJobs = [];
+    function interruptedJobKey(marker) {
+      return `${marker.kind}\u0000${marker.id}\u0000${marker.startedAt}`;
+    }
 
     // What a batch export writes with besides each frame's recipe, fixed when
     // the job starts and kept in its marker: the JPEG quality, the sprocket
@@ -25890,23 +25901,32 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       return getInterpolatedText(key, values, fallback);
     }
 
-    // Once at boot: name the jobs that stopped, and say when macOS stopped
-    // the app's web process (the Rust hook recorded it before reloading).
-    async function checkInterruptedJobs() {
-      const markers = readJobMarkers(jobMarkerStorage);
+    // At boot: name the exports that stopped, each once (the marker records
+    // that it was named), and say when macOS stopped the app's web process
+    // (the Rust hook recorded it before reloading). An interrupted roll
+    // analysis is never named: it resumes when its roll is restored. A job
+    // that proves alive by its heartbeat is looked at again once that
+    // heartbeat could have gone stale.
+    async function checkInterruptedJobs({ boot = true } = {}) {
+      const { interrupted, recheckInMs } = await findInterruptedJobMarkers(jobMarkerStorage, { singlePage: isTauriDesktop() });
       let termination = null;
-      if (isTauriDesktop()) {
+      if (boot && isTauriDesktop()) {
         try { termination = await window.__TAURI__.core.invoke('take_web_content_termination'); } catch { termination = null; }
       }
+      if (recheckInMs !== null) setTimeout(() => { void checkInterruptedJobs({ boot: false }); }, recheckInMs + 1000);
+      const known = new Set(interruptedJobs.map(interruptedJobKey));
+      const found = interrupted.filter(marker => !known.has(interruptedJobKey(marker)));
+      interruptedJobs = [...interruptedJobs, ...found];
+      const named = found.filter(marker => marker.kind !== 'roll-analysis' && !marker.reported);
       const webProcess = getLocalizedText('interruptedWebProcess', "macOS stopped the app's web process.");
-      if (!markers.length) {
+      if (!named.length) {
         if (termination) showToast(webProcess, 6000);
         return;
       }
-      interruptedJobs = markers;
-      const parts = markers.map(describeInterruptedJob);
+      for (const marker of named) markJobMarkerReported(jobMarkerStorage, marker);
+      const parts = named.map(describeInterruptedJob);
       if (termination) parts.push(webProcess);
-      if (markers.some(jobNeedsSafeMode)) {
+      if (named.some(jobNeedsSafeMode)) {
         parts.push(getLocalizedText('interruptedJobSafeMode', 'It stopped again after resuming, so the next attempt runs one photo at a time with the photo caches off.'));
       }
       parts.push(getLocalizedText('interruptedJobNext', 'Add the original photos again, then restore the roll under Batch tools to continue.'));
@@ -25954,7 +25974,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         interruptedJobs = interruptedJobs.filter(entry => entry !== marker);
         if (marker.kind === 'roll-analysis') {
           if (!rollFrames.length) { clearJobMarker(jobMarkerStorage, marker); continue; }
-          showToast(getInterpolatedText('resumeRollAnalysis', { count: String(rollFrames.length) }, `Resuming the roll analysis of ${rollFrames.length} photos.`), 4000);
+          // Never named at boot: the restore says what stopped and resumes it.
+          let message = describeInterruptedJob(marker) + ' ' + getInterpolatedText('resumeRollAnalysis', { count: String(rollFrames.length) }, `Resuming the roll analysis of ${rollFrames.length} photos.`);
+          if (jobNeedsSafeMode(marker)) message += ' ' + getLocalizedText('interruptedJobSafeMode', 'It stopped again after resuming, so the next attempt runs one photo at a time with the photo caches off.');
+          showToast(message, 5000);
           // The resumed analysis writes its own marker, one attempt later;
           // an analysis the re-import scheduled for the same frames stops.
           automaticRollRevision++;

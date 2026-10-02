@@ -7,25 +7,37 @@
  * A job writes the marker before it starts, records each frame once its sink
  * has returned (for a desktop folder that is after the native rename or copy
  * and sync, so a recorded file is complete) and deletes the marker when it
- * ends or is cancelled. A marker that is still there at boot belongs to a job
- * that was interrupted.
+ * ends or is cancelled. While it runs, its page shows that it is alive: the
+ * job holds a Web Lock named after its marker, which the browser releases
+ * when the page dies, or, without the Web Locks API (Safari before 15.4), it
+ * keeps a heartbeat in the marker. A marker still there at boot whose owner
+ * is gone belongs to a job that was interrupted; one whose owner is alive
+ * belongs to a job running in another tab.
  *
- * Pure: storage is injected ({ get, set, remove }).
+ * Pure: storage is injected ({ get, set, remove }), with what proves a
+ * running job alive: `locks` (a Web Locks manager) or `heartbeatMs`, and
+ * `running`, the page's own running jobs (a Set of marker ids).
  */
 
 // One key per job family: a batch export and a roll analysis can run together.
 export const JOB_MARKER_KEYS = Object.freeze({ export: 'nc_job_marker_export_v1', roll: 'nc_job_marker_roll_v1' });
 export const JOB_MARKER_KEY = JOB_MARKER_KEYS.export;
-// 2 records every export option the job writes with (`options`). A
-// version-1 marker is still read: it lacks the edge markings, the AI switch
-// and, for browser jobs, dust removal, so its resume asks before it uses the
-// current ones.
+// 2 records every export option the job writes with (`options`), its owner
+// and whether the boot message named it. A version-1 marker is still read:
+// it lacks the edge markings, the AI switch and, for browser jobs, dust
+// removal, so its resume asks before it uses the current ones.
 export const JOB_MARKER_VERSION = 2;
 const READABLE_VERSIONS = Object.freeze([1, 2]);
 export const JOB_KINDS = Object.freeze(['export-folder', 'export-downloads', 'export-zip', 'roll-analysis']);
 export const jobMarkerKeyFor = kind => (kind === 'roll-analysis' ? JOB_MARKER_KEYS.roll : JOB_MARKER_KEYS.export);
 // Like the project recovery copy: older markers are not offered.
 export const JOB_MARKER_MAX_AGE_MS = 14 * 24 * 3600 * 1000;
+// Without Web Locks a running job rewrites its marker this often; a
+// heartbeat older than the stale age means its page is gone. The margin
+// covers the timer throttling of a hidden tab.
+export const JOB_HEARTBEAT_MS = 10_000;
+export const JOB_HEARTBEAT_STALE_MS = 6 * JOB_HEARTBEAT_MS;
+export const jobOwnerLockName = id => `nc_job_owner_${id}`;
 
 const isIndex = (value, total) => Number.isInteger(value) && value >= 0 && value < total;
 
@@ -99,7 +111,11 @@ export function sanitizeJobMarker(value, { now = Date.now() } = {}) {
     options: sanitizeJobOptions(value.options),
     files,
     written,
-    edited: indices(value.edited)
+    edited: indices(value.edited),
+    // 'lock', 'beat' or '' (a version-1 marker, or no way to tell).
+    owner: value.owner === 'lock' || value.owner === 'beat' ? value.owner : '',
+    beat: Math.max(0, Number(value.beat) || 0),
+    reported: Boolean(value.reported)
   };
 }
 
@@ -126,30 +142,56 @@ let nextMarkerId = 0;
  * One job's marker. begin() writes it, record() adds a finished frame by its
  * index in `files`, finish() deletes it. A newer job of the same family takes
  * the key over; the older one then stops writing and never deletes it.
+ * Between begin() and finish() the job holds its owner lock or beats.
  */
-export function createJobMarker(storage, { key = null, now = () => Date.now() } = {}) {
+export function createJobMarker(storage, { key = null, now = () => Date.now(), timers = globalThis } = {}) {
   let current = null;
   let storageKey = key;
+  let releaseLock = null;
+  let heartbeat = null;
+  const locks = storage.locks || null;
+  const heartbeatMs = locks ? 0 : Math.max(0, Number(storage.heartbeatMs) || 0);
   const owned = () => {
     let stored = null;
     try { stored = storage.get(storageKey); } catch { return true; }
     if (!stored) return true;
     try { return JSON.parse(stored)?.id === current.id; } catch { return true; }
   };
+  const stopOwnership = () => {
+    if (current) storage.running?.delete(current.id);
+    releaseLock?.();
+    releaseLock = null;
+    if (heartbeat !== null) timers.clearInterval(heartbeat);
+    heartbeat = null;
+  };
   const save = () => {
-    if (!owned()) { current = null; return; }
+    if (!owned()) { stopOwnership(); current = null; return; }
+    if (current.owner === 'beat') current.beat = now();
     try { storage.set(storageKey, JSON.stringify(current)); } catch { /* storage full or blocked */ }
   };
   return {
     begin({ kind, files, destination = '', exportInfo = null, options = {}, attempt = 0, written = [] }) {
+      stopOwnership();
       storageKey = key || jobMarkerKeyFor(kind);
       const id = `${now().toString(36)}-${(nextMarkerId++).toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+      const owner = locks ? 'lock' : (heartbeatMs ? 'beat' : '');
       current = sanitizeJobMarker({
-        v: JOB_MARKER_VERSION, id, kind, startedAt: now(), attempt, destination, exportInfo, options, files, written
+        v: JOB_MARKER_VERSION, id, kind, startedAt: now(), attempt, destination, exportInfo, options, files, written,
+        owner, beat: now()
       }, { now: now() });
-      if (current) {
-        try { storage.set(storageKey, JSON.stringify(current)); } catch { /* storage full or blocked */ }
+      if (!current) return current;
+      storage.running?.add(id);
+      if (owner === 'lock') {
+        // Held until finish(), or released by the browser with the page. The
+        // promise exists first, so a finish() before the grant lets go at once.
+        const held = new Promise((resolve) => { releaseLock = resolve; });
+        try {
+          Promise.resolve(locks.request(jobOwnerLockName(id), () => held)).catch(() => {});
+        } catch { /* no lock: the marker then reads as interrupted at a boot */ }
+      } else if (owner === 'beat') {
+        heartbeat = timers.setInterval(() => { if (current) save(); }, heartbeatMs);
       }
+      try { storage.set(storageKey, JSON.stringify(current)); } catch { /* storage full or blocked */ }
       return current;
     },
     record(index, path = '') {
@@ -167,9 +209,12 @@ export function createJobMarker(storage, { key = null, now = () => Date.now() } 
       save();
     },
     finish() {
+      // The marker goes first: once the lock is free, no page finds the
+      // marker of a job that ended.
       if (current && owned()) {
         try { storage.remove(storageKey); } catch { /* storage unavailable */ }
       }
+      stopOwnership();
       current = null;
     },
     get current() { return current; }
@@ -261,11 +306,62 @@ export function clearJobMarker(storage, marker) {
   }
 }
 
-/** Every interrupted job, export first. */
+/** Every stored marker, export first. */
 export function readJobMarkers(storage, { now = Date.now() } = {}) {
   return [JOB_MARKER_KEYS.export, JOB_MARKER_KEYS.roll]
     .map(key => readJobMarker(storage, { key, now }))
     .filter(Boolean);
+}
+
+/**
+ * The stored markers, split by whether their job's page is gone. A job runs
+ * on (`running`: this page's own, or another tab's) while its page holds the
+ * job's Web Lock or its heartbeat is younger than JOB_HEARTBEAT_STALE_MS;
+ * `recheckInMs` says when the youngest such heartbeat goes stale. A marker
+ * with no owner (a version-1 marker) is `interrupted`, and so is every other
+ * marker of a page that is the only one (`singlePage`: the desktop app's
+ * window).
+ */
+export async function findInterruptedJobMarkers(storage, { now = Date.now(), singlePage = false } = {}) {
+  const markers = readJobMarkers(storage, { now });
+  const interrupted = [];
+  const running = [];
+  let recheckInMs = null;
+  let held = null;
+  if (!singlePage && storage.locks && markers.some(marker => marker.owner === 'lock')) {
+    try {
+      held = new Set(((await storage.locks.query())?.held || []).map(lock => lock.name));
+    } catch {
+      held = null;
+    }
+  }
+  for (const marker of markers) {
+    // This page's own job is never interrupted for itself.
+    let alive = Boolean(storage.running?.has(marker.id));
+    if (!alive && !singlePage && marker.owner === 'lock') {
+      alive = Boolean(held?.has(jobOwnerLockName(marker.id)));
+    } else if (!alive && !singlePage && marker.owner === 'beat') {
+      const age = now - marker.beat;
+      alive = age < JOB_HEARTBEAT_STALE_MS;
+      if (alive) recheckInMs = Math.min(recheckInMs ?? Infinity, JOB_HEARTBEAT_STALE_MS - age);
+    }
+    (alive ? running : interrupted).push(marker);
+  }
+  return { interrupted, running, recheckInMs };
+}
+
+/** Records that the boot message named this marker: it is named once. */
+export function markJobMarkerReported(storage, marker) {
+  const key = jobMarkerKeyFor(marker?.kind);
+  try {
+    const stored = JSON.parse(storage.get(key) || 'null');
+    if (!stored || stored.id !== marker.id) return false;
+    storage.set(key, JSON.stringify({ ...stored, reported: true }));
+    marker.reported = true;
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**

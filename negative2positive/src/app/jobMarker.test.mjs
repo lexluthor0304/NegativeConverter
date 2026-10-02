@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import {
   createJobMarker, readJobMarker, readJobMarkers, clearJobMarker, sanitizeJobMarker, matchJobFiles, planResumedExport,
-  resumedJobMarker, jobNeedsSafeMode, jobMarkerRecordsOptions, interruptedJobMessage, JOB_MARKER_KEY, JOB_MARKER_KEYS,
-  JOB_MARKER_MAX_AGE_MS, JOB_MARKER_VERSION, JOB_KINDS
+  resumedJobMarker, jobNeedsSafeMode, jobMarkerRecordsOptions, findInterruptedJobMarkers, markJobMarkerReported,
+  interruptedJobMessage, jobOwnerLockName, JOB_MARKER_KEY, JOB_MARKER_KEYS, JOB_MARKER_MAX_AGE_MS, JOB_MARKER_VERSION,
+  JOB_KINDS, JOB_HEARTBEAT_MS, JOB_HEARTBEAT_STALE_MS
 } from './jobMarker.js';
 import { i18n } from './i18n.js';
 import { interpolateText } from './textUtils.js';
@@ -236,10 +237,156 @@ for (const kind of ['export-folder', 'export-downloads', 'export-zip']) {
   assert.equal(legacy.v, 1);
   assert.equal(jobMarkerRecordsOptions(legacy), false, 'its resume asks for confirmation');
   assert.deepEqual(legacy.options, { jpegQuality: 88, sprocket: true }, 'the fields it has; nothing invented');
+  assert.equal(legacy.owner, '', 'no owner: nothing proves its page alive');
   assert.equal(legacy.exportInfo.bitDepth, 16);
   const desktop = sanitizeJobMarker({ v: 1, kind: 'export-folder', startedAt: clock, files: roll.slice(0, 2),
     options: { jpegQuality: 92, sprocket: false, dustRemoval: { enabled: true, strength: 3, maxParticleSize: 40 } } }, { now: clock });
   assert.deepEqual(desktop.options.dustRemoval, { enabled: true, strength: 3, maxParticleSize: 40 }, 'no AI switch was recorded');
+  const { interrupted } = await findInterruptedJobMarkers(storage, { now: clock });
+  assert.deepEqual(interrupted.map(m => m.id), ['old'], 'an ownerless marker counts as interrupted');
+}
+
+// Live ownership (R1-056, R1-146). A fake Web Locks manager: unique names
+// are granted at once and held until the callback's promise settles.
+function fakeLocks() {
+  const held = new Set();
+  return {
+    held,
+    request(name, callback) {
+      held.add(name);
+      return Promise.resolve().then(() => callback({ name })).finally(() => held.delete(name));
+    },
+    async query() { return { held: [...held].map(name => ({ name, mode: 'exclusive' })), pending: [] }; }
+  };
+}
+const flush = () => new Promise(resolve => setImmediate(resolve));
+{
+  const locks = fakeLocks();
+  const storage = Object.assign(memoryStorage(), { locks });
+  const running = createJobMarker(storage, { now });
+  const begun = running.begin({ kind: 'export-zip', files: roll.slice(0, 5), options: jobOptions() });
+  await flush();
+  assert.equal(begun.owner, 'lock');
+  assert.ok(locks.held.has(jobOwnerLockName(begun.id)), 'a running job holds its lock');
+  // Another tab boots while the job runs: the marker is not reported.
+  let found = await findInterruptedJobMarkers(storage, { now: clock });
+  assert.deepEqual(found.interrupted, [], 'a marker with a live owner is skipped');
+  assert.deepEqual(found.running.map(m => m.id), [begun.id]);
+  assert.equal(found.recheckInMs, null);
+  // The page dies: the browser releases its lock, the marker stays.
+  locks.held.clear();
+  found = await findInterruptedJobMarkers(storage, { now: clock });
+  assert.deepEqual(found.interrupted.map(m => m.id), [begun.id], 'a marker whose lock is free belongs to a dead page');
+  // The desktop app's single page: every marker at boot is interrupted.
+  locks.held.add(jobOwnerLockName(begun.id));
+  found = await findInterruptedJobMarkers(storage, { now: clock, singlePage: true });
+  assert.deepEqual(found.interrupted.map(m => m.id), [begun.id]);
+  // A job that ends deletes its marker before it lets go of the lock.
+  const ending = createJobMarker(storage, { now });
+  const second = ending.begin({ kind: 'roll-analysis', files: roll.slice(0, 3) });
+  await flush();
+  let markerAtRelease = 'unset';
+  const lockName = jobOwnerLockName(second.id);
+  locks.held.delete = function (name) {
+    if (name === lockName) markerAtRelease = storage.get(JOB_MARKER_KEYS.roll);
+    return Set.prototype.delete.call(this, name);
+  };
+  ending.finish();
+  await flush();
+  assert.equal(markerAtRelease, null, 'the marker is gone before the lock is released');
+  assert.ok(!locks.held.has(lockName));
+  // finish() before the grant still lets go.
+  const quick = createJobMarker(storage, { now });
+  const third = quick.begin({ kind: 'export-downloads', files: roll.slice(0, 2) });
+  quick.finish();
+  await flush();
+  assert.ok(!locks.held.has(jobOwnerLockName(third.id)), 'no lock outlives a job that ended before its grant');
+}
+
+// Without Web Locks: a heartbeat. A fresh one is a live owner, looked at
+// again once it could have gone stale; a stale one is an interrupted job.
+{
+  const intervals = new Map();
+  let nextTimer = 1;
+  const timers = {
+    setInterval(fn, ms) { intervals.set(nextTimer, { fn, ms }); return nextTimer++; },
+    clearInterval(id) { intervals.delete(id); }
+  };
+  const storage = Object.assign(memoryStorage(), { heartbeatMs: JOB_HEARTBEAT_MS });
+  const marker = createJobMarker(storage, { now, timers });
+  const begun = marker.begin({ kind: 'export-downloads', files: roll.slice(0, 6), options: jobOptions() });
+  assert.equal(begun.owner, 'beat');
+  assert.equal(intervals.size, 1);
+  assert.equal([...intervals.values()][0].ms, JOB_HEARTBEAT_MS);
+  const startedAt = clock;
+  clock += 4000;
+  let found = await findInterruptedJobMarkers(storage, { now: clock });
+  assert.deepEqual(found.interrupted, [], 'a fresh heartbeat: another tab runs the job');
+  assert.equal(found.recheckInMs, JOB_HEARTBEAT_STALE_MS - 4000, 'looked at again when the heartbeat could be stale');
+  // The job beats on: still alive later.
+  clock += JOB_HEARTBEAT_MS;
+  [...intervals.values()][0].fn();
+  assert.equal(readJobMarker(storage, { now: clock }).beat, clock, 'the heartbeat rewrites the marker');
+  clock += JOB_HEARTBEAT_STALE_MS - 1;
+  found = await findInterruptedJobMarkers(storage, { now: clock });
+  assert.deepEqual(found.interrupted, []);
+  // Its page dies: no more beats; once stale the marker is interrupted, and
+  // named once.
+  clock += 2;
+  found = await findInterruptedJobMarkers(storage, { now: clock });
+  assert.deepEqual(found.interrupted.map(m => m.id), [begun.id], 'an expired owner: the job was interrupted');
+  assert.equal(found.recheckInMs, null);
+  const [expired] = found.interrupted;
+  assert.equal(expired.reported, false);
+  assert.equal(markJobMarkerReported(storage, expired), true);
+  const again = await findInterruptedJobMarkers(storage, { now: clock });
+  assert.equal(again.interrupted[0].reported, true, 'a reported marker is not named twice');
+  assert.equal(again.interrupted[0].startedAt, startedAt, 'and stays resumable');
+  // A record also counts as a beat; finish() stops the heartbeat.
+  const live = createJobMarker(storage, { now, timers });
+  live.begin({ kind: 'export-downloads', files: roll.slice(0, 2) });
+  clock += 1000;
+  live.record(0);
+  assert.equal(readJobMarker(storage, { now: clock }).beat, clock);
+  live.finish();
+  assert.equal(intervals.size, 1, 'only the dead job\'s interval is left in this fake');
+  // A newer job of the same family takes the key over: the older one stops beating.
+  const older = createJobMarker(storage, { now, timers });
+  older.begin({ kind: 'roll-analysis', files: roll.slice(0, 2) });
+  const newer = createJobMarker(storage, { now, timers });
+  newer.begin({ kind: 'roll-analysis', files: roll.slice(2, 4) });
+  const before = intervals.size;
+  older.record(0);
+  assert.equal(intervals.size, before - 1, 'a job that lost its key stops its heartbeat');
+  newer.finish();
+}
+
+// A page never takes its own running job for an interrupted one, even when a
+// throttled hidden tab let its heartbeat go stale; another page does.
+{
+  const shared = memoryStorage();
+  const own = { ...shared, heartbeatMs: JOB_HEARTBEAT_MS, running: new Set() };
+  const other = { ...shared, heartbeatMs: JOB_HEARTBEAT_MS, running: new Set() };
+  const timers = { setInterval: () => 1, clearInterval: () => {} };
+  const marker = createJobMarker(own, { now, timers });
+  const begun = marker.begin({ kind: 'export-zip', files: roll.slice(0, 3) });
+  assert.ok(own.running.has(begun.id));
+  clock += JOB_HEARTBEAT_STALE_MS + 1;
+  assert.deepEqual((await findInterruptedJobMarkers(own, { now: clock })).interrupted, [], 'its own job is running');
+  assert.deepEqual((await findInterruptedJobMarkers(own, { now: clock, singlePage: true })).interrupted, [], 'in the desktop app too');
+  assert.deepEqual((await findInterruptedJobMarkers(other, { now: clock })).interrupted.map(m => m.id), [begun.id]);
+  marker.finish();
+  assert.equal(own.running.size, 0, 'a job that ended leaves the page\'s set');
+}
+
+// Reporting writes only the marker it read.
+{
+  const storage = memoryStorage();
+  createJobMarker(storage, { now }).begin({ kind: 'export-zip', files: roll.slice(0, 2) });
+  const first = readJobMarker(storage, { now: clock });
+  createJobMarker(storage, { now }).begin({ kind: 'export-zip', files: roll.slice(0, 3) });
+  assert.equal(markJobMarkerReported(storage, first), false, 'a newer job took the key');
+  assert.equal(readJobMarker(storage, { now: clock }).reported, false);
 }
 
 // The boot sentence counts finished frames (R1-150): never a frame position,

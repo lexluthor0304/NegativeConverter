@@ -29,8 +29,10 @@ a kill recoverable.
   `silent: true`, so a never-analysed frame is detected without the blocking
   overlay and its frame wait; detection inputs and geometry are unchanged.
   Readiness polls (the background photo lanes, roll-analysis retries) stay on timers.
-- No Web Lock (Chrome's Energy Saver ignores one that blocks nothing outside
-  the page) and no `NSProcessInfo` activity (it had no effect in the probe).
+- Nothing holds a hidden job awake: the Web Lock a running job holds (section
+  3) only shows that its page is alive, and Chrome's Energy Saver ignores a
+  lock that blocks nothing outside the page. No `NSProcessInfo` activity
+  either (it had no effect in the probe).
 
 ## 2. The hidden-job gate
 
@@ -122,12 +124,27 @@ state, cache bytes, live workers, the MI-GAN session and `aiRepair.revision`.
   batch never reach its later frames. The marker is deleted when the job ends
   or is cancelled. Each export sink and each analysed roll frame schedules the
   recovery copy.
-- **Boot.** A marker left over names the job ("Export of 116 photos to Scans
-  stopped after 47", "…stopped before any was written" when none finished;
-  the count is of finished frames, which lanes finish out of order), adds that
-  macOS stopped the web process when the native record is present, and points
-  to the recovery flow. After the originals are added again and the roll
-  restored:
+- **Owner.** While a job runs, its page holds a Web Lock named after the
+  marker (`nc_job_owner_<id>`), which the browser releases when the page dies
+  (WebKit releases the locks of a terminated WebContent process). Without the
+  Web Locks API (Safari before 15.4) the job rewrites a heartbeat into the
+  marker every 10 s instead. The job deletes its marker before it lets go of
+  the lock. The desktop app has one page, so every marker found at its boot
+  is the previous page's.
+- **Boot.** `findInterruptedJobMarkers` sorts the markers: one whose lock is
+  held, or whose heartbeat is younger than a minute (the margin covers a
+  hidden tab's timer throttling), belongs to a job still running in another
+  tab and is left alone (a fresh heartbeat is looked at again once it could
+  have gone stale); a page never counts its own running jobs. An interrupted
+  export is named once ("Export of 116 photos to Scans stopped after 47",
+  "…stopped before any was written" when none finished; the count is of
+  finished frames, which lanes finish out of order); the marker then records
+  that it was reported, and a later launch stays silent while the job stays
+  resumable for 14 days. The message adds that macOS stopped the web process
+  when the native record is present, and points to the recovery flow. An
+  interrupted roll analysis is never named at launch: background analysis
+  stops whenever the window closes, and it resumes when its roll is restored.
+  After the originals are added again and the roll restored:
   - a desktop-folder or download export offers to resume: the full original
     job list with the same names, positions and automatic-recipe flags,
     skipping frames recorded as written whose file still exists
@@ -142,19 +159,20 @@ state, cache bytes, live workers, the MI-GAN session and `aiRepair.revision`.
     markings, the AI switch and, for browser jobs, dust removal: its resume
     question says that the current ones are used;
   - roll analysis resumes with its frames back in automatic analysis unless the
-    user had edited them: frame detection runs only for frames without a
-    recovered recipe, and the roll-level pass re-runs over the whole group,
-    re-decoding frames whose samples died with the page.
+    user had edited them, and a toast says what stopped: frame detection runs
+    only for frames without a recovered recipe, and the roll-level pass re-runs
+    over the whole group, re-decoding frames whose samples died with the page.
 - **Crash loop.** A resumed job that stops again runs its next attempt with the
   hidden limits while visible (one lane, photo caches off) and says so.
 
 ## Checks
 
 - Unit: `yieldToPaint`, `hiddenJobGate`, `jobMarker` (options round trip,
-  version-1 markers, the boot sentence in zh/en/ja), `interruptedJobResume`
-  (main.js's export, boot and resume functions: a desktop folder job killed
-  after frame 1 resumes with its options while the controls keep their
-  defaults; ZIP restart; version-1 question), the job-options parity in
+  version-1 markers, lock and heartbeat owners, reported once, the boot
+  sentence in zh/en/ja), `interruptedJobResume` (main.js's export, boot and
+  resume functions: a desktop folder job killed after frame 1 resumes with its
+  options while the controls keep their defaults; ZIP restart; version-1
+  question; another tab's job; roll analysis), the job-options parity in
   `exportPlaneLifecycle`, `hiddenPhotoPark`, `batchExportScheduler` (admission
   before claiming, deadlock), worker and cache helpers, the MI-GAN release in
   `photoSessionLifecycle`, the roll marker in `automaticRollImport`; Rust:

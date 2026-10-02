@@ -1,10 +1,11 @@
 // Interrupted jobs (#241) end to end through main.js's own functions: a batch
 // export writes its marker, the page "dies" after the first frame, the next
-// page names the job and, after the restore, resumes it with the format,
+// page names the job once and, after the restore, resumes it with the format,
 // options, names and positions the job started with (R1-125), never with the
-// controls a reload reset, which it leaves alone. The desktop folder resume
-// runs here; the browser ZIP and downloads resumes also run in
-// scripts/hidden-job-smoke.mjs.
+// controls a reload reset, which it leaves alone. A job another tab still
+// runs is not named (R1-056); a roll analysis is never named, only resumed
+// (R1-146). The desktop folder resume runs here; the browser ZIP and
+// downloads resumes also run in scripts/hidden-job-smoke.mjs.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
@@ -24,7 +25,7 @@ function functionSource(name) {
 const runtime = [
   'rgbaToHex', 'createSprocketEdgeSettings', 'getEffectiveExportBitDepth', 'getExportInfo',
   'captureExportJobOptions', 'exportJobOptionsFor', 'legacyResumeNote', 'beginExportJobMarker', 'beginResumedJobMarker',
-  'describeInterruptedJob', 'checkInterruptedJobs', 'interruptedRollFrames', 'runResumedJob',
+  'interruptedJobKey', 'describeInterruptedJob', 'checkInterruptedJobs', 'interruptedRollFrames', 'runResumedJob',
   'offerInterruptedJobResume', 'resumedExportJobs', 'resumeInterruptedExport', 'createBatchExportJobs',
   'exportBatchIndividuallyDesktop', 'runDesktopFolderExport', 'exportBatchIndividuallyBrowser', 'runBrowserDownloadsExport',
   'exportBatchAsZipBrowser', 'getLocalizedText', 'getInterpolatedText'
@@ -33,6 +34,17 @@ const runtime = [
 function memoryStorage() {
   const map = new Map();
   return { get: key => (map.has(key) ? map.get(key) : null), set: (key, value) => { map.set(key, String(value)); }, remove: key => { map.delete(key); }, map };
+}
+function fakeLocks() {
+  const held = new Set();
+  return {
+    held,
+    request(name, callback) {
+      held.add(name);
+      return Promise.resolve().then(() => callback({ name })).finally(() => held.delete(name));
+    },
+    async query() { return { held: [...held].map(name => ({ name })), pending: [] }; }
+  };
 }
 
 const defaults = () => ({
@@ -126,7 +138,7 @@ const reAdded = () => queue().map(item => ({ ...item, automaticSettings: false }
 
 // ---- Desktop folder: killed after frame 1, resumed with the job's options.
 {
-  const storage = memoryStorage();
+  const storage = Object.assign(memoryStorage(), { locks: fakeLocks() });
   const folderFiles = new Map();
   const first = page({ storage, desktop: true, folderFiles });
   setUpJob(first.state);
@@ -140,6 +152,7 @@ const reAdded = () => queue().map(item => ({ ...item, automaticSettings: false }
   assert.equal(original.exportInfo.bitDepth, 16);
   // The page died after its first frame: its marker stays, its lock goes.
   storage.set(jobMarker.JOB_MARKER_KEYS.export, first.context.markerAtKill);
+  storage.locks.held.clear();
   const killed = JSON.parse(first.context.markerAtKill);
   assert.equal(killed.v, 2);
   assert.deepEqual(killed.options.dustRemoval, { enabled: true, strength: 6, maxParticleSize: 28, ai: false }, 'the desktop marker keeps the AI switch');
@@ -149,7 +162,10 @@ const reAdded = () => queue().map(item => ({ ...item, automaticSettings: false }
   await second.context.checkInterruptedJobs();
   assert.equal(second.log.alerts.length, 1);
   assert.match(second.log.alerts[0], /^Export of 4 photos to .*Scans stopped after 1\. Add the original photos again/);
-  const third = second;
+  // A later launch does not name it again, and it stays resumable.
+  const third = page({ storage, desktop: true, folderFiles });
+  await third.context.checkInterruptedJobs();
+  assert.deepEqual(third.log.alerts, [], 'an interrupted job is named once');
   third.state.fileQueue = reAdded();
   await third.context.offerInterruptedJobResume({ rollFrames: [] });
   assert.equal(third.log.confirms.length, 1);
@@ -169,13 +185,14 @@ const reAdded = () => queue().map(item => ({ ...item, automaticSettings: false }
 
 // ---- Browser ZIP: written again whole, with its format and options.
 {
-  const storage = memoryStorage();
+  const storage = Object.assign(memoryStorage(), { locks: fakeLocks() });
   const first = page({ storage });
   setUpJob(first.state);
   first.context.killAfter = 2;
   await assert.rejects(first.context.exportBatchAsZipBrowser(first.context.getSelectedFiles(), 'roll.zip'), /page died/);
   const original = first.log.batches[0];
   storage.set(jobMarker.JOB_MARKER_KEYS.export, first.context.markerAtKill);
+  storage.locks.held.clear();
   const second = page({ storage });
   await second.context.checkInterruptedJobs();
   assert.match(second.log.alerts[0], /^ZIP export of 4 photos stopped after 2\. A partial ZIP cannot be resumed\./);
@@ -194,7 +211,7 @@ const reAdded = () => queue().map(item => ({ ...item, automaticSettings: false }
 // ---- Browser downloads from an earlier version: asks before it uses the
 // current options for what its marker lacks.
 {
-  const storage = memoryStorage();
+  const storage = Object.assign(memoryStorage(), { locks: fakeLocks() });
   const files = queue().map(item => ({ ...item.file, output: `${item.file.name.replace('.DNG', '')}_converted_sprocket.png`, auto: false }));
   storage.set(jobMarker.JOB_MARKER_KEYS.export, JSON.stringify({
     v: 1, id: 'v1', kind: 'export-downloads', startedAt: Date.now() - 1000, files, written: [[0, ''], [1, '']],
@@ -227,6 +244,29 @@ const reAdded = () => queue().map(item => ({ ...item, automaticSettings: false }
   assert.equal(run.options.sprocket, true);
   assert.deepEqual(plain(run.options.dustRemoval), { enabled: true, strength: 3, maxParticleSize: 40, ai: false });
   assert.deepEqual(plain(run.jobs.map(job => job.name)), files.slice(1).map(entry => entry.output));
+}
+
+// ---- Another tab's running job is not named; a roll analysis never is.
+{
+  const storage = Object.assign(memoryStorage(), { locks: fakeLocks() });
+  const running = jobMarker.createJobMarker(storage);
+  running.begin({ kind: 'export-downloads', files: queue().map(item => item.file) });
+  const roll = jobMarker.createJobMarker(storage);
+  roll.begin({ kind: 'roll-analysis', files: queue().map(item => item.file) });
+  await new Promise(resolve => setImmediate(resolve));
+  // The roll's page dies; the export's tab lives on.
+  storage.locks.held.delete(jobMarker.jobOwnerLockName(roll.current.id));
+  const other = page({ storage });
+  await other.context.checkInterruptedJobs();
+  assert.deepEqual(other.log.alerts, [], 'no message: the export still runs in its tab, and roll analysis is never named');
+  assert.deepEqual(plain(other.context.interruptedJobs.map(marker => marker.kind)), ['roll-analysis']);
+  // Restoring the roll resumes the analysis and says what stopped.
+  other.state.fileQueue = reAdded();
+  await other.context.offerInterruptedJobResume({ rollFrames: other.state.fileQueue });
+  assert.equal(other.log.rolls.length, 1);
+  assert.deepEqual(other.log.toasts, ['Roll analysis of 4 photos stopped before any was analysed. Resuming the roll analysis of 4 photos.']);
+  assert.deepEqual(other.log.confirms, [], 'the running export is never offered');
+  running.finish();
 }
 
 console.log('interruptedJobResume tests passed');
