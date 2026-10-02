@@ -87,7 +87,10 @@ export async function runExportGainMapSmoke({ send, evaluate, waitFor, wait, fai
   const doc = await send('DOM.getDocument');
   const input = await send('DOM.querySelector', { nodeId: doc.result.root.nodeId, selector: '#fileInput' });
   await send('DOM.setFileInputFiles', { files: [join(root, 'negative2positive', 'test-fixtures', 'negative-gradient-16.png')], nodeId: input.result.nodeId });
-  await waitFor('gain-map fixture ready', ready, 120_000);
+  // The repeated export below must be the same file: start once the import's
+  // background passes are over (the detection tail, and the semantic colour
+  // pass, which may still set the WB gains).
+  await waitFor('gain-map fixture ready', `${ready} && !document.body.dataset.studioDetecting && window.__ncTwoStage?.status().semanticPending === false`, 120_000);
   await evaluate(`(() => {
     const probe = window.__gainMapProbe = { requests: [], downloads: [] };
     try { delete window.showSaveFilePicker; } catch {}
