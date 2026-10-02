@@ -115,7 +115,10 @@ index. Every job holds at most one reservation while it waits for the next
 search keeps its best candidate as retained, in the ledger, not as a
 reservation), and every handle is released in `finally`. The hidden-job gate
 is always passed before the budget, never after. `batchExportScheduler.test.mjs`
-runs three lanes against a budget that fits 1.5 items with a slow first sink.
+runs three lanes against a budget that fits 1.5 items with a slow first sink,
+and against a gate that admits the newest waiter first, where a lane that
+claimed its index before admission deadlocks (the test runs a scheduler
+mutated that way and requires the failure).
 
 ## The ledger
 

@@ -1,6 +1,7 @@
 // Standalone Node test for batchExportScheduler.js - run with:
 // node negative2positive/src/app/batchExportScheduler.test.mjs
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   BATCH_MAX_PARALLEL,
   BATCH_PIXEL_BUDGET,
@@ -369,11 +370,15 @@ for (const stalledStage of ['process', 'sink']) {
   const gate = createHiddenJobGate({ isHidden: () => hidden, limitsApply: () => true, setTimer: () => 0, clearTimer: () => {} });
   const sunk = [];
   const started = [];
+  const admissions = [];
   let inFlight = 0;
   let peak = 0;
   const result = await runBatchPipeline([0, 1, 2, 3, 4, 5], {
     maxParallel: 3,
-    beforeStart: ({ signal }) => gate.admit({ bytes: 1, signal }),
+    beforeStart: ({ signal, index }) => {
+      admissions.push([index, started.length]);
+      return gate.admit({ bytes: 1, signal });
+    },
     process: async (job) => {
       inFlight += 1; peak = Math.max(peak, inFlight);
       started.push(job);
@@ -387,6 +392,9 @@ for (const stalledStage of ['process', 'sink']) {
   assert.deepEqual(started, [0, 1, 2, 3, 4, 5]);
   assert.equal(result.successCount, 6);
   assert.equal(peak, 1, 'one item in flight while the gate holds the others');
+  // A lane asks before it claims: the next unclaimed index is always the
+  // next one to start, never one a waiting lane already holds.
+  assert.ok(admissions.length >= 6 && admissions.every(([index, count]) => index === count), JSON.stringify(admissions));
   assert.equal(gate.inFlight, 0, 'every admission is released after its sink');
   assert.equal(gate.waiting, 0);
 
@@ -445,6 +453,93 @@ for (const stalledStage of ['process', 'sink']) {
     beforeStart: async () => { throw new Error('boom'); },
     process: async () => 1, sink: async () => {}
   }), /boom/);
+}
+
+// ---- Admission before the claim, against a gate that admits out of order -------
+// A budget gate may let a later request through first (a smaller item, or
+// one that waited less). Here one item is admitted at a time and the newest
+// waiter goes first. Admitting before claiming, the lane admitted first
+// claims the next index, so frames still start, and are written, in order.
+// A lane that claimed its index before admission would hold index 1 while
+// the gate admits the lane holding index 2, whose sink waits for index 1:
+// a deadlock. `checkAdmissionBeforeClaim` also fails when any beforeStart
+// call sees an index that is claimed but not started.
+function createLifoGate() {
+  let inFlight = 0;
+  const waiters = [];
+  const grant = () => {
+    inFlight += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      inFlight -= 1;
+      const next = waiters.pop();
+      if (next) next(grant());
+    };
+  };
+  return {
+    admit: () => (inFlight === 0 && !waiters.length ? Promise.resolve(grant()) : new Promise(resolve => waiters.push(resolve))),
+    get inFlight() { return inFlight; },
+    get waiting() { return waiters.length; }
+  };
+}
+
+async function checkAdmissionBeforeClaim(run) {
+  const gate = createLifoGate();
+  const started = [];
+  const sunk = [];
+  const admissions = [];
+  let inFlight = 0;
+  let peak = 0;
+  let timer;
+  const deadlock = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`deadlock: started ${started}, sunk ${sunk}`)), 2000);
+  });
+  try {
+    const result = await Promise.race([deadlock, run([0, 1, 2, 3, 4, 5], {
+      maxParallel: 3,
+      beforeStart: async ({ index }) => {
+        admissions.push([index, started.length]);
+        assert.equal(index, started.length, 'no index is claimed while its lane waits for admission');
+        return gate.admit();
+      },
+      process: async (job) => {
+        inFlight += 1; peak = Math.max(peak, inFlight);
+        await sleep(job % 2 ? 1 : 3);
+        inFlight -= 1;
+        return job;
+      },
+      sink: async (job) => { if (job === 0) await sleep(10); sunk.push(job); },
+      onEvent: (event) => { if (event.type === 'start') started.push(event.index); }
+    })]);
+    assert.equal(result.successCount, 6);
+    assert.deepEqual(started, [0, 1, 2, 3, 4, 5], 'frames start in order whatever the admission order');
+    assert.deepEqual(sunk, [0, 1, 2, 3, 4, 5]);
+    assert.equal(peak, 1);
+    assert.equal(gate.inFlight, 0);
+    assert.equal(gate.waiting, 0);
+    assert.ok(admissions.length >= 6);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+await checkAdmissionBeforeClaim(runBatchPipeline);
+
+// The check fails on a scheduler that claims before it admits: the worker
+// loop of batchExportScheduler.js, mutated, imported as a module of its own.
+{
+  const here = new URL('./', import.meta.url).href;
+  const original = readFileSync(new URL('./batchExportScheduler.js', import.meta.url), 'utf8');
+  const claimFirst = original.replace(
+    /let release = null;\n\s*if \(beforeStart\) \{[\s\S]*?\n\s*const index = nextToStart;\n\s*nextToStart \+= 1;/,
+    'const index = nextToStart;\n      nextToStart += 1;\n      let release = null;\n      if (beforeStart) release = await beforeStart({ signal, index });'
+  );
+  assert.notEqual(claimFirst, original, 'the mutation finds the worker loop');
+  const mutated = await import('data:text/javascript;base64,' + Buffer.from(claimFirst.replaceAll("from './", `from '${here}`)).toString('base64'));
+  await assert.rejects(checkAdmissionBeforeClaim(mutated.runBatchPipeline),
+    (error) => /no index is claimed|deadlock/.test(error.message), 'claiming before admission is caught');
 }
 
 // ---- planGeometryBandsInFlight (#244) ------------------------------------------

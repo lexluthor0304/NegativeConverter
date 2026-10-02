@@ -44,12 +44,14 @@ Now one driver (`runBatchExport` in `main.js`) runs the per-file pipeline
   `docs/hidden-window-jobs.md`, then the memory budget's lane reservation,
   `docs/memory-budget.md`) is awaited before a lane claims its next index
   and released after that index's sink, so a lane held back while the window
-  is hidden or memory is short never blocks the in-order sink. A lane that
-  goes on before its payload's write keeps only the payload's bytes of its
-  memory reservation (the release's `early`); the hidden-window admission
-  lasts until the sink. The stages a frame goes through (decode ahead,
-  process, wait for the write) are budgeted apart; see "Stages of a frame"
-  below.
+  is hidden or memory is short never blocks the in-order sink
+  (`batchExportScheduler.test.mjs` also runs it against a gate that admits
+  the newest waiter first, where a lane that claimed before admission would
+  deadlock). A lane that goes on before its payload's write keeps only the
+  payload's bytes of its memory reservation (the release's `early`); the
+  hidden-window admission lasts until the sink. The stages a frame goes
+  through (decode ahead, process, wait for the write) are budgeted apart;
+  see "Stages of a frame" below.
 - Each batch owns a pool of conversion workers
   (`createConversionWorkerPool`, kept alive across frames instead of
   restarting per file) and a pool of export workers (`createExportWorkerPool`,
