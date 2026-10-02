@@ -240,6 +240,16 @@ Remaining performance proposals below are not claims of completed work.
   updateDesktopBatchExportControlLock (2135-2159) disables a fixed list of buttons, and most handlers in this range check isDesktopBatchExportLocked(), but switchToFile — reachable via renderFileList's onOpenFile — has no guard. During exportBatchIndividuallyDesktop (which deliberately has no blocking overlay) clicking another row runs persistCurrentFileSettings + loadFile, resetting the displayed s…  
   _Suggested fix:_ Add `if (isDesktopBatchExportLocked()) return;` at the top of switchToFile and pass a `disabled` flag to renderFileList so rows render non-interactive while locked.
 
+- **low/bug** — A conversion setting edited while Apply Crop's crop-area detection runs is part of the positive the hit's auto white balance measures (#245)  
+  `negative2positive/src/app/main.js:17057`  
+  Apply converts at once with the miss outcome and releases the UI; a hit converts again (applyCropDetectionOutcome) with the settings of the moment it lands, and maybeAutoWhiteBalance measures that positive. A core exposure, film preset or colour model change made in that window (about 0.3-1 s) is therefore part of the measurement, while 1703835 measured auto white balance in Apply, before any edit: the white balance, and the export, can differ from applying, waiting for the hit and then editing. Step-3 edits (C/M/Y, curves, gains) are unaffected (the crop-apply smoke compares a magenta drag across the hit).  
+  _Suggested fix:_ Measure the hit's auto white balance on the settings Apply converted with (one more wbSample conversion when they changed since), or hold conversion edits until the hit has landed.
+
+- **low/bug** — Undoing a geometry edit made while Apply Crop's crop-area detection ran brings Apply's frame back with the miss outcome (#245)  
+  `negative2positive/src/app/main.js:3370`  
+  A geometry edit or a second Apply ends the pending detection (pushUndo), so its hit never lands. Undoing that edit, like redo right after an undo of Apply (the edge case #245 accepted), restores Apply's frame with analysisNeedsReview and no auto white balance, where 1703835 had the hit in place before the edit. The restored entry carries the ended detection's token (captureSnapshot), so it can be recognised.  
+  _Suggested fix:_ Mark the token when cancelCropDetection ends a detection without a reply, and start the detection again (as Apply does) when an undo or redo restores an entry carrying such a token.
+
 - **low/i18n** — Export failure alert and several export-path Error messages are hard-coded English; 'selected folder' fallback leaks into localized toast  
   `negative2positive/src/app/main.js:9010`  
   notifyExportError shows alert(`Export failed: ${message}`) where message is one of several English-only Error strings thrown in the export path ('Full-resolution processing is not ready yet. Please wait…', 'Export payload is not a Blob.', 'No image available for export.', 'JSZip module is unavailable'). Chinese/Japanese users see an English dialog for the most important failure in the app. showDes…  
