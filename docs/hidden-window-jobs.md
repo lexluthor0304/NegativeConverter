@@ -45,11 +45,12 @@ prefetch, #243) before each job's decode, and roll-analysis decodes and
 contact-sheet frames directly. It counts in-flight items across callers.
 
 A background lane asks only once the foreground is idle (`backgroundGate.js`)
-and never waits for the foreground while it holds an admission: when the
-foreground is busy again after the admission (a hidden wait, an uncached
-header read) or after the frame's memory reservation, the job gives back what
-it holds and waits for the foreground first. A desktop batch export and
-Analyze roll keep the foreground busy and admit their own items here, so a
+and does not hold an admission while it waits for the foreground to let its
+job start: when the foreground is busy again after the admission (a hidden
+wait, an uncached header read) or after the frame's memory reservation, the
+job gives back what it holds and waits for the foreground first. Only its
+later steps wait while it holds one, at most 2 s each. A desktop batch export
+and Analyze roll keep the foreground busy and admit their own items here, so a
 lane that waited holding the one hidden slot would stall them until the window
 is shown, with nothing reported as paused. A full-resolution render that only
 waits for its first frame does not make the foreground busy for the lanes

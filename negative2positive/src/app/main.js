@@ -23131,8 +23131,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           if (tile.valid()) await attempt(tile, () => tile.run(null, step));
           return true;
         }
-        // One gated item (#241), taken while the foreground is idle and never
-        // held while the lane waits for it: a desktop batch export or a roll
+        // One gated item (#241), taken while the foreground is idle and not
+        // held while the job waits for the foreground to let it start (its
+        // later steps wait at most 2 s): a desktop batch export or a roll
         // analysis keeps the foreground busy and admits its own next item
         // through the same gate, one at a time in a hidden macOS window (and
         // in safe mode). A lane that waited for its admission (hidden) or for

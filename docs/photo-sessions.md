@@ -550,8 +550,9 @@ hides come last. No job starts on a file another lane is working on.
   and a full-resolution render that only waits for its first frame there does
   not count (it runs once the window is shown). Hidden admission is
   `hiddenJobGate.js` (#241), which every job also passes: it is asked after
-  the idle wait and given back, with the frame's memory, whenever the job
-  waits for the foreground again (`docs/hidden-window-jobs.md`).
+  the idle wait, and a job that finds the foreground busy again before its
+  decode (or, with a retained base, its first step) gives it back, with the
+  frame's memory, and waits again (`docs/hidden-window-jobs.md`).
   `idle({ foregroundOnly: true })` waits on input, a switch and foreground
   decodes and conversions only, not on the export locks: a desktop batch's
   decode-ahead uses it, capped at 2 s (#256, `docs/batch-export-pipeline.md`).
