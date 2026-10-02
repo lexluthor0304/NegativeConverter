@@ -12917,6 +12917,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
               }
             }
           });
+          // The ledger counts the full base from its return, before this
+          // reservation goes: releasing it admits the requests waiting in the
+          // budget at once, against the ledger as it is then (#255 review
+          // R2-057).
+          if (image && record.attempt === attempt && record.status === 'running' && !signal.aborted) record.decodedImage = image;
         } finally {
           memoryClaim.release();
         }

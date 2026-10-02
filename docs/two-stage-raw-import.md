@@ -67,10 +67,12 @@ stage 2 to crop mode or a failure.
 - **Memory** (#258): stage 1 takes the activation's foreground reservation at
   the loader gate with its half-size decode peak. Stage 2 takes a foreground
   reservation of its own there with the full size, released when its decode
-  returns. From then until the swap the ledger counts the decoded full base
-  with the open photo (`record.decodedImage`). Foreground requests never
-  wait, so the budget does not choose between the concurrent and the
-  sequential start.
+  returns. From its return until the swap the ledger counts the decoded full
+  base with the open photo (`record.decodedImage`), which the record takes
+  before the reservation goes: releasing it admits the requests waiting in
+  the budget at once, and that admission already sees the full base.
+  Foreground requests never wait, so the budget does not choose between the
+  concurrent and the sequential start.
 - A lane's decode of the same file (#243 `sharedDecodes`) is adopted instead
   of both stages.
 
@@ -252,7 +254,9 @@ quiet.
   photo is exact once that lands; a rotation or Restore full frame keeps the
   full decode's diagnostics; Apply flat field to selected measures new
   photos' defaults on the full decode. Each ends as on one decode. Each
-  window case has a control without the fix.
+  window case has a control without the fix. The admission that stage 2's
+  release runs reads a ledger (a real `createMemoryBudget`) that counts the
+  full base.
 - `restartRender.test.mjs`: the provisional pass holds its side effects back;
   switch-back to a photo left in the window decides as its pass began.
 - `processFileWithSettings.parity.test.mjs`: Export All of a photo left in

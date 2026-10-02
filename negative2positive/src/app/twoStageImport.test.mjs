@@ -29,7 +29,9 @@
 //   decode's diagnostics; a crop applied there is detected again on the
 //   installed base (the stand-in's detection ends or its hit is dropped);
 //   Apply flat field to selected measures new photos' defaults on the full
-//   decode. Each as on one decode, each with a control without the fix.
+//   decode. Each as on one decode, each with a control without the fix;
+// - stage 2's reservation goes only once the ledger counts the full base,
+//   so the admission its release runs sees it.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
@@ -44,6 +46,7 @@ import { isSameAnalysisFrame } from './cropColorAnalysis.js';
 import { rotatedDimensions, sanitizeCropRect, normalizeAngleDegrees } from './imageGeometry.js';
 import { mergeStudioColors } from './studioSettings.js';
 import { MEMORY_FUNCTIONS, memoryGlobals } from './memoryHarness.mjs';
+import { createMemoryBudget } from './memoryBudget.js';
 import { backingBuffers } from './photoSessionCache.js';
 import { aggregateRollAnalysis, groupAutomaticRollFrames, sanitizeRollFrameForSettings } from './rollAnalysis.js';
 import { applyAutomaticFilmType, applyFilmTypeOverride, sanitizeFilmTypeOverride } from './filmTypeOverride.js';
@@ -1334,5 +1337,73 @@ function flatFieldFixture({ twoStage, old = false }) {
   await control.context.applyFlatFieldToSelected();
   assert.equal(control.others[0].settings.filmBase.r, 190, 'control: measured on the stand-in');
 }
+
+// ---- stage 2's reservation and the ledger (#255 review R2-057) --------------------------------
+// Releasing stage 2's foreground reservation admits the requests waiting in
+// the budget at once (memoryBudget.js). That admission must read a ledger
+// that already counts the decoded full base, which no plane holds yet: the
+// record takes it before the reservation goes. Before, it took it in the
+// attempt's `.then`, after the release, and a lane waiting behind the
+// foreground reservation was admitted as if the full base did not exist.
+{
+  const lines = functionSource('beginFullDecodeAttempt').split('\n');
+  const from = lines.findIndex(line => line.includes('The ledger counts the full base from its return'));
+  const to = lines.findIndex((line, i) => i > from && line.includes('record.decodedImage = image;'));
+  assert.ok(from > 0 && to > from, 'the early count exists');
+  const OLD_BEGIN = [...lines.slice(0, from), ...lines.slice(to + 1)].join('\n');
+  const run = async ({ old = false } = {}) => {
+    const f = fixture();
+    if (old) vm.runInContext(OLD_BEGIN, f.context);
+    const full = { width: FULL.width, height: FULL.height, data: new Uint8ClampedArray(600_000) };
+    const reads = [], events = [];
+    let released = false;
+    f.target.memoryBudget = createMemoryBudget({
+      budgetBytes: 1 << 20,
+      // The ledger's open photo, as main.js measures it.
+      retainedBytes: () => {
+        const buffers = backingBuffers(f.context.openPhotoMemoryRoots());
+        let bytes = 0;
+        for (const buffer of buffers) bytes += buffer.byteLength;
+        if (released) reads.push({ bytes, full: buffers.has(full.data.buffer) });
+        return bytes;
+      },
+      onEvent: event => {
+        events.push(event);
+        if (event.type === 'release' && event.priority === 'foreground' && event.label.startsWith('full-resolution ')) released = true;
+      }
+    });
+    const stage2 = await loadedStandIn(f);
+    f.state.provisional.start = { fresh: false, snapshot: f.context.extractCurrentSettings(), detectFrame: false, readEdge: false };
+    f.state.provisional.settledSnapshot = f.context.extractCurrentSettings();
+    // A user job holds a reservation, stage 2 takes its own at the loader
+    // gate, and a lane's frame waits behind that foreground reservation.
+    const job = await f.target.memoryBudget.reserve(1, { priority: 'user', label: 'job' });
+    await stage2.options.reserveDecode({ kind: 'raw', width: FULL.width, height: FULL.height, estimatedBytes: 400_000 });
+    const abort = new AbortController();
+    let lane = null;
+    f.target.memoryBudget.reserve(600_000, { priority: 'background', label: 'lane', signal: abort.signal }).then(handle => { lane = handle; }, () => {});
+    await flush();
+    assert.equal(lane, null, 'the lane waits behind stage 2');
+    stage2.resolve(full);
+    await flush();
+    assert.equal(f.state.fullDecode.status, 'decoded');
+    assert.equal(f.state.fullDecode.decodedImage, full, 'the ledger counts the full base until the swap');
+    const result = { reads: reads.slice(), lane, grant: events.find(event => event.type === 'grant' && event.label === 'lane') || null };
+    abort.abort();
+    lane?.release();
+    job.release();
+    return result;
+  };
+  const fixed = await run();
+  assert.ok(fixed.reads.length > 0, 'stage 2\'s release ran an admission');
+  assert.equal(fixed.reads[0].full, true, 'that admission counts the full base');
+  assert.ok(fixed.reads[0].bytes >= 600_000);
+  assert.deepEqual([fixed.lane, fixed.grant], [null, null], 'the lane still waits: the full base leaves no room for it');
+  const control = await run({ old: true });
+  assert.equal(control.reads[0].full, false, 'control: the admission read the ledger without the full base');
+  assert.ok(control.lane, 'control: the lane was admitted');
+  assert.equal(control.grant.rule, 'fits', 'control: as if the full base did not exist');
+}
+
 
 console.log('twoStageImport: header routing, stage options and start, abort on switch, barrier, retry, exact crop across the swap, history rebase, window edits and the ledger\'s open photo passed');
