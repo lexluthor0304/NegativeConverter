@@ -169,7 +169,7 @@ export function createHarness(base, { historyBudget = 768 * 1024 * 1024, session
     studioAutoFrameRunning: false, singleExportActive: false, studioThumbnailUpdateFrame: 0, expiredAnalysisKey: null,
     cropDetection: null, cropDetectionStats: { started: 0, hits: 0, misses: 0, stale: 0, reconversions: 0, conversions: 0 },
     lensMapCache: new Map(), canvas: { style: {} }, glCanvas: { style: {} },
-    dustDetectionTimer: null, pendingBrushRepairs: 0, dustDrawing: false, fullUpdateTimer: null,
+    dustDetectionTimer: null, pendingBrushRepairs: 0, dustDrawing: false, fullUpdateTimer: null, fullResolutionRenderTimer: null,
     photoSessions: createPhotoSessionCache({ maxBytes: sessionBudget }),
     photoPreviews: createPhotoSessionCache({ maxBytes: 0 }),
     // #243: an empty prefetch slot, and each activation its own signal.

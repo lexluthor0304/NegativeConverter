@@ -85,6 +85,7 @@ function settleFixture({ loadFails = false } = {}) {
     aiRepair: { release: null, trim: null, resident: null, status: 'idle', provider: '', run: null, source: '', sourceRef: null,
       prefer: '', released: false, error: '', percent: 0, tiles: 0, ms: 0, revision: 0 },
     aiRepairRunsInFlight: 0, aiRepairIdleTimer: null, aiRepairLastUsed: 0, activeLongJobs: 0, dustDetectionTimer: null,
+    fullResolutionRenderTimer: null,
     AI_REPAIR_IDLE_RELEASE_MS: 300_000, AI_REPAIR_IDLE_RECHECK_MS: 30_000, getPerfNow: () => 0,
     DEFAULT_MODEL_URL: '/models/migan.onnx', defaultInferencePreference: () => 'wasm',
     fetchModelBytes: async () => {

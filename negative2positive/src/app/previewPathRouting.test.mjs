@@ -27,6 +27,17 @@ function functionSource(name) {
   assert.ok(end > match.index, `runtime function closes: ${name}`);
   return source.slice(match.index, end + '\n    }'.length);
 }
+// An event listener of main.js as a named function (its own `this`).
+function listenerSource(id, name) {
+  const anchor = source.indexOf(`getElementById('${id}')`);
+  assert.ok(anchor >= 0, `listener exists: ${id}`);
+  const head = /addEventListener\('\w+', (?:function \(\)|\(\) =>) \{/g;
+  head.lastIndex = anchor;
+  const match = head.exec(source);
+  assert.ok(match && match.index - anchor < 80, `${id} has a listener`);
+  const body = match.index + match[0].length;
+  return `function ${name}() {${source.slice(body, source.indexOf('\n    });', body))}\n    }`;
+}
 const settle = () => new Promise(setImmediate);
 const noop = () => {};
 
@@ -659,6 +670,123 @@ for (const large of [false, true]) {
   assert.equal(settled, true);
 }
 
+// ---- B: a cleared mask or cleared strokes in the idle window (R1-041) ----
+
+// The Clear handlers of the dust brush and the AI brush, and the photo
+// session's settled test, against the fixture.
+function clearFixture(options) {
+  const f = fixture(options);
+  const stored = [];
+  const item = { file: 'photo' };
+  Object.assign(f.state, { loadedFile: 'photo', loadedBaseImageData: f.conversionSource, rawDecodePending: false,
+    fileQueue: [item], zoomLevel: 1, panX: 0, panY: 0, filmEdge: null });
+  Object.assign(f.context, {
+    unpinDustWorker: noop, disposeDustWorker: noop, updateDustStatusUI: noop, getLocalizedText: (key, text) => text,
+    dustRefreshRepairMask: null, pushUndo: noop, markCurrentFileDirty: noop,
+    hiddenJobs: { safeMode: false }, geometryDiagnostics: { coldSessions: false }, dustAiRefresh: { rects: [] },
+    dustDrawing: false, undoStack: [], redoStack: [], photoSettingsKey: () => 'key',
+    captureSnapshot: () => ({ refs: { processedImageData: f.state.processedImageData } }),
+    photoSessions: { put: (key, entry) => { stored.push(entry); return true; } },
+    photoPreviews: { put: () => true }, currentConvertedPreviewSource: () => null,
+    buildAdjustmentSettings: () => ({ curves: { r: new Uint8Array(256), g: new Uint8Array(256), b: new Uint8Array(256) } }),
+    samplePhotoPreviewSource: () => ({}), adjustPhotoPreviewSample: () => ({}), schedulePostPaintTask: noop,
+  });
+  vm.runInContext(['clearDustState', 'rememberPhotoSession', 'displayIsReduced'].map(functionSource).join('\n') + '\n'
+    + listenerSource('dustClearMaskBtn', 'clearDustMask') + '\n' + listenerSource('aiBrushClear', 'clearAiBrushStrokes'), f.context);
+  const remember = () => { f.context.rememberPhotoSession(item); return stored.at(-1); };
+  const tick = async () => {
+    f.nextFrame();
+    f.context.scheduleCoreReprocess({ full: false });
+    await Promise.resolve();
+    await settle();
+    f.reply('preview');
+    await settle();
+  };
+  return { ...f, remember, tick };
+}
+
+{
+  // Dust on: a tick keeps the plane for the brushes until the idle pass. The
+  // kept plane waiting for its render is no settled view, and Clear mask
+  // puts its clean source back without making it current (5f23eb0 cleared
+  // fullResolutionPending: an export, and the photo session, took the
+  // previous exposure). Export renders it again, once.
+  const f = clearFixture({ repairs: true });
+  assert.ok(f.remember().snapshot, 'settled before the tick');
+  await f.tick();
+  assert.equal(f.state.processedImageData, f.fullPlane, 'the plane is kept for the brushes');
+  assert.equal(f.state.processedImageDataIsPreview, false);
+  assert.deepEqual(f.clock.delays(), [2500], 'the idle repair pass is armed');
+  assert.equal(f.remember().snapshot, null, 'a photo session left in the idle window stores no settled view');
+  f.context.clearDustMask();
+  assert.equal(f.state.processedImageData, f.fullPlane, 'Clear mask puts the clean source back');
+  assert.equal(f.state.dustRemoval.mask, null);
+  assert.equal(f.state.fullResolutionPending, true, 'which still lags its settings');
+  assert.equal(fullResolutionIsStale(f.state), true);
+  assert.deepEqual(f.clock.delays(), [300, 2500], 'detection is queued; the idle pass stands');
+  const exporting = f.context.ensureFullResolutionReadyForExport();
+  await settle();
+  assert.deepEqual(count(f), { preview: 1, shared: 0, exact: 1, mainThread: 0 }, 'export renders the plane again, once');
+  f.reply('exact');
+  await exporting;
+  assert.equal(f.state.processedImageData.name, 'exact result');
+  assert.equal(f.state.fullResolutionPending, false);
+  assert.deepEqual(f.clock.delays(), [300], 'the export took the idle pass over; detection follows the new plane');
+}
+
+{
+  // AI-brush strokes only: Clear in the idle window. Nothing is detected, so
+  // the idle pass is what renders the kept plane again; until it lands a
+  // photo session stores no settled view (5f23eb0 stored the previous
+  // exposure as settled and exported it after the return).
+  const f = clearFixture({ strokes: 1 });
+  await f.tick();
+  f.context.clearAiBrushStrokes();
+  assert.equal(f.state.repairStrokes.length, 0);
+  assert.equal(f.state.processedImageData, f.fullPlane);
+  assert.equal(f.state.fullResolutionPending, true, 'the kept plane still lags its settings');
+  assert.deepEqual(f.clock.delays(), [2500], 'no detection without dust removal; the idle pass stands');
+  assert.equal(f.remember().snapshot, null, 'no settled view while it waits');
+  f.clock.run(2500);
+  await settle();
+  assert.equal(count(f).exact, 1, 'the idle pass renders it');
+  f.reply('exact');
+  await settle(); await settle();
+  assert.equal(f.state.processedImageData.name, 'exact result');
+  assert.equal(f.state.fullResolutionPending, false);
+  const entry = f.remember();
+  assert.equal(entry.snapshot.refs.processedImageData.name, 'exact result', 'settled on the new plane');
+  assert.equal(entry.fullResolutionPending, false);
+}
+
+{
+  // A cleared mask on a settled frame changes no flag: the clean source is
+  // current, and export reuses it.
+  const f = clearFixture({ repairs: true });
+  f.context.clearDustMask();
+  assert.equal(f.state.processedImageData, f.fullPlane);
+  assert.equal(f.state.fullResolutionPending, false);
+  await f.context.ensureFullResolutionReadyForExport();
+  assert.deepEqual(count(f), { preview: 0, shared: 0, exact: 0, mainThread: 0 });
+}
+
+for (const large of [false, true]) {
+  // A display preview waiting for its render (a photo just opened, with dust
+  // removal on above 16 MP) is a settled view: the session keeps it as the
+  // preview it is, and the restore arms the render again.
+  const f = clearFixture({ large, repairs: large });
+  Object.assign(f.state, { processedImageData: f.shown, processedImageDataIsPreview: true, fullResolutionPending: true });
+  f.state.dustRemoval.mask = null;
+  f.state.dustRemoval.cleanSource = null;
+  f.context.scheduleFullResolutionRender('initial-preview');
+  assert.deepEqual(f.clock.delays(), [2500]);
+  const entry = f.remember();
+  assert.ok(entry.snapshot, 'stored as a settled view');
+  assert.equal(entry.snapshot.refs.processedImageData, f.shown);
+  assert.equal(entry.previewOnly, true);
+  assert.equal(entry.fullResolutionPending, true);
+}
+
 // ---- B: superseded exact renders are aborted ----
 
 {
@@ -928,4 +1056,4 @@ for (const large of [true, false]) {
   await assert.rejects(f.context.ensureFullResolutionReadyForExport(), /Error loading file/);
 }
 
-console.log('previewPathRouting: downgraded undo/reset routing, kept planes, idle repair pass, restore flags and paint, viewport branches, Step-3 gate, export repair waits, aborted exact renders, the repaired preview source and the colour-analysis sample barrier passed');
+console.log('previewPathRouting: downgraded undo/reset routing, kept planes, idle repair pass, restore flags and paint, viewport branches, Step-3 gate, export repair waits at both entry points, cleared masks and strokes in the idle window, aborted exact renders, the repaired preview source and the colour-analysis sample barrier passed');

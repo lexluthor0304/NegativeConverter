@@ -7326,6 +7326,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // screen (a repair pass, a cleared mask). Its display preview is rebuilt in
     // row bands or in the preview worker while the current one stays up
     // (#248 part 4), instead of a whole-frame resample in this task.
+    // `keepPending`: the plane is no newer than the one it replaces (a cleared
+    // mask's clean source). One kept while its re-render waits for idle (#237)
+    // still lags its settings, so the export barrier still renders it.
     function applyProcessedImageToState(processed, options = {}) {
       if (!processed) return;
       const previewOnly = Boolean(options.previewOnly);
@@ -7333,7 +7336,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       releaseCorePreviewRetained(processed);
       state.processedImageData = processed;
       state.processedImageDataIsPreview = previewOnly;
-      if (!previewOnly) {
+      if (!previewOnly && !options.keepPending) {
         state.fullResolutionPending = false;
       }
       state.displayImageData = null;
@@ -10009,7 +10012,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (!state.dustRemoval.enabled) return;
       const source = getDustSource();
       if (source) {
-        applyProcessedImageToState(source, { previewOnly: state.processedImageDataIsPreview, deferDisplay: true });
+        applyProcessedImageToState(source, { previewOnly: state.processedImageDataIsPreview, deferDisplay: true, keepPending: true });
       }
       clearDustState();
       state.dustRemoval.cleanSource = source;
@@ -11502,11 +11505,15 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (!item || item.file !== state.loadedFile || !(base || state.baseDescriptor) || state.rawDecodePending) return;
       // A reduced preview-tier frame (#263) is never a settled view, nor is
       // one still waiting for its normal-size tick, nor one whose original is
-      // being rebuilt (#249).
+      // being rebuilt (#249), nor a full-resolution plane kept while its
+      // render waits for idle (#237): it lags its settings and its repairs
+      // are owed. A display preview waiting for its render (a photo just
+      // opened or restored) is settled.
       const settled = state.currentStep >= 3 && state.processedImageData && !processNegativeInFlight
         && !state.geometryPending && !ensureSourcePromise && !state.baseDescriptor?.decoding
         && !coreReprocessBusy() && !coreReprocessTimer && !state.dustRemoval.processing
         && !dustDetectionTimer && !pendingBrushRepairs && !dustDrawing && !dustAiRefresh.rects.length
+        && !(fullResolutionRenderTimer && !state.processedImageDataIsPreview)
         && previewTier === 'normal' && !displayIsReduced();
       const entry = {
         file: item.file, base, baseDescriptor: describeBase(base), rawMetadata: state.rawMetadata,
@@ -26105,7 +26112,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       state.repairStrokes = [];
       markCurrentFileDirty();
       const source = getDustSource();
-      if (source) applyProcessedImageToState(source, { previewOnly: state.processedImageDataIsPreview, deferDisplay: true });
+      if (source) applyProcessedImageToState(source, { previewOnly: state.processedImageDataIsPreview, deferDisplay: true, keepPending: true });
       clearDustState();
       state.dustRemoval.cleanSource = state.dustRemoval.enabled ? source : null;
       if (state.dustRemoval.enabled) scheduleDustDetection();

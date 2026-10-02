@@ -64,7 +64,7 @@ function fixture() {
     document: { body: { dataset: {} }, getElementById: element },
     File: globalThis.File, performance, Uint8Array, structuredClone, DOMException, AbortController,
     aiRepair: { revision: 2, status: 'ready', provider: 'wasm', run: noop, release: noop },
-    processNegativeInFlight: null, coreReprocessTimer: null, dustDetectionTimer: null,
+    processNegativeInFlight: null, coreReprocessTimer: null, dustDetectionTimer: null, fullResolutionRenderTimer: null,
     corePreviewRetained: null, corePreviewCommit: null,
     pendingBrushRepairs: 0, brushRepairWaiters: [], dustMaskSources: new WeakMap(), fullResolutionConversionAbort: null,
     rememberRepairMasks: noop, clearRepairedPreview: noop,
