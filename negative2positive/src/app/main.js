@@ -28938,9 +28938,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
     // The open photo follows the decision only while untouched, from its
     // loaded base: no decode and no undo entry. A newer load, a roll revision
-    // or an edit wins.
+    // or an edit wins. A decision that arrives while another flip holds the
+    // photo is applied again once that flip is done (#229 review R1-016).
     async function flipImportPhoto(record, { wait = false, isValid = () => true } = {}) {
-      if (record.flipping) return false;
+      if (record.flipping) { scheduleImportFilmTypeUpdate(record, 250); return false; }
       const item = getCurrentQueueItem();
       const generation = loadGeneration;
       const current = () => isValid() && importFilmTypeActive(record) && isCurrentLoad(generation)
@@ -28971,8 +28972,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       refreshImportFilmTypeDecision(record);
       applyImportFilmTypeDecision(record);
       const current = getCurrentQueueItem();
-      if (current && record.items.includes(current) && importFilmTypeTarget(record, current)) {
-        await flipImportPhoto(record, { wait: true, isValid });
+      if (current && record.items.includes(current) && importFilmTypeTarget(record, current)
+        && !await flipImportPhoto(record, { wait: true, isValid }) && isValid() && importFilmTypeActive(record)) {
+        // The photo was left while its flip waited (crop mode, then a
+        // switch): it is retyped now as a background frame, before grouping,
+        // so it joins its roll (#229 review R1-016).
+        applyImportFilmTypeDecision(record);
       }
       if (isValid() && importFilmTypeActive(record)) showImportFilmTypeToast(record);
     }

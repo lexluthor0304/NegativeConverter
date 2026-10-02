@@ -619,6 +619,54 @@ const exportRecipe = item => JSON.stringify([item.settings, item.filmTypeOverrid
   assert.deepEqual(f.undos.map(entry => entry.label), ['rollFilmType', 'rollAnalysis']);
 }
 
+// #229 review R1-016: the user opens the crop tool on the untouched leader
+// while pass 1 runs. The end of pass 1 waits for the leader's flip; a decision
+// timer meanwhile finds that flip busy; then the user leaves crop mode for
+// another frame, which ends the wait. The leader is retyped as a background
+// frame before grouping and joins the B&W roll, from its pass-1 sample.
+// 5f23eb0 left it positive/noMask (un-inverted) while the toast counted it.
+{
+  const f = fixture({ verdicts: ['noMask', 'mono', 'mono', 'mono', 'mono'], realRoll: true });
+  const decode = f.context.loadFileToImageData;
+  f.context.loadFileToImageData = async file => { f.state.cropping = true; return decode(file); };
+  f.context.scheduleAutomaticRollImport(f.items);
+  f.prepareForeground(0);
+  await f.fire(1200);
+  assert.deepEqual(f.decoded, [1, 2, 3, 4], 'pass 1 ran beside crop mode');
+  assert.equal(f.items[0].settings.filmType, 'positive', 'the leader waits for crop mode to end');
+  assert.equal(f.toasts.length, 0, 'the end of pass 1 waits for the leader');
+  // The decision timer the cropping flip scheduled: the waiting flip holds
+  // the photo, so the decision is scheduled again (beside the wait's poll).
+  await f.fire(250);
+  assert.equal(f.items[0].settings.filmType, 'positive');
+  assert.equal([...f.timers.values()].filter(timer => timer.ms === 250).length, 2, 'a flip held by another schedules the decision again');
+  // switchToFile leaves crop mode and opens frame 1 with its recipe.
+  f.state.cropping = false;
+  f.navigate(1);
+  for (const key of ['filmType', 'filmTypeSource', 'filmTypeConfidence', 'filmTypeReason']) f.state[key] = f.items[1].settings[key];
+  await f.fire(250);
+  while (f.timers.size) await f.fire();
+  const leader = f.items[0].settings;
+  assert.deepEqual([leader.filmType, leader.filmTypeSource, leader.filmTypeConfidence, leader.filmTypeReason], ['bw', 'auto', 'medium', 'rollMonochrome'],
+    'the leader is retyped once it is a background frame');
+  assert.ok(f.items.every(item => item.settings.rollFrame?.locked), 'and joins the B&W roll analysis');
+  assert.deepEqual(f.decoded, [1, 2, 3, 4], 'from its pass-1 sample');
+  const rollToasts = f.toasts.filter(toast => toast.action?.id === 'rollPositives');
+  assert.equal(rollToasts.length, 1);
+  assert.ok(rollToasts[0].text.includes('5'), 'the toast counts the leader, which is now typed');
+  assert.equal(f.restored.filter(id => id === 0).length, 0, 'the leader was never flipped in place');
+  // Every frame ends with the recipe of the same import without crop mode,
+  // where the leader is flipped in place (5f23eb0 also left the B&W roll's
+  // shared analysis one frame short).
+  const reference = fixture({ verdicts: ['noMask', 'mono', 'mono', 'mono', 'mono'], realRoll: true });
+  reference.context.scheduleAutomaticRollImport(reference.items);
+  reference.prepareForeground(0);
+  await reference.fire(1200);
+  while (reference.timers.size) await reference.fire();
+  assert.deepEqual(reference.restored.slice(0, 1), [0], 'reference: the leader flips in place');
+  assert.deepEqual(f.items.map(exportRecipe), reference.items.map(exportRecipe), 'the recipes of the import without crop mode');
+}
+
 // Per-frame analysis thumbnails: each measured frame gets a converted tile
 // without blocking the next decode; they never downgrade a converted tile and
 // the roll commit still replaces them.
