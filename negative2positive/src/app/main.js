@@ -11930,8 +11930,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     const DISPLAY_PROXY_HASHES = (typeof __NC_DISPLAY_PROXY_HASHES__ === 'object' && __NC_DISPLAY_PROXY_HASHES__) || null;
     const DISPLAY_CACHE_LIMIT_KEY = 'nc_display_cache_limit_v1';
     function displayCacheLimitBytes() {
-      const stored = Number(safeStorageGet(DISPLAY_CACHE_LIMIT_KEY));
-      return Number.isFinite(stored) && stored >= 0 ? stored : DISPLAY_PROXY_STORE_DEFAULT_LIMIT_BYTES;
+      // No setting is the default, not Off (Number(null) is 0).
+      const stored = safeStorageGet(DISPLAY_CACHE_LIMIT_KEY);
+      const bytes = stored === null || !String(stored).trim() ? NaN : Number(stored);
+      return Number.isFinite(bytes) && bytes >= 0 ? bytes : DISPLAY_PROXY_STORE_DEFAULT_LIMIT_BYTES;
     }
     const displayProxyStore = DISPLAY_PROXY_HASHES ? createDisplayProxyStore({
       port: displayProxyPort,

@@ -1,8 +1,9 @@
-// Where the display-proxy caches read their free space (#249, R2-068):
-// main.js's displayProxyFreeSpace, run in a vm with stub hosts. The desktop
-// reports its volume's free space, which the store's 10 GiB floor applies
-// to; the web reports the origin's quota left, which it does not (Firefox
-// caps an origin at 10 GiB, so the store never stored there).
+// The display-proxy store's budget inputs in main.js (#249), run in a vm
+// with stub hosts. displayProxyFreeSpace (R2-068): the desktop reports its
+// volume's free space, which the store's 10 GiB floor applies to; the web
+// reports the origin's quota left, which it does not (Firefox caps an origin
+// at 10 GiB, so the store never stored there). displayCacheLimitBytes: a
+// limit never set is the default, 2 GB (it read as 0, Off, everywhere).
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
@@ -46,4 +47,22 @@ assert.deepEqual(commands, ['display_proxy_space']);
 assert.equal(displayProxyStoreBudget(desktop, 10 * GiB), 5 * GiB, 'a quarter of the space above the floor');
 assert.equal(displayProxyStoreBudget({ bytes: 10 * GiB, kind: 'volume' }, limit), 0, 'and nothing at the floor');
 
-console.log('displayProxyFreeSpace: the web reads the origin quota left, the desktop its volume, each under its own budget rule');
+// The limit setting: Off only when chosen.
+function limitFor(stored) {
+  const context = vm.createContext({
+    safeStorageGet: key => (key === 'nc_display_cache_limit_v1' ? stored : null),
+    DISPLAY_CACHE_LIMIT_KEY: 'nc_display_cache_limit_v1', DISPLAY_PROXY_STORE_DEFAULT_LIMIT_BYTES
+  });
+  vm.runInContext(functionSource('displayCacheLimitBytes'), context);
+  return context.displayCacheLimitBytes();
+}
+assert.equal(limit, 2 * GiB);
+assert.equal(limitFor(null), limit, 'a limit never set is the default, not Off');
+assert.equal(limitFor(''), limit);
+assert.equal(limitFor('0'), 0, 'Off when chosen');
+assert.equal(limitFor(String(5 * GiB)), 5 * GiB, 'a chosen limit');
+assert.equal(limitFor('soon'), limit, 'anything else is the default');
+assert.equal(limitFor('-1'), limit);
+assert.equal(displayProxyStoreBudget(firefox, limitFor(null)), 2 * GiB, 'so a fresh profile on a 10 GiB quota stores');
+
+console.log('displayProxyBudgetInputs: the web reads the origin quota left, the desktop its volume, each under its own budget rule, and an unset limit is the default');
