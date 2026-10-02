@@ -670,6 +670,40 @@ for (const large of [false, true]) {
   assert.equal(settled, true);
 }
 
+// ---- B: both export entry points wait for repairs (R1-042) ----
+
+for (const entry of ['prepareCurrentImageForExport', 'getCurrentExportImageData']) {
+  // A detection waiting on its debounce when an export starts: the prepare
+  // step (full resolution plus repairs) and the adjust step each run it, and
+  // read no pixel until it has repaired the frame.
+  const f = fixture({ repairs: true });
+  const adjusted = [];
+  Object.assign(f.context, {
+    applyAdjustmentsWithSettings: async (image, settings, options = {}) => { adjusted.push(image); return image; },
+    // TELEA dust removal and no strokes: once detection has settled, the
+    // prepare step has no repair of its own to run.
+    aiRepair: { status: 'ready', revision: 1 }, noteGeometryPixelRead: noop,
+    // The adjust step marks the planes the editor patches in place (the
+    // export lane's ownership check); nothing is patched in place here.
+    markInPlaceEditedPlanes: noop,
+  });
+  vm.runInContext(functionSource(entry), f.context);
+  f.state.dustRemoval.mask = null;
+  f.context.scheduleDustDetection();
+  let done = false;
+  const exporting = f.context[entry]().then(() => { done = true; });
+  await settle();
+  assert.deepEqual(f.log.filter(item => item === 'detect'), ['detect'], `${entry}: runs the detection`);
+  assert.equal(f.clock.timers.size, 0, `${entry}: in place of its debounce`);
+  assert.equal(done, false, `${entry}: and waits for it`);
+  assert.deepEqual(adjusted, [], `${entry}: no pixel is read before`);
+  const repaired = { ...LARGE, name: 'repaired plane' };
+  f.state.processedImageData = repaired;
+  f.context.finishDetection();
+  await exporting;
+  if (entry === 'getCurrentExportImageData') assert.deepEqual(adjusted, [repaired], 'the repaired frame is exported');
+}
+
 // ---- B: a cleared mask or cleared strokes in the idle window (R1-041) ----
 
 // The Clear handlers of the dust brush and the AI brush, and the photo

@@ -861,6 +861,69 @@ function sliderFixture(options) {
   assert.equal(f.context.coreReprocessBusy(), false);
 }
 
+// ---- #237 above 16 MP: a `full` request converts the display preview ----
+
+for (const repairs of [false, true]) {
+  // A full request through the scheduler (a select commit) on a frame over
+  // 16 MP with a separate display preview converts that preview after its
+  // 70 ms settle, and leaves export an exact render to do. Repairs arm the
+  // idle repair pass; without them nothing more runs until an export.
+  const f = schedulerFixture({ large: true, repairs });
+  f.request(5, { full: true });
+  assert.equal(f.conversions.length, 0, 'a full request settles for 70 ms first');
+  f.clock.runTimers();
+  await Promise.resolve();
+  assert.deepEqual(f.conversions.map(entry => [entry.full, entry.exposure]), [[false, 5]], 'the display preview converts');
+  f.conversions[0].resolve(f.result());
+  await settle();
+  assert.equal(f.state.fullResolutionPending, true, 'export owes the exact render');
+  assert.deepEqual(f.log.filter(entry => entry.startsWith('idle:')), repairs ? ['idle:repair-idle'] : []);
+  assert.deepEqual(f.log.filter(entry => entry === 'dust'), [], 'no detection before the exact pass');
+  assert.equal(f.context.coreReprocessBusy(), false);
+}
+
+for (const large of [false, true]) {
+  // An exact render in flight and a settings change (the caller moves the
+  // token, as Undo and Reset All do): above 16 MP the `full` request converts
+  // the display preview at once, beside the exact render; 16 MP or less it
+  // queues behind it. Either way the exact reply of the superseded settings
+  // is never applied, and the export barrier waits for both lanes.
+  const f = schedulerFixture({ large });
+  f.state.coreExposure = 20;
+  const exact = f.context.rerenderWithCoreControls({ full: true, exact: true, token: f.context.coreReprocessToken });
+  await Promise.resolve();
+  assert.deepEqual(f.conversions.map(entry => [entry.full, entry.exposure]), [[true, 20]]);
+  f.context.coreReprocessToken += 1;
+  f.state.coreExposure = 0;
+  const reset = f.context.rerenderWithCoreControls({ full: true });
+  await Promise.resolve();
+  assert.equal(f.conversions.length, large ? 2 : 1, large ? 'the preview converts beside the exact render' : 'the full request queues behind it');
+  let exported = false;
+  const barrier = f.context.flushScheduledCoreReprocess().then(() => { exported = true; });
+  if (large) {
+    assert.equal(f.conversions[1].full, false);
+    f.conversions[1].resolve(f.result());
+    assert.equal(await reset, true);
+  } else {
+    assert.equal(await reset, false);
+  }
+  await settle();
+  assert.equal(exported, false, 'export waits for the exact render too');
+  const applied = f.log.filter(entry => entry === 'apply').length;
+  f.conversions[0].resolve({ width: 400, height: 300 });
+  assert.equal(await exact, false, 'the exact reply of the superseded settings is not applied');
+  await settle();
+  assert.equal(f.log.filter(entry => entry === 'apply').length, applied);
+  if (!large) {
+    assert.deepEqual(f.conversions.slice(1).map(entry => [entry.full, entry.exposure]), [[true, 0]], 'the queued request runs after it');
+    f.conversions[1].resolve({ width: 400, height: 300 });
+  }
+  await barrier;
+  assert.equal(exported, true);
+  if (large) assert.equal(f.state.fullResolutionPending, true, 'export still owes the new settings an exact render');
+  assert.equal(f.context.coreReprocessBusy(), false);
+}
+
 // ---- #239: GPU frames between exact frames ----
 
 {
@@ -1002,4 +1065,4 @@ function sliderFixture(options) {
   assert.equal(f.context.coreReprocessBusy(), false);
 }
 
-console.log('coreReprocessDispatcher: same-task idle posts, newest-wins busy lane, one post per frame, early handoff, gate cancel/flush/settle, retained 16-bit planes committed on release/idle/export/switch/snapshot and one conversion per commit passed');
+console.log('coreReprocessDispatcher: same-task idle posts, newest-wins busy lane, one post per frame, early handoff, gate cancel/flush/settle, retained 16-bit planes committed on release/idle/export/switch/snapshot, one conversion per commit and the >16 MP preview routing beside an exact render passed');
