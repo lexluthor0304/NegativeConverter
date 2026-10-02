@@ -17,7 +17,8 @@ globalThis.ImageData = class ImageData {
 const {
   createDisplayProxySpill, createDisplayProxyPort, createDisplayProxyWorkerCore, createDisplayProxyStore,
   displayProxyStoreBudget, displayProxyFileKey, namedRecords, sha256Hex, createOpfsRecords, createPortRecords,
-  DISPLAY_PROXY_STORE_FLOOR_BYTES, DISPLAY_PROXY_STORE_QUOTA_FLOOR_BYTES, DISPLAY_PROXY_STORE_LOCK, DISPLAY_PROXY_ORPHAN_AGE_MS
+  DISPLAY_PROXY_STORE_FLOOR_BYTES, DISPLAY_PROXY_STORE_QUOTA_FLOOR_BYTES, DISPLAY_PROXY_STORE_LOCK, DISPLAY_PROXY_ORPHAN_AGE_MS,
+  DISPLAY_PROXY_LOCK_WAIT_MS
 } = await import('./displayProxyStore.js');
 const { createDesktopProxyRecords, DISPLAY_PROXY_CHUNK_BYTES } = await import('./displayProxyDesktop.js');
 const { resizeDisplayPreview } = await import('./displayPreview.js');
@@ -522,6 +523,47 @@ await sharedByTwoTabs({ webkit16: true });
   // Under the lock no tab is between a record and its entry: every orphan goes.
   await createDisplayProxyStore({ port: localPort(), records, availableBytes: async () => 20 * GiB, locks: locksStub() }).load();
   assert.equal(records.data.has(young), false, 'under the lock every orphan is deleted');
+}
+
+// ---- Where a lock request fails (an origin without Web Locks), the store
+// works as without them and asks no more; a lock that is not granted in
+// time (another tab's operation that never ends) does not stall it ----
+{
+  const image = proxyImage();
+  const young = 'a'.repeat(64), old = 'b'.repeat(64);
+  const withOrphans = () => {
+    const records = memoryRecords();
+    records.data.set(young, { bytes: new Uint8Array(10), modifiedMs: Date.now() });
+    records.data.set(old, { bytes: new Uint8Array(10), modifiedMs: Date.now() - DISPLAY_PROXY_ORPHAN_AGE_MS - 1000 });
+    return records;
+  };
+  let refused = 0;
+  const refusing = { request: async () => { refused++; throw Object.assign(new Error('denied'), { name: 'SecurityError' }); } };
+  const records = withOrphans();
+  const store = createDisplayProxyStore({ port: localPort(), records, availableBytes: async () => 20 * GiB, locks: refusing });
+  await store.load();
+  assert.equal(records.data.has(young), true, 'a refused lock: a young orphan is kept');
+  assert.equal(records.data.has(old), false, 'an old one goes');
+  assert.equal(await store.put('file-a', 'p', { file: fileOf(1), image }), true, 'a refused lock: the store stores');
+  same((await store.read((await store.find('file-a'))[0].name)).image, image, 'a refused lock: and reads back');
+  assert.equal(refused, 1, 'the lock is asked for once');
+  const never = {
+    requests: 0,
+    request(name, options) {
+      never.requests++;
+      return new Promise((resolve, reject) => options.signal.addEventListener('abort', () => reject(new DOMException('not granted', 'AbortError'))));
+    }
+  };
+  const stalled = withOrphans();
+  const waiting = createDisplayProxyStore({ port: localPort(), records: stalled, availableBytes: async () => 20 * GiB, locks: never, lockWaitMs: 20 });
+  assert.equal(DISPLAY_PROXY_LOCK_WAIT_MS, 10_000);
+  const started = Date.now();
+  assert.equal(await waiting.put('file-b', 'p', { file: fileOf(2), image }), true, 'a lock never granted does not stall the store');
+  assert.ok(Date.now() - started < 5000, 'it waits a bounded time');
+  assert.equal(stalled.data.has(young), true, 'without the lock a young orphan is kept');
+  assert.equal(stalled.data.has(old), false);
+  assert.equal(await waiting.has('file-b', 'p'), true);
+  assert.equal(never.requests, 3, 'and it is asked for again each time');
 }
 
 // ---- Presentation previews (#235 slice 3): opaque bytes with a checksum ----

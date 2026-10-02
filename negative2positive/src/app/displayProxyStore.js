@@ -596,9 +596,12 @@ export function createPortRecords(port) {
 // over another tab's entries or deletes its records as orphans, and the
 // budget and LRU count every tab's records.
 export const DISPLAY_PROXY_STORE_LOCK = 'negativeconverter-display-proxy-store';
-// Without Web Locks (Safari before 15.4) a record missing from the index may
-// be another tab's write in flight: it is deleted as an orphan only once it
-// is this old.
+// Without Web Locks (Safari before 15.4), where a lock request fails (an
+// origin without them) or is not granted within this wait (a tab whose
+// operation never ends), a change runs without the lock: a record missing
+// from the index may then be another tab's write in flight, so it is deleted
+// as an orphan only once it is DISPLAY_PROXY_ORPHAN_AGE_MS old.
+export const DISPLAY_PROXY_LOCK_WAIT_MS = 10_000;
 export const DISPLAY_PROXY_ORPHAN_AGE_MS = 60 * 60 * 1000;
 
 /**
@@ -609,12 +612,12 @@ export const DISPLAY_PROXY_ORPHAN_AGE_MS = 60 * 60 * 1000;
  * `encodeInWorker`, a put writes from the worker directly (web).
  * `availableBytes()` resolves the free space displayProxyStoreBudget reads
  * (a volume's, or `{ bytes, kind: 'quota' }` on the web). `locks` is
- * navigator.locks (DISPLAY_PROXY_STORE_LOCK).
+ * navigator.locks (DISPLAY_PROXY_STORE_LOCK, awaited at most `lockWaitMs`).
  */
 export function createDisplayProxyStore({
   port, records, availableBytes = async () => null, limitBytes = () => DISPLAY_PROXY_STORE_DEFAULT_LIMIT_BYTES,
   floorBytes = DISPLAY_PROXY_STORE_FLOOR_BYTES, encodeInWorker = false, now = () => Date.now(),
-  locks = globalThis.navigator?.locks
+  locks = globalThis.navigator?.locks, lockWaitMs = DISPLAY_PROXY_LOCK_WAIT_MS
 } = {}) {
   const index = new Map();
   // What this tab's reads changed since it last wrote the index: a record's
@@ -626,8 +629,30 @@ export function createDisplayProxyStore({
   let indexDirty = false;
   let budgetCache = { at: -Infinity, value: 0 };
   const stats = { writes: 0, reads: 0, misses: 0, corrupt: 0, failures: 0, refused: 0, evictions: 0 };
-  const lockable = typeof locks?.request === 'function';
-  const exclusive = operation => (lockable ? locks.request(DISPLAY_PROXY_STORE_LOCK, { mode: 'exclusive' }, operation) : operation());
+  let lockable = typeof locks?.request === 'function';
+
+  // Runs `operation(held)` under the lock, or without it (`held` false) when
+  // the request fails, which turns the lock off for good, or is not granted
+  // within lockWaitMs.
+  async function exclusive(operation) {
+    if (!lockable) return operation(false);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), lockWaitMs);
+    let granted = false;
+    try {
+      return await locks.request(DISPLAY_PROXY_STORE_LOCK, { mode: 'exclusive', signal: controller.signal }, () => {
+        granted = true;
+        clearTimeout(timer);
+        return operation(true);
+      });
+    } catch (error) {
+      if (granted) throw error;
+      clearTimeout(timer);
+      if (!controller.signal.aborted) lockable = false;
+      stats.failures++;
+      return operation(false);
+    }
+  }
 
   function enqueue(operation) {
     const result = queue.then(operation);
@@ -681,7 +706,7 @@ export function createDisplayProxyStore({
   // and records without an entry deleted (a lost index leaves orphans): no
   // tab is between writing a record and its entry then.
   function load() {
-    loaded ||= exclusive(async () => {
+    loaded ||= exclusive(async held => {
       try { await sync(); } catch { stats.failures++; return; }
       try {
         const listed = await records.list();
@@ -690,7 +715,7 @@ export function createDisplayProxyStore({
         const time = Date.now();
         for (const entry of listed) {
           if (entry.name === 'index' || index.has(entry.name)) continue;
-          if (!lockable && time - (entry.modifiedMs || 0) < DISPLAY_PROXY_ORPHAN_AGE_MS) continue;
+          if (!held && time - (entry.modifiedMs || 0) < DISPLAY_PROXY_ORPHAN_AGE_MS) continue;
           await records.delete(entry.name).catch(() => {});
         }
       } catch { stats.failures++; }

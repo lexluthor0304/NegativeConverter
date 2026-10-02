@@ -273,7 +273,9 @@ reads merged in (reads take no lock). No tab writes over another tab's
 entries or deletes its records as orphans, and the budget and LRU count
 every tab's records (R2-010). An index that cannot be read is not a lost
 one: nothing is deleted or written over it. Without Web Locks (Safari before
-15.4) only orphans older than an hour are deleted. The budget is
+15.4), where a lock request fails, or when the lock is not granted within
+10 s (another tab's operation that never ends), a change runs without it,
+and only orphans older than an hour are deleted. The budget is
 `min(setting, 25 % of the free space above 10 GiB)` of the desktop's volume,
 off below that floor; on the web, which knows only the origin's quota left
 (`navigator.storage.estimate()`: Firefox caps an origin at 10 GiB, Chrome
