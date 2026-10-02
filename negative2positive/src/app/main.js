@@ -8739,6 +8739,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
     // The worker request of the full-resolution render in flight.
     let fullResolutionRenderAbort = null;
+    // The render (its promise) while it still waits for its first frame.
+    let fullResolutionFrameWait = null;
 
     function startFullResolutionRender(reason = 'background') {
       if (!usesSilverCoreConversion(state)) return null;
@@ -8763,7 +8765,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const abort = typeof AbortController === 'function' ? new AbortController() : null;
       fullResolutionRenderAbort = abort;
       const promise = waitForNextFrame()
-        .then(() => rerenderWithCoreControls({ full: true, exact: true, sourceRef, token, generation, signal: abort?.signal || null }))
+        .then(() => {
+          if (fullResolutionFrameWait === promise) fullResolutionFrameWait = null;
+          return rerenderWithCoreControls({ full: true, exact: true, sourceRef, token, generation, signal: abort?.signal || null });
+        })
         .then((didRender) => {
           rendered = didRender === true;
           trace.end({
@@ -8793,6 +8798,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         });
 
       state.fullResolutionPromise = promise;
+      // A hidden window paints no frame, so this wait lasts until it is
+      // shown; the background lanes do not wait for it (#241).
+      fullResolutionFrameWait = promise;
       return promise;
     }
 
@@ -22713,9 +22721,14 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     function foregroundInteractionBusy() {
       // A failed full decode does not hold anything.
       if (state.provisional && state.fullDecode?.status !== 'failed') return true;
+      // A full-resolution render that only waits for its first frame in a
+      // hidden window holds nothing: that frame comes when the window is
+      // shown, and roll analysis and tiles go on meanwhile (#241).
+      const render = state.fullResolutionPromise;
+      const renderBusy = Boolean(render) && !(render === fullResolutionFrameWait && document.visibilityState === 'hidden');
       return Boolean(document.body.dataset.photoSwitching || document.body.dataset.studioBusy)
         || Boolean(processNegativeInFlight) || coreReprocessBusy() || Boolean(coreReprocessTimer)
-        || Boolean(state.fullResolutionPromise) || Boolean(fullResolutionRenderTimer);
+        || renderBusy || Boolean(fullResolutionRenderTimer);
     }
 
     // Input the gate waits 400 ms after: presses, wheel, keys and slider or

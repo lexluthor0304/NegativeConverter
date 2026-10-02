@@ -1,8 +1,8 @@
 // Test harness for the background photo lanes in main.js (#243): the real
 // scheduler functions, run in a vm context with the real pure modules (gate,
 // shared decodes, job pick, session caches, hidden-job gate) and stubbed
-// decoders and renders. Used by backgroundLanes.test.mjs and
-// thumbnailScheduling.test.mjs.
+// decoders and renders. Used by backgroundLanes.test.mjs,
+// thumbnailScheduling.test.mjs and hiddenAdmission.test.mjs.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
@@ -115,8 +115,9 @@ export function createLaneFixture({ count = 5, order = null, current = 0, prefet
     state, console: { warn: (...args) => warnings.push(args), error: noop, info: noop },
     Map, Set, WeakMap, Promise, AbortController, DOMException, structuredClone, JSON, Math, Number, Boolean, Array,
     setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout,
-    document: { body: { dataset: {} }, getElementById: () => null },
-    processNegativeInFlight: null, coreReprocessTimer: null, fullResolutionRenderTimer: null, singleExportActive: false,
+    document: { body: { dataset: {} }, getElementById: () => null, visibilityState: 'visible' },
+    processNegativeInFlight: null, coreReprocessTimer: null, fullResolutionRenderTimer: null, fullResolutionFrameWait: null,
+    singleExportActive: false,
     coreReprocessBusy: () => false, isDesktopBatchExportLocked: () => false,
     studioBackgroundReady: () => state.currentStep >= 3 && context.getCurrentQueueItem()?.file === state.loadedFile
       && !context.document.body.dataset.studioBusy && !context.processNegativeInFlight,
