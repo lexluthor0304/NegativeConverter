@@ -18143,6 +18143,19 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       renderCurve();
       markCurrentFileDirty();
       if (usesSilverCoreConversion(state) && state.conversionSourceImageData) {
+        // New conversion settings, as a slider's (scheduleCoreReprocess). An
+        // exact render of the old ones in flight (the idle repair pass, the
+        // dust-detection or AI-brush barrier) is abandoned: above 16 MP this
+        // request converts the display preview and does not queue behind it
+        // (#237), so with the old token it would land as the current plane.
+        coreReprocessToken += 1;
+        abortSupersededFullResolutionConversion();
+        cancelScheduledFullResolutionRender();
+        if (dustDetectionTimer) {
+          clearTimeout(dustDetectionTimer);
+          dustDetectionTimer = null;
+        }
+        if (hasSeparateConversionPreview()) state.fullResolutionPending = true;
         void rerenderWithCoreControls({ full: true }).catch((err) => {
           console.error('Core rerender failed:', err);
         });

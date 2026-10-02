@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { createCoreReprocessGates } from './coreReprocessDispatcher.js';
-import { routeCoreConversion, keepsFullPlaneOnDowngrade } from './fullResolutionRouting.js';
+import { routeCoreConversion, keepsFullPlaneOnDowngrade, fullResolutionIsStale } from './fullResolutionRouting.js';
 import { DISABLED_GPU_PREVIEW_SCHEDULER } from './gpuPreviewScheduler.js';
 import { hasWindowEdits, geometryEdits, overlayWindowEdits } from './provisionalPhoto.js';
 import { displaySessionStubs, DISPLAY_SESSION_HELPERS } from './displaySessionHarness.mjs';
@@ -312,6 +312,204 @@ for (const withNewOwner of [false, true]) {
   assert.equal(state.fullResolutionPromise, null, 'new full-resolution owner cleans up normally');
   assert.equal(state.fullResolutionPending, false);
   assert.equal(state.processedImageData, test.newPixels);
+}
+
+// #237 above 16 MP (R1-040, R1-042): a frame with a separate display preview.
+// A `full` request (Reset, dust off) converts the display preview there, so
+// it runs beside an exact render in flight instead of queueing behind it. The
+// real routing, full-resolution scheduling and apply functions run against a
+// deferred conversion stand-in whose frames carry the exposure they were
+// converted with; an aborted request rejects as the dedicated worker's does.
+
+// Real timers and immediates, enough for chained worker replies to land.
+const drain = async () => {
+  for (let i = 0; i < 4; i++) {
+    await new Promise(resolve => setTimeout(resolve, 2));
+    for (let j = 0; j < 10; j++) await new Promise(setImmediate);
+  }
+};
+
+function listenerSource(id, name) {
+  const anchor = source.indexOf(`getElementById('${id}')`);
+  assert.ok(anchor >= 0, `listener exists: ${id}`);
+  const head = /addEventListener\('\w+', (?:function \(\)|\(\) =>) \{/g;
+  head.lastIndex = anchor;
+  const match = head.exec(source);
+  assert.ok(match && match.index - anchor < 80, `${id} has a listener`);
+  const body = match.index + match[0].length;
+  return `function ${name}() {${source.slice(body, source.indexOf('\n    });', body))}\n    }`;
+}
+
+function largeFixture({ strokes = 0, dust = false, aiBrush = false } = {}) {
+  const test = fixture({ repairs: false, large: true });
+  const { context, state } = test;
+  const timers = new Map();
+  let nextTimer = 1;
+  const conversions = [];
+  const noop = () => {};
+  // The settled exact plane of exposure 0; the display preview is smaller.
+  Object.assign(state, {
+    conversionPreviewImageData: { width: 1, height: 1, name: 'display preview' },
+    processedImageData: { width: 2, height: 2, renderedExposure: 0 }, processedImageDataIsPreview: false,
+    fullResolutionPending: false, fullResolutionPromise: null, coreExposure: 0,
+    repairStrokes: Array.from({ length: strokes }, () => ({ points: [1] })),
+  });
+  state.dustRemoval.enabled = dust;
+  Object.assign(context, {
+    setTimeout: (callback, delay) => { const id = nextTimer++; timers.set(id, { callback, delay }); return id; },
+    clearTimeout: id => { timers.delete(id); },
+    AbortController, createPerfTrace: () => ({ end: noop, mark: noop }),
+    getImageDataPixelCount: image => (image ? image.width * image.height : 0),
+    waitForNextFrame: () => Promise.resolve(), getCurrentQueueItem: () => null,
+    FULL_RESOLUTION_INTERACTIVE_DELAY_MS: 300, fullResolutionRenderAbort: null, displayedFrameToken: 0,
+    exportBands: null, convertFullResolutionFrameInWorker: { name: 'exact client' }, convertForExportInBands: null,
+    isAiBrushEnabled: () => aiBrush, scheduleFullUpdate: noop, fullResolutionIsStale,
+    // The display fields of an applied frame (#248) are not under test.
+    installDisplayFor: noop, cancelDisplayPreviewRebuild: noop, buildPreviewSourceImageData: image => image,
+    installDisplayPreview: (processed, preview) => { state.previewSourceImageData = preview; },
+    initWebGLRenderer: () => false, fitStep3CanvasBox: noop,
+    // The export barrier's other steps have nothing to wait for here.
+    ensureFullDecode: async () => true, settlePendingCropDetection: async () => {},
+    // The dust-off handler's UI.
+    document: { getElementById: () => null }, updateDustControlsVisibility: noop, ensureAiRepairPreload: noop,
+    updateCanvasVisibility: noop, syncDustWorkerPin: noop,
+    convertFromCurrentSource: (settings, options) => new Promise((resolve, reject) => {
+      const exact = !options.interactive;
+      const entry = { exact, exposure: state.coreExposure, signal: options.signal || null };
+      entry.resolve = () => resolve({ ...(exact ? { width: 2, height: 2 } : { width: 1, height: 1 }), renderedExposure: entry.exposure });
+      options.signal?.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { code: 'WORKER_ABORTED' })));
+      conversions.push(entry);
+    }),
+  });
+  vm.runInContext([
+    'hasSeparateConversionPreview', 'startFullResolutionRender', 'scheduleFullResolutionRender',
+    'cancelScheduledFullResolutionRender', 'ensureFullResolutionReadyForExport', 'ensureAiBrushPlane',
+    'applyProcessedImageToState', 'applyPreviewProcessedImageToState',
+  ].map(functionSource).join('\n') + '\n' + listenerSource('dustRemovalEnabled', 'dustToggled'), context);
+  // Fires every armed timer, then lets their work start.
+  const runTimers = async () => {
+    const due = [...timers.values()];
+    timers.clear();
+    for (const timer of due) timer.callback();
+    await drain();
+  };
+  const exact = () => conversions.filter(entry => entry.exact);
+  return { ...test, timers, conversions, exact, runTimers };
+}
+
+for (const [label, options] of [['stroke', { strokes: 1 }], ['dust', { dust: true }]]) {
+  // The idle repair pass converts exposure 20 when Reset All sets 0. The
+  // pass is abandoned (5f23eb0 landed it as the current plane: the export
+  // and the photo session took exposure 20 under the reset settings); the
+  // reset settings get an exact pass of their own.
+  const f = largeFixture(options);
+  const { context, state } = f;
+  state.coreExposure = 20;
+  state.fullResolutionPending = true;
+  const idle = context.startFullResolutionRender('repair-idle');
+  await drain();
+  assert.deepEqual(f.conversions.map(entry => [entry.exact, entry.exposure]), [[true, 20]], `${label}: the idle pass converts exposure 20`);
+  context.resetAllAdjustments();
+  assert.equal(state.coreExposure, 0);
+  await drain();
+  assert.deepEqual(f.conversions.slice(1).map(entry => [entry.exact, entry.exposure]), [[false, 0]],
+    `${label}: Reset converts the display preview at once, beside the exact render`);
+  f.conversions[1].resolve();
+  await drain();
+  // A reply of the old settings, unless the request was abandoned.
+  f.conversions[0].resolve();
+  await idle;
+  await drain();
+  await f.runTimers();
+  for (const entry of f.exact().slice(1)) entry.resolve();
+  await drain();
+  assert.equal(state.processedImageData.renderedExposure, 0, `${label}: the settled plane is the reset settings' conversion`);
+  assert.equal(state.processedImageDataIsPreview, false);
+  assert.equal(state.fullResolutionPending, false);
+  assert.deepEqual(f.exact().map(entry => entry.exposure), [20, 0], `${label}: a second exact render converts the reset settings`);
+  assert.equal(f.exact()[0].signal.aborted, true, `${label}: the superseded exact request is aborted`);
+  assert.equal(f.timers.size, 0);
+  assert.equal(context.coreReprocessBusy(), false);
+}
+
+{
+  // The AI-brush barrier converts exposure 20 for a display-preview frame
+  // when Reset All sets 0: its loop renders the reset settings instead of
+  // returning on the abandoned plane.
+  const f = largeFixture({ aiBrush: true });
+  const { context, state } = f;
+  Object.assign(state, { coreExposure: 20, processedImageData: { width: 1, height: 1, renderedExposure: 20 },
+    processedImageDataIsPreview: true, fullResolutionPending: true });
+  const barrier = context.ensureFullResolutionReadyForExport({ reason: 'ai-brush' });
+  await drain();
+  assert.deepEqual(f.conversions.map(entry => [entry.exact, entry.exposure]), [[true, 20]]);
+  context.resetAllAdjustments();
+  await drain();
+  f.conversions[1].resolve();
+  await drain();
+  f.conversions[0].resolve();
+  await drain();
+  for (const entry of f.exact().slice(1)) entry.resolve();
+  await barrier;
+  await drain();
+  assert.equal(state.processedImageData.renderedExposure, 0, 'the AI brush paints on the reset settings\' plane');
+  assert.equal(state.processedImageDataIsPreview, false);
+  assert.equal(state.fullResolutionPending, false);
+  assert.deepEqual(f.exact().map(entry => entry.exposure), [20, 0]);
+}
+
+{
+  // Dust off while the idle repair pass converts exposure 20: the settings
+  // did not change, so that pass stands and becomes the plane; the dust-off
+  // preview lands first and is replaced by it.
+  const f = largeFixture({ dust: true });
+  const { context, state } = f;
+  state.coreExposure = 20;
+  state.fullResolutionPending = true;
+  const idle = context.startFullResolutionRender('repair-idle');
+  await drain();
+  context.dustToggled.call({ checked: false });
+  assert.equal(state.dustRemoval.enabled, false);
+  await drain();
+  assert.deepEqual(f.conversions.map(entry => [entry.exact, entry.exposure]), [[true, 20], [false, 20]]);
+  f.conversions[1].resolve();
+  await drain();
+  assert.equal(state.processedImageDataIsPreview, true, 'without repairs the preview drops the stale plane');
+  f.conversions[0].resolve();
+  await idle;
+  await f.runTimers();
+  assert.equal(state.processedImageData.renderedExposure, 20, 'the plane is the current settings\' conversion');
+  assert.equal(state.processedImageDataIsPreview, false);
+  assert.equal(state.fullResolutionPending, false);
+  assert.equal(f.exact().length, 1, 'no exact render again');
+  assert.equal(f.exact()[0].signal.aborted, false);
+}
+
+{
+  // Reset with no exact render in flight converts once, as before. The idle
+  // pass and a detection queued before it would start the exact pass before
+  // Reset's preview lands: the idle delay counts from Reset instead.
+  const f = largeFixture({ strokes: 1 });
+  const { context, state } = f;
+  state.coreExposure = 20;
+  context.scheduleFullResolutionRender('repair-idle');
+  context.dustDetectionTimer = context.setTimeout(() => assert.fail('a detection queued before Reset ran'), 300);
+  context.resetAllAdjustments();
+  assert.equal(state.fullResolutionPending, true, 'the kept plane is stale from the click on');
+  assert.equal(context.dustDetectionTimer, null);
+  assert.equal(f.timers.size, 0, 'the idle pass armed before Reset is cancelled');
+  await drain();
+  assert.deepEqual(f.conversions.map(entry => [entry.exact, entry.exposure]), [[false, 0]]);
+  f.conversions[0].resolve();
+  await drain();
+  assert.equal(state.fullResolutionPending, true, 'the kept plane owes the reset settings an exact render');
+  assert.deepEqual([...f.timers.values()].map(timer => timer.delay), [2500], 'one idle repair pass is armed');
+  await f.runTimers();
+  f.exact()[0].resolve();
+  await drain();
+  assert.equal(state.processedImageData.renderedExposure, 0);
+  assert.equal(state.fullResolutionPending, false);
+  assert.deepEqual(f.exact().map(entry => entry.exposure), [0]);
 }
 
 // #236: the first photo converts its provisional settings while the frame
