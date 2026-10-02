@@ -17,7 +17,8 @@
 // band stream compares equal; TIFF by file; JPEG by the decoded primary, its
 // metadata and the gain-map bytes), then fails on any difference from the
 // baseline. A baseline recorded before R1-100 (whole-file hashes) is refused:
-// record it again on the reference build.
+// record it again on the reference build. Record and compare with the same
+// Chrome: the JPEG and its gain map come out of its encoder.
 //
 // Flagged #229 changes (issues/229.md, "Constraints for every child") that a
 // 1703835 baseline cannot match are excluded per file, never by default:
