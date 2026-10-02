@@ -32,13 +32,18 @@
 //   exports) and is over the band pool's 4 MP (the export's conversion
 //   bands), the stand-in (1.3 MP) is neither; for the settle and an export
 //   during stage 2;
+// - TIFF 16 and DNG exports clicked during stage 2 have the full decode's
+//   width, height and 16-bit samples (#229 review R1-130);
+// - a photo without a recipe opened from the prefetch slot (its base adopted)
+//   and the same photo opened directly (two stages) give the same recipe,
+//   automaticDefaults and exports (#229 review R1-062);
 // - a failed stage 2 holds no background work: with three photos the other
 //   two get their thumbnails while the open one stays provisional, nothing of
 //   its stand-in is persisted, and an export then decodes again (#255 review
 //   R2-033).
 //
 // TWO_STAGE_SCENES (comma-separated: settle, during, crop, failure, leave,
-// roll, failure-lanes) runs only those scenes.
+// roll, adopt, failure-lanes) runs only those scenes.
 //
 // Opt-in, real files (never in the repo): TWO_STAGE_PARITY_FILES=/abs/a.DNG:/abs/b.dng
 // runs the same scenarios for each file, with the second generated DNG as
@@ -309,7 +314,7 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
   // is held.
   const scenarios = async ({ label, a, b, c = null, twoStage, extra = '', only = null, formats = FORMATS, duringFormats = formats }) => {
     const nameA = basename(a), nameB = basename(b);
-    // TWO_STAGE_SCENES=crop,failure-lanes runs only those scenes (their
+    // TWO_STAGE_SCENES=adopt,failure-lanes runs only those scenes (their
     // references still run).
     const scenes = (process.env.TWO_STAGE_SCENES || '').split(',').filter(Boolean);
     const runs = name => (!only || only.includes(name)) && (!scenes.length || scenes.includes(name));
@@ -407,7 +412,17 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
         if (await evaluate('window.__twoStageDownloads.length')) fail(`${label}: a ${key} export was written from the stand-in`);
         if (!(await evaluate(`${status}.pending`))) fail(`${label}: the photo left the provisional state while stage 2 was held`);
         await evaluate('window.__ncTwoStage.releaseFullDecodes()');
-        sameExport(`${label}: ${key} export clicked during stage 2`, await take(`${label} ${key} export during stage 2`), reference.click.exports[key]);
+        const entry = await take(`${label} ${key} export during stage 2`);
+        // TIFF 16 and the DNG: the full decode's size and 16-bit samples
+        // (#229 review R1-130), as one decode writes them.
+        if (key === 'tiff16' || key === 'dng') {
+          const expected = reference.click.exports[key].layout;
+          console.log(`two-stage smoke ${label} ${key} during stage 2:`, JSON.stringify({ layout: entry.layout, oneDecode: expected, base: reference.base }));
+          if (!entry.layout || entry.layout.bits.some(bits => bits !== 16) || JSON.stringify(entry.layout) !== JSON.stringify(expected)) {
+            fail(`${label}: the ${key} export clicked during stage 2 is not the full decode's 16-bit image: ` + JSON.stringify({ layout: entry.layout, oneDecode: expected }));
+          }
+        }
+        sameExport(`${label}: ${key} export clicked during stage 2`, entry, reference.click.exports[key]);
         await waitFor('export settled', `!document.getElementById('exportSingleBtn').disabled && ${exact}`, 900_000);
         await evaluate(releaseSemantic);
         same(`${label}: automaticDefaults after an export during stage 2`, await automaticDefaults(), reference.defaults);
@@ -536,7 +551,47 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
       console.log(`ok: ${label}: Analyze roll clicked during stage 2 waits for the full decode, and matches one decode with the same edit`);
     }
 
-    // 7. A failed stage 2 holds no background work (#255 review R2-033). With
+    // 7. A photo without a recipe whose base the prefetch slot holds (#243),
+    // opened from it (its base adopted, no stages) or, with the caches
+    // dropped, directly (two stages): the same recipe, automaticDefaults and
+    // exports (#229 review R1-062). The other photo is opened first; the
+    // lanes give A a tile (and a recipe, dropped before A is opened) and the
+    // prefetch slot its base.
+    if (runs('adopt')) {
+      const openA = async adopt => {
+        const route = adopt ? 'adopted' : 'direct';
+        await boot(`${two}&debugCounters=1`);
+        await importFiles([b, a]);
+        await waitFor(`${label} ${route}: the other photo first`, `${ready} && ${filename(nameB)} && ${exact} && ${lanesReady}`, 900_000);
+        await settledRecipe();
+        await waitFor(`${label} ${route}: the next photo prefetched`, `window.__ncHiddenJobs.status().photoPrefetchBytes > 0 && ${lanesReady}`, 300_000);
+        const plans = `window.__ncTwoStage.diagnostics.plans.filter(plan => plan.file === ${JSON.stringify(nameA)})`;
+        const plansBefore = (await evaluate(plans)).length;
+        const forgot = await evaluate(`(() => {
+          const button = [...document.querySelectorAll('.file-list-name')].find(entry => entry.textContent.includes(${JSON.stringify(nameA)}));
+          if (${!adopt}) window.__ncDebug.forgetPhotoCaches();
+          const forgot = window.__ncHiddenJobs.forgetFrameSettings(Number(button.dataset.index));
+          button.click();
+          return forgot;
+        })()`);
+        if (!forgot) fail(`${label} ${route}: the photo's recipe could not be dropped`);
+        await waitFor(`${label} ${route}: opened`, `${ready} && ${filename(nameA)} && ${exact}`, 900_000);
+        const planned = (await evaluate(plans)).slice(plansBefore);
+        console.log(`two-stage smoke ${label} ${route} open:`, JSON.stringify(planned));
+        if (adopt ? planned.length !== 0 : planned.length !== 1 || planned[0].stages !== 2) fail(`${label}: the ${route} open took another route: ` + JSON.stringify(planned));
+        const settled = await settledPhoto();
+        return { ...settled, exports: await exportFormats(`${label} ${route}`, formats) };
+      };
+      const adopted = await openA(true);
+      const direct = await openA(false);
+      console.log(`two-stage smoke ${label} adopted and direct:`, JSON.stringify({ crop: adopted.recipe.cropRegion, angle: adopted.recipe.rotationAngle, filmBase: adopted.recipe.filmBase, exports: short(adopted.exports) }));
+      same(`${label}: the recipe of the photo adopted from the prefetch slot (vs opened directly)`, adopted.recipe, direct.recipe);
+      same(`${label}: automaticDefaults after the adopted open (vs opened directly)`, adopted.defaults, direct.defaults);
+      sameExports(`${label}: exports of the photo adopted from the prefetch slot (vs opened directly)`, adopted.exports, direct.exports);
+      console.log(`ok: ${label}: a photo without a recipe adopted from the prefetch slot gets the recipe and exports of a direct open`);
+    }
+
+    // 8. A failed stage 2 holds no background work (#255 review R2-033). With
     // three photos the lanes and the automatic roll import go on: the other
     // two get their thumbnails while the open photo stays provisional, its
     // stand-in neither persisted nor learned from (no roll forms without it).

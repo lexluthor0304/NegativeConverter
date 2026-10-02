@@ -73,8 +73,10 @@ stage 2 to crop mode or a failure.
   the budget at once, and that admission already sees the full base.
   Foreground requests never wait, so the budget does not choose between the
   concurrent and the sequential start.
-- A lane's decode of the same file (#243 `sharedDecodes`) is adopted instead
-  of both stages.
+- A lane's decode of the same file (#243 `sharedDecodes`), or the next
+  photo's base in the prefetch slot, is adopted instead of both stages. A
+  photo without a recipe opened that way gets its recipe from that full
+  decode, the recipe a direct open settles on (#229 review R1-062).
 
 `state.fullDecode` is the record (`waiting` → `running` → `decoded` →
 `swapped` → `installed`, or `failed` / `abandoned`). `state.rawDecodePending`
@@ -270,7 +272,11 @@ quiet.
   `studioBackgroundReady` agree on every other state), the real automatic
   roll import runs without persisting or sampling the stand-in and ends as
   without the failure, and the roll's film-type changes to the open photo
-  wait.
+  wait. A photo without a recipe adopted from a lane's decode or the
+  prefetch slot gets a direct open's recipe. With the real geometry (#244's
+  harness), a crop applied in the window and undone after the swap installs
+  the pre-crop region in full units with the full base's planes, and Apply
+  Crop then maps within the full decode (controls: 4fdd9db's landing).
 - `restartRender.test.mjs`: the provisional pass holds its side effects back;
   switch-back to a photo left in the window decides as its pass began.
 - `processFileWithSettings.parity.test.mjs`: Export All of a photo left in
@@ -305,9 +311,13 @@ quiet.
   counts as large (the >16 MP rules: display-resolution conversions, a
   full-resolution render only for exports) and its exports convert on the
   band pool (over 4 MP), while its stand-in (1.3 MP) is neither; the page's
-  threshold and the band pool's use are checked. With three photos and the
-  open one's stage 2 failed, the other two get their thumbnails while it
-  stays provisional, and no roll is analysed from its stand-in.
+  threshold and the band pool's use are checked. TIFF 16 and DNG exports
+  clicked during stage 2 have the full decode's width, height and 16-bit
+  samples. A photo without a recipe opened from the prefetch slot and the
+  same photo opened directly (two stages) give the same recipe,
+  automaticDefaults and exports. With three photos and the open one's stage
+  2 failed, the other two get their thumbnails while it stays provisional,
+  and no roll is analysed from its stand-in.
 
 ## Verification on real files (not in the repository)
 
@@ -317,7 +327,8 @@ quiet.
   decode of it with the flag off: the settle, an export during stage 2 in
   each of the five formats, crop mode, a failed stage 2, leaving then Export
   All and Analyze roll during stage 2, the other photo being a generated
-  DNG. The two-stage runs use `?twoStageMinMp=40`
+  DNG; and the file opened from the prefetch slot against the file opened
+  directly. The two-stage runs use `?twoStageMinMp=40`
   (`TWO_STAGE_PARITY_MIN_MP` sets another threshold, so smaller RAWs can go
   two-stage too). Run one 60 MP file at a time: a file takes several
   minutes. So far it has passed on `_DSC3111.NEF` (10.7 MP, concurrent

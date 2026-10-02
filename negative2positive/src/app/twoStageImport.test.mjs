@@ -35,7 +35,11 @@
 // - a failed stage 2 holds no background work (the lanes, the automatic roll
 //   import), while the roll import's persist and sample still refuse the
 //   stand-in and its film-type changes to the open photo wait for the exact
-//   photo.
+//   photo;
+// - a heavy file without a recipe adopted from a lane decode or the prefetch
+//   slot gets the recipe of a direct open; a crop applied in the window and
+//   undone after the swap installs its region in full units, and Apply Crop
+//   then maps within the full decode (real geometry).
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
@@ -1583,5 +1587,164 @@ async function automaticRollAfterFailure({ old = false } = {}) {
   assert.deepEqual(await run('applyImportPositives', 'installed'), ['persist', 'undo rollFilmType', 'restore']);
 }
 
+// ---- a heavy RAW without a recipe, adopted or opened directly (#229 review R1-062) -------------
+// A lane's decode in flight and the prefetch slot hand loadFile a full
+// decode: no stages, and the import pass runs on it. Opened directly, the
+// same file takes two stages and the settle computes its recipe on the full
+// decode. Each ends with the full decode's recipe (frame, angle, film base,
+// learned contrast) and automatic defaults. At 1703835 and 4fdd9db a direct
+// open kept the recipe of its half-size preview, the stand-in pass's here.
+{
+  const RECIPE = ['cropRegion', 'rotationAngle', 'mirrored', 'filmBase', 'filmType', 'filmTypeSource', 'coreContrast', 'learnedDefaults', 'coreExposure'];
+  const recipe = settings => JSON.stringify(Object.fromEntries(RECIPE.map(key => [key, settings?.[key] ?? null])));
+  const open = async route => {
+    const f = flowFixture({ twoStage: true });
+    const file = f.file();
+    const full = image(FULL);
+    if (route === 'direct') {
+      const loading = f.context.loadFile(file, { autoConvert: false, quiet: true });
+      await flush();
+      f.stage1[0].options.onLibRawReleased();
+      f.stage1[0].resolve(image(HALF, { __decodeScale: 0.5, __fullSize: { ...FULL } }));
+      await loading;
+      await importPass(f);
+      const standIn = f.state.provisional.settledSnapshot;
+      const waiting = f.context.ensureFullDecode({ reason: 'export' });
+      f.stage2[0].resolve(full);
+      assert.equal(await waiting, true);
+      assert.deepEqual([f.stage1.length, f.stage2.length], [1, 1], 'direct: two stages');
+      return { f, standIn };
+    }
+    if (route === 'prefetch') {
+      assert.equal((await f.context.loadFile(file, { autoConvert: false, quiet: true, decoded: { file, base: full, rawMetadata: null } })).status, 'loaded');
+    } else {
+      // A lane is decoding the file when it is opened (#243 sharedDecodes).
+      const lane = deferred();
+      f.target.sharedDecodes = createSharedDecodes({ decode: () => lane.promise });
+      const lease = f.target.sharedDecodes.open(file, {});
+      const loading = f.context.loadFile(file, { autoConvert: false, quiet: true });
+      await flush();
+      lane.resolve({ base: full, rawMetadata: null });
+      assert.equal((await loading).status, 'loaded');
+      lease.release();
+    }
+    assert.deepEqual([f.stage1.length, f.stage2.length, f.reads.length], [0, 0, 0], `${route}: adopted, nothing read or decoded again`);
+    assert.deepEqual([f.state.fullDecode, f.state.rawDecodePending, f.state.loadedBaseImageData === full], [null, false, true], `${route}: one stage`);
+    await importPass(f);
+    return { f };
+  };
+  const direct = await open('direct');
+  const expected = recipe(direct.f.context.extractCurrentSettings());
+  assert.equal(JSON.parse(expected).filmBase.r, 205, 'the full decode\'s film base');
+  for (const route of ['prefetch', 'lane']) {
+    const { f } = await open(route);
+    assert.equal(recipe(f.context.extractCurrentSettings()), expected, `${route}: the recipe of a direct open`);
+    assert.equal(recipe(f.item.automaticDefaults), recipe(direct.f.item.automaticDefaults), `${route}: the same automatic defaults`);
+  }
+  // What a direct open kept before #255: the stand-in pass's recipe.
+  assert.notEqual(recipe(direct.standIn), expected, 'the stand-in pass alone gives another recipe');
+  assert.equal(direct.standIn.filmBase.r, 190, 'its film base measured on the half-size stand-in');
+}
 
-console.log('twoStageImport: header routing, stage options and start, abort on switch, barrier, retry, exact crop across the swap, history rebase, window edits and the ledger\'s open photo passed');
+// ---- a crop in the window and history past the swap (#229 review R1-067) ---------------------------
+// Real geometry (#244's harness): the stand-in with the pass's recipe, a crop
+// applied on it, the swap (main.js's history rebase, then the full base
+// installed with the exact crop, as installFullDecode does), history made
+// cold, and an undo past the swap. The window entry went cold at the swap,
+// so its planes are rebuilt from the full base: the region installed is the
+// pre-crop region in full units, and Apply Crop maps D to F inside the full
+// decode, one scale. At 4fdd9db the landing kept the entries as they were: a
+// cold restore put a preview-unit crop on the full base, and a hot one
+// brought preview planes back under Apply Crop's full-base F (controls).
+{
+  const { createHarness, makeBase, exportChain, samePixels, settle, applyCropHandlerSource, geometry } = await import('./geometryTestHarness.mjs');
+  const { isSameAnalysisFrame, workingPointsToBase, buildCropDetectionInput } = await import('./cropColorAnalysis.js');
+  const plain = value => JSON.parse(JSON.stringify(value));
+  const FULL_BASE = { width: 96, height: 64 }, STAND_IN = { width: 48, height: 32 };
+  const PASS = { rotationAngle: 1.3, mirrored: false, cropRegion: { left: 8, top: 6, width: 78, height: 50 } };
+  const run = async ({ swap }) => {
+    const full = makeBase(FULL_BASE.width, FULL_BASE.height, 5);
+    const standIn = Object.assign(makeBase(STAND_IN.width, STAND_IN.height, 6), { __decodeScale: 0.5, __fullSize: { ...FULL_BASE } });
+    const h = createHarness(standIn), c = h.context;
+    Object.assign(h.target, {
+      createExactGeometry, imageAreaFromWorkingRect, isSameAnalysisFrame, workingPointsToBase, buildCropDetectionInput,
+      applyCropBtn: { disabled: false }, cancelCropBtn: { disabled: false },
+      getLoadingOverlay: () => ({ show: async () => {}, hide() {} }),
+      requestAnimationFrame: callback => setTimeout(callback, 0),
+      studioWorkspace: { sync() {}, text: key => key },
+      runOpenCvTask: async (_type, task) => { await task.build(); return null; },
+      exitCropMode: () => { h.state.cropping = false; h.state.cropDraft = null; }
+    });
+    vm.runInContext(['provisionalUnits', 'liveGeometry', 'rebaseProvisionalHistory'].map(functionSource).join('\n'), c);
+    vm.runInContext(applyCropHandlerSource(), c);
+    // Apply in crop mode on the frame on screen (the real click handler).
+    const apply = async (rect, straightenAngle = 0) => {
+      const frame = h.state.originalImageData;
+      const preview = c.renderFrameSample(700_000);
+      const turned = straightenAngle ? geometry.applyRotationToImageData(preview, straightenAngle) : preview;
+      h.state.cropping = true;
+      h.state.cropDraft = { sourceImageData: frame, rotatedSize: { width: turned.width, height: turned.height }, rect, rotationBase: 0, straightenAngle, analysisOnly: false };
+      await c.applyCropHandler();
+      await settle();
+      const draftFrame = rotatedDimensions(frame.width, frame.height, straightenAngle);
+      return { draftFrame, mapped: c.scaleCropRect(rect, draftFrame.width / turned.width, draftFrame.height / turned.height) };
+    };
+    // The stand-in, provisional, with the pass's recipe (full units).
+    const provisional = h.state.provisional = { size: { ...STAND_IN }, fullSize: { ...FULL_BASE }, geometry: createExactGeometry({ size: STAND_IN, fullSize: FULL_BASE }), swapped: false };
+    provisional.geometry.installed({ cropRegion: null, rotationAngle: 0, mirrored: false });
+    c.restoreSettings(structuredClone(PASS));
+    await h.state.geometryReady;
+    assert.ok(h.state.cropRegion.width < PASS.cropRegion.width / 2 + 2, 'the pass\'s crop projected onto the stand-in');
+    // A crop applied in the window; its undo entry keeps the pre-crop state.
+    await apply({ left: 4, top: 3, width: 30, height: 20 });
+    assert.equal(h.target.undoStack.length, 1);
+    const entry = h.target.undoStack[0];
+    assert.ok(entry.settings.provisionalGeometry, 'the window entry keeps the exact geometry');
+    // The swap.
+    const exact = provisional.geometry.rebase(FULL_BASE, c.liveGeometry());
+    swap(h, c, provisional);
+    provisional.swapped = true;
+    h.state.loadedBaseImageData = full;
+    c.restoreSettings({ rotationAngle: exact.rotationAngle, mirrored: exact.mirrored, cropRegion: exact.cropRegion }, { refreshDisplay: false, holdBusy: false });
+    await h.state.geometryReady;
+    await settle();
+    h.state.provisional = null;
+    samePixels(h.state.croppedImageData, exportChain(full, exact), 'the window crop on the full base');
+    // History made cold: the budget strips whatever it may.
+    c.pruneHistoryForMemory({ limit: 0 });
+    const cold = JSON.stringify(entry.refs) === '{"cold":true}';
+    // Undo past the swap.
+    await c.performUndo();
+    await settle();
+    return { h, c, full, cold, apply };
+  };
+  const fixed = await run({ swap: (_h, c, provisional) => c.rebaseProvisionalHistory(provisional, FULL_BASE) });
+  assert.equal(fixed.cold, true, 'the window entry went cold at the swap');
+  assert.deepEqual(plain(fixed.h.state.cropRegion), PASS.cropRegion, 'undo installs the pre-crop region in full units');
+  assert.equal(fixed.h.state.rotationAngle, PASS.rotationAngle);
+  assert.equal(fixed.h.state.loadedBaseImageData, fixed.full);
+  samePixels(fixed.h.state.croppedImageData, exportChain(fixed.full, PASS), 'with the full base\'s planes');
+  // Apply Crop after the undo: D (the draft's frame) and F (the frame derived
+  // from the base) are both the full decode's, so D maps to F by a
+  // translation only.
+  const fullFrame = rotatedDimensions(FULL_BASE.width, FULL_BASE.height, PASS.rotationAngle);
+  const frameNow = fixed.h.state.originalImageData;
+  assert.deepEqual([frameNow.width, frameNow.height], [fullFrame.width, fullFrame.height], 'the draft opens on the full frame');
+  const applied = await fixed.apply({ left: 11.3, top: 7.8, width: 40.4, height: 27.1 }, -0.5);
+  const total = normalizeAngleDegrees(PASS.rotationAngle - 0.5);
+  const expected = fixed.c.mapDraftRectToFrame(applied.mapped, applied.draftFrame, rotatedDimensions(FULL_BASE.width, FULL_BASE.height, total));
+  assert.deepEqual(plain(fixed.h.state.cropRegion), plain(expected), 'Apply Crop maps D to F inside the full decode');
+  samePixels(fixed.h.state.croppedImageData, exportChain(fixed.full, { rotationAngle: total, mirrored: false, cropRegion: expected }), 'and builds the full base\'s planes');
+  // Controls, the 4fdd9db landing: entries kept as they were. Made cold (by
+  // the budget or a stored session), the undo puts a preview-unit crop on the
+  // full base; kept hot (the last geometry entry), it brings the stand-in's
+  // planes back, a frame of another scale than Apply Crop's F.
+  const coldControl = await run({ swap: h => { for (const stacked of h.target.undoStack) { stacked.refs = { cold: true }; delete stacked.frame; } } });
+  assert.ok(coldControl.h.state.cropRegion.width < PASS.cropRegion.width / 2 + 2, 'cold control: a preview-unit crop on the full base');
+  const hotControl = await run({ swap: () => {} });
+  assert.equal(hotControl.cold, false, 'hot control: the window entry stayed hot');
+  assert.equal(hotControl.h.state.loadedBaseImageData, hotControl.full);
+  assert.ok(hotControl.h.state.originalImageData.width < fullFrame.width / 2 + 2, 'hot control: the stand-in\'s frame under the full base');
+}
+
+console.log('twoStageImport: header routing, stage options and start, abort on switch, barrier, retry, exact crop across the swap, history rebase, window edits, the ledger\'s open photo, background work after a failure and adopted decodes passed');
