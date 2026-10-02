@@ -164,8 +164,11 @@ function selfTest() {
 
     // The command line: exit status 1 on the stale build, 0 on the renamed one.
     const cli = (dist) => spawnSync(process.execPath, [fileURLToPath(import.meta.url), '--dist', dist], { encoding: 'utf8' });
-    assert.equal(cli(stale).status, 1);
-    assert.equal(cli(renamed).status, 0, cli(renamed).stderr);
+    const staleRun = cli(stale);
+    assert.equal(staleRun.status, 1);
+    assert.match(staleRun.stderr, /worker-BpdlSnKn\.js/);
+    const renamedRun = cli(renamed);
+    assert.equal(renamedRun.status, 0, renamedRun.stderr);
 
     // vite.config.js's names: every script carries the suffix, so none of
     // 1703835's comes back whatever its hash; other assets keep Vite's own.
