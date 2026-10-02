@@ -993,4 +993,160 @@ for (const [tier, area, decodes] of [['A', AREA, 0], ['A', AREA3, 1], ['B', AREA
   }
 }
 
-console.log('displaySessions: Tier A, Tier B, demotion, spill, ensureBase/ensureSource, invalidation, the proxy invariant, the colour-analysis sample across Undo, Redo and recipe changes (export parity) and the settled-view parity of filled proxies passed');
+// ---- A stored proxy whose colour-analysis sample is not the one its decoded
+// original gives (R2-004, R2-053: another build's sampler or decode under a
+// key that still matches). ensureSource re-samples the base and compares:
+// the record is purged, the base keeps its own sample, and the photo is
+// converted again, its auto-WB estimate taken again when this session took
+// it from the record. A matching sample keeps the session ----
+{
+  const { convertColorWithSilverCore, invalidateSilverCoreCache } = await import('../pipeline/silverAdapter.js');
+  const geometry = { rotationAngle: 1.3, mirrored: false, cropRegion: { left: 9, top: 7, width: 96, height: 60 } };
+  const settings = { ...geometry, autoFrameMeta: { imageArea: AREA }, filmEdge: { checked: true } };
+  // A negative inside the image area, a bright rebate around it, so the
+  // sample decides the conversion (as in the Tier A export parity above).
+  const width = 120, height = 80;
+  const data16 = new Uint16Array(width * height * 4);
+  for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+    const inside = x >= width * 0.2 && x < width * 0.8 && y >= height * 0.2 && y < height * 0.8;
+    const v = 4000 + (x * 173 + y * 719) % 24000;
+    data16.set(inside ? [Math.min(65535, v * 1.8), v, v * 0.6, 65535] : [65535, x % 5 ? 0 : 65535, 0, 65535], (y * width + x) * 4);
+  }
+  const base = new ImageData(Uint8ClampedArray.from(data16, v => v >>> 8), width, height);
+  base.__image16 = { width, height, data: data16 };
+  const fresh = sampleAnalysisArea(base, AREA);
+  const bytes = new Uint8Array(300_000).map((_, i) => (i * 7) & 255);
+  // A store on disk across sessions.
+  const records = new Map();
+  const memoryRecords = {
+    async write(name, record) { records.set(name, new Uint8Array(record instanceof ArrayBuffer ? record : record.buffer).slice()); },
+    async read(name) { return records.has(name) ? records.get(name).slice().buffer : null; },
+    async delete(name) { records.delete(name); }, async clear() { records.clear(); },
+    async list() { return [...records].map(([name, size]) => ({ name, bytes: size.byteLength, modifiedMs: 0 })); }
+  };
+  const proxyRecords = () => [...records.keys()].filter(name => name !== 'index').length;
+  const session = () => {
+    const h = createHarness(base, { sessionBudget: 1 << 30, realProcessNegative: true, displayLevels: true, conversionRequests: true });
+    Object.assign(h.target, {
+      largeImagePixels: 1000, displayLevelFactor: () => 2, getCanvasContainerSize: () => ({ width: 40, height: 32 }),
+      previewTierMaxPixels: () => 600, usesSilverCoreConversion: () => true,
+      restoreAutoFrameDiagnostics: meta => { h.state.autoFrame.lastDiagnostics = meta ? structuredClone(meta) : null; },
+      hashFileForProject: async blob => sha256Hex(new Uint8Array(await blob.slice(0, 1 << 20).arrayBuffer())), displayProxyFileKey, sha256Hex,
+      displayProxyStore: createDisplayProxyStore({
+        port: createDisplayProxyPort({ core: createDisplayProxyWorkerCore({ backend: null }) }), records: memoryRecords,
+        availableBytes: async () => 64 * 1024 ** 3
+      })
+    });
+    const item = { id: 'roll-07::1', file: Object.assign(new Blob([bytes]), { name: 'roll-07.dng', lastModified: 1234 }), settings };
+    h.state.fileQueue = [{ id: 'open', file: { name: 'open.dng' } }, item];
+    h.state.currentFileIndex = 0;
+    h.state.loadedFile = h.state.fileQueue[0].file;
+    return { h, c: h.context, item };
+  };
+  // A lane's decode filled the store in an earlier session.
+  {
+    const { h, c, item } = session();
+    assert.equal(await c.fillDisplayProxy(item, base, settings), true, 'filled');
+    await h.target.displayProxyStore.settled();
+    assert.equal(proxyRecords(), 1, 'stored');
+  }
+  const record = new Map(records);
+  // This session opens the frame from the store. `sample` stands for the
+  // sample another build stored: the levels of another decode.
+  const storeHit = async ({ sample = null, autoWb = false } = {}) => {
+    records.clear();
+    for (const [name, bytesOfRecord] of record) records.set(name, bytesOfRecord);
+    const { h, c, item } = session();
+    if (sample) {
+      const read = h.target.displayProxyStore.read.bind(h.target.displayProxyStore);
+      h.target.displayProxyStore.read = async name => ({ ...(await read(name)), sample });
+    }
+    if (autoWb) h.target.maybeAutoWhiteBalance = () => { h.target.autoMeasurements++; return true; };
+    const entry = await c.readStoredDisplaySession(item);
+    assert.ok(entry?.stored, 'a store hit');
+    h.target.getCurrentQueueItem = () => item;
+    h.state.currentFileIndex = 1;
+    h.target.prepareStudioPhoto = async () => { await c.processNegative({ quiet: true }); };
+    await c.activateDisplaySession(item, entry, h.target.loadGeneration);
+    assert.equal(h.state.conversionSourceImageData, null, 'opened from the proxy');
+    sameSample(h.requests.at(-1).options.analysisImageData, sample || fresh, 'the first open converts with the record\'s sample');
+    const reruns = [];
+    h.target.scheduleCoreReprocess = options => reruns.push({ ...options });
+    h.target.decodeBase = () => base;
+    const conversions = h.requests.length;
+    assert.equal(await c.ensureSource(), true, 'the source is rebuilt');
+    for (let i = 0; i < 40 && !h.target.displaySessionDiagnostics.selfChecks; i++) await settle();
+    await settle();
+    await h.target.displayProxyStore.settled();
+    return { h, c, item, reruns, conversions };
+  };
+  const exportRequest = async (h, c) => {
+    await c.convertFromCurrentSource(h.state, { preview: false });
+    const request = h.requests.at(-1);
+    assert.equal(request.imageData, h.state.conversionSourceImageData, 'the rebuilt source');
+    return request;
+  };
+  // Another build's sample: the base's levels a tenth higher.
+  const stale = { ...fresh, data: Uint16Array.from(fresh.data, v => Math.min(65535, Math.round(v * 1.1))) };
+
+  // A matching sample keeps the session and its record.
+  {
+    const { h, c, item, reruns, conversions } = await storeHit();
+    assert.equal(h.target.displaySessionDiagnostics.selfChecks, 1, 'the self-check ran');
+    assert.equal(h.target.displaySessionDiagnostics.selfCheckMismatches, 0, 'no mismatch');
+    sameSample(c.getColorAnalysisSample(h.state), fresh, 'the base samples itself');
+    assert.equal(h.requests.length, conversions, 'nothing is converted again');
+    assert.deepEqual(reruns, []);
+    assert.ok((await c.readStoredDisplaySession(item))?.stored, 'the record is kept');
+    sameSample((await exportRequest(h, c)).options.analysisImageData, fresh, 'the export converts with the base\'s sample');
+    // The self-check compares the sample the photo converts with too: one
+    // the base did not give (a regression of ensureBase's) is dropped.
+    h.target.colorAnalysisSamples.set(base, { key: JSON.stringify(AREA), sample: stale });
+    await c.selfCheckDisplayProxy({ key: 'proxy' }, h.state.conversionSourceImageData, h.target.loadGeneration);
+    assert.equal(h.target.displaySessionDiagnostics.selfCheckMismatches, 1, 'a sample the base does not give fails the self-check');
+    assert.equal(h.target.colorAnalysisSamples.has(base), false, 'and is dropped');
+    sameSample(c.getColorAnalysisSample(h.state), fresh, 'the next conversion samples the base');
+    assert.deepEqual(reruns, [{ full: false }], 'converted again');
+    assert.equal(await c.readStoredDisplaySession(item), null, 'the record is purged');
+  }
+  // Another sample: purged, the base's own sample, converted again.
+  let request;
+  {
+    const { h, c, item, reruns, conversions } = await storeHit({ sample: stale });
+    assert.equal(h.target.displaySessionDiagnostics.selfCheckMismatches, 1, 'the sample failed the check');
+    sameSample(c.getColorAnalysisSample(h.state), fresh, 'the base keeps its own sample, not the record\'s');
+    assert.deepEqual(reruns, [{ full: true }], 'the photo is converted again, with it');
+    assert.equal(h.requests.length, conversions, 'as a settle: its auto-WB estimate was not the record\'s');
+    assert.equal(await c.readStoredDisplaySession(item), null, 'the record is purged');
+    assert.equal(proxyRecords(), 0);
+    request = await exportRequest(h, c);
+    sameSample(request.options.analysisImageData, fresh, 'the export converts with the base\'s sample');
+  }
+  // An auto-WB estimate this session took from the record is taken again,
+  // from the rebuilt source and the base's sample.
+  {
+    const { h, reruns, conversions } = await storeHit({ sample: stale, autoWb: true });
+    assert.equal(h.target.autoMeasurements, 2, 'the estimate is taken again');
+    assert.equal(h.requests.length, conversions + 1, 'by processNegative');
+    assert.deepEqual(reruns, []);
+    sameSample(h.requests.at(-1).options.analysisImageData, fresh, 'with the base\'s sample');
+    assert.ok(h.state.conversionSourceImageData, 'from the rebuilt source, not the record\'s level');
+  }
+  // Export parity, old vs new (real SilverCore): before, ensureBase copied
+  // the record's sample onto the base and the export converted with it; now
+  // it converts what a cold open (and 1703835) converts.
+  const engineSettings = { colorModel: 'standard', preSaturation: 115, borderBuffer: 10, filmBase: { r: 210, g: 120, b: 70 } };
+  const convert = async analysisImageData => {
+    invalidateSilverCoreCache();
+    return convertColorWithSilverCore(request.imageData, engineSettings, { preview: false, forceFullProcess: true, includeAnalysisPreview: true, analysisImageData });
+  };
+  const now = await convert(request.options.analysisImageData);
+  const cold = await convert(fresh);
+  const before = await convert(stale);
+  samePixels(now, cold, 'the export after a stale record == a cold open');
+  assert.ok(Buffer.from(now.__analysisPreview.data).equals(Buffer.from(cold.__analysisPreview.data)), 'and auto WB reads the same analysis preview');
+  assert.ok(!Buffer.from(before.__image16.data.buffer).equals(Buffer.from(cold.__image16.data.buffer)),
+    'with the record\'s sample (before the fix) the engine converted other pixels');
+}
+
+console.log('displaySessions: Tier A, Tier B, demotion, spill, ensureBase/ensureSource, invalidation, the proxy invariant, the colour-analysis sample across Undo, Redo and recipe changes (export parity), the settled-view parity of filled proxies and the sample check of stored proxies (export parity) passed');

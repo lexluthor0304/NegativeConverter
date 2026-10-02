@@ -124,11 +124,20 @@ area; no viewport, since the level serves any window.
   queues behind lanes), checks its size, depth and route against
   the descriptor and installs it under the same geometry id, so the kept planes
   stay valid; a decode that differs purges the photo's proxies and reopens it
-  cold. `ensureSource()` adds the geometry chain from the base (pool) and lens
-  correction, keeps the level as the display level and then checks it: the
-  level must equal the new source's own level (the pool's prebuilt one, or
-  `buildDisplayLevelInBands`; hash compare); a mismatch purges the stored
-  copies, installs the new level and converts again. A
+  cold. The base then samples the area in use itself, as on a cold open, and
+  every sample the descriptor carried must be the one the base gives (a
+  stored record's may come from another build's decode or sampler). A sample
+  that differs counts as a self-check mismatch: the photo's stored copies are
+  purged and it is converted again, after its source when it is a Tier B
+  session; when this session took its auto-WB estimate from the record (the
+  descriptor's sample or the restored level), `processNegative` takes it
+  again. `ensureSource()` adds the geometry chain from the base (pool) and
+  lens correction, keeps the level as the display level and then checks it:
+  the level must equal the new source's own level (the pool's prebuilt one, or
+  `buildDisplayLevelInBands`; hash compare), and the sample the photo converts
+  with the one the base gives; a mismatch purges the stored copies, drops the
+  base's cached sample, installs the new level and converts again (the auto-WB
+  estimate too, as above). A
   geometry edit (rotate, mirror, a settings refresh with new geometry, Undo of
   a cold geometry entry) runs as a geometry job that first awaits the base;
   crop mode, Auto Frame, film-base sampling and detection, the flat field,
@@ -628,4 +637,8 @@ its usage plus 10 GiB, the store's floor, so the web store has no budget in
 Chrome and that hit is skipped there; fills only make levels smaller than
 their frame (k > 1, about 16 MP and up), so `displaySessions.test.mjs`
 checks a filled proxy's first open, from the spill and from the store,
-against a cold open's conversion request.
+against a cold open's conversion request. It also opens a stored frame whose
+record carries another build's colour-analysis sample: the record is purged,
+the photo converts and exports with the base's own sample (with real
+SilverCore, the export equals a cold open's), and an auto-WB estimate taken
+from the record is taken again.

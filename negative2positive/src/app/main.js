@@ -4758,6 +4758,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // Descriptors a conversion of the live photo missed its sample on:
     // ensureBase() converts that photo again once its base is back.
     const colorAnalysisSampleMisses = new WeakSet();
+    // Descriptors and pending sources whose session took its auto-WB
+    // estimate from a conversion of their record (the descriptor's sample,
+    // the restored display level): a record found to differ from the decoded
+    // original has it taken again (displaySessionMismatch).
+    const autoWbFromRecords = new WeakSet();
     function getColorAnalysisSample(settings = state, source = baseSizeSource()) {
       if (!source) return null;
       const meta = settings === state ? state.autoFrame.lastDiagnostics : settings.autoFrameMeta;
@@ -4779,6 +4784,14 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const sample = sampleAnalysisArea(source, area);
       colorAnalysisSamples.set(source, { key, sample });
       return sample;
+    }
+
+    // Whether two colour-analysis samples (or their absence) are the same.
+    function sameAnalysisSample(a, b) {
+      if (!a?.data || !b?.data) return !a?.data && !b?.data;
+      if (a.width !== b.width || a.height !== b.height || a.data.length !== b.data.length) return false;
+      for (let i = 0; i < a.data.length; i++) if (a.data[i] !== b.data[i]) return false;
+      return true;
     }
 
     // Whether a conversion of `settings` would miss its colour-analysis
@@ -7326,7 +7339,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // re-renders, core-control tweaks, dust updates, or undo restores — and
     // never once the user has sampled a gray point or touched the RGB gain
     // sliders. Low-confidence estimates apply nothing and leave the existing
-    // gray-point guide nudging toward the manual click instead.
+    // gray-point guide nudging toward the manual click instead. Returns
+    // whether it estimated.
     function maybeAutoWhiteBalance(processed) {
       if (!usesSilverCoreConversion(state)) return;
       if (sanitizePresetType(state.filmType || 'color') !== 'color') return;
@@ -7356,7 +7370,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           updateGrayPointGuideUI();
         }
         state.wbAutoConfidence = 'low';
-        return;
+        return true;
       }
       state.wbR = estimate.wbR;
       state.wbG = estimate.wbG;
@@ -7365,6 +7379,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       updateWBSliders();
       updateGrayPointGuideUI();
       markCurrentFileDirty();
+      return true;
     }
 
     // What the auto-WB sample is keyed by: the conversion source, or the
@@ -9080,6 +9095,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           const hasPreviewSource = usesSilverCoreConversion(state) && hasSeparateConversionPreview();
           overlay.updateProgress(hasPreviewSource ? 35 : 40, lang.loadingConverting);
 
+          // What the conversion reads of a session's record (#249): the
+          // display level it restored, a descriptor's colour-analysis sample.
+          const records = [proxy && pendingSource, !state.loadedBaseImageData && state.baseDescriptor].filter(Boolean);
           // With the first frame the worker converts the viewport-independent
           // auto-WB sample (#248 part 3).
           const processed = await convertFromCurrentSource(state, { preview: hasPreviewSource, wbSample: automatic });
@@ -9099,7 +9117,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           overlay.updateProgress(hasPreviewSource ? 78 : 85, lang.loadingProcessing);
           applyProcessedImageToState(processed, { previewOnly: hasPreviewSource });
           if (automatic) {
-            maybeAutoWhiteBalance(processed);
+            if (maybeAutoWhiteBalance(processed)) for (const record of records) autoWbFromRecords.add(record);
             maybeAnalyzeExpiredRescue(processed);
           }
           // Reset dust removal state for new conversion
@@ -12105,6 +12123,48 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       };
     }
 
+    // Whether every colour-analysis sample `descriptor` carried is the one
+    // its decoded `base` gives for that area. The base keeps its own sample
+    // of the area in use, never the descriptor's.
+    function sameDescriptorSamples(descriptor, base) {
+      const live = analysisAreaOf(state.autoFrame.lastDiagnostics);
+      let same = true;
+      for (const [key, kept] of descriptor.samples || []) {
+        const sample = sampleAnalysisArea(base, JSON.parse(key));
+        if (key === live) colorAnalysisSamples.set(base, { key, sample });
+        if (!sameAnalysisSample(sample, kept)) same = false;
+      }
+      return same;
+    }
+
+    // A session restored without its base whose record differs from what
+    // the decoded original gives (`what`: a colour-analysis sample in
+    // ensureBase, the display level in the self-check). Its stored copies are
+    // purged and the photo is converted again: by `settle`, or, when this
+    // session took its auto-WB estimate from the record, by processNegative,
+    // which takes the estimate again. A Tier B session waits for its source
+    // first, so neither converts the record's level again.
+    function displaySessionMismatch(what, record, settle) {
+      displaySessionDiagnostics.selfCheckMismatches++;
+      console.error(`A display session's ${what} did not match its decoded original; its stored copies are purged.`, state.loadedFile?.name);
+      const item = getCurrentQueueItem();
+      if (item) forgetDisplayProxies(item);
+      const automatic = autoWbFromRecords.has(record);
+      const generation = loadGeneration;
+      void (async () => {
+        if (state.sourcePending && (!(await ensureSource()) || !isCurrentLoad(generation))) return;
+        if (!automatic) {
+          settle();
+          return;
+        }
+        while (processNegativeInFlight) {
+          await processNegativeInFlight;
+          if (!isCurrentLoad(generation)) return;
+        }
+        await processNegative({ quiet: true });
+      })().catch(error => console.warn('Converting a mismatched display session again failed:', error));
+    }
+
     // The decoded base of a session restored without it: the normal loader's
     // decode (joined with a lane's when one runs it, #243), checked against
     // the stored size and plane depth, then installed under the geometry id
@@ -12143,16 +12203,23 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
             return null;
           }
           geometryBaseIds.set(base, geometryBaseId(descriptor));
-          // The sample of the area in use comes along; the base gives any other.
-          const area = analysisAreaOf(state.autoFrame.lastDiagnostics);
-          if (area && descriptor.samples?.has(area)) colorAnalysisSamples.set(base, { key: area, sample: descriptor.samples.get(area) });
+          // The base gives the samples now, as on a cold open.
+          const samplesMatch = sameDescriptorSamples(descriptor, base);
           state.loadedBaseImageData = base;
           if (!state.rawMetadata && decoded.rawMetadata) state.rawMetadata = decoded.rawMetadata;
           state.baseDescriptor = null;
           reviveFrameDescriptor();
-          // A frame converted without its colour-analysis sample meanwhile (a
-          // slider preview) is converted again with it.
-          if (colorAnalysisSampleMisses.delete(descriptor)) scheduleCoreReprocess({ full: true });
+          const missed = colorAnalysisSampleMisses.delete(descriptor);
+          // A sample the session converted with that differs (a stored
+          // proxy's, from another build's decode or sampler) purges its
+          // record, and the photo is converted again.
+          if (!samplesMatch) {
+            displaySessionMismatch('colour-analysis sample', descriptor, () => scheduleCoreReprocess({ full: true }));
+          } else if (missed) {
+            // A frame converted without its colour-analysis sample meanwhile
+            // (a slider preview) is converted again with it.
+            scheduleCoreReprocess({ full: true });
+          }
           return base;
         } catch (error) {
           if (error?.name !== 'AbortError') console.warn('Decoding the original of a restored photo failed:', error);
@@ -12277,9 +12344,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // When ensureSource() rebuilt the source of a frame opened from a proxy,
     // the proxy must be the display level the new source gives (#248: the
     // geometry pool builds it with the planes; else it is built here in
-    // bands). A match keeps the proxy (its identity is the preview worker's
-    // cached source); a mismatch purges the stored proxies of the photo and
-    // converts from the new level.
+    // bands), and the colour-analysis sample it converts with the one the
+    // base gives (ensureBase compared the record's with it). A match keeps
+    // the proxy (its identity is the preview worker's cached source); a
+    // mismatch purges the stored proxies of the photo, drops the base's
+    // cached sample and converts from the new level.
     async function selfCheckDisplayProxy(pending, source, generation) {
       const level = state.displayLevelImageData;
       if (!level || !pending?.key) return;
@@ -12293,14 +12362,18 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         : await buildDisplayLevelInBands(source, k, { isCurrent });
       if (!rebuilt || !isCurrent()) return;
       displaySessionDiagnostics.selfChecks++;
-      if (rebuilt.width === level.width && rebuilt.height === level.height && displayPlaneHash(rebuilt) === displayPlaneHash(level)) return;
-      displaySessionDiagnostics.selfCheckMismatches++;
-      console.error('A display proxy did not match its rebuilt source; its stored copies are purged.', state.loadedFile?.name);
-      const item = getCurrentQueueItem();
-      if (item) forgetDisplayProxies(item);
-      state.displayLevelImageData = rebuilt;
-      state.conversionPreviewImageData = conversionTargetFor(source, rebuilt, 'normal');
-      scheduleCoreReprocess({ full: false });
+      const levelMatches = rebuilt.width === level.width && rebuilt.height === level.height
+        && displayPlaneHash(rebuilt) === displayPlaneHash(level);
+      const base = state.loadedBaseImageData;
+      const cached = base ? colorAnalysisSamples.get(base) : null;
+      const area = cached?.key === analysisAreaOf(state.autoFrame.lastDiagnostics) ? JSON.parse(cached.key) : null;
+      if (levelMatches && (!area || sameAnalysisSample(cached.sample, sampleAnalysisArea(base, area)))) return;
+      if (base) colorAnalysisSamples.delete(base);
+      if (!levelMatches) {
+        state.displayLevelImageData = rebuilt;
+        state.conversionPreviewImageData = conversionTargetFor(source, rebuilt, 'normal');
+      }
+      displaySessionMismatch(levelMatches ? 'colour-analysis sample' : 'display proxy', pending, () => scheduleCoreReprocess({ full: false }));
     }
 
     // Runs after the next paint (rAF, then a task); a hidden page paints no
