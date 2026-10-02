@@ -23131,9 +23131,24 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           if (tile.valid()) await attempt(tile, () => tile.run(null, step));
           return true;
         }
-        // One gated item (#241); a lane that waited while hidden re-checks.
-        release = await hiddenJobs.admit({ bytes: await hiddenJobBytesFor([item.file]), signal: controller.signal });
-        if (!wanted()) return false;
+        // One gated item (#241), taken while the foreground is idle and never
+        // held while the lane waits for it: a desktop batch export or a roll
+        // analysis keeps the foreground busy and admits its own next item
+        // through the same gate, one at a time in a hidden macOS window (and
+        // in safe mode). A lane that waited for its admission (hidden) or for
+        // the header read asks the foreground again. False: no need is left.
+        const admit = async () => {
+          for (;;) {
+            await backgroundGate.idle({ signal: controller.signal });
+            if (!wanted()) return false;
+            release = await hiddenJobs.admit({ bytes: await hiddenJobBytesFor([item.file]), signal: controller.signal });
+            if (!wanted()) return false;
+            if (backgroundGate.isIdle()) return true;
+            release();
+            release = null;
+          }
+        };
+        if (!await admit()) return false;
         // The base: a retained session or the prefetch slot, or one decode
         // shared with any other consumer (the foreground may adopt it).
         const retained = photoSessions.has(item) ? photoSessions.peek(item)
@@ -23154,11 +23169,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           // opened, and only what fits next to the caches (or one item alone).
           // A reservation that waited behind an opening photo is granted when
           // that activation is superseded, which is when the next switch
-          // starts: the gate is asked again, and the memory given back while
-          // the lane waits for it.
+          // starts: the gate is asked again, and the memory and the hidden-job
+          // admission are given back while the lane waits for it.
           for (;;) {
-            await backgroundGate.idle({ signal: controller.signal });
-            if (!wanted()) return false;
+            if (!release && !await admit()) return false;
             memoryClaim = await reserveFrameClaim(createFrameClaim(item.file, {
               priority: 'background', signal: controller.signal, label: `${needs.join('+')} ${item.file.name}`,
               bytesFor: !analysis ? frameReservationBytes : analysis.decode ? rollFrameReservationBytes : laneReservationBytes
@@ -23167,6 +23181,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
             if (backgroundGate.isIdle()) break;
             memoryClaim.release();
             memoryClaim = null;
+            release();
+            release = null;
           }
           job.decoding = true;
           job.halfSize = Boolean(tile?.halfSize && !analysis && !prefetch);
