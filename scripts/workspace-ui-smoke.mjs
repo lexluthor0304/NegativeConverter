@@ -208,6 +208,13 @@ async function runRenderedUiFontSmoke({ send, evaluate, waitFor, fail, port, roo
       }
       const coldBytes = cold.reduce((sum, request) => sum + request.bytes, 0);
       if (lang !== 'en' && coldBytes > COLD_UI_FONT_BUDGET) fail('cold ' + lang + ' UI fonts exceed 50 KB: ' + JSON.stringify(cold));
+      // en draws only Latin until the menu opens. At 4fdd9db the closed menu
+      // still laid out its 中文/日本語 buttons, so a cold en load fetched both
+      // CJK subsets; en has no byte budget that would catch that.
+      if (lang === 'en' && (!cold.length || cold.some(request => !request.file.startsWith('nc-studio-latin'))
+          || coldFaces.some(family => family !== 'NC Studio Latin' && [...UI_FAMILIES, ...FULL_FAMILIES].includes(family)))) {
+        fail('cold en load fetched more than NC Studio Latin: ' + JSON.stringify({ cold, coldFaces }));
+      }
       // The welcome text; its language-tagged discovery links use system-ui on purpose.
       for (const selector of ['.studio-welcome h1', '.studio-welcome p']) {
         const fonts = await platformFonts(send, selector);
