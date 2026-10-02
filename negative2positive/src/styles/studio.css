@@ -162,8 +162,8 @@ body.studio {
 .studio .toolbar-btn.active { color: var(--accent); background: var(--bg-hover); }
 /* No taller than the buttons (a 16 px icon, 7 px padding): at its own 32 px,
    crop mode's ratio control made the toolbar taller, so the picture shrank
-   and moved when crop mode opened (#245). Narrow layouts keep their
-   min-height (app.css), which matches their buttons. */
+   and moved when crop mode opened (#245). Narrow layouts keep app.css's
+   min-height, which is no taller than their buttons. */
 .studio .toolbar-select { height: 30px; padding-block: 0; }
 .studio-filmstrip { display: none; min-width: 0; border-top: 1px solid var(--border); background: #202020; padding: 6px 12px; }
 .studio-loaded .studio-filmstrip { display: block; grid-row: 2; grid-column: 1; }
