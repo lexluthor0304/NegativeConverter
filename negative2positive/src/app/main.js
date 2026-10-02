@@ -5208,6 +5208,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         .some(image => image && reducedDisplayImages.has(image));
     }
 
+    // A preview conversion of a reduced target still on its way: its frame
+    // lands after the session end (a click on the track, a release while the
+    // worker is slow), so that end must replace it too (#229 review R1-119).
+    function reducedConversionInFlight() {
+      return Boolean(_coreReprocessPreviewInFlight && _coreReprocessPreviewInFlight.reduced);
+    }
+
     // Resizes the drawing buffer and draws in the same task, so no cleared
     // frame shows. The SilverCore preview follows on its next tick.
     function redrawForPreviewTier() {
@@ -5230,19 +5237,21 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       }
       if (source && state.currentStep >= 3) {
         scheduleDisplayPreviewResize();
-        if (displayIsReduced()) restoreNormalTierDisplay();
+        if (displayIsReduced() || reducedConversionInFlight()) restoreNormalTierDisplay();
       }
       redrawForPreviewTier();
     }
 
     function restoreNormalTierDisplay() {
       const processed = state.processedImageData;
-      if (!processed || reducedDisplayImages.has(processed) || state.fullResolutionPending) {
-        // A frame converted at the reduced size is on screen: convert the
-        // final settings once at the normal size, whether or not the display
-        // resize finds a new size. A restored preview of matching size would
-        // otherwise leave the reduced texture up, and on a large image no
-        // full-resolution render ever replaces it.
+      if (!processed || reducedDisplayImages.has(processed) || state.fullResolutionPending || reducedConversionInFlight()) {
+        // A frame converted at the reduced size is on screen or on its way:
+        // convert the final settings once at the normal size, whether or not
+        // the display resize finds a new size. A restored preview of matching
+        // size would otherwise leave the reduced texture up, and on a large
+        // image no full-resolution render ever replaces it. A reduced frame
+        // still converting is superseded by this tick, which posts as soon as
+        // that one lands.
         const before = coreReprocessToken;
         scheduleCoreReprocess({ full: false });
         // This tick converts the live settings, so the released slider's
@@ -8529,6 +8538,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           // Check if preview source is actually smaller than full source
           const hasSmallPreview = hasSeparateConversionPreview();
           const reducedInput = hasSmallPreview && reducedDisplayImages.has(state.conversionPreviewImageData);
+          // A session that ends before this frame lands still owes it the
+          // normal-size tick (#229 review R1-119).
+          previewFlight.reduced = reducedInput;
 
           // Preview-resolution path: run SilverCore on small image. Its 16-bit
           // plane may stay in the worker until committed; never when the

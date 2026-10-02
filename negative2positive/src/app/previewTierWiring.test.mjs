@@ -182,7 +182,7 @@ function fixture({ width = 3000, height = 2000, repairs = false, largePreviewFra
     ...DISPLAY_SESSION_HELPERS,
     'getDisplayPreviewSize', 'noteTierImage', 'buildPreviewSourceImageData', 'buildWebglSourceImageData',
     'histogramSourceFor', 'scheduleDisplayPreviewResize', 'ensureConversionPreviewForDisplay', 'displayIsReduced',
-    'redrawForPreviewTier', 'leavePreviewTier', 'restoreNormalTierDisplay', 'onPreviewTierChange',
+    'reducedConversionInFlight', 'redrawForPreviewTier', 'leavePreviewTier', 'restoreNormalTierDisplay', 'onPreviewTierChange',
     'onPreviewTierSessionEnd', 'resetPreviewTierForActivation', 'resizeWebGLCanvas',
     'installDisplayFor', 'installDisplayPreview', 'cancelDisplayPreviewRebuild', 'rebuildDisplayPreview',
     'flushDisplayPreviewRebuild', 'countMainResample', 'updateConversionTarget', 'conversionTargetFor',
@@ -218,6 +218,15 @@ function fixture({ width = 3000, height = 2000, repairs = false, largePreviewFra
     conversions.at(-1)?.resolve();
     await settle();
   };
+  // One slider input whose conversion is posted and left unanswered (a slow
+  // worker).
+  const post = async (value) => {
+    nextFrame();
+    state.coreExposure = value;
+    handlers.onInput(value);
+    await Promise.resolve();
+    await settle();
+  };
   const answerAll = async () => {
     for (let round = 0; round < 4; round++) {
       await Promise.resolve();
@@ -227,7 +236,7 @@ function fixture({ width = 3000, height = 2000, repairs = false, largePreviewFra
     }
   };
   return { context, state, base, conversions, resizes, log, glCanvas, controllerStub, idleCallbacks,
-    normalTarget, handlers, input, answerAll, runTimers, nextFrame, timers, container };
+    normalTarget, handlers, input, post, answerAll, runTimers, nextFrame, timers, container };
 }
 
 const bytesEqual = (a, b) => a.width === b.width && a.height === b.height && Buffer.compare(Buffer.from(a.data), Buffer.from(b.data)) === 0;
@@ -460,6 +469,77 @@ for (const largePreviewFrames of [true, false]) {
   const expected = displayPreviewSize(3000, 2000, { viewportWidth: 1480, viewportHeight: 880, dpr: DPR, zoom: 1, maxDimension: 8192 });
   assert.equal(f.state.conversionPreviewImageData.width, expected.width);
   assert.equal(f.context.displayIsReduced(), false);
+}
+
+// ---- #229 review R1-119: the session ends before its reduced tick is
+// answered (a click on the track, or a release while the worker is slow).
+// That frame lands after the end: the end still converts once at the normal
+// size, and the settled view is the normal path's frame ----
+{
+  const sizes = f => f.conversions.map(entry => `${entry.input.width}x${entry.input.height}`);
+  const baseline = fixture();
+  await baseline.input(25);
+  baseline.handlers.onCommit(25);
+  await baseline.answerAll();
+  baseline.runTimers();
+  await baseline.answerAll();
+  assert.deepEqual(sizes(baseline), ['1860x1240']);
+
+  const f = fixture();
+  const normalPreview = f.state.conversionPreviewImageData;
+  f.context.onPreviewTierChange('reduced');
+  await f.post(25);
+  assert.equal(f.conversions.length, 1, 'the reduced tick is on its way');
+  // pointerup ends the session in the capture phase; the slider's own change
+  // handler follows.
+  f.context.onPreviewTierChange('normal');
+  f.handlers.onCommit(25);
+  await f.answerAll();
+  f.runTimers();
+  await f.answerAll();
+  assert.deepEqual(sizes(f), ['1224x816', '1860x1240'], 'the reduced tick, then one normal-size tick');
+  assert.equal(f.conversions[1].input, normalPreview, 'from the kept normal-tier preview');
+  assert.equal(f.conversions[1].exposure, 25);
+  for (const key of ['previewSourceImageData', 'webglSourceImageData', 'processedImageData']) {
+    assert.ok(bytesEqual(f.state[key], baseline.state[key]), `settled ${key} is the normal path's frame`);
+  }
+  assert.equal(f.state.processedImageData.width, 1860);
+  assert.equal(f.context.displayIsReduced(), false, 'nothing reduced is left on screen');
+  assert.equal(f.state.fullResolutionPending, baseline.state.fullResolutionPending);
+
+  // A tick queued behind the one in flight is replaced by the end's tick, not
+  // joined by it.
+  const queued = fixture();
+  queued.context.onPreviewTierChange('reduced');
+  await queued.post(20);
+  await queued.post(25);
+  assert.equal(queued.conversions.length, 1, 'the second tick waits for the lane');
+  queued.context.onPreviewTierChange('normal');
+  queued.handlers.onCommit(25);
+  await queued.answerAll();
+  queued.runTimers();
+  await queued.answerAll();
+  assert.deepEqual(sizes(queued), ['1224x816', '1860x1240']);
+  assert.equal(queued.conversions[1].exposure, 25);
+  assert.ok(bytesEqual(queued.state.processedImageData, baseline.state.processedImageData));
+  assert.equal(queued.context.displayIsReduced(), false);
+
+  // A full-resolution plane that reads as current (a whole-frame result
+  // landed meanwhile) does not turn the end into a display rebuild: the
+  // reduced frame on its way is still replaced by a conversion.
+  const plane = fixture({ largePreviewFrames: false });
+  plane.context.convertPreviewFrameInWorker.resample = (image, target) => Promise.resolve(resizeDisplayPreview(image, target));
+  plane.context.onPreviewTierChange('reduced');
+  await plane.post(25);
+  plane.state.fullResolutionPending = false;
+  plane.context.onPreviewTierChange('normal');
+  plane.handlers.onCommit(25);
+  await plane.answerAll();
+  plane.runTimers();
+  await plane.answerAll();
+  assert.deepEqual(sizes(plane), ['1224x816', '1860x1240'], 'the reduced tick, then one normal-size tick');
+  assert.equal(plane.context.displayIsReduced(), false);
+  assert.ok(bytesEqual(plane.state.previewSourceImageData, baseline.state.previewSourceImageData));
 }
 
 // ---- Session end diagnostics ----
