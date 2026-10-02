@@ -16851,6 +16851,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       window.__ncAnalysis = {
         tasks: runOpenCvTask.stats, detection: cropDetectionStats, cropView: cropViewStats,
         pendingDetection: () => Boolean(cropDetection),
+        converting: () => Boolean(processNegativeInFlight),
         settle: () => settlePendingCropDetection(),
         failWorker: (failing = true) => { analysisWorkerFailing = Boolean(failing); },
         proxyReady: () => {

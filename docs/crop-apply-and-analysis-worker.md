@@ -64,6 +64,11 @@ worker meanwhile (`startCropDetection`):
   one): that entry holds the frame being detected, so the detection goes on
   and follows the diagnostics the restore installs. It is current only while
   the geometry Apply installed and those diagnostics are in place.
+- On a two-stage import's half-size stand-in (#255) the detection samples
+  provisional pixels. The swap to the full decode ends it, applies the crop
+  again on the full base with the same rule (`appliedCropDiagnostics`, the
+  diagnostics Apply installs) and starts the crop's detection there; the
+  photo counts as exact once that has landed (`docs/two-stage-raw-import.md`).
 - History taken while the detection runs holds the miss outcome and the
   white balance before the hit. Before #245 the hit was in place before any
   such entry, so every entry taken while the detection is pending carries
@@ -74,12 +79,10 @@ worker meanwhile (`startCropDetection`):
   entry held the white balance it started from. White balance the user set
   while the detection ran wins (no auto white balance ran then), so an entry
   taken before that edit gets the hit without an auto white balance. Entries
-  of another Apply carry that Apply's token.
-- On a two-stage import's half-size stand-in (#255) the detection samples
-  provisional pixels. The swap to the full decode ends it, applies the crop
-  again on the full base with the same rule (`appliedCropDiagnostics`, the
-  diagnostics Apply installs) and starts the crop's detection there; the
-  photo counts as exact once that has landed (`docs/two-stage-raw-import.md`).
+  of another Apply carry that Apply's token. The crop-apply smoke holds the
+  detection request while a magenta drag starts and checks that the PNG8 and
+  TIFF16 exports, before and after undoing the drag, equal those of the same
+  drag made after the hit.
 - `settlePendingCropDetection()` is the barrier for everything that reads or
   copies the photo's settings for output: single export (before it persists
   the settings), `ensureFullResolutionReadyForExport`, batch and ZIP export,
@@ -160,7 +163,8 @@ Chrome):
 (worker and fallback requests), `detection` (started, hits, misses, stale,
 reconversions, conversions), `cropView` (proxy builds, stand-ins, draws,
 histograms, the last redraw's time), `settle()`, `pendingDetection()`,
-`proxyReady()`, `draftView()`, `failWorker(true)` to force the page fallback.
+`converting()` (a `processNegative` in flight), `proxyReady()`, `draftView()`,
+`failWorker(true)` to force the page fallback.
 
 ## Remaining acceptance runs
 
