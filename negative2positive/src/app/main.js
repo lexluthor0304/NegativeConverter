@@ -24643,6 +24643,22 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         && state.currentStep >= 3 && !state.cropping && !state.samplingMode);
     }
 
+    // The AI brush paints with its model ready, and with none loaded (never
+    // loaded, or released by #236 or #241): the stroke's repair pass loads it
+    // (inpaintManualBrush), and the load starts with the stroke. While a load
+    // runs, or after one failed, the stroke is refused with the reason
+    // instead of being dropped silently; the status line shows which.
+    function aiBrushTakesStroke() {
+      const status = aiRepair.status;
+      if (status === 'ready') return true;
+      ensureAiRepairPreload();
+      if (status === 'idle') return true;
+      showToast(status === 'error'
+        ? getInterpolatedText('dustAiStatusError', { message: aiRepair.error }, `Model failed: ${aiRepair.error}. Load a MI-GAN Pipeline ONNX file instead.`)
+        : getLocalizedText('aiBrushModelLoading', 'The repair model is still loading. Paint again once it is ready.'), 3000);
+      return false;
+    }
+
     // The stroke is drawn on the feedback overlay (#254 A): no image-size
     // canvas, and only the new segments each frame.
     let aiBrushDrawing = null;
@@ -24679,15 +24695,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         }
         event.preventDefault();
         event.stopImmediatePropagation();
-        if (aiRepair.status !== 'ready') {
-          // The brush waits for its model (the status line shows the load);
-          // say so instead of dropping the stroke silently.
-          ensureAiRepairPreload();
-          showToast(aiRepair.status === 'error'
-            ? getInterpolatedText('dustAiStatusError', { message: aiRepair.error }, `Model failed: ${aiRepair.error}. Load a MI-GAN Pipeline ONNX file instead.`)
-            : getLocalizedText('aiBrushModelLoading', 'The repair model is still loading. Paint again once it is ready.'), 3000);
-          return;
-        }
+        if (!aiBrushTakesStroke()) return;
         // Strokes repair the full decode, never a two-stage stand-in (#255).
         if (!currentPhotoExact()) { void ensureFullDecodeWithNotice('ai-brush'); return; }
         if (state.processedImageDataIsPreview || state.dustRemoval.processing) return;
@@ -24790,9 +24798,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const loadBtn = document.getElementById('dustAiLoadBtn');
       if (enabled) enabled.checked = Boolean(state.dustRemoval.ai);
       if (loadBtn) loadBtn.disabled = aiRepair.status === 'loading';
-      // A checked AI brush is disabled until its model is ready.
-      const brushWaiting = Boolean(document.getElementById('aiBrushEnabled')?.checked) && aiRepair.status !== 'ready';
-      document.getElementById('aiBrushSection')?.toggleAttribute('data-model-pending', brushWaiting);
+      // A checked AI brush waits while its model loads and cannot paint after
+      // a failed load; with no model loaded it paints and loads it.
+      const brushChecked = Boolean(document.getElementById('aiBrushEnabled')?.checked);
+      const brushSection = document.getElementById('aiBrushSection');
+      brushSection?.toggleAttribute('data-model-pending', brushChecked && aiRepair.status === 'loading');
+      brushSection?.toggleAttribute('data-model-error', brushChecked && aiRepair.status === 'error');
       if (!status) return;
       const providerName = aiRepair.provider === 'webgpu' ? 'WebGPU' : 'WASM';
       let text;
@@ -24803,6 +24814,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         if (aiRepair.tiles) text += ' · ' + getInterpolatedText('dustAiStatusLast', { tiles: String(aiRepair.tiles), ms: String(aiRepair.ms) }, `last run ${aiRepair.tiles} tile(s) in ${aiRepair.ms} ms`);
       } else if (aiRepair.status === 'error') {
         text = getInterpolatedText('dustAiStatusError', { message: aiRepair.error }, `Model failed: ${aiRepair.error}. Load a MI-GAN Pipeline ONNX file instead.`);
+      } else if (retouchTabSelected()) {
+        // On the Retouch tab (a model #236 or #241 released) opening the tab
+        // is not what loads it.
+        text = getLocalizedText('dustAiStatusIdleRetouch', 'No model loaded. MI-GAN loads when you paint, remove dust or export.');
       } else {
         text = getLocalizedText(inpaintBackends().webgpu ? 'dustAiStatusIdleGpu' : 'dustAiStatusIdleWasm', 'No model loaded.');
       }

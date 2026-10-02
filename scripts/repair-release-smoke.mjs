@@ -7,7 +7,9 @@
 // under its revision, and drains (R1-035). The export repairs from
 // scratch: its PNG 8-bit and TIFF 16-bit files equal, byte for byte, those of
 // a session that kept its model and brushed the same stroke. A settled repair
-// is exported after a release as it is: no load, no tile inferred.
+// is exported after a release as it is: no load, no tile inferred. An armed
+// AI brush after a release shows no busy cursor and takes its first stroke
+// (R1-147).
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 
@@ -164,4 +166,34 @@ export async function runRepairReleaseSmoke({ send, evaluate, waitFor, wait, fai
   if (afterSettled.status !== 'idle' || settled.tiles) fail('a settled repair after a release was repaired again: ' + JSON.stringify({ settled, afterSettled }));
   if (settled.sha256 !== kept.png8.sha256) fail('a settled repair after a release exported other pixels');
   console.log('ok: a settled repair exports after a release with no load and no inference, the same PNG8');
+
+  // An armed AI brush after a release (R1-147): no busy cursor while nothing
+  // loads, and the first stroke is taken (its repair loads the model) instead
+  // of being refused with "still loading".
+  await evaluate(`document.getElementById('aiBrushEnabled').click()`);
+  await waitFor('AI brush armed with its model', `${ready} && window.__ncAiRepair.state().status === 'ready'`, 120_000);
+  if (await evaluate(`window.__ncAiRepair.release()`) !== true) fail('the armed brush\'s model was not released: ' + JSON.stringify(await state()));
+  const armed = await evaluate(`({ cursor: getComputedStyle(document.getElementById('canvasContainer')).cursor,
+    pending: document.getElementById('aiBrushSection').hasAttribute('data-model-pending'),
+    status: document.getElementById('dustAiStatus').textContent })`);
+  if (armed.cursor !== 'crosshair' || armed.pending || /open Retouch/.test(armed.status)) fail('an armed AI brush after a release: ' + JSON.stringify(armed));
+  await evaluate(`(() => {
+    window.__brushToasts = [];
+    new MutationObserver((records) => { for (const r of records) for (const n of r.addedNodes) if (n.nodeType === 1) window.__brushToasts.push(n.textContent); })
+      .observe(document.getElementById('toastContainer'), { childList: true });
+    const surface = [...document.querySelectorAll('#canvas, #glCanvas')].find(el => getComputedStyle(el).display !== 'none');
+    const rect = surface.getBoundingClientRect();
+    const at = (dx) => ({ bubbles: true, cancelable: true, pointerId: 12, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 1,
+      clientX: rect.x + rect.width * 0.3 + dx, clientY: rect.y + rect.height * 0.4 });
+    surface.dispatchEvent(new PointerEvent('pointerdown', at(0)));
+    surface.dispatchEvent(new PointerEvent('pointermove', at(6)));
+    surface.dispatchEvent(new PointerEvent('pointermove', at(12)));
+    surface.dispatchEvent(new PointerEvent('pointerup', { ...at(12), buttons: 0 }));
+  })()`);
+  await waitFor('the first stroke after a release is repaired', `${ready} && (() => { const s = window.__ncAiRepair.state();
+    return s.strokes === 1 && s.status === 'ready' && s.revision === ${JSON.stringify((await state()).revision)}; })()
+    && /last run [1-9][0-9]* tile/.test(document.getElementById('dustAiStatus').textContent)`, 180_000);
+  const toasts = await evaluate(`window.__brushToasts`);
+  if (toasts.some(text => /still loading/.test(text))) fail('the first AI-brush stroke after a release was refused: ' + JSON.stringify(toasts));
+  console.log('ok: an armed AI brush after a release shows a crosshair, takes its first stroke and repairs it with the model it loads again');
 }

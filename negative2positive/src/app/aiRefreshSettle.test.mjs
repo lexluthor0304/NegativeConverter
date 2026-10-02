@@ -1,9 +1,10 @@
 // After MI-GAN was released (#236's idle rule, #241's hidden window), the
-// dust brush brings it back: a dust-brush stroke's refresh loads the model and
-// drains its queue, so a photo with repair strokes settles and a switch keeps
-// its snapshot and history; a model that cannot be loaded drains the queue
-// too. The refresh's repair-stroke mask goes with the photo (switch, New
-// session). Runs the real functions from main.js.
+// dust and AI repair brushes bring it back: a dust-brush stroke's refresh
+// loads the model and drains its queue, so a photo with repair strokes
+// settles and a switch keeps its snapshot and history; a model that cannot be
+// loaded drains the queue too. The refresh's repair-stroke mask goes with the
+// photo (switch, New session). An armed AI brush shows no busy cursor after a
+// release and takes its first stroke. Runs the real functions from main.js.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
@@ -255,4 +256,105 @@ for (const loadFails of [false, true]) {
   assert.equal(h.target.dustRefreshRepairMask, null, 'a new clean source drops it');
 }
 
-console.log('AI refresh settle: a released model is loaded by the dust brush and its queue drains (a failed load drains it too), so a switch keeps the settled view and history; the repair-stroke mask goes with the photo');
+// ---- 3. An armed AI brush after a forced release ----------------------------
+// The cursor over the viewer, from studio.css's rules for #canvasContainer
+// with :has() conditions (the last matching rule of equal specificity wins).
+const studioCss = readFileSync(new URL('../styles/studio.css', import.meta.url), 'utf8');
+const cursorRules = [...studioCss.matchAll(/^(\.studio(?::has\([^{]*?\))+) #canvasContainer \{ cursor: ([\w-]+); \}$/gm)]
+  .map(([, selector, cursor]) => ({ cursor, conditions: [...selector.matchAll(/:has\(([^)]*\))\)|:has\(([^)]*)\)/g)].map(m => m[1] || m[2]) }));
+for (const cursor of ['crosshair', 'progress', 'not-allowed']) {
+  assert.ok(cursorRules.some(rule => rule.cursor === cursor), `studio.css has the ${cursor} rule of the AI brush`);
+}
+for (const rule of cursorRules.filter(rule => rule.cursor === 'progress')) {
+  assert.ok(rule.conditions.some(condition => condition.includes('[data-model-pending]')), 'progress needs a pending model');
+}
+function viewerCursor(facts) {
+  let cursor = 'default';
+  for (const rule of cursorRules) if (rule.conditions.every(condition => facts.has(condition))) cursor = rule.cursor;
+  return cursor;
+}
+
+function brushFixture() {
+  const attributes = new Set();
+  const elements = {
+    aiBrushEnabled: { checked: true }, dustAiEnabled: { checked: true }, dustAiLoadBtn: { disabled: false },
+    dustAiStatus: { textContent: '' },
+    aiBrushSection: { toggleAttribute: (name, on) => { if (on) attributes.add(name); else attributes.delete(name); } },
+    'studioTab-repair': { getAttribute: name => (name === 'aria-selected' ? 'true' : null) },
+  };
+  const toasts = [], loads = [];
+  const context = vm.createContext({
+    console: quiet, File: globalThis.File, document: { getElementById: id => elements[id] || null },
+    state: { currentStep: 3, cropping: false, samplingMode: null, dustRemoval: { ai: true } },
+    aiRepair: { release: null, trim: null, resident: null, status: 'idle', provider: '', run: null, source: '', sourceRef: null,
+      prefer: '', released: false, error: '', percent: 0, tiles: 0, ms: 0, revision: 0 },
+    aiRepairRunsInFlight: 0, pendingBrushRepairs: 0, aiRepairLoadWatcher: null,
+    noteAiRepairUsed: () => {}, hasFrameRepairs: () => false, scheduleDustDetection: () => {},
+    DEFAULT_MODEL_URL: '/models/migan.onnx', defaultInferencePreference: () => 'wasm', inpaintBackends: () => ({ webgpu: false }),
+    failLoads: false,
+    fetchModelBytes: async () => { if (context.failLoads) throw new Error('Failed to fetch'); return new Uint8Array(4); },
+    createInpaintSessionInWorker: async (bytes, { prefer }) => ({ provider: prefer, run: async () => {}, release: async () => {} }),
+    getLocalizedText: (key, fallback) => `${key}|${fallback}`, getInterpolatedText: (key, values, fallback) => `${key}|${fallback}`,
+    showToast: message => toasts.push(message),
+  });
+  vm.runInContext(['updateAiRepairUI', 'retouchTabSelected', 'canPaintAiBrush', 'aiBrushTakesStroke', 'ensureAiRepairPreload',
+    'releaseAiRepairSession', 'performAiRepairModelLoad', 'aiRepairLoadArgs'].map(functionSource).join('\n'), context);
+  const loader = createAiModelLoader(context.performAiRepairModelLoad, context.DEFAULT_MODEL_URL);
+  context.loadAiRepairModel = (...args) => { loads.push(JSON.stringify(args)); return loader(...args); };
+  const facts = () => new Set([
+    '#aiBrushEnabled:checked', '#studioTab-repair[aria-selected="true"]',
+    ...[...attributes].map(name => `#aiBrushSection[${name}]`)
+  ]);
+  return { context, elements, attributes, toasts, loads, cursor: () => viewerCursor(facts()) };
+}
+
+{
+  const f = brushFixture(), c = f.context;
+  await c.loadAiRepairModel(c.DEFAULT_MODEL_URL, { prefer: 'wasm', refresh: false });
+  assert.equal(c.aiRepair.status, 'ready');
+  assert.equal(f.cursor(), 'crosshair', 'the armed brush');
+  // Forced release, as #236's idle rule or #241's hidden window makes it.
+  assert.equal(await c.releaseAiRepairSession(), true);
+  assert.equal(c.aiRepair.status, 'idle');
+  assert.notEqual(f.cursor(), 'progress', 'nothing loads: no busy cursor');
+  assert.equal(f.cursor(), 'crosshair');
+  assert.ok(f.elements.dustAiStatus.textContent.startsWith('dustAiStatusIdleRetouch|'),
+    'on Retouch the status line does not say the model loads when Retouch opens');
+  assert.ok(!f.elements.dustAiStatus.textContent.includes('open Retouch'));
+  f.loads.length = 0;
+  assert.equal(c.aiBrushTakesStroke(), true, 'the first stroke is accepted');
+  assert.deepEqual(f.toasts, [], 'without the still-loading toast');
+  assert.equal(JSON.stringify(f.loads), JSON.stringify([JSON.stringify([c.DEFAULT_MODEL_URL, { refresh: false, prefer: 'wasm' }])]),
+    'and the released model starts loading for its repair');
+  await Promise.resolve();
+  await Promise.resolve();
+  // While that load runs the brush waits, and says so.
+  assert.equal(c.aiRepair.status, 'loading');
+  assert.equal(f.cursor(), 'progress', 'a load in flight shows the busy cursor');
+  assert.equal(c.aiBrushTakesStroke(), false);
+  assert.ok(f.toasts.at(-1).startsWith('aiBrushModelLoading|'));
+  await turn();
+  assert.equal(c.aiRepair.status, 'ready');
+  assert.equal(f.cursor(), 'crosshair');
+
+  // A load that fails: an error state, never a busy cursor for the rest of the session.
+  await c.releaseAiRepairSession();
+  c.failLoads = true;
+  f.toasts.length = 0;
+  assert.equal(c.aiBrushTakesStroke(), true);
+  await turn();
+  assert.equal(c.aiRepair.status, 'error');
+  assert.equal(f.cursor(), 'not-allowed', 'a failed model: the brush cannot paint');
+  assert.ok(f.attributes.has('data-model-error') && !f.attributes.has('data-model-pending'));
+  assert.ok(f.elements.dustAiStatus.textContent.startsWith('dustAiStatusError|'));
+  f.loads.length = 0;
+  assert.equal(c.aiBrushTakesStroke(), false, 'a stroke is refused with the reason');
+  assert.ok(f.toasts.at(-1).startsWith('dustAiStatusError|'));
+  assert.equal(f.loads.length, 0, 'and loads nothing on its own');
+  // The brush unchecked: neither state is shown.
+  f.elements.aiBrushEnabled.checked = false;
+  c.updateAiRepairUI();
+  assert.equal(f.attributes.size, 0);
+}
+
+console.log('AI refresh settle: a released model is loaded by the dust brush and its queue drains (a failed load drains it too), so a switch keeps the settled view and history; the repair-stroke mask goes with the photo; an armed AI brush shows no busy cursor after a release and takes its first stroke');

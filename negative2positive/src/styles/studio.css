@@ -141,10 +141,13 @@ body.studio {
 .studio .control-section { border: 0; background: transparent; box-shadow: none; margin-bottom: 8px; }
 .studio .section-header { background: transparent; }
 .studio:has(#aiBrushEnabled:checked):has(#studioTab-repair[aria-selected="true"]) #canvasContainer { cursor: crosshair; }
-/* The brush is disabled until its model is ready; the status line shows the load. */
+/* The brush waits while its model loads; the status line shows the load. */
 .studio:has(#aiBrushSection[data-model-pending]):has(#studioTab-repair[aria-selected="true"]) #canvasContainer { cursor: progress; }
-.studio #aiBrushSection[data-model-pending] #aiBrushSize { opacity: .5; }
+/* After a failed load it cannot paint; the status line says why. */
+.studio:has(#aiBrushSection[data-model-error]):has(#studioTab-repair[aria-selected="true"]) #canvasContainer { cursor: not-allowed; }
+.studio #aiBrushSection:is([data-model-pending], [data-model-error]) #aiBrushSize { opacity: .5; }
 .studio #aiBrushSection[data-model-pending] #dustAiStatus { color: var(--accent); }
+.studio #aiBrushSection[data-model-error] #dustAiStatus { color: var(--danger); }
 .studio #aiBrushSection { padding: 16px; }
 .studio #aiBrushSection .control-group { margin: 0; }
 .studio #aiBrushSection details { margin-top: 12px; }
