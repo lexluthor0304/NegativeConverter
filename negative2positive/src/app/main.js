@@ -17690,17 +17690,64 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       return new ImageData(sourceData.data, sourceData.width, sourceData.height);
     }
 
+    // Whether a dust mask has a pixel set, 32 bits at a time (a few ms at 60 MP).
+    function dustMaskHasPixels(mask) {
+      let i = 0;
+      if (mask.byteOffset % 4 === 0) {
+        const words = new Uint32Array(mask.buffer, mask.byteOffset, mask.length >>> 2);
+        for (; i < words.length; i++) if (words[i]) return true;
+        i = words.length * 4;
+      }
+      for (; i < mask.length; i++) if (mask[i]) return true;
+      return false;
+    }
+
+    // The export waits for the repair model: `onModelLoad(percent)` follows
+    // the load on its overlay and gets null when the wait ends. With `load`
+    // a model that is not loaded is loaded the way inpaintForCommit loads it
+    // (the one #236 or #241 released comes back on its provider), and an
+    // export that cannot get it (offline without a cached model) fails here
+    // rather than shipping TELEA in its place.
+    async function loadAiRepairForExport(onModelLoad, { load = true } = {}) {
+      aiRepairLoadWatcher = () => onModelLoad?.(aiRepair.status === 'loading' ? aiRepair.percent : 0);
+      aiRepairLoadWatcher();
+      try {
+        await settleAiRepairModel({ load });
+      } finally {
+        aiRepairLoadWatcher = null;
+        onModelLoad?.(null);
+      }
+      if (load && aiRepair.status !== 'ready') {
+        const message = aiRepair.error || aiRepair.status;
+        throw new Error(getInterpolatedText('exportAiModelUnavailable', { message },
+          `The AI repair model could not be loaded (${message}), so nothing was exported. Load it in Retouch and export again.`));
+      }
+    }
+
     // The prepare step of a single export: full resolution plus AI/dust repair.
-    async function prepareCurrentImageForExport() {
+    // `onModelLoad` shows a model load it waits for (loadAiRepairForExport).
+    async function prepareCurrentImageForExport({ onModelLoad = null } = {}) {
       await ensureFullResolutionReadyForExport();
       await ensureRepairsReadyForExport();
+      const modelFailed = aiRepair.status === 'error';
+      // A load in flight decides which inpainter the recipe names.
+      if (state.dustRemoval.ai && aiRepair.status === 'loading') await loadAiRepairForExport(onModelLoad, { load: false });
       // A quick export after a stroke must use MI-GAN, not its temporary preview.
       // A committed repair stamped with the current recipe is that result
       // already; only a TELEA stand-in or an outdated result is repaired again.
-      const needsRepair = (aiRepairReady() && state.dustRemoval.enabled && state.dustRemoval.mask) || state.repairStrokes.length;
+      // Strokes patch the repaired image in place (#259), so with AI repair on
+      // the dust is repaired again whether or not its model is loaded (#236
+      // and #241 release it); only a mask with nothing set needs no pass then.
+      const { ai, enabled, mask: dustMask } = state.dustRemoval;
+      const aiDust = Boolean(ai && enabled && dustMask && (aiRepairReady() || dustMaskHasPixels(dustMask)));
+      const needsRepair = aiDust || state.repairStrokes.length;
       if (needsRepair && repairStamps.matches(state.dustRemoval.inpaintedImageData, currentRepairRecipe())) {
         if (state.processedImageData !== state.dustRemoval.inpaintedImageData) applyDustResultToState();
       } else if (needsRepair) {
+        // The pass runs MI-GAN, so a model that is not loaded is loaded first.
+        // One that had failed before leaves TELEA the dust repair, as on
+        // screen (the stroke pass still asks for the model).
+        if (!modelFailed && aiRepair.status !== 'ready') await loadAiRepairForExport(onModelLoad);
         const source = getDustSource();
         const dustEnabled = Boolean(state.dustRemoval.enabled);
         // Brush strokes patch the mask in place, so the pass reads a copy
@@ -17738,8 +17785,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     // The adjust step. `prepared` skips the prepare step a caller already ran.
-    async function renderCurrentImageDataForExport(exportInfo = null, { bridge = null, planeOnly = false, prepared = false } = {}) {
-      if (!prepared) await prepareCurrentImageForExport();
+    async function renderCurrentImageDataForExport(exportInfo = null, { bridge = null, planeOnly = false, prepared = false, onModelLoad = null } = {}) {
+      if (!prepared) await prepareCurrentImageForExport({ onModelLoad });
       const imageData = await getCurrentExportImageData({ bitDepth: exportInfo?.bitDepth || 8, bridge, planeOnly });
       if (!imageData) throw new Error('No image available for export.');
       if (exportInfo?.format === 'jpeg' && safeStorageGet('nc_hdr_gain_map_v1') !== 'off' && state.processedImageData?.__image16) {
@@ -17794,12 +17841,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // `png16Pool` (#257): a PNG16 is encoded by the band pool from the
     // adjusted plane instead of the fused request; `signal` cancels the
     // worker requests from the encode on.
-    async function renderAndEncodeCurrentImage(exportInfo, { bridge, png16Pool = null, signal = null, metadata = null, onProgress = null, onEncoding = null, transferPlanes = true, ownedPlanes = [] }) {
+    async function renderAndEncodeCurrentImage(exportInfo, { bridge, png16Pool = null, signal = null, metadata = null, onProgress = null, onEncoding = null, onModelLoad = null, transferPlanes = true, ownedPlanes = [] }) {
       const planeOnly = exportInfo.bitDepth === 16 && (exportInfo.format === 'tiff' || exportInfo.format === 'png')
         && !state.exportSprocketHolesEnabled;
       const fused = planeOnly && (exportInfo.format === 'tiff' || !png16Pool);
       if (fused) {
-        await prepareCurrentImageForExport();
+        await prepareCurrentImageForExport({ onModelLoad });
         // getCurrentExportImageData's 16-bit trigger: the editor's plane is
         // sent as a sliced copy (it belongs to the editor).
         if (state.currentStep >= 3 && state.processedImageData?.__image16) {
@@ -17808,7 +17855,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           if (blob) return blob;
         }
       }
-      const imageData = await renderCurrentImageDataForExport(exportInfo, { bridge, planeOnly, prepared: fused });
+      const imageData = await renderCurrentImageDataForExport(exportInfo, { bridge, planeOnly, prepared: fused, onModelLoad });
       ownedPlanes.push(imageData);
       const outputImageData = await applySprocketFrameForExport(imageData, exportInfo);
       if (outputImageData !== imageData) ownedPlanes.push(outputImageData);
@@ -17974,7 +18021,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
               if (full) overlay.updateProgress(60, lang.loadingEncoding);
               allowCancel();
             },
-            onProgress: (pct) => overlay.updateProgress(start + pct * span, lang.loadingEncoding)
+            onProgress: (pct) => overlay.updateProgress(start + pct * span, lang.loadingEncoding),
+            // A repair model the export loads (#236 and #241 release it).
+            onModelLoad: (percent) => overlay.updateProgress(full ? 5 : 50, percent !== null
+              ? `${getLocalizedText('exportAiModelLoading', 'Loading the AI repair model…')}${percent > 0 ? ` ${percent}%` : ''}`
+              : full ? lang.loadingAdjusting : lang.loadingEncoding)
           });
           try {
             blob = await render(true);
@@ -24418,6 +24469,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     });
     let pendingBrushRepairs = 0;
     let aiRepairRunsInFlight = 0;
+    // Follows a model load an export waits for (loadAiRepairForExport).
+    let aiRepairLoadWatcher = null;
 
     // Hidden-window shedding (#241): a warmed MI-GAN session holds 0.6-0.8 GB
     // of WASM heap in WKWebView. Release it while no run, brush repair or dust
@@ -24691,6 +24744,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     function updateAiRepairUI() {
+      aiRepairLoadWatcher?.();
       const status = document.getElementById('dustAiStatus');
       const enabled = document.getElementById('dustAiEnabled');
       const loadBtn = document.getElementById('dustAiLoadBtn');

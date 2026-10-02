@@ -200,7 +200,7 @@ function createContext({ gainMap = 'on' } = {}) {
     saveBlob: async (blob) => { saved.push(blob); return { saved: true }; },
     learnFromExport: async () => {},
     ensureFullResolutionReadyForExport: async () => {}, ensureRepairsReadyForExport: async () => {},
-    aiRepairReady: () => false,
+    aiRepairReady: () => false, aiRepair: { status: 'idle', revision: 0 },
     isWebGLActive: () => true,
     safeStorageGet: (key) => (key === 'nc_hdr_gain_map_v1' ? gainMap : null),
     buildAdjustmentSettings: (settings) => (settings === state ? state.recipe : settings.recipe),

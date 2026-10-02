@@ -75,7 +75,7 @@ function fixture() {
     aiRepair: { status: 'ready', revision: 4, run() {}, release: async () => {}, trim: null, resident: null,
       provider: 'wasm', prefer: 'wasm', source: 'migan_pipeline_v2.onnx', sourceRef: MODEL_URL, released: false,
       error: '', percent: 0, tiles: 0, ms: 0 },
-    aiRepairRunsInFlight: 0, DEFAULT_MODEL_URL: MODEL_URL, File: globalThis.File,
+    aiRepairRunsInFlight: 0, aiRepairLoadWatcher: null, DEFAULT_MODEL_URL: MODEL_URL, File: globalThis.File,
     updateAiRepairUI() {}, noteAiRepairUsed() {}, scheduleDustDetection() {},
     defaultInferencePreference: () => 'wasm',
     fetchModelBytes: async () => new Uint8Array(4),
@@ -83,6 +83,7 @@ function fixture() {
       calls.loads++;
       return { provider, run() {}, release: async () => {} };
     },
+    getInterpolatedText: (key, values, fallback) => fallback,
     repairStamps: createRepairStamps(), sameRepairStrokes, captureDustPass, dustPassMatches, restoreDustPass,
     dustMaskInfo: (mask) => infos.get(mask) || null,
     assertRepairCurrent(isCurrent) { if (!isCurrent()) throw new DOMException('Repair superseded', 'AbortError'); },
@@ -94,8 +95,8 @@ function fixture() {
     dustMaxParticleSizeFor: () => 40,
     detectDustOffMainThread: async () => { calls.detect++; return { mask: detectedMask(), particleCount: 2, _state: null }; },
     // Dust pass: changes pixels inside the mask's blocks only, as MI-GAN and
-    // TELEA do. A brush stroke can land while it runs
-    // (`strokeDuringNextDustPass`), between two of its tiles.
+    // TELEA do, and fills every mask pixel. A brush stroke can land while it
+    // runs (`strokeDuringNextDustPass`), between two of its tiles.
     async inpaintForCommit(input, mask, isCurrent, worker, { report } = {}) {
       if (duringDustPass) { const stroke = duringDustPass; duringDustPass = null; stroke(mask); }
       calls.dust++;
@@ -107,9 +108,12 @@ function fixture() {
         out.data[(y * W + x) * 4] ^= usedAi ? 0x55 : 0x33;
         out.__image16.data[(y * W + x) * 4 + 1] ^= usedAi ? 0x5555 : 0x3333;
       }
+      for (let i = 0; i < mask.length; i++) if (mask[i]) out.data[i * 4 + 1] = usedAi ? 200 : 100;
       return out;
     },
-    async inpaintManualBrush(input) {
+    // Without repair strokes the stroke pass returns its input, as it does.
+    async inpaintManualBrush(input, settings = state) {
+      if (!settings.repairStrokes?.length) return input;
       calls.strokes++;
       calls.strokeInputs.push(input);
       if (bumpDuringStrokes) { bumpDuringStrokes = false; c.aiRepair.revision++; }
@@ -128,7 +132,7 @@ function fixture() {
   vm.runInContext([...DISPLAY_SESSION_HELPERS, 'getDustSource', 'nextDustMaskTag', 'noteDustReplaced', 'hasFrameRepairs', 'isCurrentLoad', 'currentRepairRecipe',
     'stampRepairResult', 'carryRestoredRepairStamp', 'commitDustPass', 'aiRepairReady', 'dustPassUsesAi',
     'applyDustResultToState', 'runDustDetection', 'runDustDetectionPass', 'prepareCurrentImageForExport', 'renderCurrentImageDataForExport',
-    'ensureRepairsReadyForExport', 'dustMaskIsStale', 'whenBrushRepairsSettled',
+    'ensureRepairsReadyForExport', 'dustMaskIsStale', 'whenBrushRepairsSettled', 'dustMaskHasPixels', 'loadAiRepairForExport',
     'settleAiRepairModel', 'releaseAiRepairSession', 'aiRepairLoadArgs', 'performAiRepairModelLoad'].map(functionSource).join('\n'), c);
   c.loadAiRepairModel = createAiModelLoader(c.performAiRepairModelLoad, MODEL_URL, value => value instanceof File);
   return { c, state, clean, lens, calls, detectedMask, infos, bumpNextStrokePass: () => { bumpDuringStrokes = true; },
@@ -263,6 +267,47 @@ for (const [label, mutate, rerun] of negatives) {
   assert.deepEqual(counts(f), { dust: 1, strokes: 2 }, 'different strokes are repaired again, on the kept dust pass');
 }
 
+// #236's idle release and #241's hidden-window release drop the MI-GAN
+// session (no run, status 'idle') under the same revision. A dust-brush
+// stroke had patched the settled repair in place (#259): the export loads
+// the released model again and repairs from scratch, and its pixels equal
+// what a ready model exports for the same mask and strokes.
+{
+  // As commitDustStroke: a TELEA stand-in at the speck, the mask refined in
+  // place, both summaries forgotten and the dust revision moved.
+  const brush = (f) => {
+    const { mask, inpaintedImageData: target } = f.state.dustRemoval;
+    f.c.repairStamps.forget(target);
+    f.infos.delete(mask);
+    mask[20 * W + 30] = 255;
+    target.data[(20 * W + 30) * 4 + 1] = 7;
+    target.__image16.data[(20 * W + 30) * 4 + 1] = 7 * 257;
+    f.state.dustRemoval.revision++;
+  };
+  const exportAfterStroke = async (release) => {
+    const f = fixture();
+    f.state.repairStrokes = [];
+    await f.c.runDustDetection();
+    brush(f);
+    const patched = copy(f.state.dustRemoval.inpaintedImageData);
+    if (release) assert.equal(await f.c.releaseAiRepairSession(), true);
+    return { f, patched, exported: await f.exportImage() };
+  };
+  const ready = await exportAfterStroke(false);
+  const released = await exportAfterStroke(true);
+  assert.equal(ready.f.calls.loads, 0);
+  assert.equal(released.f.calls.loads, 1, 'the export loads the released model again');
+  assert.equal(released.f.c.aiRepair.status, 'ready');
+  assert.equal(released.f.c.aiRepair.revision, 4, 'the same model on its provider, under its revision');
+  assert.deepEqual([released.f.calls.dust, ready.f.calls.dust], [2, 2], 'both export a from-scratch dust pass');
+  assert.notDeepEqual(released.exported.data, released.patched.data, 'never the stroke-patched buffer');
+  assert.deepEqual(released.exported.data, ready.exported.data, '8-bit pixels of a ready model\'s export');
+  assert.deepEqual(released.exported.__image16.data, ready.exported.__image16.data, '16-bit pixels too');
+  assert.equal(released.exported.data[(20 * W + 30) * 4 + 1], 200, 'the refined speck is MI-GAN\'s, not TELEA\'s');
+  await released.f.exportImage();
+  assert.equal(released.f.calls.dust, 2, 'the from-scratch result is stamped for the next export');
+}
+
 // A release keeps the revision, so a settled repair is still the result of
 // the inpainter its recipe names: export takes it without a load or an
 // inference, and a fresh detection of the same content restores the kept
@@ -314,4 +359,4 @@ for (const [label, mutate, rerun] of negatives) {
   assert.notEqual(f.c.dustPassCache, null, 'which is kept');
 }
 
-console.log('repairCommitReuse: settled commits export with 0 passes; unchanged dust content skips the dust pass; recipe changes, reloads and stand-ins re-run; a released model reuses settled work; a stroke during a dust pass leaves nothing kept');
+console.log('repairCommitReuse: settled commits export with 0 passes; unchanged dust content skips the dust pass; recipe changes, reloads and stand-ins re-run; a released model exports from scratch after a stroke and reuses settled work; a stroke during a dust pass leaves nothing kept');

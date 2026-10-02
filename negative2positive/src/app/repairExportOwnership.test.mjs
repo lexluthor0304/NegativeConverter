@@ -22,7 +22,7 @@ function deferred() {
 const noop = () => {};
 const image = () => ({ width: 4, height: 4, data: new Uint8ClampedArray(64) });
 
-function fixture({ enabled = false, mask = null } = {}) {
+function fixture({ enabled = false, mask = null, model = null } = {}) {
   const clean = image(), repaired = image();
   const state = {
     originalImageData: image(), conversionSourceImageData: image(),
@@ -33,6 +33,7 @@ function fixture({ enabled = false, mask = null } = {}) {
       processing: false, strength: 3, particleCount: 0, _state: null, revision: 0, maskTag: null },
   };
   const commits = [], manualCalls = [], observers = [], timers = new Map(), backgroundRuns = [], exportReads = [];
+  const dustPasses = [], loadRequests = [];
   let timerId = 0;
   const c = vm.createContext({
     // #249: no photo here takes a display form.
@@ -45,7 +46,11 @@ function fixture({ enabled = false, mask = null } = {}) {
     state, coreReprocessToken: 7, dustDetectionRevision: 11, loadGeneration: 3,
     dustDetectionTimer: null, Uint8Array, dustMaskTagSequence: 0, dustAiRefresh: { rects: [] },
     syncDustWorkerPin: noop,
-    aiRepair: { status: 'ready', revision: 5 }, repairStamps: createRepairStamps(), dustPassCache: null,
+    aiRepair: model || { status: 'ready', revision: 5 }, repairStamps: createRepairStamps(), dustPassCache: null,
+    aiRepairLoadWatcher: null, DEFAULT_MODEL_URL: '/m.onnx',
+    getInterpolatedText: (key, values, fallback) => fallback,
+    // A case with a `model` loads it through here (#236/#241 released it).
+    loadAiRepairModel: async (...args) => { loadRequests.push(args); },
     dustMaskInfo: () => null, captureDustPass, dustPassMatches, restoreDustPass,
     assertRepairCurrent(isCurrent) { if (!isCurrent()) throw new DOMException('Repair superseded', 'AbortError'); },
     console: { error: (...args) => assert.fail(`Unexpected background error: ${args.join(' ')}`) },
@@ -54,8 +59,10 @@ function fixture({ enabled = false, mask = null } = {}) {
     // here export and detection deliberately overlap.
     ensureRepairsReadyForExport: async () => {},
     dustDetectionRun: null, dustMaskSources: new WeakMap(), rememberRepairMasks: noop,
-    aiRepairReady: () => true,
+    // A case with a `model` runs the real aiRepairReady on it.
+    ...(model ? {} : { aiRepairReady: () => true }),
     inpaintForCommit: async (input, passMask) => {
+      dustPasses.push(passMask);
       // Brushes patch the mask in place: the pass must read its own copy.
       if (state.dustRemoval.mask) assert.notEqual(passMask, state.dustRemoval.mask);
       if (passMask) assert.deepEqual(passMask, state.dustRemoval.mask);
@@ -86,7 +93,8 @@ function fixture({ enabled = false, mask = null } = {}) {
   vm.runInContext([...DISPLAY_SESSION_HELPERS, 'getDustSource', 'nextDustMaskTag', 'noteDustReplaced', 'hasFrameRepairs', 'isCurrentLoad',
     'currentRepairRecipe', 'stampRepairResult', 'commitDustPass', 'dustPassUsesAi',
     'applyDustResultToState', 'runDustDetection', 'runDustDetectionPass', 'scheduleDustDetection',
-    'prepareCurrentImageForExport', 'renderCurrentImageDataForExport'].map(functionSource).join('\n'), c);
+    'prepareCurrentImageForExport', 'renderCurrentImageDataForExport', 'dustMaskHasPixels', 'loadAiRepairForExport',
+    'settleAiRepairModel', 'aiRepairLoadArgs', ...(model ? ['aiRepairReady'] : [])].map(functionSource).join('\n'), c);
   const actualRunDustDetection = c.runDustDetection;
   c.runDustDetection = () => {
     const pending = actualRunDustDetection(); backgroundRuns.push(pending); return pending;
@@ -106,7 +114,7 @@ function fixture({ enabled = false, mask = null } = {}) {
     timers.delete(id); callback();
     return { call: await started, completion: backgroundRuns.at(-1) };
   };
-  return { c, state, clean, repaired, commits, manualCalls, timers, exportReads, startExport, startScheduledDetection };
+  return { c, state, clean, repaired, commits, manualCalls, timers, exportReads, dustPasses, loadRequests, startExport, startScheduledDetection };
 }
 
 // A manual brush schedules detection even with automatic dust removal off.
@@ -164,4 +172,75 @@ for (const [label, enabled, mutate] of mutations) {
   assert.equal(f.state.dustRemoval.inpaintedImageData, null, `${label}: state is not stamped with stale repair`);
 }
 
-console.log('repairExportOwnership: scheduled manual-only zero-mask refresh is safe in both completion orders; genuine source/token/stroke/dust-mask/mode changes reject without stale commits');
+// AI repair on with its model released by #236's idle rule or #241's hidden
+// window (status 'idle', no run): the real aiRepairReady says no, yet the
+// model is still the repair's inpainter. A dust-brush stroke left the repair
+// patched in place and unstamped (#259), so the export loads the released
+// model on its provider, shows the load, and repairs from scratch over its
+// own copy of the mask; it never encodes the patched image.
+const releasedModel = () => ({ status: 'idle', released: true, run: null, revision: 5, provider: 'wasm',
+  prefer: 'wasm', sourceRef: '/m.onnx', error: '', percent: 0 });
+function releasedFixture() {
+  const mask = new Uint8Array(16);
+  mask[5] = 255;
+  const f = fixture({ enabled: true, mask, model: releasedModel() });
+  f.state.dustRemoval.ai = true;
+  f.state.repairStrokes = [];
+  const patched = image();
+  f.state.dustRemoval.inpaintedImageData = f.state.processedImageData = patched;
+  return { f, patched };
+}
+{
+  const { f, patched } = releasedFixture();
+  assert.equal(f.c.aiRepairReady(), false, 'the real check: a released model is not ready');
+  f.c.loadAiRepairModel = async (...args) => {
+    f.loadRequests.push(args);
+    Object.assign(f.c.aiRepair, { status: 'ready', run() {}, released: false });
+  };
+  const progress = [];
+  const started = new Promise(resolve => { f.c.inpaintManualBrush = (input) => { resolve(input); return Promise.resolve(f.repaired); }; });
+  const value = await f.c.renderCurrentImageDataForExport({ format: 'png', bitDepth: 8 }, { onModelLoad: percent => progress.push(percent) });
+  assert.equal(JSON.stringify(f.loadRequests), JSON.stringify([['/m.onnx', { refresh: false, prefer: 'wasm' }]]), 'the released model, on its provider');
+  assert.deepEqual(progress, [0, null], 'the load shows on the export overlay');
+  assert.equal(f.dustPasses.length, 1, 'a from-scratch dust pass');
+  assert.notEqual(f.dustPasses[0], f.state.dustRemoval.mask, 'over a copy of the mask');
+  assert.deepEqual([...f.dustPasses[0]], [...f.state.dustRemoval.mask]);
+  assert.equal(await started, f.clean, 'the stroke pass takes the dust pass result');
+  assert.equal(value, f.repaired, 'the export encodes the from-scratch repair');
+  assert.notEqual(value, patched, 'not the stroke-patched image');
+  assert.equal(f.state.dustRemoval.inpaintedImageData, f.repaired);
+  assert.equal(f.c.repairStamps.recipeOf(f.repaired)?.revision, 5, 'stamped under the revision it ran with');
+}
+
+// Offline without a cached model the load fails: the export stops with a
+// clear error before any pass, and nothing (no TELEA stand-in) is committed.
+{
+  const { f, patched } = releasedFixture();
+  f.c.loadAiRepairModel = async (...args) => {
+    f.loadRequests.push(args);
+    Object.assign(f.c.aiRepair, { status: 'error', error: 'Failed to fetch', released: false });
+  };
+  f.c.inpaintManualBrush = () => assert.fail('no stroke pass without the model');
+  await assert.rejects(f.c.renderCurrentImageDataForExport({ format: 'png', bitDepth: 8 }),
+    /AI repair model could not be loaded \(Failed to fetch\), so nothing was exported/);
+  assert.equal(f.loadRequests.length, 1);
+  assert.equal(f.dustPasses.length, 0, 'no TELEA pass in its place');
+  assert.deepEqual([f.commits.length, f.exportReads.length], [0, 0], 'nothing committed or encoded');
+  assert.equal(f.state.dustRemoval.inpaintedImageData, patched);
+}
+
+// A model that had failed before the export (status 'error', TELEA on
+// screen) is not loaded for the dust: TELEA is that repair, run from scratch
+// over a copy of the mask instead of encoding the patched image.
+{
+  const { f, patched } = releasedFixture();
+  Object.assign(f.c.aiRepair, { status: 'error', released: false, error: 'bad model' });
+  f.c.inpaintManualBrush = (input) => Promise.resolve(input === f.clean ? f.repaired : null);
+  const value = await f.c.renderCurrentImageDataForExport({ format: 'png', bitDepth: 8 });
+  assert.equal(f.loadRequests.length, 0, 'no load for the dust');
+  assert.equal(f.dustPasses.length, 1, 'a from-scratch pass');
+  assert.equal(value, f.repaired);
+  assert.notEqual(value, patched);
+}
+
+console.log('repairExportOwnership: scheduled manual-only zero-mask refresh is safe in both completion orders; genuine source/token/stroke/dust-mask/mode changes reject without stale commits; a released model is loaded again and repairs from scratch, or the export fails clearly; a failed model repairs with TELEA from scratch');
