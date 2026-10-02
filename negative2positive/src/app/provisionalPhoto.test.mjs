@@ -6,11 +6,12 @@
 //   drawn in the window converts to full units once; the swap re-converts a
 //   converted crop against the real full size and keeps a saved one;
 // - window edits: what the user changed wins, automatic values come from the
-//   full decode, white balance only when the user took it over.
+//   full decode, white balance only when the user took it over; Apply Crop
+//   and Confirm image area (autoFrameMeta's analysis fields) count as edits.
 import assert from 'node:assert/strict';
 import {
   twoStageMinPixels, stageTwoStartMode, projectCropRegion, geometryFrame, createExactGeometry,
-  windowEditKeys, windowEdits, overlayWindowEdits, geometryEdits, hasWindowEdits, sameGeometry
+  windowEditKeys, windowEdits, overlayWindowEdits, geometryEdits, hasWindowEdits, sameGeometry, analysisAreaEdited, confirmedImageArea
 } from './provisionalPhoto.js';
 import { sanitizeCropRect } from './imageGeometry.js';
 
@@ -171,4 +172,34 @@ for (const settings of saved) {
     { cropRegion: null, rotationAngle: 90, mirrored: false, autoFrameMeta: null });
 }
 
-console.log('Provisional window: flag, start mode, exact crop units, convert-once edits and window edit merge passed');
+// ---- the analysis area (#255 review R2-052) ---------------------------------------------------
+// Apply Crop and Confirm image area change autoFrameMeta's analysis fields,
+// with or without the geometry: a window edit of its own. A later conversion
+// or the restore's normalisation (missing flags read as false) is none.
+{
+  const area = [{ x: 0.1, y: 0.1 }, { x: 0.9, y: 0.1 }, { x: 0.9, y: 0.9 }, { x: 0.1, y: 0.9 }];
+  const meta = { confidence: 0.9, method: 'hough', appliedMode: 'crop', importAuto: true, imageArea: area };
+  const settled = { cropRegion: { left: 10, top: 10, width: 100, height: 80 }, rotationAngle: 0.4, mirrored: false, autoFrameMeta: meta, coreExposure: 0 };
+  const withMeta = changes => ({ ...structuredClone(settled), autoFrameMeta: { ...structuredClone(meta), ...changes } });
+  assert.equal(analysisAreaEdited(settled, withMeta({ analysisNeedsReview: false, frameIncomplete: false, analysisArea: null })), false, 'normalised, unchanged');
+  assert.equal(analysisAreaEdited(settled, withMeta({ confidence: 0.5, appliedMode: 'none' })), false, 'the detection\'s own fields');
+  assert.equal(analysisAreaEdited(settled, { ...structuredClone(settled), autoFrameMeta: null }), false);
+  const confirmedArea = [{ x: 0.2, y: 0.2 }, { x: 0.6, y: 0.2 }, { x: 0.6, y: 0.7 }, { x: 0.2, y: 0.7 }];
+  const confirmed = withMeta({ imageArea: confirmedArea, method: 'manual-analysis-area', analysisNeedsReview: false, frameIncomplete: false, analysisArea: area });
+  assert.equal(analysisAreaEdited(settled, confirmed), true);
+  assert.deepEqual(windowEditKeys(settled, confirmed), ['autoFrameMeta'], 'Confirm image area alone is a window edit');
+  assert.deepEqual(windowEdits(settled, confirmed).autoFrameMeta.imageArea, confirmedArea);
+  assert.deepEqual(confirmedImageArea(confirmed), { imageArea: confirmedArea, analysisNeedsReview: false });
+  assert.equal(analysisAreaEdited(confirmed, structuredClone(confirmed)), false, 'confirmed before the window: no edit of this one');
+  // A crop the confirmed area is not the frame of, applied after it.
+  assert.equal(confirmedImageArea(withMeta({ imageArea: confirmedArea, method: 'manual-analysis-area', analysisNeedsReview: true })).analysisNeedsReview, true);
+  // Apply Crop: the miss outcome, then (or not) the detection's hit.
+  const applied = withMeta({ analysisNeedsReview: true, analysisArea: area });
+  assert.equal(analysisAreaEdited(settled, applied), true);
+  assert.equal(confirmedImageArea(applied), null);
+  assert.equal(confirmedImageArea(withMeta({ imageArea: confirmedArea, method: 'manual-image-window' })), null, 'a detected area is no confirmed one');
+  applied.cropRegion = { left: 20, top: 10, width: 90, height: 80 };
+  assert.deepEqual(windowEditKeys(settled, applied).sort(), ['autoFrameMeta', 'cropRegion', 'mirrored', 'rotationAngle']);
+}
+
+console.log('Provisional window: flag, start mode, exact crop units, convert-once edits, window edit merge and analysis-area edits passed');

@@ -155,7 +155,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     import { imagePixelsForBatch, imagePixelsWithSiblings, importPixelsForRoll, rememberImageDimensions, knownImageDimensions, rawDecodePlan } from './imageDimensions.js';
     import {
       TWO_STAGE_MIN_MP_DEFAULT, twoStageMinPixels, stageTwoStartMode, createExactGeometry, windowEdits, overlayWindowEdits,
-      geometryEdits, hasWindowEdits
+      geometryEdits, hasWindowEdits, analysisAreaEdited, confirmedImageArea
     } from './provisionalPhoto.js';
     import { buildRollAnalysisSample as buildRollAnalysisSampleOf, buildRollSample as buildRollSampleOf, rollSampleSettings } from './rollSample.js';
     import {
@@ -13089,18 +13089,20 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     // Waits until the swap can land without cutting into an interaction: the
-    // stand-in's own pass is over, no crop draft is open, no conversion,
-    // geometry build or crop-area detection is running, and (unless an exact
-    // consumer is waiting) no input came for the background gate's quiet
-    // period, so the rebuild never lands inside a drag.
+    // stand-in's own pass is over, no crop draft is open, no conversion or
+    // geometry build is running, and (unless an exact consumer is waiting) no
+    // input came for the background gate's quiet period, so the rebuild never
+    // lands inside a drag. A crop-area detection of a crop applied here
+    // measures the stand-in's sample: it ends, and the swap runs it again on
+    // the full base (installFullDecode).
     async function waitForProvisionalSwap(record, provisional, current) {
       for (;;) {
         if (!current()) return;
         if (provisional.passDone) { await provisional.passDone; continue; }
         if (state.cropping) { await whenCropModeClosed(); continue; }
+        if (hasPendingCropDetection()) { cancelCropDetection(); continue; }
         if (processNegativeInFlight) { await processNegativeInFlight.catch(() => {}); continue; }
         if (state.geometryPending) { await whenGeometrySettled(); continue; }
-        if (hasPendingCropDetection()) { await settlePendingCropDetection(); continue; }
         if (!record.urgent) {
           const quiet = BACKGROUND_INPUT_QUIET_MS - (performance.now() - backgroundGate.lastInputAt);
           const busy = coreReprocessBusy() || Boolean(coreReprocessTimer) || dustDrawing || Boolean(aiBrushDrawing);
@@ -13188,6 +13190,36 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       updateUndoRedoButtons();
     }
 
+    // The window's autoFrameMeta on the full decode (#255 review R2-052).
+    // The stand-in's auto-frame result and crop-area detections were
+    // provisional: this is the full decode's (`settled`) with what the user
+    // did in the window replayed on the full base. Restore full frame keeps
+    // its mode. Apply Crop and Confirm image area are applied again by
+    // appliedCropDiagnostics, the frame they replaced being the settled one:
+    // an image area the user confirmed keeps its fractions of the base (the
+    // same area on both decodes); a crop (`merged`, in full units) that is
+    // not the image area's frame gets the miss outcome, and `detect` asks for
+    // its crop-area detection on the installed base.
+    function windowFrameMetaOnFull(settled, merged, baseline, live, base) {
+      const before = baseline.autoFrameMeta || null, now = live.autoFrameMeta || null;
+      let meta = settled.autoFrameMeta ? structuredClone(settled.autoFrameMeta) : null;
+      if (meta && before && now && now.appliedMode !== before.appliedMode) meta.appliedMode = now.appliedMode;
+      if (!analysisAreaEdited(baseline, live)) return { meta, detect: false };
+      const previous = {
+        rotationAngle: settled.rotationAngle, mirrored: settled.mirrored, cropRegion: settled.cropRegion,
+        frame: geometryFrameSize(base, settled.rotationAngle)
+      };
+      let applied = { meta, detect: false };
+      const confirmed = confirmedImageArea(live);
+      if (confirmed) applied = appliedCropDiagnostics(applied.meta, { selectedArea: confirmed.imageArea, base, previous, analysisOnly: true });
+      // A crop: the last Apply, or one after the confirmed area that was not
+      // its frame.
+      if ((!confirmed || confirmed.analysisNeedsReview) && merged.cropRegion) {
+        applied = appliedCropDiagnostics(applied.meta, { selectedArea: imageAreaFromWorkingRect(merged.cropRegion, merged, base), base, previous });
+      }
+      return applied;
+    }
+
     // The swap, in one task: the user's window edits over `settled`, the
     // history rebased, the full base installed and its geometry started in
     // the pool (no studioBusy, the stand-in stays on screen until it lands).
@@ -13199,6 +13231,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const edits = provisional.settledSnapshot ? windowEdits(provisional.settledSnapshot, live) : {};
       if ('cropRegion' in edits) Object.assign(edits, provisional.geometry.rebase(realSize, liveGeometry()));
       const merged = overlayWindowEdits(settled, edits);
+      let detectCrop = false;
+      if ('autoFrameMeta' in edits) {
+        ({ meta: merged.autoFrameMeta, detect: detectCrop } = windowFrameMetaOnFull(settled, merged, provisional.settledSnapshot, live, image));
+        edits.autoFrameMeta = merged.autoFrameMeta ? structuredClone(merged.autoFrameMeta) : null;
+      }
       rebaseProvisionalHistory(provisional, realSize);
       provisional.swapped = true;
       provisional.swapEdits = edits;
@@ -13222,6 +13259,14 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const step2Mode = state.step2Mode;
       restoreSettings(merged, { refreshDisplay: false, holdBusy: false });
       state.step2Mode = step2Mode;
+      // A crop applied in the window: its crop-area detection, as Apply starts
+      // it, on the installed base and the diagnostics just installed.
+      if (detectCrop && state.cropRegion) {
+        startCropDetection({
+          meta: state.autoFrame.lastDiagnostics, base: image, frame: geometryFrameSize(image, state.rotationAngle),
+          cropRegion: { ...state.cropRegion }, ready: whenGeometrySettled()
+        });
+      }
       provisional.swapBaseline = extractCurrentSettings();
       noteFullDecodeChange(record);
     }
@@ -13267,6 +13312,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           const sourceData = state.croppedImageData || state.originalImageData;
           if (sourceData) { displayNegative(sourceData); updateCanvasVisibility(); }
         }
+        if (!current()) return;
+        // The crop-area detection of a window crop (a hit converts again):
+        // the photo is exact once it has landed.
+        await settlePendingCropDetection();
         if (!current()) return;
         trace.mark('converted');
         record.status = 'installed';
@@ -17199,6 +17248,33 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       }
     }
 
+    // The diagnostics Apply installs (#245) over the photo's `meta`. The frame
+    // it replaces (`previous`: the crop, or the whole working `frame`, and the
+    // geometry on `base`) is kept as the analysis area an uncertain
+    // re-detection falls back to, once. Confirm image area (`analysisOnly`)
+    // makes `selectedArea` the image area; a crop whose frame is not the
+    // stored image area gets the miss outcome, and `detect` asks for the
+    // crop-area detection that may replace it. The two-stage swap applies a
+    // window's crop on the full base with it (#255).
+    function appliedCropDiagnostics(meta, { selectedArea, base, previous, analysisOnly = false }) {
+      const nextMeta = structuredClone(meta || {});
+      // 不確かな再検出では前回の解析範囲・WB を維持する。
+      nextMeta.analysisArea ||= imageAreaFromWorkingRect(previous.cropRegion || { left: 0, top: 0, width: previous.frame.width, height: previous.frame.height }, previous, base);
+      let detect = false;
+      if (analysisOnly) {
+        nextMeta.imageArea = selectedArea;
+        nextMeta.analysisNeedsReview = false;
+        nextMeta.frameIncomplete = false;
+        nextMeta.method = 'manual-analysis-area';
+      } else if (!isSameAnalysisFrame(nextMeta.imageArea, selectedArea)) {
+        // The miss outcome until the detection says otherwise.
+        nextMeta.analysisNeedsReview = true;
+        detect = true;
+      }
+      nextMeta.importAuto = true;
+      return { meta: nextMeta, detect };
+    }
+
     applyCropBtn.addEventListener('click', async () => {
       const draft = state.cropDraft;
       if (!draft || !draft.sourceImageData || studioAutoFrameRunning) return;
@@ -17246,22 +17322,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         ), draftFrame, frame);
         if (!cropRegion) return;
 
-        const selectedArea = imageAreaFromWorkingRect(cropRegion, nextGeometry, base);
-        const nextMeta = structuredClone(state.autoFrame.lastDiagnostics || {});
-        // 不確かな再検出では前回の解析範囲・WB を維持する。
-        nextMeta.analysisArea ||= imageAreaFromWorkingRect(state.cropRegion || { left: 0, top: 0, width: state.originalImageData.width, height: state.originalImageData.height }, state, base);
-        let detect = false;
-        if (draft.analysisOnly) {
-          nextMeta.imageArea = selectedArea;
-          nextMeta.analysisNeedsReview = false;
-          nextMeta.frameIncomplete = false;
-          nextMeta.method = 'manual-analysis-area';
-        } else if (!isSameAnalysisFrame(nextMeta.imageArea, selectedArea)) {
-          // The miss outcome until the detection says otherwise.
-          nextMeta.analysisNeedsReview = true;
-          detect = true;
-        }
-        nextMeta.importAuto = true;
+        const { meta: nextMeta, detect } = appliedCropDiagnostics(state.autoFrame.lastDiagnostics, {
+          selectedArea: imageAreaFromWorkingRect(cropRegion, nextGeometry, base), base, analysisOnly: draft.analysisOnly,
+          previous: { rotationAngle: state.rotationAngle, mirrored: state.mirrored, cropRegion: state.cropRegion, frame: state.originalImageData }
+        });
 
         pushUndo('crop');
         state.autoFrame.lastDiagnostics = nextMeta;

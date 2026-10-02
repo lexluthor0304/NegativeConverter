@@ -24,8 +24,11 @@
 // - Analyze roll, Auto Frame Selected, Apply film type to roll and Save
 //   Project clicked in the window wait for the exact photo and end as on one
 //   decode; crop mode and the automatic roll import still complete;
-// - Apply flat field to selected in the window measures new photos'
-//   defaults on the full decode, as one decode does (control without the fix).
+// - Confirm image area on the stand-in survives the swap over the full
+//   decode's diagnostics; a crop applied there is detected again on the
+//   installed base (the stand-in's detection ends or its hit is dropped);
+//   Apply flat field to selected measures new photos' defaults on the full
+//   decode. Each as on one decode, each with a control without the fix.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
@@ -33,8 +36,10 @@ import { createSharedDecodes } from './sharedDecodes.js';
 import { rawDecodePlan } from './imageDimensions.js';
 import {
   TWO_STAGE_MIN_MP_DEFAULT, twoStageMinPixels, stageTwoStartMode, createExactGeometry, windowEdits, overlayWindowEdits,
-  geometryEdits, hasWindowEdits
+  geometryEdits, hasWindowEdits, analysisAreaEdited, confirmedImageArea
 } from './provisionalPhoto.js';
+import { imageAreaFromWorkingRect, imageAreaFromDetection, resolveAnalysisRegion } from './analysisRegion.js';
+import { isSameAnalysisFrame } from './cropColorAnalysis.js';
 import { rotatedDimensions, sanitizeCropRect, normalizeAngleDegrees } from './imageGeometry.js';
 import { mergeStudioColors } from './studioSettings.js';
 import { MEMORY_FUNCTIONS, memoryGlobals } from './memoryHarness.mjs';
@@ -122,6 +127,7 @@ function fixture({ search = '?twoStageMinMp=40&twoStageMode=sequential', settled
     createPerfTrace: () => ({ mark() {}, end() {} }),
     rawDecodePlan, twoStageMinPixels, stageTwoStartMode, createExactGeometry, windowEdits, overlayWindowEdits,
     geometryEdits, hasWindowEdits, TWO_STAGE_MIN_MP_DEFAULT, mergeStudioColors, rotatedDimensions, normalizeAngleDegrees,
+    analysisAreaEdited, confirmedImageArea, imageAreaFromWorkingRect, isSameAnalysisFrame,
     BACKGROUND_INPUT_QUIET_MS: 400, BACKGROUND_BUSY_POLL_MS: 250,
     backgroundGate: { lastInputAt: -Infinity, bump() {} },
     coreReprocessBusy: () => false, hasPendingCropDetection: () => false, settlePendingCropDetection: async () => {},
@@ -198,7 +204,8 @@ function fixture({ search = '?twoStageMinMp=40&twoStageMode=sequential', settled
     'createFullDecode', 'beginFullDecodeAttempt', 'noteFullDecodeChange', 'nextFullDecodeChange', 'failFullDecode',
     'retryFullDecode', 'beginProvisionalPhoto', 'abandonFullDecode', 'currentPhotoExact', 'ensureFullDecode',
     'ensureFullDecodeWithNotice', 'whenCropModeClosed', 'startProvisionalSettle', 'waitForProvisionalSwap',
-    'settledImportSettings', 'rebaseProvisionalHistory', 'installFullDecode', 'settleProvisionalPhoto',
+    'settledImportSettings', 'rebaseProvisionalHistory', 'windowFrameMetaOnFull', 'appliedCropDiagnostics', 'geometryFrameSize',
+    'effectiveGeometryAngle', 'installFullDecode', 'settleProvisionalPhoto',
     'leaveProvisionalPhoto', 'withPendingEdits', 'pendingGeometryEdits', 'extractCurrentSettings', 'restoreSettings',
     'persistCurrentFileSettings', 'canReuseLoadedRollSource', 'studioBackgroundReady', 'rememberPhotoBase',
     'buildFinalImportSettings', 'getCurrentQueueItem', 'liveHistoryRoots', 'openPhotoMemoryRoots', ...MEMORY_FUNCTIONS
@@ -992,6 +999,238 @@ async function automaticRollInWindow({ click }) {
   // photo is exact and supersedes the import, which ends without running.
   const manual = await automaticRollInWindow({ click: true });
   assert.deepEqual([manual.marker.begins, manual.f.target.automaticRollRevision], [0, 1]);
+}
+
+// ---- the analysis area in the window (#255 review R2-052) ---------------------------------------
+// Confirm image area and Apply Crop on the stand-in, against the same on one
+// decode. The stand-in's auto-frame (its frame and image area a pixel off,
+// as 2x2-binned data without the defect pass gives) and its crop-area
+// detection are provisional: the swap installs the full decode's
+// diagnostics with the user's confirmed area (fractions of the base, the
+// same area on both decodes) or the crop applied again on the full base,
+// whose crop-area detection runs on the installed base.
+const FULL_CROP = { left: 480, top: 320, width: 8576, height: 5696 };
+const FULL_WINDOW = { left: 400, top: 260, width: 8736, height: 5816 };
+// Diagnostics compared field by field, whatever order their keys were set in.
+const canon = value => JSON.stringify(value, (_key, v) => (v && typeof v === 'object' && !Array.isArray(v)
+  ? Object.fromEntries(Object.keys(v).sort().map(k => [k, v[k]])) : v));
+function areaFixture({ twoStage }) {
+  const f = fixture({ search: twoStage ? '?twoStageMinMp=40&twoStageMode=sequential' : '' });
+  const { target, state } = f;
+  // Settings carry autoFrameMeta as the real sanitizeSettings and
+  // deepCopySanitizedSettings do.
+  const sanitize = target.sanitizeSettings;
+  target.sanitizeSettings = (raw, options = {}) => ({
+    ...sanitize(raw, options),
+    autoFrameMeta: raw === state ? state.autoFrame.lastDiagnostics ?? null
+      : raw && Object.hasOwn(raw, 'autoFrameMeta') ? raw.autoFrameMeta
+        : options.fallbackSettings === state ? state.autoFrame.lastDiagnostics ?? null : options.fallbackSettings?.autoFrameMeta ?? null
+  });
+  target.deepCopySanitizedSettings = (safe, { autoFrameMeta = safe.autoFrameMeta } = {}) => ({
+    ...structuredClone(safe), autoFrameMeta: autoFrameMeta ? structuredClone(autoFrameMeta) : null
+  });
+  // The import's auto-frame of `img`: on the stand-in a pixel off.
+  target.analyzeStudioImportFrame = async (img, settings) => {
+    const scale = img.width / FULL.width, off = img.width === FULL.width ? 0 : 1;
+    const rect = r => ({ left: Math.round(r.left * scale) + off, top: Math.round(r.top * scale), width: Math.round(r.width * scale), height: Math.round(r.height * scale) });
+    return {
+      ...settings, rotationAngle: 0.5, mirrored: false, cropRegion: rect(FULL_CROP),
+      autoFrameMeta: {
+        confidence: off ? 0.88 : 0.91, confidenceLevel: 'high', detectedFormat: '135', method: 'hough', appliedMode: 'crop',
+        importAuto: true, frameIncomplete: false, imageArea: imageAreaFromDetection({ cropRegion: rect(FULL_WINDOW), angle: 0.5 }, img)
+      }
+    };
+  };
+  // Apply's crop-area detection: what it was started with, and its outcome
+  // (a hit completes the diagnostics it was given, applyCropDetectionOutcome).
+  f.cropDetections = [];
+  let pending = null;
+  Object.assign(target, {
+    startCropDetection: options => {
+      const detection = { ...options, gate: deferred(), metaAtStart: canon(options.meta), live: { ...state.cropRegion } };
+      pending = detection;
+      f.cropDetections.push(detection);
+      return detection;
+    },
+    hasPendingCropDetection: () => Boolean(pending),
+    cancelCropDetection: () => {
+      if (!pending) return;
+      const detection = pending;
+      pending = null;
+      detection.cancelled = true;
+      detection.gate.resolve();
+    },
+    settlePendingCropDetection: async () => { while (pending) await pending.gate.promise; }
+  });
+  f.land = (detection, imageArea) => {
+    assert.equal(pending, detection, 'the detection is still pending');
+    Object.assign(detection.meta, { imageArea, analysisNeedsReview: false, frameIncomplete: false, method: 'manual-image-window' });
+    pending = null;
+    detection.gate.resolve();
+  };
+  vm.runInContext(functionSource('restoreAutoFrameDiagnostics'), f.context);
+  return f;
+}
+// A fresh photo's import on the loaded base (prepareStudioPhoto's auto-frame;
+// on a stand-in in full units, recorded for the settle).
+async function importFrame(f) {
+  const { context, state, target } = f;
+  const provisional = state.provisional;
+  const snapshot = context.extractCurrentSettings();
+  if (provisional) {
+    provisional.start = { fresh: true, inputs: { automatic: true }, snapshot, detectFrame: true, readEdge: false, applyEdgeDefaults: false,
+      autoFrame: { enabled: true, onImport: true }, userEdited: false, pendingEdits: null };
+  }
+  let settings = await target.analyzeStudioImportFrame(state.loadedBaseImageData, snapshot);
+  if (provisional) settings = { ...settings, ...provisional.geometry.toExact(settings) };
+  context.restoreSettings(settings, { refreshDisplay: false });
+  state.currentStep = 3;
+  if (provisional) provisional.settledSnapshot = context.extractCurrentSettings();
+}
+// Apply in crop mode, as its click handler does it (no straighten): the
+// diagnostics, the new crop, and the crop-area detection on the loaded base.
+function applyCrop(f, { rect = null, selectedArea = null, analysisOnly = false }) {
+  const { context, state, target } = f;
+  const base = state.loadedBaseImageData;
+  const geometry = { rotationAngle: state.rotationAngle, mirrored: state.mirrored };
+  const frame = context.geometryFrameSize(base, state.rotationAngle);
+  const { meta, detect } = context.appliedCropDiagnostics(state.autoFrame.lastDiagnostics, {
+    selectedArea: selectedArea || imageAreaFromWorkingRect(rect, geometry, base), base, analysisOnly,
+    previous: { ...geometry, cropRegion: state.cropRegion, frame }
+  });
+  state.autoFrame.lastDiagnostics = meta;
+  if (!analysisOnly) target.applyGeometryFromBase({ cropRegion: rect });
+  return detect ? target.startCropDetection({ meta, base, frame, cropRegion: { ...state.cropRegion }, ready: Promise.resolve(true) }) : null;
+}
+// Two stages: the stand-in's import, `edit` in the window, stage 2 landing.
+async function windowFlow(edit, { control = null } = {}) {
+  const f = areaFixture({ twoStage: true });
+  const stage2 = await loadedStandIn(f);
+  await importFrame(f);
+  control?.(f);
+  const window = await edit(f);
+  f.context.startProvisionalSettle(f.state.fullDecode);
+  stage2.resolve(image(FULL));
+  await flush(40);
+  return { f, window };
+}
+async function singleFlow(edit) {
+  const f = areaFixture({ twoStage: false });
+  await loadedSingle(f);
+  await importFrame(f);
+  await edit(f);
+  return f;
+}
+// The rect on the stand-in's frame of the window's edits, and the same rect
+// in full units (2x the stand-in's here).
+const WINDOW_AREA = { left: 1000, top: 700, width: 2400, height: 1500 };
+// A crop reaching past the image window's corner: not its frame, so Apply
+// detects the image area inside it.
+const WINDOW_CROP = { left: 0, top: 0, width: 2000, height: 1500 };
+const double = r => ({ left: r.left * 2, top: r.top * 2, width: r.width * 2, height: r.height * 2 });
+{
+  // (a) Confirm image area: the area the user confirmed on the stand-in
+  // survives the swap; everything else in the diagnostics is the full
+  // decode's, and the analysis area kept for an uncertain re-detection is the
+  // settled frame's on the full base.
+  let area = null, region = null;
+  const confirm = async f => {
+    applyCrop(f, { rect: WINDOW_AREA, analysisOnly: true });
+    area = structuredClone(f.state.autoFrame.lastDiagnostics.imageArea);
+    region = resolveAnalysisRegion({ ...f.context.liveGeometry(), autoFrameMeta: f.state.autoFrame.lastDiagnostics }, f.state.loadedBaseImageData);
+  };
+  const { f } = await windowFlow(confirm);
+  assert.equal(f.state.fullDecode.status, 'installed');
+  assert.equal(f.state.loadedBaseImageData.width, FULL.width);
+  const meta = f.state.autoFrame.lastDiagnostics;
+  assert.equal(JSON.stringify(meta.imageArea), JSON.stringify(area), 'the confirmed area survives the swap');
+  assert.deepEqual([meta.method, meta.analysisNeedsReview, meta.frameIncomplete, meta.confidence], ['manual-analysis-area', false, false, 0.91],
+    'over the full decode\'s diagnostics');
+  assert.equal(f.cropDetections.length, 0, 'a confirmed area is not detected');
+  // In full-size units: the same part of the photo's frame on the full base.
+  const full = resolveAnalysisRegion({ ...f.context.extractCurrentSettings(), autoFrameMeta: meta }, f.state.loadedBaseImageData);
+  for (const key of ['left', 'top', 'width', 'height']) assert.ok(Math.abs(full[key] - region[key]) < 1e-3, `analysis region ${key}`);
+  // One decode, the same area confirmed after its import: the same diagnostics.
+  const one = await singleFlow(async g => { applyCrop(g, { selectedArea: area, analysisOnly: true }); });
+  assert.equal(canon(meta), canon(one.state.autoFrame.lastDiagnostics), 'Confirm image area in the window gives one decode\'s diagnostics');
+  assert.equal(JSON.stringify(f.context.extractCurrentSettings().cropRegion), JSON.stringify(one.context.extractCurrentSettings().cropRegion));
+  // Before the fix the analysis area alone was no window edit: the swap kept
+  // the full decode's automatic area.
+  const control = await windowFlow(confirm, { control: g => {
+    g.target.windowEdits = (settled, live) => {
+      const edits = windowEdits(settled, live);
+      if (!('cropRegion' in edits)) delete edits.autoFrameMeta;
+      return edits;
+    };
+  } });
+  const lost = control.f.state.autoFrame.lastDiagnostics;
+  assert.notEqual(JSON.stringify(lost.imageArea), JSON.stringify(area), 'control: the confirmed area is lost at the swap');
+  assert.equal(lost.method, 'hough');
+}
+{
+  // (b) Apply Crop: the stand-in's crop-area detection ends (or its hit is
+  // dropped), and the crop's detection runs on the installed base with one
+  // decode's miss outcome; the photo is exact once it has landed.
+  const STANDIN_HIT = imageAreaFromDetection({ cropRegion: { left: 202, top: 131, width: 1798, height: 1369 }, angle: 0.5 }, HALF);
+  const FULL_HIT = imageAreaFromDetection({ cropRegion: double({ left: 200, top: 130, width: 1800, height: 1370 }), angle: 0.5 }, FULL);
+  for (const landed of [false, true]) {
+    const crop = async f => {
+      const detection = applyCrop(f, { rect: WINDOW_CROP });
+      assert.ok(detection, 'Apply starts a crop-area detection');
+      assert.equal(detection.base.width, HALF.width, 'on the stand-in');
+      if (landed) f.land(detection, STANDIN_HIT);
+      return detection;
+    };
+    const { f, window } = await windowFlow(crop);
+    assert.equal(window.cancelled, landed ? undefined : true, landed ? 'the stand-in\'s hit landed' : 'the stand-in\'s detection ends at the swap');
+    assert.equal(f.cropDetections.length, 2, 'the crop is detected again');
+    const detection = f.cropDetections[1];
+    assert.equal(detection.base, f.state.loadedBaseImageData, 'on the installed full base');
+    assert.equal(detection.base.width, FULL.width);
+    assert.equal(detection.meta, f.state.autoFrame.lastDiagnostics, 'completing the installed diagnostics');
+    assert.equal(JSON.stringify(detection.cropRegion), JSON.stringify(double(WINDOW_CROP)), 'for the crop in full units');
+    const atStart = JSON.parse(detection.metaAtStart);
+    assert.deepEqual([atStart.analysisNeedsReview, atStart.method, atStart.confidence], [true, 'hough', 0.91], 'the miss outcome over the full decode\'s diagnostics');
+    assert.equal(f.state.fullDecode.status, 'swapped', 'not exact while the detection runs');
+    f.land(detection, FULL_HIT);
+    await flush(40);
+    assert.equal(f.state.fullDecode.status, 'installed', 'exact once it landed');
+    // One decode applying the same crop after its import.
+    const one = await singleFlow(async g => { applyCrop(g, { rect: double(WINDOW_CROP) }); });
+    const reference = one.cropDetections[0];
+    assert.equal(detection.metaAtStart, reference.metaAtStart, 'the diagnostics Apply installs on one decode');
+    assert.equal(JSON.stringify([detection.frame, detection.cropRegion]), JSON.stringify([reference.frame, reference.cropRegion]));
+    one.land(reference, FULL_HIT);
+    assert.equal(canon(f.state.autoFrame.lastDiagnostics), canon(one.state.autoFrame.lastDiagnostics), 'and its hit, as on one decode');
+  }
+  // Before the fix the merged recipe kept the stand-in's detection.
+  const control = await windowFlow(async f => {
+    const detection = applyCrop(f, { rect: WINDOW_CROP });
+    f.land(detection, STANDIN_HIT);
+  }, { control: g => { g.target.windowFrameMetaOnFull = (_settled, merged) => ({ meta: merged.autoFrameMeta, detect: false }); } });
+  assert.equal(control.f.cropDetections.length, 1, 'control: no detection on the full base');
+  assert.equal(JSON.stringify(control.f.state.autoFrame.lastDiagnostics.imageArea), JSON.stringify(STANDIN_HIT), 'control: the stand-in\'s hit is the analysis area');
+}
+{
+  // (c) A geometry edit alone (a rotation) and Restore full frame: the full
+  // decode's diagnostics, not the stand-in's auto-frame result they used to
+  // carry with the geometry; Restore keeps its applied mode.
+  const rotate = async f => { f.state.rotationAngle = 1.5; f.target.applyGeometryFromBase({ cropRegion: f.state.cropRegion }); };
+  const { f } = await windowFlow(rotate);
+  const one = await singleFlow(rotate);
+  assert.equal(f.state.autoFrame.lastDiagnostics.confidence, 0.91);
+  assert.equal(canon(f.state.autoFrame.lastDiagnostics), canon(one.state.autoFrame.lastDiagnostics), 'a rotation in the window: one decode\'s diagnostics');
+  const restore = async g => {
+    g.state.rotationAngle = 0;
+    g.state.autoFrame.lastDiagnostics.appliedMode = 'none';
+    g.target.applyGeometryFromBase({ cropRegion: null });
+  };
+  const restored = await windowFlow(restore);
+  const reference = await singleFlow(restore);
+  assert.equal(restored.f.state.autoFrame.lastDiagnostics.appliedMode, 'none');
+  assert.equal(canon(restored.f.state.autoFrame.lastDiagnostics), canon(reference.state.autoFrame.lastDiagnostics), 'Restore full frame in the window: one decode\'s diagnostics');
+  const control = await windowFlow(rotate, { control: g => { g.target.windowFrameMetaOnFull = (_settled, merged) => ({ meta: merged.autoFrameMeta, detect: false }); } });
+  assert.equal(control.f.state.autoFrame.lastDiagnostics.confidence, 0.88, 'control: the stand-in\'s auto-frame result');
 }
 
 // ---- Apply flat field to selected in the window (#255 review R2-034) -----------------------------

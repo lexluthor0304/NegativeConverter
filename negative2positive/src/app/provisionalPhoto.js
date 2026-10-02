@@ -193,6 +193,10 @@ const WB_KEYS = ['wbR', 'wbG', 'wbB', 'wbAutoConfidence', 'wbSemanticApplied', '
 // Measurements only the analyses write. They are always taken from the full
 // decode (a conversion measures the expired-film analysis again).
 export const AUTOMATIC_ONLY_KEYS = Object.freeze(['expiredAnalysis', 'learnedDefaults', 'filmEdge']);
+// What Apply Crop and Confirm image area write into autoFrameMeta (#245):
+// the analysis area. The rest of it describes the auto-frame detection.
+export const ANALYSIS_META_KEYS = Object.freeze(['imageArea', 'analysisArea', 'analysisNeedsReview', 'frameIncomplete', 'method', 'importAuto']);
+const ANALYSIS_META_FLAGS = new Set(['analysisNeedsReview', 'frameIncomplete', 'importAuto']);
 
 export function sameSettingValue(a, b) {
   if (a === b) return true;
@@ -220,6 +224,35 @@ function wbTouched(settled, live) {
   return ['wbR', 'wbG', 'wbB'].some(key => !sameSettingValue(live[key], settled[key]));
 }
 
+function analysisMetaValue(meta, key) {
+  return ANALYSIS_META_FLAGS.has(key) ? Boolean(meta?.[key]) : meta?.[key] ?? null;
+}
+
+/**
+ * Whether Apply Crop or Confirm image area ran in the window (#255 review
+ * R2-052): the analysis fields of autoFrameMeta changed between `settled`
+ * and `live`. Their values were measured on the stand-in (its frame, its
+ * crop-area detection), so the swap computes them again on the full decode.
+ */
+export function analysisAreaEdited(settled, live) {
+  const before = settled?.autoFrameMeta || null, now = live?.autoFrameMeta || null;
+  if (!now) return false;
+  return ANALYSIS_META_KEYS.some(key => !sameSettingValue(analysisMetaValue(before, key), analysisMetaValue(now, key)));
+}
+
+/**
+ * The image area the user confirmed (Confirm image area) when it is the
+ * photo's analysis area in `settings`, else null. An image area is fractions
+ * of the base, so it is the same area on the stand-in and on the full
+ * decode. `analysisNeedsReview` is set when a crop applied after it is not
+ * that frame (its crop-area detection was pending or missed).
+ */
+export function confirmedImageArea(settings) {
+  const meta = settings?.autoFrameMeta || null;
+  if (meta?.method !== 'manual-analysis-area' || !meta.imageArea) return null;
+  return { imageArea: cloneValue(meta.imageArea), analysisNeedsReview: Boolean(meta.analysisNeedsReview) };
+}
+
 /**
  * The keys the user changed between `settled` (the provisional pass's final
  * settings) and `live` (now), both in full-resolution units. Grouped keys
@@ -234,6 +267,9 @@ export function windowEditKeys(settled, live) {
     if (group.test.some(key => !sameSettingValue(settled[key], live[key]))) for (const key of group.keys) touched.add(key);
   }
   if (wbTouched(settled, live)) for (const key of WB_KEYS) touched.add(key);
+  // Apply Crop and Confirm image area change autoFrameMeta's analysis area,
+  // with or without the geometry: the user's too.
+  if (analysisAreaEdited(settled, live)) touched.add('autoFrameMeta');
   for (const key of new Set([...Object.keys(settled), ...Object.keys(live)])) {
     if (grouped.has(key)) continue;
     if (!sameSettingValue(settled[key], live[key])) touched.add(key);

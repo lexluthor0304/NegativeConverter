@@ -134,22 +134,35 @@ learn and set the roll date). Those steps decide with the `userEdited` the
 pass began with: an edit made in the window neither drops the learned
 defaults nor locks the frame out of the roll's film-type decision. It waits
 until the swap cannot cut into an interaction: the pass is over, no crop
-draft is open, no conversion, geometry build or crop-area detection is
-running, and input has been quiet for 400 ms, unless an exact consumer is
-waiting. It then swaps in one task:
+draft is open, no conversion or geometry build is running, and input has
+been quiet for 400 ms, unless an exact consumer is waiting. A crop-area
+detection still running there measures the stand-in's sample: it ends
+instead (step 4 runs it on the full base). It then swaps in one task:
 
 1. The user's window edits (`windowEdits`, the diff between the pass's settled
    settings and now) go over the new automatic settings. Geometry, film type
    and curves count as groups. White balance counts only once a gray point
    was sampled or the gains were set by hand; conversions re-estimate it
    otherwise. `expiredAnalysis`, `learnedDefaults` and `filmEdge` always come
-   from the full decode.
+   from the full decode. So does `autoFrameMeta`, with what the user did in
+   the window replayed on it (`windowFrameMetaOnFull`): Restore full frame
+   keeps its mode, and Apply Crop and Confirm image area, whose analysis
+   fields (`ANALYSIS_META_KEYS`) count as an edit even without a geometry
+   change, are applied again on the full base with Apply's own rule
+   (`appliedCropDiagnostics`), the frame they replaced being the settled
+   one. An image area the user confirmed keeps its fractions of the base,
+   the same area on both decodes. A crop that is not the image area's frame
+   gets the miss outcome.
 2. The history is rebased: every entry's crop goes to full units, entries go
    cold (#244: rebuilt from the full base on restore), and dust-stroke
    entries (they patch stand-in planes) go with everything older.
 3. The full base is installed (`rawDecodePending` false). The stand-in's
    renders are dropped, and `restoreSettings(..., { holdBusy: false })`
    rebuilds the geometry in the #244 pool without `studioBusy`.
+4. That crop's crop-area detection starts on the installed base, as Apply
+   starts it (`startCropDetection`). The settle waits for its outcome (a
+   hit converts again) after the conversion below, so `installed` includes
+   it, as a single decode's exports wait for it.
 
 One `processNegative` of the full base follows, with today's automatic
 measurements. Then the record is `installed` and semantic colour is scheduled.
@@ -195,9 +208,13 @@ quiet.
   (`item.userEdited` stays set): the automatic roll import leaves it alone,
   as after one decode, and never builds it a recipe without its pending
   edits; the roll's decisions for other frames treat it as edited.
-  `photoSettingsKey` includes the edits of a photo without a recipe. The
-  photo's tile keeps the stand-in's render without its settings key, so the
-  lane renders the photo again.
+  `photoSettingsKey` includes the edits of a photo without a recipe. An
+  image area confirmed in the window is one of those edits. With a geometry
+  or analysis-area edit, the window's `autoFrameMeta` is kept as the window
+  had it, the stand-in's auto-frame result and crop-area detection included:
+  no full decode is left to replay them on (audit backlog). The photo's tile
+  keeps the stand-in's render without its settings key, so the lane renders
+  the photo again.
 
 ## Flagged approximations (display only, never exported)
 
@@ -215,7 +232,8 @@ quiet.
   parser, and the repo-root RAW fixtures when present.
 - `provisionalPhoto.test.mjs`: crop projection and the exact round trip
   (rotated, mirrored, clamped-looking, the issue's {400, 300, 8700, 5800}),
-  convert-once edits, and the window-edit merge.
+  convert-once edits, the window-edit merge, and Apply Crop and Confirm
+  image area as edits of `autoFrameMeta`'s analysis fields.
 - `twoStageImport.test.mjs`: the real main.js functions (loadFile routing and
   stage options, sequential and concurrent start, abort on switch, the
   barrier with retry and failure, the settle with its history rebase, and
@@ -226,8 +244,13 @@ quiet.
   Selected, Apply film type to roll and Save Project clicked in the window
   wait for the exact photo and end as on one decode (on one decode as
   before); crop mode and the automatic roll import (fake timers) still
-  complete. Apply flat field to selected measures new photos' defaults on
-  the full decode. Each window case has a control without the fix.
+  complete. Confirm image area on the stand-in survives the swap over the
+  full decode's diagnostics; a crop applied there is detected again on the
+  installed base, its stand-in detection ended or its hit dropped, and the
+  photo is exact once that lands; a rotation or Restore full frame keeps the
+  full decode's diagnostics; Apply flat field to selected measures new
+  photos' defaults on the full decode. Each ends as on one decode. Each
+  window case has a control without the fix.
 - `restartRender.test.mjs`: the provisional pass holds its side effects back;
   switch-back to a photo left in the window decides as its pass began.
 - `processFileWithSettings.parity.test.mjs`: Export All of a photo left in

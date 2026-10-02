@@ -54,6 +54,11 @@ worker meanwhile (`startCropDetection`):
   second Apply (`pushUndo` with a geometry label), a new load and closing
   the session. It is current only while the diagnostics object and the
   geometry Apply installed are still in place.
+- On a two-stage import's half-size stand-in (#255) the detection samples
+  provisional pixels. The swap to the full decode ends it, applies the crop
+  again on the full base with the same rule (`appliedCropDiagnostics`, the
+  diagnostics Apply installs) and starts the crop's detection there; the
+  photo counts as exact once that has landed (`docs/two-stage-raw-import.md`).
 - `settlePendingCropDetection()` is the barrier for everything that reads or
   copies the photo's settings for output: single export (before it persists
   the settings), `ensureFullResolutionReadyForExport`, batch and ZIP export,
