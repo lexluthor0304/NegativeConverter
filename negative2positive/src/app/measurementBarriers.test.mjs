@@ -47,6 +47,9 @@ const tick = () => new Promise(resolve => setTimeout(resolve, 0));
 const gainsOf = state => [state.wbR, state.wbG, state.wbB].map(value => Number(value.toFixed(5)));
 const whiteBalanceOf = state => ({ wbR: state.wbR, wbG: state.wbG, wbB: state.wbB, wbAutoConfidence: state.wbAutoConfidence ?? null });
 
+// Apply film type to roll: the click listener, or the function it calls
+// (#255 names it, to wait for a two-stage import's full decode first).
+const NAMED_ROLL_HANDLER = /^    async function applyFilmTypeToRoll\(/m.test(source);
 // The real functions on the measurement path, beside the harness's.
 const MEASURE_FUNCTIONS = [
   // A retained frame's 16-bit plane (#233).
@@ -57,13 +60,14 @@ const MEASURE_FUNCTIONS = [
   'clampBetween', 'setExpiredEnabled', 'setExpiredSession', 'analyzeExpiredAgain', 'runExpiredAnalysis', 'expiredAnalysisSample',
   'applyExpiredAnalysisDefaults', 'resetExpiredStrengthsInState', 'hasCurrentExpiredAnalysis', 'expiredSourceKey',
   'baseSizeSource', 'sanitizeNumeric', 'cropImageData', 'sanitizeCropRegionForImage', 'resetStudioColors',
-  'refreshExpiredAfterColorReset', 'runLabMatch', 'renderCurrentForMatching', 'currentRecipeCode', 'copyRecipe'
+  'refreshExpiredAfterColorReset', 'runLabMatch', 'renderCurrentForMatching', 'currentRecipeCode', 'copyRecipe',
+  ...(NAMED_ROLL_HANDLER ? ['applyFilmTypeToRoll'] : [])
 ];
 const INLINE_HANDLERS = [
   inlineSource('onColorCorrect', '        onColorCorrect: () => {', '\n        },'),
   inlineSource('onReset', '        onReset: () => {', '\n        },'),
   inlineSource('expiredAnalyzeClick', "    document.getElementById('expiredAnalyzeBtn')?.addEventListener('click', () => {", '\n    });'),
-  inlineSource('applyFilmTypeToRoll', "    document.getElementById('applyFilmTypeToRollBtn').addEventListener('click', async () => {", '\n    });')
+  ...(NAMED_ROLL_HANDLER ? [] : [inlineSource('applyFilmTypeToRoll', "    document.getElementById('applyFilmTypeToRollBtn').addEventListener('click', async () => {", '\n    });')])
 ];
 
 // The harness with the measurement path. `analysed` records each expired
@@ -124,7 +128,9 @@ function measureContext(base = makeBase(90, 64, 7)) {
     persistCurrentFileSettings: () => {
       persisted.push({ meta: structuredClone(h.state.autoFrame.lastDiagnostics), wb: whiteBalanceOf(h.state), pending: c.hasPendingCropDetection() });
     },
-    applyFilmTypeOverride: (settings, choice) => ({ ...settings, ...choice })
+    applyFilmTypeOverride: (settings, choice) => ({ ...settings, ...choice }),
+    // The photo is its full decode (#255).
+    currentPhotoExact: () => true
   });
   h.target.document.getElementById = id => elements[id] || null;
   Object.assign(h.state, {
