@@ -14217,7 +14217,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const detectionStatus = document.getElementById('filmTypeDetectionStatus');
       if (detectionStatus) {
         const automatic = state.filmTypeSource === 'auto' && state.filmTypeConfidence;
-        const key = !automatic ? 'filmTypeManual' : state.filmTypeConfidence === 'low' ? (state.filmTypeReason === 'monochrome' ? 'filmTypeMonochrome' : 'filmTypeUncertain')
+        // The monochrome line says the photo is treated as a B&W negative:
+        // a recipe saved before #231 kept such a frame positive with the same
+        // reason (#229 review R1-019).
+        const key = !automatic ? 'filmTypeManual' : state.filmTypeConfidence === 'low'
+          ? (state.filmTypeReason === 'monochrome' && state.filmType === 'bw' ? 'filmTypeMonochrome' : 'filmTypeUncertain')
           : state.filmTypeReason === ROLL_MONOCHROME.reason ? 'filmTypeRollMonochrome'
           : state.filmTypeConfidence === 'high' ? 'filmTypeDetected' : 'filmTypeSuggested';
         detectionStatus.dataset.i18n = key;
