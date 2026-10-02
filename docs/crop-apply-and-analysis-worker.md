@@ -17,7 +17,8 @@ visible overlay, so the first frame shows it fully opaque: Studio's fade uses
 `hide()` drops the class, so the fade-out is unchanged. The overlay stays up
 through the geometry build and hands over to the conversion's own overlay in
 the same task. Every early return goes through the `finally` that clears the
-busy state.
+busy state. Apply sets `studioBusy` only when it is free and clears only a lock
+it set: one another task holds (a photo's detection tail) stays with it.
 
 ## Converting without waiting for the crop-area detection
 
