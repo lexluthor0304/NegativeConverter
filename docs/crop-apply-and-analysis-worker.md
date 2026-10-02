@@ -45,8 +45,15 @@ worker meanwhile (`startCropDetection`):
   finishes first. If a conversion ran since Apply, the hit converts again
   (`processNegative({ quiet: true })`), so the analysis area, the colour
   sample and auto white balance follow the image area as in the single pass
-  before. A hit that lands before the conversion starts is converted once. A
-  miss does nothing more. A miss converts once, a hit at most twice.
+  before. That conversion first supersedes every render that read the miss
+  outcome (a new `coreReprocessToken`, the full-resolution render state
+  cleared, a >16 MP render aborted): a full-resolution render the
+  provisional pass armed would otherwise land after it as the exact frame
+  and be exported. `processNegative` arms a new one. Until it replaces the
+  provisional frame, that frame keeps its flags, so a preview never passes
+  for the exact frame (the AI brush, history and export read them). A hit
+  that lands before the conversion starts is converted once. A miss does
+  nothing more. A miss converts once, a hit at most twice.
 - With the expired rescue on, Apply still waits for the detection before
   converting (the rescue measures once per source, whatever the area), now
   after the paint and off the main thread.

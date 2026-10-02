@@ -11,10 +11,12 @@
 // - Undo, a second Apply and a new load end the detection; the barrier
 //   settles only after a hit's conversion.
 // - With the expired rescue on, the conversion waits for the detection.
+// - The hit's conversion supersedes a full-resolution render the provisional
+//   pass armed: the exact plane installed is the hit's (R1-070).
 
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
-import { createHarness, makeBase, applyCropHandlerSource, settle } from './geometryTestHarness.mjs';
+import { createHarness, makeBase, applyCropHandlerSource, settle, functionSource } from './geometryTestHarness.mjs';
 import { imageAreaFromWorkingRect } from './analysisRegion.js';
 import { isSameAnalysisFrame, workingPointsToBase, buildCropDetectionInput } from './cropColorAnalysis.js';
 import { normalizeAngleDegrees } from './imageGeometry.js';
@@ -246,6 +248,106 @@ for (const cancel of ['undo', 'apply', 'load']) {
   assert.equal(t.conversions.length, 0);
   assert.equal(t.h.state.autoFrame.lastDiagnostics.method, 'manual-image-window');
   assert.equal(normalizeAngleDegrees(t.h.state.rotationAngle), 0);
+}
+
+// ---- A full-resolution render in flight when the hit lands (R1-070) ----
+// The real processNegative, full-resolution scheduling and core rerender;
+// the conversion records the analysis area it read and full-resolution
+// requests wait for the test.
+async function fullResolutionRun({ hitFirst = false } = {}) {
+  const h = createHarness(base, { realProcessNegative: true });
+  const c = h.context;
+  const fullRenders = [];
+  // The frame on screen when each preview conversion starts.
+  const previews = [];
+  let answer = null;
+  const areaOf = meta => JSON.stringify(meta?.imageArea || meta?.analysisArea || null);
+  delete h.target.applyProcessedImageToState;
+  Object.assign(h.target, {
+    applyCropBtn: { disabled: false }, cancelCropBtn: { disabled: false },
+    getLoadingOverlay: () => ({ show: async () => {}, updateProgress() {}, hide() {} }),
+    studioWorkspace: { sync() {}, text: key => key },
+    imageAreaFromWorkingRect, isSameAnalysisFrame, workingPointsToBase, buildCropDetectionInput,
+    exitCropMode: () => { h.state.cropping = false; h.state.cropDraft = null; },
+    runOpenCvTask: async (type, task) => {
+      const input = await task.build();
+      if (!hitFirst) await new Promise(resolve => { answer = resolve; });
+      return hitPoints(input);
+    },
+    usesSilverCoreConversion: () => true, hasSeparateConversionPreview: () => true,
+    routeCoreRequest: options => ({ full: Boolean(options?.full), downgraded: false }),
+    waitForNextFrame: () => Promise.resolve(), backgroundGate: { bump() {} },
+    fullResolutionRenderTimer: null, fullResolutionConversionAbort: null, FULL_RESOLUTION_IDLE_DELAY_MS: 0,
+    FULL_RESOLUTION_INTERACTIVE_DELAY_MS: 0, displayedFrameToken: null, repairedPreviewShown: null, exportBands: null,
+    _coreReprocessActive: 0, _coreReprocessFullInFlight: false, _coreReprocessPreviewInFlight: false, _coreReprocessPending: null,
+    convertFromCurrentSource: async (settings, { preview = false } = {}) => {
+      const area = areaOf(h.state.autoFrame.lastDiagnostics);
+      const source = h.state.conversionSourceImageData;
+      if (preview) {
+        const shown = h.state.processedImageData;
+        previews.push({ area, shown: shown ? { preview: shown.preview === true, flaggedPreview: h.state.processedImageDataIsPreview, pending: h.state.fullResolutionPending } : null });
+        return { width: 20, height: 14, area, preview: true };
+      }
+      const request = { area, release: null };
+      fullRenders.push(request);
+      await new Promise(resolve => { request.release = resolve; });
+      return { width: source.width, height: source.height, area };
+    }
+  });
+  vm.runInContext(['applyProcessedImageToState', 'startFullResolutionRender', 'scheduleFullResolutionRender',
+    'clearFullResolutionRenderState', 'abortSupersededFullResolutionConversion', 'beginFullResolutionConversion',
+    'endFullResolutionConversion', 'rerenderWithCoreControls', 'runCoreReprocess'].map(functionSource).join('\n'), c);
+  vm.runInContext(applyCropHandlerSource(), c);
+  h.state.currentStep = 3;
+  h.state.autoFrame.lastDiagnostics = { analysisArea: null, imageArea: null, method: 'import' };
+  const preview = c.renderFrameSample(700_000);
+  h.state.cropping = true;
+  h.state.cropDraft = { sourceImageData: h.state.originalImageData, rotatedSize: { width: preview.width, height: preview.height }, rect: { left: 10.2, top: 8.6, width: 60.3, height: 40.1 }, rotationBase: 0, straightenAngle: 0 };
+  const waitFor = async (what, check) => {
+    for (let i = 0; i < 200 && !check(); i++) await new Promise(resolve => setTimeout(resolve, 1));
+    assert.ok(check(), what);
+  };
+  await c.applyCropHandler();
+  const missArea = areaOf(h.state.autoFrame.lastDiagnostics);
+  assert.equal(h.state.processedImageDataIsPreview, true, 'the conversion shows a preview');
+  if (!hitFirst) {
+    // The full-resolution render the provisional pass armed starts with the
+    // miss outcome, and is still converting when the hit lands.
+    await waitFor('a full-resolution render is in flight', () => fullRenders.length === 1);
+    assert.equal(fullRenders[0].area, missArea);
+    await waitFor('the detection was requested', () => answer);
+    answer();
+  }
+  await c.settlePendingCropDetection();
+  const hitArea = areaOf(h.state.autoFrame.lastDiagnostics);
+  assert.equal(JSON.parse(hitArea).length, 4, 'the hit set the image area');
+  if (!hitFirst) assert.notEqual(hitArea, missArea, 'the hit changed the analysis area');
+  assert.equal(h.state.processedImageData.area, hitArea, 'the hit\'s conversion is on screen');
+  if (!hitFirst) {
+    // While the hit converted, the provisional preview stayed on screen
+    // flagged as a preview that owes an exact render.
+    assert.deepEqual(previews.map(entry => entry.area), [missArea, hitArea]);
+    assert.deepEqual(previews[1].shown, { preview: true, flaggedPreview: true, pending: true }, 'the provisional preview never passes for the exact frame');
+  }
+  assert.equal(h.state.fullResolutionPending, true, 'the hit\'s conversion owes a full-resolution render');
+  // Whatever the stale render brings back is not installed.
+  for (const request of fullRenders) request.release();
+  await settle();
+  await waitFor('a full-resolution render of the hit', () => fullRenders.some(request => request.area === hitArea));
+  for (const request of fullRenders) request.release?.();
+  await waitFor('the exact plane landed', () => !h.state.processedImageDataIsPreview && !h.state.fullResolutionPending);
+  await settle();
+  assert.equal(h.state.processedImageData.area, hitArea, 'the exact plane is converted with the hit\'s analysis area');
+  assert.equal(h.state.processedImageData.preview, undefined);
+  return { exact: h.state.processedImageData.area, renders: fullRenders.map(request => request.area === hitArea ? 'hit' : 'miss') };
+}
+{
+  const inFlight = await fullResolutionRun();
+  assert.deepEqual(inFlight.renders, ['miss', 'hit'], 'the stale render is superseded by one of the hit');
+  // The hit before the conversion: one pass, as before #245.
+  const hitFirst = await fullResolutionRun({ hitFirst: true });
+  assert.deepEqual(hitFirst.renders, ['hit']);
+  assert.equal(inFlight.exact, hitFirst.exact, 'the exact plane does not depend on when the hit landed');
 }
 
 console.log('cropDetectionApply tests passed');

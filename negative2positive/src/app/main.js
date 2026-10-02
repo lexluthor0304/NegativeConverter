@@ -17711,6 +17711,17 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // the colour sample and auto white balance all follow the image area.
       if (state.currentStep >= 3 && cropDetectionStats.conversions > detection.conversions) {
         cropDetectionStats.reconversions++;
+        // Every render that read the miss outcome is superseded, as any new
+        // conversion supersedes them: a full-resolution render the
+        // provisional pass armed would otherwise land over this conversion
+        // as the exact frame, and be exported (R1-070). processNegative arms
+        // a new one. The provisional frame stays on screen until then, with
+        // its flags: a preview must not pass for the exact frame meanwhile.
+        coreReprocessToken += 1;
+        abortSupersededFullResolutionConversion();
+        const { processedImageDataIsPreview, fullResolutionPending } = state;
+        clearFullResolutionRenderState();
+        Object.assign(state, { processedImageDataIsPreview, fullResolutionPending });
         await processNegative({ quiet: true });
       }
     }
