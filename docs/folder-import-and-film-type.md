@@ -57,7 +57,10 @@ count does not depend on the resolution.
 Borderless monochrome without a rebate is typed as a B&W negative at low
 confidence (`monochrome`), whatever the fallback. Film scans are more common here
 than prints or monochrome digital images; the frame is flagged for review and a
-prompt asks for Positive when it is a print or slide.
+prompt asks for Positive when it is a print or slide. Projects and recovery
+copies keep their film type: a monochrome frame saved as a positive before this
+rule opens as a positive, and its status line says the polarity is uncertain,
+not that it is treated as a B&W negative.
 
 ## Roll film-type decision
 
@@ -87,14 +90,27 @@ roll grouping, so the shared roll analysis runs once, in B&W, from the samples
 the first pass kept: a retype changes only film-type fields, and the samples are
 re-keyed instead of decoded again. The open photo follows the decision only while
 untouched, from its loaded base, with no decode and no undo entry; a newer load,
-an edit or a roll revision wins. Auto-frame keeps the film type the first pass
-started with, so the decision does not change framing within an import. Frames
-that get settings outside the first pass (batch export, batch auto-frame,
-thumbnails) take the recorded decision.
+an edit or a roll revision wins. A decision that only confirms its type (B&W at
+low confidence becoming `rollMonochrome`) changes what the detection describes,
+not what converts: the status line follows and the photo is not converted
+again. When the end of the first pass waits for the open photo (crop mode) and
+the user leaves it for another frame, it is retyped as a background frame
+before grouping and joins its roll; a decision that finds another flip holding
+the photo is applied again once that flip is done. Auto-frame keeps the film
+type the first pass started with, so the decision does not change framing
+within an import. Frames that get settings outside the first pass (batch
+export, batch auto-frame, thumbnails) take the recorded decision.
 
 One toast per import reports the typed frames with **These are positives**. It
 applies the whole-roll override to exactly those frames as one undo step
-(`rollFilmType`), leaving a colour roll in the same import alone. When no segment
+(`rollFilmType`), leaving a colour roll in the same import alone. The toast is
+up while the import's roll groups are analysed, and a click cancels nothing
+else: only the group of the retyped frames stops (a group formed before the
+click and not yet analysed waits for the next grouping, which leaves them out),
+the colour roll is still analysed from the first pass's samples, other imports
+and their decisions go on, and an open photo that is not one of those frames is
+not counted as edited. The toast's 12 s count from when it is shown: one made
+while the window is hidden waits until the window is seen again. When no segment
 forms, the open photo's own monochrome prompt is shown once the decision is known;
 single-photo and two-photo imports show it immediately, as before.
 
@@ -121,8 +137,15 @@ unopened photos. Later imports are a separate operation.
 - Roll decision: B&W majority, noMask leader, warm colour frame, a run of noMask
   frames, locked and edited frames and two rolls in one import
   (`rollFilmType.test.mjs`); the orchestration with decode counts, sample reuse,
-  the open-photo flip, the toast and its correction (`automaticRollImport.test.mjs`);
-  and `npm run test:smoke -- --bw-roll-only` on generated PNG frames.
+  the open-photo flip, the toast and its correction (`automaticRollImport.test.mjs`,
+  which also covers the correction while the roll groups are analysed, the
+  leader left while the first pass waits for it and a confirmation without a
+  conversion); the toast's duration in a hidden page (`toast.test.mjs`); the
+  status line of a restored monochrome positive (`filmModeStatus.test.mjs`);
+  and `npm run test:smoke -- --bw-roll-only` on generated PNG frames, including a
+  colour roll followed by B&W frames, corrected with **These are positives** as
+  its toast appears: the colour roll is still analysed, and its PNG and TIFF
+  exports match the same import without the click.
 - Whole-roll override: preserve per-frame edits and manual white balance; project
   round-trip for unopened photos.
 - Real Chrome: pause background preparation, set B&W, apply to the roll, undo,

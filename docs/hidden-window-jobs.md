@@ -30,6 +30,10 @@ a kill recoverable.
   `silent: true`, so a never-analysed frame is detected without the blocking
   overlay and its frame wait; detection inputs and geometry are unchanged.
   Readiness polls (the background photo lanes, roll-analysis retries) stay on timers.
+- **Toasts wait to be seen.** A toast shown while the window is hidden (a
+  roll's film-type decision with **These are positives**, a job's end) appears
+  when the window is seen again and stays its whole duration from then:
+  `toast.js` starts the duration in the frame that shows it (#229 review R1-018).
 - Nothing holds a hidden job awake: the Web Lock a running job holds (section
   3) only shows that its page is alive, and Chrome's Energy Saver ignores a
   lock that blocks nothing outside the page. No `NSProcessInfo` activity
