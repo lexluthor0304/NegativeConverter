@@ -1,5 +1,5 @@
-// The RAW decoder's licence notices must be complete (#264's native decoder,
-// reviewed in #229).
+// The RAW decoder's licence notices must be complete and must reach the people
+// who receive the code (#264's native decoder, reviewed in #229).
 //
 // LibRaw (CDDL-1.0), musl's math functions and, on macOS, the LLVM OpenMP
 // runtime are compiled into every macOS and Linux desktop binary:
@@ -7,7 +7,8 @@
 // whatever the runtime gate says, and every app runs LibRaw as libraw-wasm.
 // Their licences ask for the holders' notices in what recipients get (the BSD
 // and NCSA terms, Sun's "provided that this notice is preserved", MIT's "above
-// copyright notice", Apache-2.0 §4).
+// copyright notice", Apache-2.0 §4), and CDDL §3.1 also wants recipients told
+// how to obtain the source.
 // negative2positive/public/licenses/raw-decoder-notices.txt carries them; this
 // checks that
 //
@@ -16,13 +17,18 @@
 //   permission notice there, is in it: musl's COPYRIGHT leaves the notices of
 //   its math files (Arm's MIT, Sun's) to those files, and several LibRaw
 //   decoders name holders its COPYRIGHT does not;
-// - the vendored licence files are reproduced in full.
+// - the vendored licence files are reproduced in full;
+// - recipients can find it: the Studio menu links it with a label in zh, en
+//   and ja, about.html links it, and the GitHub release text names LibRaw, its
+//   licence, its source and the notices. The desktop bundles carry the file
+//   itself (bundle.resources, checked by check-tauri-config.mjs).
 //
 //   node scripts/check-third-party-notices.mjs
 import assert from 'node:assert/strict';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, extname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { i18n } from '../negative2positive/src/app/i18n.js';
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 const vendorDir = join(repoRoot, 'src-tauri', 'vendor');
@@ -139,13 +145,41 @@ for (const pattern of [/Arm Limited/, /Sun Microsystems.*Permission to use/, /Li
 
 for (const item of missingFromNotices(notices, required, licences)) problems.push(`${NOTICES_PATH} lacks ${item}`);
 
+// ---- recipients can find it ----
+
+// The Studio menu (the desktop app's only UI): a link that opens it without
+// leaving the session, labelled in every language. workspace-ui-smoke.mjs
+// clicks it in the real menu.
+const studio = readFileSync(join(repoRoot, 'negative2positive', 'src', 'app', 'studioWorkspace.js'), 'utf8');
+const menuLink = new RegExp(`<a\\b[^>]*\\bhref="\\./${NOTICES_PATH.replace(/\./g, '\\.')}"[^>]*>`).exec(studio)?.[0];
+if (!menuLink) {
+  problems.push(`studioWorkspace.js gives the Studio menu no link to ./${NOTICES_PATH}`);
+} else {
+  if (!/\btarget="_blank"/.test(menuLink)) problems.push(`the Studio menu's notices link would replace the app: ${menuLink}`);
+  const key = /\bdata-i18n="([^"]+)"/.exec(menuLink)?.[1];
+  if (!key) problems.push(`the Studio menu's notices link has no data-i18n label: ${menuLink}`);
+  for (const lang of ['zh', 'en', 'ja']) {
+    if (key && !i18n[lang]?.[key]?.trim()) problems.push(`i18n.${lang}.${key} (the Studio menu's notices link) is missing`);
+  }
+}
+
+const about = readFileSync(join(repoRoot, 'negative2positive', 'about.html'), 'utf8');
+if (!about.includes(`href="/${NOTICES_PATH}"`)) problems.push(`about.html does not link /${NOTICES_PATH}`);
+
+// The GitHub release text: LibRaw, its licence, where its source is, and the notices.
+const workflow = readFileSync(join(repoRoot, '.github', 'workflows', 'desktop-release.yml'), 'utf8');
+const releaseBody = /append_body: \|\n((?:[ \t]*\n| {12,}.*\n)+)/.exec(workflow)?.[1] || '';
+for (const needle of ['LibRaw', 'CDDL-1.0', 'https://github.com/LibRaw/LibRaw', NOTICES_PATH]) {
+  if (!releaseBody.includes(needle)) problems.push(`desktop-release.yml's release text (append_body) does not mention ${needle}`);
+}
+
 if (problems.length) {
   console.error('FAIL third-party notices:\n  ' + problems.join('\n  '));
   process.exit(1);
 }
 
 // It can fail: without the Arm paragraphs of the musl files or the notice of
-// cos.c (R2-045), or with a licence file cut short.
+// cos.c, or with a licence file cut short.
 const withoutArm = notices.replace(/^.*Arm Limited\.\n.*SPDX-License-Identifier: MIT\n/gm, '');
 assert.ok(withoutArm !== notices, 'mutation found no Arm paragraph to delete');
 assert.ok(missingFromNotices(withoutArm, required, licences).some(item => item.includes('Arm Limited')),
@@ -159,4 +193,4 @@ const lastCddlSentence = cddl.split('\n').filter(line => /[a-z]/i.test(line)).po
 assert.ok(missingFromNotices(notices.replace(lastCddlSentence, ''), required, licences).includes('libraw/LICENSE.CDDL in full'),
   'a truncated CDDL text went unnoticed');
 
-console.log(`ok: ${NOTICES_PATH} carries the ${required.length} header notices of ${SOURCE_DIRS.length} vendored trees and ${licences.length} licence files in full`);
+console.log(`ok: ${NOTICES_PATH} carries the ${required.length} header notices of ${SOURCE_DIRS.length} vendored trees and ${licences.length} licence files in full; the Studio menu, about.html and the release text point to it`);

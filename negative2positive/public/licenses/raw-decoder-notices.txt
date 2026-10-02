@@ -1,12 +1,13 @@
 RAW decoder notices
 ==============================================================================
 
-The Negative Converter desktop app decodes RAW files with LibRaw 0.22.1,
-statically linked into the application, unmodified. Its mathematical
-functions pow, powf, exp, log, logf and cos come from musl 1.2.6, and on
-macOS it runs LibRaw's parallel regions with the LLVM OpenMP runtime
-(libomp 22.1.8). The web app runs the same LibRaw release compiled to
-WebAssembly (the libraw-wasm package).
+Negative Converter decodes RAW files with LibRaw 0.22.1, unmodified. The web
+app and the desktop apps run it compiled to WebAssembly (the libraw-wasm
+package). The macOS and Linux desktop apps also contain it compiled
+natively and statically linked into the application: there its
+mathematical functions pow, powf, exp, log, logf and cos come from musl
+1.2.6, and on macOS its parallel regions run on the LLVM OpenMP runtime
+(libomp 22.1.8), statically linked as well.
 
 LibRaw is offered under LGPL-2.1 or CDDL-1.0; this app uses it under the
 COMMON DEVELOPMENT AND DISTRIBUTION LICENSE (CDDL) Version 1.0, reproduced
@@ -15,6 +16,13 @@ https://github.com/LibRaw/LibRaw (tag 0.22.1, commit
 b860248a89d9082b8e0a1e202e516f46af9adb29) and, exactly as compiled into this
 app, in the app's source repository under src-tauri/vendor/libraw
 (https://github.com/lexluthor0304/NegativeConverter).
+
+Where Negative Converter is distributed in executable form under other
+terms, such as Apple's Licensed Application End User License Agreement for
+the Mac App Store version, any of those terms that differ from the CDDL are
+offered by NeoAnalogLab (NEO ANALOG LABO K.K.) alone, not by LibRaw's Initial
+Developer or any Contributor, and they do not limit or alter your rights in
+LibRaw's Source Code under the CDDL.
 
 The LLVM OpenMP runtime is licensed under the Apache License v2.0 with LLVM
 Exceptions; parts of it originate from Intel's OpenMP runtime and remain

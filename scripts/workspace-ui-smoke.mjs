@@ -1,6 +1,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { FALLBACK_CODE_POINTS, UI_FACES } from './ui-font-glyphs.mjs';
+import { i18n } from '../negative2positive/src/app/i18n.js';
 
 const LATIN_POSTSCRIPT = 'NCStudioLatin';
 const UI_POSTSCRIPT = Object.fromEntries(UI_FACES.map(face => [face.id, face.postScriptName]));
@@ -10,14 +11,19 @@ const FULL_FAMILIES = ['Fusion Pixel SC', 'Fusion Pixel TC', 'Fusion Pixel JP', 
 // Cold UI font budget for zh and ja (#262): the subsets, not a 0.66 MB face.
 const COLD_UI_FONT_BUDGET = 50 * 1024;
 
-export async function runWorkspaceUiSmoke({ send, evaluate, waitFor, fail, port, root }) {
+export async function runWorkspaceUiSmoke({ send, sendTo, evaluate, waitFor, fail, port, root }) {
   await send('DOM.enable'); await send('CSS.enable');
   for (const query of ['workspace=classic&lang=zh', 'workspace=studio&lang=en', 'lang=ja']) {
     await send('Page.navigate', { url: `http://127.0.0.1:${port}/?${query}` });
     await waitFor('single workspace', `!!document.getElementById('studioBasic')`);
     if (!await evaluate(`document.body.classList.contains('studio') && !document.querySelector('.app-header,.app-footer,#studioPreviewLink,#noviceGuideSection,#controlStageBar,#panelModeToggle,#frontierGuidePopupOverlay,.upload-seo-summary,#studioHeaderSource,#studioExportSource')`)) fail('old workspace markup remains');
     if (!await evaluate(`document.querySelector('.studio-mark')?.textContent === 'NeoAnalogLab' && !document.querySelector('.studio-mark').hasAttribute('aria-hidden')`)) fail('brand name is missing or inaccessible');
+    // The menu's notices link is created after the first setLanguage ran.
+    const lang = new URLSearchParams(query).get('lang');
+    const label = await evaluate(`document.getElementById('studioNotices')?.textContent`);
+    if (label !== i18n[lang].navThirdPartyNotices) fail('third-party notices label in ' + lang + ': ' + JSON.stringify(label));
   }
+  await runNoticesLinkSmoke({ send, sendTo, evaluate, fail });
   // 空画布による片寄り・狭幅での押しつぶしを DOM 座標で回帰検証する。
   for (const [width, height] of [[2048, 1166], [1440, 900], [390, 844], [320, 568], [844, 390]]) {
     await send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: width < 900 });
@@ -103,6 +109,65 @@ export async function runWorkspaceUiSmoke({ send, evaluate, waitFor, fail, port,
   await send('Emulation.clearDeviceMetricsOverride');
   console.log('ok: old workspace links open the only UI; Latin, SC, TC, Japanese and Korean render custom pixel fonts');
   await runRenderedUiFontSmoke({ send, evaluate, waitFor, fail, port, root });
+}
+
+// The RAW decoder's licence notices (LibRaw's CDDL-1.0, musl, libomp): the
+// menu entry opens them in a new tab, so the session stays, and that tab shows
+// the file. Its label follows a language switch. The page is on ja here.
+async function runNoticesLinkSmoke({ send, sendTo, evaluate, fail }) {
+  const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const link = await evaluate(`(async () => {
+    document.getElementById('studioMenu').open = true;
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const link = document.getElementById('studioNotices');
+    const box = link.getBoundingClientRect();
+    const x = box.x + box.width / 2, y = box.y + box.height / 2;
+    return { href: link.href, target: link.target, x, y, width: box.width, visible: link.checkVisibility(),
+      inMenu: !!link.closest('#studioMenu[open] .studio-menu-content'), hit: link.contains(document.elementFromPoint(x, y)), app: location.href };
+  })()`);
+  if (!link.visible || !link.inMenu || !link.hit || link.width < 20 || link.target !== '_blank' || !link.href.endsWith('/licenses/raw-decoder-notices.txt')) {
+    fail('third-party notices link not usable in the open menu: ' + JSON.stringify(link));
+  }
+  const pages = async () => (await sendTo(undefined, 'Target.getTargets')).result?.targetInfos?.filter(info => info.type === 'page') || [];
+  const known = new Set((await pages()).map(info => info.targetId));
+  for (const type of ['mousePressed', 'mouseReleased']) {
+    await send('Input.dispatchMouseEvent', { type, x: link.x, y: link.y, button: 'left', clickCount: 1 });
+  }
+  let tab = null;
+  for (let i = 0; i < 40 && !tab; i++) {
+    tab = (await pages()).find(info => !known.has(info.targetId) && info.url === link.href) || null;
+    if (!tab) await wait(250);
+  }
+  if (!tab) fail('clicking the third-party notices link opened no tab with ' + link.href);
+  // The tab starts on about:blank: read it once it shows the notices' URL.
+  let shown = '', seen = '';
+  const sessionId = (await sendTo(undefined, 'Target.attachToTarget', { targetId: tab.targetId, flatten: true })).result?.sessionId;
+  for (let i = 0; i < 40 && sessionId && !shown; i++) {
+    const response = await sendTo(sessionId, 'Runtime.evaluate', { returnByValue: true,
+      expression: `[location.href, document.readyState, document.contentType, document.body?.innerText || ''].join('\\n')` });
+    seen = response.result?.result?.value || '';
+    const [href, readyState, ...rest] = seen.split('\n');
+    if (href === link.href && readyState === 'complete') shown = rest.join('\n');
+    else await wait(250);
+  }
+  if (sessionId) await sendTo(undefined, 'Target.detachFromTarget', { sessionId });
+  await sendTo(undefined, 'Target.closeTarget', { targetId: tab.targetId });
+  if (!shown.startsWith('text/plain\n') || !['RAW decoder notices', 'COMMON DEVELOPMENT AND DISTRIBUTION LICENSE', 'https://github.com/LibRaw/LibRaw', 'Arm Limited', 'Sun Microsystems'].every(text => shown.includes(text))) {
+    fail('the third-party notices tab does not show the notices: ' + JSON.stringify(seen.slice(0, 300)));
+  }
+  if (await evaluate(`location.href`) !== link.app || !await evaluate(`!!document.getElementById('studioBasic')`)) fail('opening the third-party notices left the app');
+  // A language switch relabels it; the remembered language is put back.
+  const relabelled = await evaluate(`(() => {
+    const stored = localStorage.getItem('nc_lang_v1');
+    document.querySelector('.lang-btn[data-lang="zh"]').click();
+    const label = document.getElementById('studioNotices').textContent;
+    document.querySelector('.lang-btn[data-lang="ja"]').click();
+    if (stored === null) localStorage.removeItem('nc_lang_v1'); else localStorage.setItem('nc_lang_v1', stored);
+    document.getElementById('studioMenu').open = false;
+    return label;
+  })()`);
+  if (relabelled !== i18n.zh.navThirdPartyNotices) fail('third-party notices label after switching to zh: ' + JSON.stringify(relabelled));
+  console.log('ok: the Studio menu opens the third-party notices in a new tab (' + shown.length + ' characters of text/plain), labelled in zh, en and ja');
 }
 
 async function platformFonts(send, selector) {

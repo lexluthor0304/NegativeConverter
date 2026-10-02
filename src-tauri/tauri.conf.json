@@ -30,6 +30,9 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "resources": {
+      "../negative2positive/public/licenses/raw-decoder-notices.txt": "licenses/raw-decoder-notices.txt"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

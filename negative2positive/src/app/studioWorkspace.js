@@ -505,6 +505,16 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
   ['offlineDownloadLink', 'feedbackBtn', 'privacyDetailsLink', 'shopLink'].forEach(id => move(id, $('studioPublicLinks')));
   const guide = document.querySelector('.header-site-links');
   if (guide) $('studioLinks').append(guide);
+  // LibRaw (CDDL-1.0), musl and libomp are compiled into the apps; their
+  // licences ask that recipients can find the notices and LibRaw's source.
+  // A row of its own in the site links' style, opened in a new tab so the
+  // session stays (the desktop app sends every link to the browser).
+  const notices = document.createElement('div');
+  notices.className = 'header-site-links';
+  notices.innerHTML = '<a id="studioNotices" href="./licenses/raw-decoder-notices.txt" target="_blank" rel="noopener" data-i18n="navThirdPartyNotices"></a>';
+  // setLanguage ran before the Studio was mounted; later switches reach the data-i18n.
+  notices.firstChild.textContent = getText?.('navThirdPartyNotices') || 'Third-party notices';
+  $('studioLinks').append(notices);
 
   const welcome = $('studioWelcome');
   const importActions = document.createElement('div');

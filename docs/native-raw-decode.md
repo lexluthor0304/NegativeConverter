@@ -265,25 +265,57 @@ the files the app opens become less trusted than the user's own scans.
 
 ## Licences
 
-LibRaw is dual-licensed LGPL-2.1 / CDDL-1.0. The desktop app uses it under
-**CDDL-1.0**: its obligations are file-based (the covered source files, here
-unmodified in `src-tauri/vendor/libraw`, stay available under CDDL with the
-licence text, and recipients of the executable are told where), with no
-relinking requirement, which suits a statically linked App Store binary.
-LGPL-2.1 would add the duty to let users relink with a modified LibRaw.
-`negative2positive/public/licenses/raw-decoder-notices.txt` (bundled with the
-web and desktop apps) carries the notices: LibRaw's COPYRIGHT and the
-copyright lines of its source files, the BSD licences of DCB/FBDD and the X3F
-tools, the MIT notice of the DNG SDK code, musl's COPYRIGHT in full with the
-notices of the compiled math files (Arm Limited's MIT for pow, exp, log, powf,
-logf and their tables; Sun Microsystems' for cos and its kernels, "provided
-that this notice is preserved"), the CDDL text, and the OpenMP runtime's
-licence file (Apache-2.0 with LLVM Exceptions; its legacy parts from Intel's
-runtime are under the University of Illinois/NCSA or MIT licence, which ask
-for the notice in binary distributions). `scripts/check-third-party-notices.mjs`
-(part of `npm test`) fails when a copyright or SPDX line or a permission
-notice in the header of a vendored source, or a vendored licence file, is
-missing from it.
+LibRaw is dual-licensed LGPL-2.1 / CDDL-1.0. The apps use it under
+**CDDL-1.0**: its obligations are file-based, with no relinking requirement,
+which suits a statically linked App Store binary (LGPL-2.1 would add the duty
+to let users relink with a modified LibRaw). The covered source files stay
+available under CDDL with the licence text (unmodified in
+`src-tauri/vendor/libraw`, and upstream); recipients of the executable must
+be told how to obtain them (§3.1); and where the executable is distributed
+under other terms, as the App Store does under Apple's licence agreement,
+those terms must be made clear as the distributor's alone (§3.5). These are
+conditions of the licence grant. They apply to every macOS and Linux build,
+the App Store build included, whether or not `NATIVE_RAW_PARITY` lets the
+page use the native decoder, and every app (the web app and Windows
+included) also runs LibRaw as libraw-wasm.
+
+`negative2positive/public/licenses/raw-decoder-notices.txt` carries the
+notices: where LibRaw's source is and the §3.5 statement, LibRaw's COPYRIGHT
+and the copyright lines of its source files, the BSD licences of DCB/FBDD and
+the X3F tools, the MIT notice of the DNG SDK code, musl's COPYRIGHT in full
+with the notices of the compiled math files (Arm Limited's MIT for pow, exp,
+log, powf, logf and their tables; Sun Microsystems' for cos and its kernels,
+"provided that this notice is preserved"), the CDDL text, and the OpenMP
+runtime's licence file (Apache-2.0 with LLVM Exceptions; its legacy parts
+from Intel's runtime are under the University of Illinois/NCSA or MIT
+licence, which ask for the notice in binary distributions).
+
+Recipients find it:
+
+- in every desktop package, as a plain file (`bundle.resources` in
+  `src-tauri/tauri.conf.json`): `Contents/Resources/licenses/` in the macOS
+  app, the App Store build included, the installation folder on Windows, and
+  `usr/lib/<product name>/licenses/` in the deb and rpm packages and the
+  AppImage. The copy among the frontend assets alone would not do: Tauri
+  compresses those into the executable.
+- in the app: the Studio menu's Third-party notices entry opens it in a new
+  tab; the desktop app opens the site's copy in the browser, as it does every
+  link.
+- on the site at `/licenses/raw-decoder-notices.txt`, linked from
+  `about.html` (Source, releases and support).
+- in the GitHub release text (`append_body` in
+  `.github/workflows/desktop-release.yml`), which names LibRaw, the CDDL-1.0,
+  the source and the file.
+- in the App Store description, which this repository does not manage
+  (`docs/mas-release.md`).
+
+`scripts/check-third-party-notices.mjs` (part of `npm test`) fails when a
+copyright or SPDX line or a permission notice in the header of a vendored
+source, or a vendored licence file, is missing from the notices, and when the
+menu link, its zh/en/ja label, the about page's link or the release text's
+mention goes; `scripts/check-tauri-config.mjs` keeps the bundle resource and
+keeps the override configs away from it; `node scripts/smoke-test.mjs
+--workspace-ui-only` clicks the menu entry and reads what it opens.
 
 ## Measured
 

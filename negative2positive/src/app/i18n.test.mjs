@@ -12,6 +12,10 @@ import { i18n } from './i18n.js';
 
 const appDir = dirname(fileURLToPath(import.meta.url));
 const indexHtml = readFileSync(join(appDir, '..', '..', 'index.html'), 'utf8');
+// The Studio chrome adds markup of its own when it mounts (the menu's notices
+// link, the Advanced toggle); setLanguage translates it with the same attributes.
+const studioJs = readFileSync(join(appDir, 'studioWorkspace.js'), 'utf8');
+const markupSources = { 'index.html': indexHtml, 'studioWorkspace.js': studioJs };
 
 const languages = Object.keys(i18n);
 assert.deepEqual(languages.sort(), ['en', 'ja', 'zh'], 'expected exactly the zh/en/ja dictionaries');
@@ -44,34 +48,45 @@ const I18N_ATTRIBUTES = [
   'data-i18n-label',
 ];
 const usedKeys = new Set();
-for (const attribute of I18N_ATTRIBUTES) {
-  for (const match of indexHtml.matchAll(new RegExp(`${attribute}="([^"]+)"`, 'g'))) {
-    usedKeys.add(match[1]);
+const keysBySource = {};
+for (const [source, markup] of Object.entries(markupSources)) {
+  keysBySource[source] = new Set();
+  for (const attribute of I18N_ATTRIBUTES) {
+    for (const match of markup.matchAll(new RegExp(`${attribute}="([^"]+)"`, 'g'))) {
+      usedKeys.add(match[1]);
+      keysBySource[source].add(match[1]);
+    }
   }
 }
-assert.ok(usedKeys.size > 100, `expected the app page to reference many keys, found ${usedKeys.size}`);
+assert.ok(keysBySource['index.html'].size > 100, `expected the app page to reference many keys, found ${keysBySource['index.html'].size}`);
+// The Studio menu's link to the RAW decoder's licence notices (CDDL §3.1).
+assert.ok(keysBySource['studioWorkspace.js'].has('navThirdPartyNotices'), 'the Studio menu has no translated third-party notices link');
 
 for (const lang of languages) {
-  const undefinedKeys = [...usedKeys].filter((key) => !keySets[lang].has(key));
-  assert.equal(
-    undefinedKeys.length,
-    0,
-    `index.html references keys missing from ${lang}: ${undefinedKeys.slice(0, 10).join(', ')}`
-  );
+  for (const [source, keys] of Object.entries(keysBySource)) {
+    const undefinedKeys = [...keys].filter((key) => !keySets[lang].has(key));
+    assert.equal(
+      undefinedKeys.length,
+      0,
+      `${source} references keys missing from ${lang}: ${undefinedKeys.slice(0, 10).join(', ')}`
+    );
+  }
 }
 
 // --- The attribute-driven names must actually be applied --------------------
 // setLanguage walks these attributes; a new one added to the markup without a
 // matching loop would leave that name frozen at its English fallback.
 const mainJs = readFileSync(join(appDir, 'main.js'), 'utf8');
-for (const attribute of I18N_ATTRIBUTES) {
-  if (!indexHtml.includes(`${attribute}="`)) continue;
-  assert.ok(
-    mainJs.includes(`querySelectorAll('[${attribute}]')`),
-    `index.html uses ${attribute} but setLanguage never reads it`
-  );
+for (const [source, markup] of Object.entries(markupSources)) {
+  for (const attribute of I18N_ATTRIBUTES) {
+    if (!markup.includes(`${attribute}="`)) continue;
+    assert.ok(
+      mainJs.includes(`querySelectorAll('[${attribute}]')`),
+      `${source} uses ${attribute} but setLanguage never reads it`
+    );
+  }
 }
 
 console.log(
-  `i18n tests: all passed (${languages.length} languages x ${reference.size} keys, ${usedKeys.size} referenced by the app page)`
+  `i18n tests: all passed (${languages.length} languages x ${reference.size} keys, ${usedKeys.size} referenced by the app page and the Studio chrome)`
 );

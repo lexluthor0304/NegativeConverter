@@ -15,8 +15,17 @@
 // app.security.headers) on every response. An override may not touch it:
 // Merge Patch would drop it with a null and replace its values otherwise.
 //
+// Every bundle carries the RAW decoder's licence notices as a readable file
+// (bundle.resources): LibRaw, musl and libomp are compiled into the desktop
+// binaries, the App Store build included, and their licences ask for the
+// notices in what recipients get (scripts/check-third-party-notices.mjs). It
+// lands in Contents/Resources/licenses in the macOS app, in the installation
+// folder on Windows and in usr/lib/<product name>/licenses in the Linux
+// packages. No override may set bundle.resources either: Merge Patch would
+// drop the map with a null and replace it with an array.
+//
 //   node scripts/check-tauri-config.mjs
-import { readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CROSS_ORIGIN_ISOLATION_HEADERS } from './cross-origin-isolation.mjs';
@@ -47,6 +56,15 @@ for (const [key, value] of Object.entries(CROSS_ORIGIN_ISOLATION_HEADERS)) {
   }
 }
 
+const NOTICES_SOURCE = '../negative2positive/public/licenses/raw-decoder-notices.txt';
+const NOTICES_TARGET = 'licenses/raw-decoder-notices.txt';
+const resources = base?.bundle?.resources;
+if (Array.isArray(resources) || resources?.[NOTICES_SOURCE] !== NOTICES_TARGET) {
+  problems.push(`tauri.conf.json: bundle.resources must map ${JSON.stringify(NOTICES_SOURCE)} to ${JSON.stringify(NOTICES_TARGET)}, found ${JSON.stringify(resources)}`);
+} else if (!existsSync(join(tauriDir, NOTICES_SOURCE))) {
+  problems.push(`tauri.conf.json: bundle.resources names ${NOTICES_SOURCE}, which does not exist`);
+}
+
 const overrides = readdirSync(tauriDir).filter((name) => /^tauri\..+\.conf\.json$/.test(name));
 if (!overrides.length) problems.push('no override configs found next to tauri.conf.json');
 for (const name of overrides) {
@@ -57,10 +75,13 @@ for (const name of overrides) {
   if (config?.app?.security && Object.prototype.hasOwnProperty.call(config.app.security, 'headers')) {
     problems.push(`${name}: sets app.security.headers, which would change or drop the cross-origin isolation headers`);
   }
+  if (config?.bundle && Object.prototype.hasOwnProperty.call(config.bundle, 'resources')) {
+    problems.push(`${name}: sets bundle.resources, which could replace or drop the bundled licence notices`);
+  }
 }
 
 if (problems.length) {
   console.error('FAIL tauri config:\n  ' + problems.join('\n  '));
   process.exit(1);
 }
-console.log(`ok: backgroundThrottling is disabled, the isolation headers are set and ${overrides.length} override config(s) leave app.windows and app.security.headers alone`);
+console.log(`ok: backgroundThrottling is disabled, the isolation headers are set, the bundles carry ${NOTICES_TARGET} and ${overrides.length} override config(s) leave app.windows, app.security.headers and bundle.resources alone`);
