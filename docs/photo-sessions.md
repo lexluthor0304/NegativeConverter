@@ -348,7 +348,11 @@ A photo that still needs its frame and film-edge detection is converted first
 rendered while both detections run, and the loading surface lifts at that
 paint. During the detection tail the frame notice reads "Detecting the image
 area and tilt…", the filmstrip navigates, and editing, history and export stay
-locked (`studioBusy`). The final settings are then built in the old order
+locked (`studioBusy`): the panel, the history, the preview toolbar (rotate,
+mirror, crop) and the photo surface (brushes and samplers) are inert, and the
+undo/redo keys do nothing. Zoom, pan and a drop, which supersedes the photo as
+the filmstrip does, stay available. Apply Crop takes `studioBusy` only when it
+is free, so it never unlocks a tail. The final settings are then built in the old order
 (frame, film edge, learned defaults); when their conversion key equals the
 provisional one only the detection descriptions are applied, otherwise the
 photo is rendered once more. A provisional photo is never persisted, cached

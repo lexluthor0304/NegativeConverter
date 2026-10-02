@@ -222,6 +222,11 @@ assert.match(source, /photoSort\.sync\(\{ state, busy, photoSwitching: navigable
 // not navigation (#236): the strip stays usable while the panel is inert.
 assert.match(source, /const navigable = body\.dataset\.photoSwitching === 'true' \|\| Boolean\(detecting\);\n\s+set\(strip, 'inert', busy && !navigable\);/);
 assert.match(source, /set\(panel, 'inert', busy\);/);
+// The rest of editing is locked with the panel (R1-034): the toolbar's
+// rotate, mirror and crop, and the brushes and samplers on the photo (its
+// container keeps zoom, pan and drops).
+assert.match(source, /set\(panel, 'inert', busy\);\n(?:\s+\/\/.*\n)*\s+set\(node\.previewToolbar, 'inert', busy\);\n\s+set\(node\.canvasTransformWrapper, 'inert', busy\);/);
+assert.match(source, /const STUDIO_SYNC_IDS = \[[^\]]*'previewToolbar', 'canvasTransformWrapper',/);
 assert.match(source, /t\(preparing \? 'preparingOriginal' : detecting === 'frame' \? 'detectingFrame' :/, 'the frame notice reports the running detection, or the original being prepared (#249)');
 console.log('studioWorkspace: shared localized sort select, callback ownership and navigation locks passed');
 

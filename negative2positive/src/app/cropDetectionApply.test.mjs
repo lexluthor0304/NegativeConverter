@@ -10,6 +10,8 @@
 // - A hit that lands before the conversion starts is converted once.
 // - Undo, a second Apply and a new load end the detection; the barrier
 //   settles only after a hit's conversion.
+// - Apply inside another task's studioBusy (a detection tail) leaves that
+//   lock set (R1-034).
 // - With the expired rescue on, the conversion waits for the detection.
 // - The hit's conversion supersedes a full-resolution render the provisional
 //   pass armed: the exact plane installed is the hit's (R1-070).
@@ -225,6 +227,23 @@ for (const cancel of ['undo', 'apply', 'load']) {
   assert.equal(installed.analysisNeedsReview, true, `${cancel}: the stale hit never completes the old meta`);
   assert.equal(t.conversions.length, conversionsBefore + (cancel === 'apply' ? 1 : 0), `${cancel}: no conversion from a stale hit`);
   assert.ok(t.h.target.cropDetectionStats.stale >= 1, `${cancel}: counted stale`);
+}
+
+// ---- Apply inside another task's lock (R1-034) ----
+// A photo's detection tail holds studioBusy (editing and export locked);
+// Apply leaves that lock to its owner, and releases only a lock it took.
+{
+  for (const held of [true, false]) {
+    const t = setup({ points: null, immediate: true });
+    const body = t.h.target.document.body;
+    if (held) body.dataset.studioBusy = 'true';
+    t.openDraft();
+    const applying = t.c.applyCropHandler();
+    await t.finishConversion();
+    await applying;
+    assert.equal(body.dataset.studioBusy, held ? 'true' : undefined,
+      held ? 'the tail keeps its lock: Export stays disabled until it ends' : 'Apply releases the lock it took');
+  }
 }
 
 // ---- Expired rescue on: the conversion waits for the detection ----

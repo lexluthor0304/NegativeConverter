@@ -16340,20 +16340,24 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // Undo/Redo keyboard shortcuts
     document.addEventListener('keydown', (event) => {
       if (isEditableTarget(event.target)) return;
+      // The history is locked during a photo's detection tail, whose final
+      // settings would replace whatever an undo restored: the keys still
+      // belong to the app, but do nothing.
+      const locked = Boolean(document.body.dataset.studioDetecting);
 
       if ((event.ctrlKey || event.metaKey) && !event.shiftKey && event.key === 'z') {
         event.preventDefault();
-        performUndo();
+        if (!locked) performUndo();
         return;
       }
       if ((event.ctrlKey || event.metaKey) && event.shiftKey && (event.key === 'z' || event.key === 'Z')) {
         event.preventDefault();
-        performRedo();
+        if (!locked) performRedo();
         return;
       }
       if ((event.ctrlKey || event.metaKey) && event.key === 'y') {
         event.preventDefault();
-        performRedo();
+        if (!locked) performRedo();
         return;
       }
     });
@@ -16991,7 +16995,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (state.baseDescriptor || state.sourcePending) {
         return prepareOriginalForTool().then(ready => (ready ? beginCropMode(options) : undefined));
       }
-      if (state.geometryPending) return whenGeometrySettled().then(() => openCropMode(options));
+      if (state.geometryPending) {
+        // Only on the photo it was asked for: the wait spans a switch, and the
+        // next photo may be in its detection tail by then.
+        const generation = loadGeneration;
+        return whenGeometrySettled().then(() => { if (isCurrentLoad(generation)) openCropMode(options); });
+      }
       openCropMode(options);
       return Promise.resolve();
     }
@@ -17815,11 +17824,14 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const overlay = getLoadingOverlay();
       let busy = true;
       let handedOver = false;
+      // A lock held by another task (a photo's detection tail) stays with it:
+      // its end, not this Apply, unlocks editing and export.
+      const ownsBusy = !document.body.dataset.studioBusy;
       const releaseBusy = () => {
         if (!busy) return;
         busy = false;
         studioAutoFrameRunning = false;
-        delete document.body.dataset.studioBusy;
+        if (ownsBusy) delete document.body.dataset.studioBusy;
         applyCropBtn.disabled = cancelCropBtn.disabled = false;
         studioWorkspace?.sync();
       };

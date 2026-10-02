@@ -72,9 +72,10 @@ In `main.js` the scalars change synchronously and the planes follow:
   `processNegative`, export, crop-mode entry, Step 2's border suggestion and
   the frame readers await `whenGeometrySettled()`; film-base sampling ignores
   clicks while a build is pending. A newer edit, undo/redo or a switch
-  supersedes the job. The job holds `studioBusy` unless someone else does,
-  except the swap to a two-stage import's full decode (`holdBusy: false`),
-  which never locks editing.
+  supersedes the job. The job holds `studioBusy` unless someone else does
+  (Studio then makes the panel, the preview toolbar and the photo's brushes
+  inert, as for any `studioBusy`), except the swap to a two-stage import's
+  full decode (`holdBusy: false`), which never locks editing.
 - Rotate 90° and mirror turn or flip the current display with CSS at once
   (UI only; composed when edits follow each other); the first paint of the
   new planes removes it, on the GL display or on `#canvas`, with the film

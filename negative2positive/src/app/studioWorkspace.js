@@ -249,6 +249,7 @@ const STUDIO_SYNC_IDS = [
   'studioOpenProject', 'studioRestoreProject', 'studioMergeAverage', 'studioMergeHdr', 'studioNewSession', 'studioAdd',
   'studioLoupe', 'saveSettingsBtn', 'applyToSelectedBtn', 'exportBtn', 'filmSettingsSection',
   'studioPhotoSwitchFeedback', 'studioPhotoSwitchMessage', 'studioPhotoSwitchHint', 'canvasContainer',
+  'previewToolbar', 'canvasTransformWrapper',
 ];
 // Shown once a photo is converted, hidden before.
 const STUDIO_STEP3_SECTIONS = ['toneSection', 'colorSection', 'cmySection', 'additionalSection', 'consoleSection',
@@ -926,6 +927,12 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
     set(node.studioFrameNotice, 'dataset.status', preparing ? 'preparing' : detecting === 'frame' ? 'detecting' : frameMeta?.appliedMode || '');
     set(node.studioFrameNotice, 'disabled', Boolean(state.cropping || busy));
     set(panel, 'inert', busy);
+    // The toolbar (rotate, mirror, crop) and the brushes and samplers on the
+    // photo edit it too, outside the panel: a photo's detection tail shows
+    // it with no overlay over them. The container keeps zoom, pan and a
+    // drop, which supersedes the photo as the filmstrip does.
+    set(node.previewToolbar, 'inert', busy);
+    set(node.canvasTransformWrapper, 'inert', busy);
     // Photo activation locks editing, not navigation: rapid browsing must
     // be able to supersede a slow decode, or the detection tail of a photo
     // already on screen, without touching the old photo.
