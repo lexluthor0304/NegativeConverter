@@ -23723,9 +23723,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       item.semanticAttempted = true;
       const source = state.processedImageData;
       if (!source) return;
-      // The anchors are estimated on the auto-WB sample, which does not follow
-      // the viewport (#248), whenever it belongs to this source.
-      const sampleSource = autoWbSampleFor(autoWbSampleKey()) || source;
+      // The white balance's anchors are estimated on the auto-WB sample, which
+      // does not follow the viewport (#248), whenever it belongs to this
+      // source. Under rescue the map weights the measurement of `source`, the
+      // frame on screen, and is of that frame, as at 1703835 (#229 review
+      // R1-085).
+      const rescue = Boolean(state.expiredEnabled);
+      const sampleSource = rescue ? source : autoWbSampleFor(autoWbSampleKey()) || source;
       // The interpretation the map and the rescue's measurement are of: an
       // automatic retype (#231) changes it without an edit (R1-017).
       const interpretation = expiredInterpretation();
@@ -23734,7 +23738,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // passing states (crop mode, Auto Frame, a roll import) count before
       // and after it only, as they always did.
       const wanted = () => isCurrentLoad(generation) && item === getCurrentQueueItem() && revision === manualEditRevision && !state.wbUserOverride && !state.grayPointSampled && !state.rollReference.applyLock && !item.savedSettings
-        && interpretation === expiredInterpretation();
+        && interpretation === expiredInterpretation() && rescue === Boolean(state.expiredEnabled);
       const valid = () => wanted() && !state.cropping && !studioAutoFrameRunning && !automaticRollImportRunning && !state.rollFrame?.locked;
       // Whole converted preview coordinates are used for both WB and rescue.
       const preview = downsampleImageDataForMaxDim(sampleSource, 512);
