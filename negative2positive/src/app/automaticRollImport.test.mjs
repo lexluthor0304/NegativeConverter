@@ -556,7 +556,8 @@ for (const change of ['recipe', 'edit', 'dirty', 'remove', 'cancel', 'off']) {
   // Frames 1-4 were decoded and sunk while every render is still pending.
   assert.deepEqual(f.decoded, [1, 2, 3, 4], 'renders never hold back the next decode');
   assert.equal(f.frameRenders.length, 3, 'a processed tile needs no per-frame render');
-  assert.ok(f.frameRenders.every(job => job.request.options.preview && job.request.settings.analysisRegion === null));
+  assert.ok(f.tileRenders.length === 3 && f.tileRenders.every(render => render.ctx.automaticWhiteBalance
+    && render.ctx.maxSize === 288 && render.ctx.baseSize), 'the per-frame render is the roll tile recipe (#247 2a)');
   // Complete the renders after the commit took over frame 4's tile.
   f.items[4].thumbnail = 'thumbnail:commit'; f.items[4].thumbnailKind = 'analysis';
   f.items[1].thumbnail = 'data:live'; f.items[1].thumbnailKind = 'processed';

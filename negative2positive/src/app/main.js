@@ -27997,11 +27997,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       }
     }
 
-    // Per-frame `analysis` tiles during automatic roll import, rendered from
-    // the frame's 900 px sample with the same recipe the roll commit uses
-    // (worker conversion, then createAdjustedPhotoPreview with the frame's
-    // adjustment settings). They only fill empty or `embedded` tiles; the
-    // commit and the canonical lane replace them as before.
+    // Per-frame `analysis` tiles during automatic roll import: the roll's own
+    // tile recipe (renderSampleTile, #247 2a) on the frame's sample, so the
+    // commit's tile of the same recipe has the same pixels and a tile changes
+    // look once at most. The import's conversion worker renders them without
+    // holding back the next decode. They only fill empty or `embedded` tiles
+    // and never count as ready; the commit and the canonical lane replace
+    // them as before.
     let frameThumbnailWorkers = null;
     const frameThumbnailJobs = new Set();
     function renderFrameAnalysisThumbnail(item, { sample, settings }, isValid) {
@@ -28009,13 +28011,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const job = (async () => {
         try {
           frameThumbnailWorkers ||= createConversionWorkerPool({ size: 1 });
-          const converted = await frameThumbnailWorkers({
-            imageData: downsampleImageDataForMaxDim(sample, 288),
-            settings: { ...buildCoreConversionSettings(settings), analysisRegion: null },
-            options: { preview: true, includeAnalysisPreview: false }
-          });
-          if (!converted || !isValid() || !state.fileQueue.includes(item) || !canPublishThumbnail(item, 'analysis')) return;
-          item.thumbnail = thumbnailDataUrl(createAdjustedPhotoPreview(converted, buildAdjustmentSettings(settings)));
+          const current = () => isValid() && state.fileQueue.includes(item);
+          const tile = await renderSampleTile(item, settings, sample, { convert: frameThumbnailWorkers, isCurrent: current });
+          if (!tile || !current() || !canPublishThumbnail(item, 'analysis')) return;
+          item.thumbnail = tile.thumbnail;
           item.thumbnailKind = 'analysis';
           item.thumbnailKey = null;
           scheduleTileFlush(item);

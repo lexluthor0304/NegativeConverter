@@ -561,7 +561,10 @@ it was rendered for; otherwise (lens correction, or a global dust, AI or
 flat-field change while the commit waited) it stays `analysis` and the lane
 renders it again, from its tile source when it has one. Frames no group took
 (positives, mixed stocks, groups of fewer than three) get their canonical
-tile from the retained sample before the import finishes. Tiles rank
+tile from the retained sample before the import finishes. A frame's
+per-frame `analysis` tile, published as soon as pass 1 has measured it, is
+rendered from the same sample with the same renderer and recipe, so a tile
+whose recipe the commit leaves alone keeps its pixels. Tiles rank
 `embedded` < `analysis` < `processed` (`thumbnailRank.js`): import-time
 embedded tiles and per-frame analysis tiles only fill empty or `embedded`
 tiles, so a tile never moves back, and neither kind carries a `thumbnailKey`

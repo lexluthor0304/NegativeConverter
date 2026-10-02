@@ -23,8 +23,11 @@ detected stocks and roll outliers are visible at a glance.
   jobs are not gated on roll import, and tile DOM updates are batched once per
   frame. These tiles are provisional camera renderings: they stay
   `data-preview-state="pending"`. During automatic roll import each measured
-  frame then gets a converted `analysis` tile from its 900 px sample, rendered
-  in a conversion worker without delaying the next decode. Final tiles come
+  frame then gets a converted `analysis` tile from its sample, rendered with
+  the roll's own tile recipe (the commit's renderer, with the frame's tile
+  working image, analysis reference and automatic gray point) in a conversion
+  worker without delaying the next decode, so the commit's tile of the same
+  recipe has the same pixels. Final tiles come
   from data already in memory (#247): the roll commit renders each analysed
   frame's `processed` tile from its sample, frames no roll group took get
   theirs from their samples before the import ends, and recipe changes over
