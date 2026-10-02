@@ -11,6 +11,7 @@ import { routeCoreConversion, keepsFullPlaneOnDowngrade, viewportRefreshBranch }
 import { isLargeImage } from './imageMemoryBudget.js';
 import { DISABLED_GPU_PREVIEW_SCHEDULER } from './gpuPreviewScheduler.js';
 import { displaySessionStubs, DISPLAY_SESSION_HELPERS } from './displaySessionHarness.mjs';
+import { poolRepairMask, repoolRepairMaskRect, countPooledCells } from './repairedPreview.js';
 
 // Drives the real preview-tier wiring of main.js (#263) together with the real
 // scheduler, reprocess and state-application functions, on synthetic images:
@@ -95,11 +96,16 @@ function fixture({ width = 3000, height = 2000, repairs = false, largePreviewFra
     previewSourceImageData: null, histogramSourceImageData: null, webglSourceImageData: null,
     currentStep: 3, coreExposure: 0, repairStrokes: [], fullResolutionPending: false, zoomLevel: 1,
     cropping: false, beforeAfterActive: false, sprocketPreviewEnabled: false,
-    dustRemoval: { enabled: repairs, processing: false },
+    dustRemoval: { enabled: repairs, processing: false, mask: null, revision: 0 },
   };
   const conversions = [];
   const resizes = [];
   const log = [];
+  // #237 phase 2: the preview repair worker's fills and the display negatives
+  // the preview worker sent for them. A fill blacks out the pooled cells.
+  const fills = [];
+  const displayNegatives = [];
+  let heldNegative = null;
   const glCanvas = { width: 0, height: 0 };
   const controllerStub = { active: false, ends: [], nextStartTier: 'normal',
     nextStart() { return { tier: this.nextStartTier, reason: null }; },
@@ -124,7 +130,29 @@ function fixture({ width = 3000, height = 2000, repairs = false, largePreviewFra
     CORE_RETAIN_PREVIEW_PLANE: false, CORE_PREVIEW_COMMIT_IDLE_MS: 150,
     corePreviewRetained: null, corePreviewCommit: null, corePreviewCommitWanted: false,
     corePreviewCommitTimer: null, corePreviewSettleWaiters: [],
-    convertPreviewFrameInWorker: { commit: async () => null },
+    convertPreviewFrameInWorker: {
+      commit: async () => null,
+      displayNegative: async ({ imageData, display }) => {
+        displayNegatives.push({ ...display.target });
+        const negative = resampleDisplayLevel(imageData, display.geometry, display.target);
+        return new ImageData(negative.data, negative.width, negative.height);
+      },
+    },
+    poolRepairMask, repoolRepairMaskRect, countPooledCells,
+    previewRepairWorker: {
+      inpaint: async (image, mask) => {
+        heldNegative = image;
+        const out = new ImageData(new Uint8ClampedArray(image.data), image.width, image.height);
+        for (let i = 0; i < mask.length; i++) if (mask[i]) out.data.fill(0, i * 4, i * 4 + 3);
+        fills.push({ image, mask: mask.slice(), out });
+        return out;
+      },
+      holds: image => image === heldNegative, dispose: () => {},
+    },
+    buildRepairMask: () => ({ mask: null, bounds: null }), localExposureGeometryFor: () => ({}),
+    buildRouterSettings: () => ({}), getColorAnalysisSample: () => null,
+    repairedPreview: null, repairedPreviewBuild: null, repairedPreviewPool: null,
+    repairedPreviewTimer: null, REPAIRED_PREVIEW_IDLE_MS: 300,
     coreReprocessTimer: null, coreReprocessScheduled: null,
     coreReprocessToken: 0, coreReprocessGeneration: 0,
     _coreReprocessFullInFlight: false, _coreReprocessPreviewInFlight: false,
@@ -151,8 +179,10 @@ function fixture({ width = 3000, height = 2000, repairs = false, largePreviewFra
     usesSilverCoreConversion: () => true,
     hasFrameRepairs: () => state.dustRemoval.enabled,
     convertFromCurrentSource: (settings, options) => new Promise(resolve => {
-      const input = options.preview && state.conversionPreviewImageData ? state.conversionPreviewImageData : state.conversionSourceImageData;
-      const entry = { input, exposure: state.coreExposure, full: !options.interactive,
+      // A filled display preview source (#237 phase 2) is converted instead.
+      const input = options.previewSource
+        || (options.preview && state.conversionPreviewImageData ? state.conversionPreviewImageData : state.conversionSourceImageData);
+      const entry = { input, filled: Boolean(options.previewSource), exposure: state.coreExposure, full: !options.interactive,
         resolve: () => resolve(convertPixels(input, entry.exposure)) };
       conversions.push(entry);
     }),
@@ -165,12 +195,12 @@ function fixture({ width = 3000, height = 2000, repairs = false, largePreviewFra
     carryStudioThumbnailSource: () => {}, updateDebugWidget: () => {},
     logWebviewDiagnostics: line => log.push(`log:${line}`), formatPreviewSessionLine: () => 'session',
     updateEnlargerUI: () => {},
-    // #237: the one routing rule and the viewport refresh run for real; these
-    // synthetic frames are below 16 MP, so the routing is unchanged. No exact
-    // render, repaired preview or AI brush is involved.
+    // #237: the one routing rule, the viewport refresh and the repaired preview
+    // run for real; these synthetic frames are below 16 MP, so the routing is
+    // unchanged. No exact render or AI brush is involved.
     routeCoreConversion, keepsFullPlaneOnDowngrade, viewportRefreshBranch, isLargeImage,
     fullResolutionConversionAbort: null, dustDetectionTimer: null, repairedPreviewShown: null, repairedPreviewMasks: null,
-    isAiBrushEnabled: () => false, repairedPreviewSourceFor: () => null, ensureRepairedPreview: () => {},
+    isAiBrushEnabled: () => false,
     ensureAiBrushPlane: () => {},
     // No GPU preview (#239): the tier's frames take the worker path.
     gpuPreviewScheduler: DISABLED_GPU_PREVIEW_SCHEDULER, gpuPreviewCanTake: () => false, gpuPreview: { status: 'none' },
@@ -197,6 +227,9 @@ function fixture({ width = 3000, height = 2000, repairs = false, largePreviewFra
     'applyProcessedImageToState', 'applyPreviewProcessedImageToState', 'coreReprocessHandlersFor',
     'refreshDisplayPreviewForViewport', 'routeCoreRequest', 'beginFullResolutionConversion',
     'endFullResolutionConversion', 'abortSupersededFullResolutionConversion',
+    'previewRequestImage', 'scheduleRepairedPreviewAfterInput', 'rememberRepairMasks', 'poolRepairStroke',
+    'clearRepairedPreview', 'repairedPreviewMatches', 'repairedPreviewBaseFor', 'repairedPreviewSourceFor',
+    'ensureRepairedPreview', 'currentRepairPool', 'buildRepairedPreview',
   ].map(functionSource).join('\n'), context);
 
   // processNegative's first conversion: the normal display target and its frame.
@@ -235,8 +268,13 @@ function fixture({ width = 3000, height = 2000, repairs = false, largePreviewFra
       await settle();
     }
   };
+  // Runs only the timers of one delay (a pause of that length).
+  const runTimersOf = (delay) => {
+    for (const [id, timer] of [...timers]) if (timer.delay === delay) { timers.delete(id); timer.callback(); }
+  };
   return { context, state, base, conversions, resizes, log, glCanvas, controllerStub, idleCallbacks,
-    normalTarget, handlers, input, post, answerAll, runTimers, nextFrame, timers, container };
+    normalTarget, handlers, input, post, answerAll, runTimers, runTimersOf, nextFrame, timers, container,
+    fills, displayNegatives };
 }
 
 const bytesEqual = (a, b) => a.width === b.width && a.height === b.height && Buffer.compare(Buffer.from(a.data), Buffer.from(b.data)) === 0;
@@ -628,6 +666,129 @@ for (const kind of ['curve', 'slider', 'reduced frame']) {
   }
 }
 
+// ---- #229 review R1-120: repairs on, the normal tier's display preview filled
+// (#237 phase 2). A reduced session converts that fill, resampled to its own
+// size, from its first tick; it never fills a reduced target of its own, so a
+// pause mid-drag keeps the normal fill; and its settle tick converts the
+// normal fill again ----
+{
+  const dustSource = { width: 3000, height: 2000 };
+  const specks = (f) => {
+    const mask = new Uint8Array(3000 * 2000);
+    for (const [x, y] of [[500, 400], [1500, 1000], [2400, 1700], [2999, 1999]]) mask[y * 3000 + x] = 255;
+    f.state.dustRemoval.mask = mask;
+    f.state.dustRemoval.revision += 2;
+  };
+  // Lets a fill land: its build leaves the task first.
+  const fillLands = async (f) => {
+    for (let round = 0; round < 3; round++) {
+      f.runTimersOf(0);
+      await settle();
+    }
+  };
+  // Identities are checked with assert.ok: a failing assert.equal inspects
+  // these multi-megapixel images in full, for seconds and gigabytes.
+  const reducedFromFill = (entry, fill) => isDisplayTarget(entry.input) && entry.input.__displayOf === fill
+    && pixels(entry.input) <= PREVIEW_TIER_REDUCED_MAX_PIXELS && entry.filled;
+
+  const f = fixture({ repairs: true });
+  const normalPreview = f.state.conversionPreviewImageData;
+  specks(f);
+  // Detection settled the repair: its masks are remembered and filled.
+  f.context.rememberRepairMasks(dustSource);
+  await fillLands(f);
+  const fill = f.context.repairedPreview?.image;
+  assert.ok(fill, 'the normal tier\'s preview is filled');
+  assert.ok(f.context.repairedPreview.base === normalPreview, 'for its own conversion preview');
+  assert.equal(f.fills.length, 1);
+  assert.deepEqual(f.displayNegatives, [{ width: normalPreview.width, height: normalPreview.height }]);
+
+  f.context.onPreviewTierChange('reduced');
+  for (const value of [10, 20]) await f.input(value);
+  const drag = f.conversions.slice(-2);
+  assert.ok(drag.every(entry => reducedFromFill(entry, fill)), 'every reduced tick converts the normal fill at its own size');
+  assert.ok(drag[0].input === drag[1].input, 'one stand-in object, so the worker keeps its resample');
+  assert.deepEqual([drag[0].input.width, drag[0].input.height], [f.state.conversionPreviewImageData.width, f.state.conversionPreviewImageData.height]);
+  assert.ok(f.context.displayIsReduced(), 'a reduced frame is on screen');
+  assert.ok(f.context.repairedPreviewShown === f.state.previewSourceImageData, 'shown as a repaired preview');
+  // The tick's pixels: the normal fill resampled to the reduced size, converted.
+  assert.ok(bytesEqual(f.state.processedImageData, convertPixels(drag[1].input, 20)));
+  assert.ok(!bytesEqual(f.state.processedImageData, convertPixels(f.state.conversionPreviewImageData, 20)), 'the specks are filled');
+
+  // The user holds still for 300 ms mid-drag: nothing is filled for the
+  // reduced target, and the normal fill stays.
+  f.runTimersOf(300);
+  await fillLands(f);
+  assert.ok(f.context.repairedPreview.base === normalPreview, 'the normal fill survives the pause');
+  assert.ok(f.context.repairedPreview.image === fill, 'unchanged');
+  assert.equal(f.fills.length, 1, 'no fill of a reduced target');
+  assert.equal(f.displayNegatives.length, 1);
+
+  await f.input(30);
+  assert.ok(reducedFromFill(f.conversions.at(-1), fill));
+  f.context.onPreviewTierChange('normal');
+  f.handlers.onCommit(30);
+  await f.answerAll();
+  f.runTimers();
+  await f.answerAll();
+  const settleTick = f.conversions.at(-1);
+  assert.ok(settleTick.input === fill, 'the settle tick converts the normal fill');
+  assert.equal(settleTick.exposure, 30);
+  assert.equal(f.context.displayIsReduced(), false);
+  assert.ok(bytesEqual(f.state.processedImageData, convertPixels(fill, 30)), 'the settled frame is the filled one');
+  assert.ok(f.context.repairedPreviewShown === f.state.previewSourceImageData, 'and the idle pass keeps it on screen');
+  assert.equal(f.fills.length, 1, 'the session made no fill');
+
+  // A repair that settles during a reduced session (detection after the idle
+  // pass) is filled for the normal tier's preview, never the reduced target;
+  // the ticks after it convert that fill, and so does the settle tick.
+  const g = fixture({ repairs: true });
+  const gNormal = g.state.conversionPreviewImageData;
+  g.context.onPreviewTierChange('reduced');
+  await g.input(10);
+  assert.equal(g.conversions.at(-1).filled, false, 'nothing to fill with yet');
+  specks(g);
+  g.context.rememberRepairMasks(dustSource);
+  await fillLands(g);
+  assert.ok(g.context.repairedPreview?.base === gNormal, 'filled for the normal tier\'s preview');
+  assert.deepEqual(g.displayNegatives, [{ width: gNormal.width, height: gNormal.height }]);
+  const gFill = g.context.repairedPreview.image;
+  await g.input(20);
+  assert.ok(reducedFromFill(g.conversions.at(-1), gFill));
+  g.runTimersOf(300);
+  await fillLands(g);
+  assert.ok(g.context.repairedPreview.base === gNormal, 'kept through the pause');
+  g.context.onPreviewTierChange('normal');
+  g.handlers.onCommit(20);
+  await g.answerAll();
+  g.runTimers();
+  await g.answerAll();
+  assert.ok(g.conversions.at(-1).input === gFill, 'the settle tick converts the normal fill');
+  assert.equal(g.fills.length, 1);
+
+  // A fill of another size (the window changed since) serves no reduced
+  // tick; a pause mid-drag fills the normal tier's new preview, not the
+  // reduced target, and the ticks after it convert that fill.
+  const h = fixture({ repairs: true });
+  specks(h);
+  h.context.rememberRepairMasks(dustSource);
+  await fillLands(h);
+  const oldFill = h.context.repairedPreview.image;
+  h.container.height = 560;
+  h.state.conversionPreviewImageData = h.context.conversionTargetFor(h.base, h.base, 'normal');
+  const hNormal = h.state.conversionPreviewImageData;
+  assert.notEqual(hNormal.height, oldFill.height);
+  h.context.onPreviewTierChange('reduced');
+  await h.input(10);
+  assert.equal(h.conversions.at(-1).filled, false, 'a fill of another size is not used');
+  h.runTimersOf(300);
+  await fillLands(h);
+  assert.ok(h.context.repairedPreview?.base === hNormal, 'the pause fills the normal tier\'s preview');
+  assert.deepEqual(h.displayNegatives.at(-1), { width: hNormal.width, height: hNormal.height });
+  await h.input(20);
+  assert.ok(reducedFromFill(h.conversions.at(-1), h.context.repairedPreview.image));
+}
+
 // ---- Session end diagnostics ----
 {
   const f = fixture();
@@ -640,4 +801,4 @@ for (const kind of ['curve', 'slider', 'reduced frame']) {
   assert.equal(f.log.at(-1), 'log:session', 'no frame log without the flag');
 }
 
-console.log('previewTierWiring: reduced sessions show <= 1 MP, settle byte-identical to the normal path, keep history normal and skip the old photo');
+console.log('previewTierWiring: reduced sessions show <= 1 MP, settle byte-identical to the normal path, keep history normal, skip the old photo and convert the normal fill of a repaired preview');

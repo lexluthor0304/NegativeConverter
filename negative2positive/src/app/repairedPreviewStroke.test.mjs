@@ -118,6 +118,7 @@ function fixture({ repairStrokes = [] } = {}) {
     buildRouterSettings: () => ({}), getColorAnalysisSample: () => null,
     displayTargetFor, isDisplayTarget, displayLevelGeometry,
     hasFrameRepairs: () => Boolean(state.dustRemoval.enabled || state.repairStrokes.length),
+    reducedDisplayImages: new WeakSet(), previewTierKept: null,
     repairedPreviewMasks: null, repairedPreview: null, repairedPreviewBuild: null, repairedPreviewPool: null,
     repairedPreviewShown: null, repairedPreviewTimer: null, REPAIRED_PREVIEW_IDLE_MS: 300,
     // The stroke end (#259) with its stroke worker answering at once.
@@ -134,7 +135,7 @@ function fixture({ repairStrokes = [] } = {}) {
   vm.runInContext([
     ...DISPLAY_SESSION_HELPERS, 'hasSeparateConversionPreview', 'previewRequestImage',
     'scheduleRepairedPreviewAfterInput', 'rememberRepairMasks', 'poolRepairStroke', 'clearRepairedPreview',
-    'repairedPreviewMatches', 'repairedPreviewSourceFor', 'ensureRepairedPreview',
+    'repairedPreviewMatches', 'repairedPreviewBaseFor', 'repairedPreviewSourceFor', 'ensureRepairedPreview',
     'currentRepairPool', 'buildRepairedPreview',
     'getDustSource', 'needsDustPrivateBuffer', 'installDustPrivateBuffer', 'ensureDustPrivateBuffer',
     'prepareDustPrivateBuffer', 'nextDustMaskTag', 'strokeDustOffMainThread', 'commitDustStroke',

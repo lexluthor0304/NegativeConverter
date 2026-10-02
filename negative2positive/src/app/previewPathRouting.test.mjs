@@ -238,7 +238,7 @@ function fixture({ large = true, repairs = false, strokes = 0, aiBrush = false, 
     'whenBrushRepairsSettled', 'noteBrushRepairSettled', 'getDustSource', 'cancelPendingTimers',
     'trimHistorySnapshot', 'rememberRepairMasks', 'clearRepairedPreview', 'repairedPreviewMatches',
     'repairedPreviewSourceFor', 'ensureRepairedPreview', 'buildRepairedPreview', 'applyExactPlaneKeepingView',
-    'poolRepairStroke', 'currentRepairPool',
+    'poolRepairStroke', 'repairedPreviewBaseFor', 'currentRepairPool',
     'scheduleRepairedPreviewAfterInput', 'clearFullResolutionRenderState', 'ensureConversionPreviewForDisplay', 'noteTierImage',
     'previewRequestImage', 'convertRequestOnMain', 'installDisplayFor', 'installDisplayPreview', 'cancelDisplayPreviewRebuild',
     'rebuildDisplayPreview', 'flushDisplayPreviewRebuild', 'countMainResample', 'updateConversionTarget', 'conversionTargetFor',
@@ -1033,6 +1033,39 @@ for (const large of [false, true]) {
   await settle();
 }
 
+// ---- #229 review R1-120: a reduced preview-tier target (#263) converts the
+// normal tier's fill, resampled by the preview worker to its own size ----
+{
+  const f = fixture({ large: false, repairs: true, size: { width: 800, height: 600 }, target: { width: 400, height: 300 } });
+  const dustMask = new Uint8Array(800 * 600);
+  dustMask[300 * 800 + 500] = 255;
+  f.state.dustRemoval.mask = dustMask;
+  f.context.rememberRepairMasks(f.fullPlane);
+  f.clock.run(0);
+  await settle();
+  const fill = { width: 400, height: 300, name: 'normal fill' };
+  f.previewRepairs[0].resolve(fill);
+  await settle();
+  const normal = f.state.conversionPreviewImageData;
+  const reduced = displayTargetFor(f.conversionSource, { width: 300, height: 225 }, 'reduced');
+  f.context.reducedDisplayImages.add(reduced);
+  f.context.previewTierKept = { source: f.conversionSource, preview: normal };
+  f.state.conversionPreviewImageData = reduced;
+  f.nextFrame();
+  f.context.scheduleCoreReprocess({ full: false });
+  await Promise.resolve();
+  await settle();
+  const { request } = f.clients.preview.at(-1);
+  assert.equal(request.imageData, fill, 'the worker converts from the normal fill');
+  assert.deepEqual({ ...request.display.target }, { width: 300, height: 225 }, 'resampled to the reduced size');
+  assert.deepEqual({ ...request.display.geometry }, { sourceWidth: 400, sourceHeight: 300, k: 1 });
+  f.reply('preview');
+  await settle();
+  assert.equal(f.context.repairedPreviewShown, f.state.previewSourceImageData);
+  assert.ok(!f.clock.delays().includes(300), 'no fill of the reduced target is scheduled');
+  assert.equal(f.previewRepairs.length, 1);
+}
+
 // ---- #249: a Tier B session converts previews from its display proxy (the
 // display level, #248) while its source is pending; a full conversion and
 // the export barrier wait for ensureSource() ----
@@ -1149,4 +1182,4 @@ for (const large of [true, false]) {
   await assert.rejects(f.context.ensureFullResolutionReadyForExport(), /Error loading file/);
 }
 
-console.log('previewPathRouting: downgraded undo/reset routing, kept planes, idle repair pass, restore flags and paint, viewport branches, Step-3 gate, export repair waits at both entry points, cleared masks and strokes in the idle window, aborted exact renders, the repaired preview source, a stroke fill after input and the colour-analysis sample barrier passed');
+console.log('previewPathRouting: downgraded undo/reset routing, kept planes, idle repair pass, restore flags and paint, viewport branches, Step-3 gate, export repair waits at both entry points, cleared masks and strokes in the idle window, aborted exact renders, the repaired preview source, a stroke fill after input, the reduced tier fill and the colour-analysis sample barrier passed');

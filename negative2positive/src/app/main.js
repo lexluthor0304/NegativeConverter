@@ -7545,10 +7545,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (!fullSource && !(preview && state.sourcePending && state.conversionPreviewImageData)) return null;
       if (!state.conversionSourceImageData && fullSource) noteGeometryPixelRead('convertFromCurrentSource');
       // previewSource: the display preview source with its repairs filled
-      // (Phase 2 of #237), for interactive preview frames only.
+      // (Phase 2 of #237), for interactive preview frames only; a reduced
+      // preview-tier target on it (#263) is resampled by the worker.
       const previewImage = preview ? state.conversionPreviewImageData : null;
-      const { imageData: source, display } = previewImage && !previewSource ? previewRequestImage(previewImage)
-        : { imageData: (previewImage && previewSource) || previewImage || fullSource, display: null };
+      const { imageData: source, display } = previewImage ? previewRequestImage(previewSource || previewImage)
+        : { imageData: fullSource, display: null };
       const fullRender = !preview && !interactive;
       const request = {
         imageData: source,
@@ -8332,9 +8333,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // dustMask, strokes, dustEnabled }. They outlive the idle pass's reset:
     // during the wait for new ones they are what the preview is filled with.
     let repairedPreviewMasks = null;
-    // The fill of the conversion preview: { base, masks, image, negative,
-    // revision }, made at the dust mask's `revision`. `negative` names the
-    // display negative the preview repair worker kept.
+    // The fill of the normal tier's conversion preview: { base, masks, image,
+    // negative, revision }, made at the dust mask's `revision`. `negative`
+    // names the display negative the preview repair worker kept. A reduced
+    // preview-tier target (#263) converts this fill resampled to its size: it
+    // is never filled itself (#229 review R1-120).
     let repairedPreview = null;
     let repairedPreviewBuild = null;
     // The masks pooled to the fill's size, at the dust mask's `revision`:
@@ -8412,17 +8415,28 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         && masks.strokes === state.repairStrokes && masks.dustEnabled === Boolean(state.dustRemoval.enabled));
     }
 
-    function repairedPreviewSourceFor(base) {
-      const entry = repairedPreview;
-      if (!entry || entry.base !== base || !repairedPreviewMatches(entry.masks)) return null;
-      return entry.image;
+    // The conversion preview whose fill `preview` uses: a reduced preview-tier
+    // target (#263) stands in for the normal tier's, which the session keeps.
+    function repairedPreviewBaseFor(preview) {
+      if (!preview || !reducedDisplayImages.has(preview)) return preview;
+      return previewTierKept?.preview || null;
     }
 
-    // Fills the current display preview source with the remembered masks as
-    // they are now, unless that is done or under way.
+    function repairedPreviewSourceFor(base) {
+      const entry = repairedPreview;
+      if (!entry || !base || !repairedPreviewMatches(entry.masks)) return null;
+      if (entry.base === base) return entry.image;
+      // A reduced target converts the normal tier's fill, which the preview
+      // worker resamples to its size: no fill of its own (#229 review R1-120).
+      if (entry.image && repairedPreviewBaseFor(base) === entry.base) return displayTargetFor(entry.image, base, 'reduced');
+      return null;
+    }
+
+    // Fills the normal tier's display preview source with the remembered
+    // masks as they are now, unless that is done or under way.
     function ensureRepairedPreview() {
       const masks = repairedPreviewMasks;
-      const base = state.conversionPreviewImageData;
+      const base = repairedPreviewBaseFor(state.conversionPreviewImageData);
       if (!repairedPreviewMatches(masks) || !base || base === state.conversionSourceImageData) return;
       const revision = state.dustRemoval.revision;
       if (repairedPreview?.base === base && repairedPreview.masks === masks && repairedPreview.revision === revision) return;
