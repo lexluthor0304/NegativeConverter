@@ -324,6 +324,8 @@ export function createMemoryBudget({
       };
     },
     get budget() { return budget; },
+    /** Bytes the outstanding reservations hold, every priority (no ledger walk). */
+    get reserved() { return reservedTotal(); },
     /** Outstanding user and background reservations. */
     get jobs() { return jobCount; },
     get foregroundOutstanding() { return foregroundCount; },

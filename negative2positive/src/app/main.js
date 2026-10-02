@@ -11264,7 +11264,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
     // An item of a long job: the hidden-job gate first (#241), then the
     // budget, never the other way round: a lane holding memory never waits
-    // on the hidden gate's one item in flight.
+    // on the hidden gate's one item in flight. `memory` is the budget's
+    // handle.
     async function admitJobItem({ hiddenBytes = 0, memoryBytes = 0, priority = 'user', label = '', signal = null } = {}) {
       const releaseHidden = await hiddenJobs.admit({ bytes: hiddenBytes, signal });
       let handle;
@@ -11274,10 +11275,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         releaseHidden();
         throw error;
       }
-      return () => {
+      const release = () => {
         handle.release();
         releaseHidden();
       };
+      release.memory = handle;
+      return release;
     }
 
     // The photo being opened: one foreground claim per activation, taken at
@@ -20693,7 +20696,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     const batchPipelineDiagnostics = {
       batches: 0, lastMode: null, lastLanes: 0, droppedPlanes16: 0, rebuilds: 0, residentFrames: 0,
       bandBridge: {}, bands: null, singleExport: null,
-      decodeAhead: { admitted: 0, refused: { ceiling: 0, 'low-memory': 0, engine: 0, hidden: 0, format: 0 }, lastEstimate: 0 },
+      decodeAhead: { admitted: 0, refused: { ceiling: 0, 'low-memory': 0, engine: 0, hidden: 0, foreground: 0, format: 0 }, lastEstimate: 0 },
       last: null
     };
     if (typeof window !== 'undefined') window.__ncBatchPipeline = { diagnostics: batchPipelineDiagnostics };
@@ -20705,14 +20708,19 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // as before. The prepared base is the same decode the lane would make.
     //
     // The ceiling is the memory budget's (#258), and the estimate counts its
-    // ledger. The decode itself takes no reservation of its own: a lane
+    // ledger and its outstanding reservations other than the batch's own
+    // lanes (`ownReservedBytes`; their frames and payloads are counted
+    // apart). The decode itself takes no reservation of its own: a lane
     // reserves before it claims a frame and then waits for that frame's
     // prepare, so a prepare waiting for memory the lane holds would never
     // finish. Admission is a yes or no at once instead, and a frame it
     // refuses is decoded by its lane inside the lane's reservation. It
     // refuses every frame on WebKit engines until the #230 harness has
-    // measured a lane.
-    function batchDecodeAhead(mode, { pixelsPerFile, convertsInBands = () => false }) {
+    // measured a lane, and while a foreground reservation (a photo being
+    // opened, ensureBase) is out. A decoded frame waiting for its lane is
+    // counted by the ledger (heldJobFrames) until a lane takes it or the
+    // batch drops it.
+    function batchDecodeAhead(mode, { pixelsPerFile, convertsInBands = () => false, ownReservedBytes = () => 0 }) {
       if (mode === 'serial') return null;
       const decodesOffThread = (file) => isRawLikeFileName(String(file?.name || '').toLowerCase()) || isPngFile(file);
       const subStages = mode === 'substages';
@@ -20731,19 +20739,21 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
             batchPipelineDiagnostics.decodeAhead.refused.format += 1;
             return false;
           }
+          // A frame that is ready waits for its lane in the ledger.
           const decodingPixels = [];
-          const waitingPixels = [];
-          for (const entry of prepared) (entry.stage === 'ready' ? waitingPixels : decodingPixels).push(await pixelsOf(entry.job.file));
+          for (const entry of prepared) if (entry.stage !== 'ready') decodingPixels.push(await pixelsOf(entry.job.file));
           const hidden = hiddenJobs.status();
-          // Read at each admission: the desktop's engine arrives after boot.
+          // Read at each admission: the desktop's engine arrives after boot,
+          // and the budget's holders change during a batch.
           const plan = planDecodeAhead({
             candidatePixels: await pixelsOf(job.file),
             decodingPixels,
-            waitingPixels,
             processingPixels: Array.from({ length: processing }, () => pixelsPerFile),
             processingInBands: convertsInBands(),
             unwrittenBytes,
             residentBytes: hiddenResidentBytes(),
+            reservedBytes: Math.max(0, memoryBudget.reserved - ownReservedBytes()),
+            foregroundOutstanding: memoryBudget.foregroundOutstanding,
             deviceMemory: navigator.deviceMemory,
             engine: memoryRuntime.engine,
             hiddenLimited: hidden.safeMode || (hidden.hidden && hidden.limited),
@@ -20762,16 +20772,24 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           if (isTauriDesktop()) await backgroundGate.idle({ signal, maxWaitMs: BACKGROUND_STEP_WAIT_CAP_MS, foregroundOnly: true });
           running += 1;
           try {
-            const base = await loadFileToImageData(job.file, {
+            const base = markOwnedPlanes(await loadFileToImageData(job.file, {
               filmStats: !job.settings, signal, claim: coveredMemoryClaim(), ...(subStages ? { onStage: stage } : {})
-            });
-            return markOwnedPlanes(base);
+            }));
+            heldJobFrames.add(base);
+            return base;
           } finally {
             running -= 1;
           }
         },
+        // A lane takes the frame (its reservation covers it from then on).
+        take: (base) => {
+          if (heldJobFrames.delete(base)) memoryBudget.poke();
+        },
         // A frame decoded ahead of a cancelled batch is never processed.
-        disposePrepared: (base) => releaseOwnedPlanes(base)
+        disposePrepared: (base) => {
+          if (heldJobFrames.delete(base)) memoryBudget.poke();
+          releaseOwnedPlanes(base);
+        }
       };
     }
 
@@ -20834,10 +20852,21 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // Each lane reserves the lane constant over the batch's largest frame
       // (#258): the index is not claimed yet when it asks.
       const laneBytes = laneReservationBytes({ pixels: pixelsPerFile });
+      // The lanes' own reservations: decode-ahead counts the budget's other
+      // holders, and these lanes' frames and payloads apart.
+      const laneHandles = new Set();
+      const ownReservedBytes = () => {
+        let held = 0;
+        for (const handle of laneHandles) {
+          if (handle.released) laneHandles.delete(handle);
+          else held += handle.bytes;
+        }
+        return held;
+      };
       const mode = batchPipelineMode();
       // `workers` (below) is read at each admission, once the batch runs.
       const decodeAhead = batchDecodeAhead(mode, {
-        pixelsPerFile, convertsInBands: () => Boolean(workers.bandPool?.available)
+        pixelsPerFile, ownReservedBytes, convertsInBands: () => Boolean(workers.bandPool?.available)
       });
       const workers = createBatchExportWorkers(lanes, { pixelsPerFile, exportInfo, mode, decodesInFlight: () => decodeAhead?.running() || 0 });
       const trace = createPerfTrace('batchExport', { files: jobs.length, lanes, mode });
@@ -20860,14 +20889,21 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           // Admission happens before a lane claims its next index (#241):
           // the hidden-job gate, then the memory budget; both are released
           // once the claimed frame's sink has run.
-          beforeStart: ({ signal: stop }) => admitJobItem({
-            hiddenBytes: bytes, memoryBytes: laneBytes, priority: 'user', label: 'export lane', signal: stop
-          }),
-          process: (job, index, prepared, context) => renderBatchExportFile(job, job.markerIndex ?? index, {
-            exportInfo, workers, options, prepared: prepared || null,
-            onBaseReady: context?.decoded || null,
-            learningBarrier: () => learning.before(index)
-          }),
+          beforeStart: async ({ signal: stop }) => {
+            const release = await admitJobItem({
+              hiddenBytes: bytes, memoryBytes: laneBytes, priority: 'user', label: 'export lane', signal: stop
+            });
+            laneHandles.add(release.memory);
+            return release;
+          },
+          process: (job, index, prepared, context) => {
+            if (prepared) decodeAhead?.take(prepared);
+            return renderBatchExportFile(job, job.markerIndex ?? index, {
+              exportInfo, workers, options, prepared: prepared || null,
+              onBaseReady: context?.decoded || null,
+              learningBarrier: () => learning.before(index)
+            });
+          },
           sink: async (job, blob, index) => {
             let outcome = null;
             try {

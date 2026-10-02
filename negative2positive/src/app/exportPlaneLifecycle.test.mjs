@@ -108,7 +108,8 @@ const { requestExportGainMap, gainMapInputsMatch } = await import('./exportGainM
 const adjustment = await import('./adjustmentPipeline.js');
 const encoders = await import('./exportImageEncoders.js');
 const { computeGainMap } = await import('./gainMapJpeg.js');
-const { runBatchPipeline, createLearningBarrier, planDecodeAhead, EXPORT_MAX_UNWRITTEN_BYTES } = await import('./batchExportScheduler.js');
+const { runBatchPipeline, createLearningBarrier, planDecodeAhead, EXPORT_MAX_UNWRITTEN_BYTES, LANE_BYTES_PER_PIXEL } = await import('./batchExportScheduler.js');
+const { createRetainedLedger } = await import('./memoryBudget.js');
 const { downconvertPlane16 } = await import('../workers/pixelAdjustments16.js');
 
 configurePlaneRelease({ engine: 'webkit' });
@@ -127,7 +128,8 @@ const runtime = [
   'exportSingle', 'applyAdjustmentsWithSettings', 'applyPreparedAdjustmentsWithWorkers', 'startExportGainMap',
   'imageDataToBlob', 'png16EncodeSettings', 'makeExportCancelledError', 'createBatchExportWorkers',
   'renderBatchExportFile', 'runBatchExport', 'batchPipelineMode', 'batchDecodeAhead', 'mayLearnFromExport',
-  'encodeResidentFrame', 'createExportBands', 'convertForExportInBands', 'markInPlaceEditedPlanes', ...MEMORY_FUNCTIONS
+  'encodeResidentFrame', 'createExportBands', 'convertForExportInBands', 'markInPlaceEditedPlanes', 'memoryLedgerConsumers',
+  ...MEMORY_FUNCTIONS
 ].map(functionSource).join('\n')
   // vm scripts have no dynamic import: hand the module over directly.
   .replaceAll("await import('./gainMapJpeg.js')", 'await importGainMapJpeg()');
@@ -292,7 +294,7 @@ function createContext({ gainMap = 'on' } = {}) {
     // #256 stages: decode-ahead only for RAW names here, never admitted by
     // default (the fixture decodes nothing); tests below switch it on.
     batchPipelineDiagnostics: { batches: 0, droppedPlanes16: 0, residentFrames: 0, bandBridge: {}, bands: null, singleExport: null,
-      decodeAhead: { admitted: 0, refused: { ceiling: 0, 'low-memory': 0, engine: 0, hidden: 0, format: 0 } } },
+      decodeAhead: { admitted: 0, refused: { ceiling: 0, 'low-memory': 0, engine: 0, hidden: 0, foreground: 0, format: 0 } } },
     // #256 band pool: none in this fixture (a 1 MP frame, and no pool size),
     // unless a test below sets one.
     exportBands: null,
@@ -768,9 +770,11 @@ for (const [format, bitDepth] of [['jpeg', 8], ['png', 8], ['tiff', 16], ['png',
   // (one at a time, one frame ahead) and handed over as the frame's owned
   // base; a lane goes on while its payload waits for the write; a
   // never-analysed frame reads the learned defaults only after an earlier
-  // learning frame's write. 'serial' turns the stages off. `engine` is the
-  // page's memoryEngine().
-  const run = async (mode, { budgetBytes = null, engine = null } = {}) => {
+  // learning frame's write. 'serial' turns the stages off. `beforeBase` and
+  // `onProcess` run in a frame's processing (before and after it reports its
+  // base), `outstandingBytes` is a background reservation held during the
+  // batch (a roll lane's), `engine` the page's memoryEngine().
+  const run = async (mode, { budgetBytes = null, engine = null, outstandingBytes = 0, beforeBase = null, onProcess = null, signal = null } = {}) => {
     const { f, exportInfo } = batchContext({ format: 'png', bitDepth: 8 });
     const log = [];
     const decoded = [];
@@ -778,13 +782,16 @@ for (const [format, bitDepth] of [['jpeg', 8], ['png', 8], ['tiff', 16], ['png',
     f.context.state.rollReference = { applyLock: false };
     if (budgetBytes !== null) f.context.memoryBudget.setBudget(budgetBytes);
     if (engine) f.context.memoryRuntime.engine = engine;
+    const outstanding = outstandingBytes
+      ? await f.context.memoryBudget.reserve(outstandingBytes, { priority: 'background', label: 'roll lane' })
+      : null;
     f.context.loadFileToImageData = async (file, options) => {
       assert.ok(options.signal instanceof AbortSignal, 'a prepared decode can be aborted');
       assert.equal(options.filmStats, !fileSettings.get(file.name), 'the options the lane would decode with');
       // Admitted at once against the memory budget's ceiling (#258); the
       // decode reserves nothing a lane could be waiting on.
       assert.equal(options.claim?.fixed, true, 'a prepared decode takes no reservation of its own');
-      log.push(`decode-ahead:${file.name}`);
+      log.push(`decode-ahead:${file.name}${f.context.memoryBudget.foregroundOutstanding ? ':during-foreground' : ''}`);
       const base = makeProcessed(5);
       decoded.push(base);
       return base;
@@ -798,8 +805,10 @@ for (const [format, bitDepth] of [['jpeg', 8], ['png', 8], ['tiff', 16], ['png',
         log.push(`process:${file.name}:prepared`);
       } else {
         log.push(`process:${file.name}:self`);
+        await beforeBase?.(file.name, f);
         options.onBaseReady?.();
       }
+      await onProcess?.(file.name, options, f);
       if (!settings) {
         await options.learningBarrier();
         log.push(`learned-read:${file.name}:${learnedAt === null ? 'before' : 'after'}`);
@@ -819,6 +828,7 @@ for (const [format, bitDepth] of [['jpeg', 8], ['png', 8], ['tiff', 16], ['png',
     const result = await f.context.runBatchExport(jobs, {
       exportInfo,
       learnsInSink: true,
+      signal,
       sink: async (job, blob) => {
         written.push(job.file.name);
         log.push(`written:${job.file.name}`);
@@ -828,9 +838,13 @@ for (const [format, bitDepth] of [['jpeg', 8], ['png', 8], ['tiff', 16], ['png',
         return { learned };
       }
     });
+    outstanding?.release();
+    if (signal) return { log, diagnostics: f.context.batchPipelineDiagnostics, f, result, written };
     assert.equal(result.successCount, 4);
     assert.deepEqual(written, names, 'written in order');
-    return { log, diagnostics: f.context.batchPipelineDiagnostics };
+    assert.equal(f.context.heldJobFrames.size, 0, 'no frame decoded ahead is left in the ledger');
+    assert.equal(f.context.memoryBudget.idle, true, 'every lane reservation was released');
+    return { log, diagnostics: f.context.batchPipelineDiagnostics, f };
   };
   const staged = await run(null);
   assert.deepEqual(staged.log.filter((line) => line.startsWith('process:')),
@@ -850,6 +864,10 @@ for (const [format, bitDepth] of [['jpeg', 8], ['png', 8], ['tiff', 16], ['png',
   assert.ok(serial.log.includes('learned-read:c.dng:after'));
 
   const selfOnly = ['process:a.dng:self', 'process:b.dng:self', 'process:c.dng:self', 'process:d.dng:self'];
+  const until = async (condition, what) => {
+    for (let i = 0; i < 200 && !condition(); i++) await new Promise((resolve) => setImmediate(resolve));
+    assert.ok(condition(), what);
+  };
 
   // WebKit engines decode every frame in its lane until the #230 harness has
   // measured one (#256 Part 3); the engine is read at the batch's admissions.
@@ -858,6 +876,82 @@ for (const [format, bitDepth] of [['jpeg', 8], ['png', 8], ['tiff', 16], ['png',
     assert.deepEqual(webkit.log.filter((line) => line.startsWith('process:')), selfOnly, engine);
     assert.equal(webkit.diagnostics.decodeAhead.admitted, 0, engine);
     assert.ok(webkit.diagnostics.decodeAhead.refused.engine >= 1, engine);
+  }
+
+  // A foreground reservation (a photo opened during the batch) refuses every
+  // decode-ahead offered while it is out; once it ends, offers are admitted.
+  {
+    let foreground = null;
+    const opened = await run(null, {
+      beforeBase: async (name, f) => {
+        if (name === 'a.dng') foreground = await f.context.memoryBudget.reserve(1, { priority: 'foreground', label: 'open photo' });
+      },
+      onProcess: async (name, _options, f) => {
+        if (name !== 'a.dng') return;
+        await until(() => f.context.batchPipelineDiagnostics.decodeAhead.refused.foreground >= 1, 'the offer was decided while the photo opened');
+        for (let i = 0; i < 20; i++) await new Promise((resolve) => setImmediate(resolve));
+        foreground.release();
+      }
+    });
+    assert.deepEqual(opened.log.filter((line) => line.endsWith(':during-foreground')), [], 'nothing decoded ahead while the photo opened');
+    assert.ok(opened.log.includes('process:d.dng:prepared'), opened.log.join());
+  }
+
+  // The budget's outstanding reservations count, the batch's own lanes do not
+  // (their frames and payloads are counted apart): a ceiling half a lane above
+  // the estimate admits beside the batch's own lane, and refuses beside a
+  // roll lane's reservation of one lane.
+  {
+    const estimate = planDecodeAhead({ candidatePixels: W * H, processingPixels: [W * H] }).bytes;
+    const laneBytes = W * H * LANE_BYTES_PER_PIXEL;
+    const own = await run(null, { budgetBytes: estimate + laneBytes / 2 });
+    assert.ok(own.log.includes('process:b.dng:prepared'), 'the batch\'s own lane is not counted twice: ' + own.log.join());
+    const beside = await run(null, { budgetBytes: estimate + laneBytes / 2, outstandingBytes: laneBytes });
+    assert.deepEqual(beside.log.filter((line) => line.startsWith('process:')), selfOnly, 'refused beside a roll lane');
+    assert.equal(beside.diagnostics.decodeAhead.admitted, 0);
+    assert.ok(beside.diagnostics.decodeAhead.refused.ceiling >= 1);
+  }
+
+  // A frame decoded ahead is in the ledger (heldJobFrames, #258) until its
+  // lane takes it, and a cancelled batch drops it from there. The ledger is
+  // main.js's (memoryLedgerConsumers), its other consumers empty here.
+  {
+    const frameBytes = 12 * W * H;
+    let retainedWaiting = null;
+    let heldWhenTaken = null;
+    const counted = await run(null, {
+      onProcess: async (name, options, f) => {
+        Object.assign(f.context, {
+          openPhotoMemoryRoots: () => [], photoSessions: { buffers: () => [] }, photoPreviews: { buffers: () => [] },
+          boundedStoreBuffers: () => [], sampleStoreBytes: () => 0, workerResidentBytes: () => 0
+        });
+        const ledger = createRetainedLedger(() => f.context.memoryLedgerConsumers());
+        if (name === 'a.dng') {
+          await until(() => f.context.heldJobFrames.size === 1, 'frame b was decoded ahead');
+          retainedWaiting = ledger.measure();
+        } else if (name === 'b.dng') {
+          heldWhenTaken = f.context.heldJobFrames.has(options.sourceImageData);
+        }
+      }
+    });
+    assert.ok(counted.log.includes('process:b.dng:prepared'));
+    assert.equal(retainedWaiting.total, frameBytes, 'the untaken base counts in the ledger');
+    assert.equal(retainedWaiting.breakdown.jobs, frameBytes, 'as a job\'s frame');
+    assert.equal(heldWhenTaken, false, 'the lane that takes it holds it in its reservation instead');
+
+    const stop = new AbortController();
+    const cancelled = await run(null, {
+      signal: stop.signal,
+      onProcess: async (name, _options, f) => {
+        if (name !== 'a.dng') return;
+        await until(() => f.context.heldJobFrames.size === 1, 'frame b was decoded ahead');
+        stop.abort();
+      }
+    });
+    assert.equal(cancelled.result.cancelled, true);
+    assert.deepEqual(cancelled.written, ['a.dng']);
+    assert.equal(cancelled.f.context.heldJobFrames.size, 0, 'the dropped frame left the ledger');
+    assert.equal(cancelled.f.context.memoryBudget.idle, true);
   }
 }
 

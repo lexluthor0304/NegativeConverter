@@ -15,6 +15,7 @@ import {
   PROCESSING_SLOT_BYTES_PER_PIXEL,
   BAND_POOL_BYTES_PER_PIXEL
 } from './batchExportScheduler.js';
+import { budgetFor, GIB } from './memoryBudget.js';
 
 const tick = () => new Promise(resolve => setTimeout(resolve, 0));
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
@@ -420,6 +421,15 @@ for (const readyBeforeCancel of [false, true]) {
   // A lane converting in the band pool counts the pool's copies.
   assert.equal(planDecodeAhead({ candidatePixels: px60, processingPixels: [px60], processingInBands: true }).bytes
     - planDecodeAhead({ candidatePixels: px60, processingPixels: [px60] }).bytes, px60 * BAND_POOL_BYTES_PER_PIXEL);
+  // Nothing is decoded ahead while a foreground reservation is out (#258).
+  assert.deepEqual(planDecodeAhead({ candidatePixels: 1e6, foregroundOutstanding: 1 }), { admit: false, bytes: 0, reason: 'foreground' });
+  // The budget's other reservations count: a frame that fits beside the open
+  // photo does not fit beside a roll lane's frame and decode as well.
+  const budget16 = budgetFor({ ramBytes: 16 * GIB });
+  const alone = planDecodeAhead({ candidatePixels: px60, processingPixels: [px60], residentBytes: 1.7e9, ceilingBytes: budget16 });
+  assert.equal(alone.admit, true);
+  const beside = planDecodeAhead({ candidatePixels: px60, processingPixels: [px60], residentBytes: 1.7e9, reservedBytes: 2.84e9, ceilingBytes: budget16 });
+  assert.deepEqual(beside, { admit: false, bytes: alone.bytes + 2.84e9, reason: 'ceiling' });
 }
 
 console.log('batch pipeline stage tests passed');

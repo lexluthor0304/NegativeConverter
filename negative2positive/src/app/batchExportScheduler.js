@@ -335,7 +335,8 @@ export const EXPORT_MAX_UNWRITTEN_BYTES = 512 * 1024 * 1024;
 // decode ahead (~1.8 GB) and one unwritten TIFF16 (0.36 GB) come to about
 // 6.1 GB and are admitted; a lane converting in the band pool (~2.1 GB)
 // brings that to 6.7 GB and is refused, as is the pre-#256 lane (50 B/px:
-// 7.6 GB, at WebKit's 8 GB WebContent kill limit).
+// 7.6 GB, at WebKit's 8 GB WebContent kill limit). The export also adds the
+// budget's outstanding reservations other than its own lanes.
 export const DECODE_AHEAD_CEILING_BYTES = 6.5e9;
 // A decoded frame waiting for its lane: the RGBA16 plane and its 8-bit mirror.
 export const DECODED_BASE_BYTES_PER_PIXEL = 12;
@@ -362,11 +363,16 @@ export const BAND_POOL_BYTES_PER_PIXEL = 10;
  *   pool (BAND_POOL_BYTES_PER_PIXEL more each)
  * @param {number} [options.unwrittenBytes] encoded payloads waiting for their write
  * @param {number} [options.residentBytes] the editor's planes and photo caches
+ * @param {number} [options.reservedBytes] the memory budget's outstanding
+ *   reservations (#258) other than the ones the estimate counts itself (the
+ *   batch's own lanes)
+ * @param {number} [options.foregroundOutstanding] foreground reservations out
+ *   (a photo being opened, ensureBase)
  * @param {number} [options.deviceMemory] navigator.deviceMemory (GB); WebKit reports none
  * @param {string|null} [options.engine] memoryEngine() of the page
  * @param {boolean} [options.hiddenLimited] the hidden-window gate limits jobs (#241)
  * @param {number} [options.ceilingBytes]
- * @returns {{admit: boolean, bytes: number, reason: 'fits'|'ceiling'|'low-memory'|'engine'|'hidden'}}
+ * @returns {{admit: boolean, bytes: number, reason: 'fits'|'ceiling'|'low-memory'|'engine'|'hidden'|'foreground'}}
  */
 export function planDecodeAhead({
   candidatePixels,
@@ -376,6 +382,8 @@ export function planDecodeAhead({
   processingInBands = false,
   unwrittenBytes = 0,
   residentBytes = 0,
+  reservedBytes = 0,
+  foregroundOutstanding = 0,
   deviceMemory,
   engine = null,
   hiddenLimited = false,
@@ -393,6 +401,9 @@ export function planDecodeAhead({
   // A hidden macOS window runs one item at a time (hiddenJobGate.js); the
   // lane's frame is that item.
   if (hiddenLimited) return { admit: false, bytes: 0, reason: 'hidden' };
+  // No user or background work starts while a foreground reservation is out
+  // (#258): a decode ahead is work of the batch's.
+  if (Number(foregroundOutstanding) > 0) return { admit: false, bytes: 0, reason: 'foreground' };
   const count = (value) => Math.max(0, Number(value) || 0);
   const decode = (pixels) => estimateRawDecodeBytes(count(pixels), 1);
   const slotBytes = PROCESSING_SLOT_BYTES_PER_PIXEL + (processingInBands ? BAND_POOL_BYTES_PER_PIXEL : 0);
@@ -400,7 +411,7 @@ export function planDecodeAhead({
   for (const pixels of decodingPixels) bytes += decode(pixels);
   for (const pixels of waitingPixels) bytes += count(pixels) * DECODED_BASE_BYTES_PER_PIXEL;
   for (const pixels of processingPixels) bytes += count(pixels) * slotBytes;
-  bytes += count(unwrittenBytes) + count(residentBytes);
+  bytes += count(unwrittenBytes) + count(residentBytes) + count(reservedBytes);
   const admit = bytes <= count(ceilingBytes);
   return { admit, bytes, reason: admit ? 'fits' : 'ceiling' };
 }

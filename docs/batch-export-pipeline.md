@@ -250,18 +250,22 @@ Budgets, in estimated bytes (`batchExportScheduler.js`):
 | one processing lane | 25 B/px, ~1.5 GB (code accounting) | `PROCESSING_SLOT_BYTES_PER_PIXEL` |
 | a lane converting in the band pool, on top | 10 B/px, ~0.6 GB (code accounting: the assembled planes beside the bands' outputs, 12 B per converted pixel at an 81 % crop) | `BAND_POOL_BYTES_PER_PIXEL` |
 | encoded, waiting for its write | the payload's size, at most 512 MiB in all | `EXPORT_MAX_UNWRITTEN_BYTES` |
-| the editor (open photo, sessions, previews, stores, workers) | resident bytes | the memory ledger (`hiddenResidentBytes()`, #258) |
+| the editor (open photo, sessions, previews, stores, workers) and frames decoded ahead that wait for their lane | resident bytes | the memory ledger (`hiddenResidentBytes()`, #258) |
+| everything else the memory budget has reserved (roll and tile lanes, the prefetch, other jobs) | their reservations | `memoryBudget.reserved` minus the batch's own lanes |
 
 The lane plan (`planBatchParallelism`) is unchanged: frames of 45 MP and
 more keep one processing lane, and the other cores go to decode-ahead and
 the band pool. The processing figure is code accounting until the #230
 harness measures the per-lane peak. The decode-ahead ceiling is the memory
 budget's (`docs/memory-budget.md`, #258: 6.0 GiB at 16 GiB of RAM, 3.6 GiB
-at 8 GiB or unknown), and the editor's bytes are its ledger's. A prepared
-decode takes no reservation of its own: a lane reserves before it claims a
-frame and then waits for that frame's prepare, so admission is a yes or no at
-once, and a refused frame is decoded by its lane inside the lane's
-reservation.
+at 8 GiB or unknown), the editor's bytes are its ledger's, and the budget's
+other holders count with their reservations (the batch's own lanes are
+counted by the rows above instead). A prepared decode takes no reservation
+of its own: a lane reserves before it claims a frame and then waits for that
+frame's prepare, so admission is a yes or no at once, and a refused frame is
+decoded by its lane inside the lane's reservation. Once decoded, a frame
+waiting for its lane is in the ledger (`heldJobFrames`) until a lane takes it
+or the batch drops it, so the budget's other requests see it.
 
 - **Smaller lane** (Part 1). `processFileWithSettings` with `releaseEarly`
   (batch only) releases the decoded base and the geometry/lens outputs it
@@ -294,8 +298,9 @@ reservation.
   desktop's answer arrives after boot) the spec enables it only once the
   #230 harness has measured the per-lane `phys_footprint` and
   `PROCESSING_SLOT_BYTES_PER_PIXEL` is set from it; until then every lane
-  there decodes its own frame, as before #256. RAW and PNG files only, whose
-  decodes run off the main thread.
+  there decodes its own frame, as before #256. Nothing is decoded ahead
+  while a foreground reservation is out (#258). RAW and PNG files only,
+  whose decodes run off the main thread.
   The prepared base is `loadFileToImageData` with the options the lane
   would use, so it is the same decode. On the desktop a prepare waits for
   the background gate's foreground conditions only (input in the last

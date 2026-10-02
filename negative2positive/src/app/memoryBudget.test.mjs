@@ -284,8 +284,13 @@ assert.equal(hasPeriodicMemoryPurge('chromium'), false);
   await tick();
   assert.equal(f.settled && !f.error, true);
   assert.equal(env.budget.snapshot().background, 20);
+  // `reserved`: what the outstanding handles hold, every priority, without
+  // reading the ledger (Export All's decode-ahead adds the others' bytes).
+  assert.equal(env.budget.reserved, env.budget.snapshot().reserved);
+  assert.equal(env.budget.reserved, [c.value, d.value, e.value, f.value].reduce((sum, handle) => sum + handle.bytes, 0));
   for (const handle of [c.value, d.value, e.value, f.value]) handle.release();
   assert.equal(env.budget.snapshot().reserved, 0);
+  assert.equal(env.budget.reserved, 0);
 }
 
 // ---- Ledger: each buffer once, attributed to the first holder ---------------
