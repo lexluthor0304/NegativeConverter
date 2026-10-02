@@ -197,8 +197,8 @@ AI 修復ブラシを使う、修復ストロークを持つ写真が落ち着�
 `technical-depth-smoke.mjs` は写真の読み込みではモデルを読まず Retouch タブで
 読むこと、壊れたモデルからの復帰、標準モデルの読み込み、
 実推論、PNG 書き出しへの反映、WASM 推論と非マスク領域の 16-bit 保持を検証。
-`repair-release-smoke.mjs`（`node scripts/smoke-test.mjs --repair-release-only`、
-全体実行には含めない）は WASM 上の MI-GAN で、アイドル解放の後のゴミブラシ一筆を
+`repair-release-smoke.mjs`（全体実行に含む。単独では `--repair-release-only`、約 50 秒）は
+WASM 上の MI-GAN で、アイドル解放の後のゴミブラシ一筆を
 書き出した PNG 8-bit と TIFF 16-bit が、モデルを解放しなかったセッションの書き出しと
 バイト単位で同じこと、解放後も確定済みの修復を読み込みも推論もせずに書き出すことを確認する。
 `first-photo-smoke.mjs` は既定の読み込みで `aiInpaintWorker` も `nc_ai_models`

@@ -1213,6 +1213,7 @@ if (!process.argv.some(arg => arg.endsWith('-only'))) await runNativeFilmFontSmo
 if (!process.argv.some(arg => arg.endsWith('-only'))) await runExportGainMapSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
 if (!process.argv.some(arg => arg.endsWith('-only'))) await runPng16BandSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
 if (!process.argv.some(arg => arg.endsWith('-only'))) await runExportOwnershipSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+if (!process.argv.some(arg => arg.endsWith('-only'))) await runRepairReleaseSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
 if (!process.argv.some(arg => arg.endsWith('-only'))) await runBatchPipelineSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
 
 if (!process.argv.some(arg => arg.endsWith('-only'))) await runSimplicitySmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
