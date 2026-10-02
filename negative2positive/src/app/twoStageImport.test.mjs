@@ -60,6 +60,8 @@ import { aggregateRollAnalysis, groupAutomaticRollFrames, sanitizeRollFrameForSe
 import { applyAutomaticFilmType, applyFilmTypeOverride, sanitizeFilmTypeOverride } from './filmTypeOverride.js';
 import { applyLearnedDefaults, learnedDefaultsKey } from './learnedDefaults.js';
 import { decideRollFilmType, mergeRollDecision, ownFilmTypeVerdict, rollDecisionFrame, rollFilmTypeTarget, ROLL_MONOCHROME } from './rollFilmType.js';
+import { createSemanticAnalyzer } from './semanticModel.js';
+import { sanitizeSemanticMap } from './semanticAnchors.js';
 
 const source = readFileSync(new URL('./main.js', import.meta.url), 'utf8');
 function functionSource(name) {
@@ -1747,4 +1749,81 @@ async function automaticRollAfterFailure({ old = false } = {}) {
   assert.ok(hotControl.h.state.originalImageData.width < fullFrame.width / 2 + 2, 'hot control: the stand-in\'s frame under the full base');
 }
 
-console.log('twoStageImport: header routing, stage options and start, abort on switch, barrier, retry, exact crop across the swap, history rebase, window edits, the ledger\'s open photo, background work after a failure and adopted decodes passed');
+{
+  // Semantic colour after the swap (R2-030), with the real settle,
+  // scheduleSemanticColour and analyzer (a stub worker that answers when
+  // told). The settle schedules it for the edit revision the stand-in pass
+  // ended with. An export clicked in the window bumps the revision at the
+  // click (exportSingle's freeze), so the export gets the same white balance
+  // whether the inference would answer before or after its render; without
+  // a click the map is applied after the swap.
+  const answer = { width: 2, height: 2, labels: [0, 0, 1, 1], confidence: 0.9 };
+  const exportRun = async ({ exportClicked, answerBeforeRender }) => {
+    const f = fixture();
+    const workers = [];
+    Object.assign(f.target, {
+      manualEditRevision: 0, studioAutoFrameRunning: false, automaticRollImportRunning: false,
+      semanticColourInFlight: 0, automaticRollPendingItems: new Set(),
+      analyzeSemanticPreview: createSemanticAnalyzer({ modelUrl: () => '/model.onnx', loadModel: async () => ({}), workerFactory: () => {
+        const worker = { postMessage(message) { this.message = message; }, terminate() { this.terminated = true; } };
+        workers.push(worker);
+        return worker;
+      } }),
+      sanitizeSemanticMap, downsampleImageDataForMaxDim: img => img,
+      estimateAutoWhiteBalance: (img, { anchors }) => ({ anchored: Boolean(anchors), confidence: 'high', wbR: 1.25, wbG: 1, wbB: 0.8 }),
+      processNegative: async () => { f.state.processedImageData = image({ width: 8, height: 8 }); }
+    });
+    vm.runInContext(['autoWbSampleFor', 'scheduleSemanticColour'].map(functionSource).join('\n'), f.context);
+    const stage2 = await loadedStandIn(f);
+    const provisional = f.state.provisional;
+    provisional.start = {
+      fresh: true, inputs: { automatic: true }, snapshot: f.context.extractCurrentSettings(), detectFrame: false, readEdge: false,
+      applyEdgeDefaults: true, autoFrame: { enabled: true }, userEdited: false, pendingEdits: null
+    };
+    // The stand-in pass ends (prepareStudioPhoto records these).
+    provisional.settledSnapshot = f.context.extractCurrentSettings();
+    provisional.settledRevision = f.target.manualEditRevision;
+    f.state.currentStep = 3;
+    const wb = () => [f.state.wbR, f.state.wbG, f.state.wbB];
+    const render = deferred();
+    let exported = null, exporting = null;
+    if (exportClicked) {
+      // exportSingle: the freeze, the barrier, then the render reads `state`.
+      f.target.manualEditRevision++;
+      exporting = f.context.ensureFullDecode({ reason: 'export' }).then(async exact => {
+        assert.equal(exact, true);
+        await render.promise;
+        exported = wb();
+      });
+    }
+    f.context.startProvisionalSettle(f.state.fullDecode);
+    stage2.resolve(image(FULL));
+    await flush(40);
+    // The pass's zero-delay task, then the model load and the worker.
+    await new Promise(resolve => setTimeout(resolve, 10));
+    await flush(20);
+    assert.equal(f.state.fullDecode.status, 'installed');
+    const answerInference = async () => {
+      for (const worker of workers) worker.onmessage?.({ data: answer });
+      await flush(20);
+    };
+    if (answerBeforeRender) await answerInference();
+    render.resolve();
+    await flush(20);
+    if (!answerBeforeRender) await answerInference();
+    await exporting;
+    return { exported, final: wb(), applied: Boolean(f.state.wbSemanticApplied), workers: workers.length };
+  };
+  const first = await exportRun({ exportClicked: true, answerBeforeRender: true });
+  const last = await exportRun({ exportClicked: true, answerBeforeRender: false });
+  assert.deepEqual(first.exported, last.exported, 'an export clicked in the window gets the same white balance whichever lands first');
+  assert.deepEqual(first.exported, [1, 1, 1], 'the white balance of the click');
+  assert.equal(first.workers + last.workers, 0, 'the click cancels the semantic pass before its inference');
+  assert.deepEqual([first.final, last.final], [[1, 1, 1], [1, 1, 1]], 'and no map lands after the export either');
+  const idle = await exportRun({ exportClicked: false, answerBeforeRender: true });
+  assert.equal(idle.workers, 1);
+  assert.equal(idle.applied, true, 'with nothing clicked or edited in the window the map is applied after the swap');
+  assert.deepEqual(idle.final, [1.25, 1, 0.8]);
+}
+
+console.log('twoStageImport: header routing, stage options and start, abort on switch, barrier, retry, exact crop across the swap, history rebase, window edits, the ledger\'s open photo, background work after a failure, adopted decodes and semantic colour after an export click in the window passed');

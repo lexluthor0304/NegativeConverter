@@ -13693,7 +13693,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         record.status = 'installed';
         state.provisional = null;
         noteFullDecodeChange(record);
-        if (provisional.start?.fresh) scheduleSemanticColour(item, generation);
+        // Valid only while nothing was edited, and no export clicked, since
+        // the stand-in pass ended: a later pass would land inside an export.
+        if (provisional.start?.fresh) scheduleSemanticColour(item, generation, { revision: provisional.settledRevision });
         updateAutoFrameButtons();
         updateBeforeAfterButtonState();
         updateFileListUI();
@@ -23594,7 +23596,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         if (provisional) {
           // What the window's edits are measured against, then the settle on
           // the full decode (#255).
-          if (state.provisional === provisional && isCurrentLoad(generation)) provisional.settledSnapshot = extractCurrentSettings();
+          if (state.provisional === provisional && isCurrentLoad(generation)) {
+            provisional.settledSnapshot = extractCurrentSettings();
+            // The semantic colour of the settle belongs to this state too.
+            provisional.settledRevision = manualEditRevision;
+          }
           provisional.passDone = null;
           passEnded();
           if (state.provisional === provisional && isCurrentLoad(generation)) startProvisionalSettle(provisional.record);
@@ -23609,7 +23615,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // Semantic colour passes queued or running (debug status for the smokes'
     // settled recipes, #255).
     let semanticColourInFlight = 0;
-    function scheduleSemanticColour(item, generation) {
+    // `revision` is the edit revision the pass belongs to: now, at the end of
+    // an import pass, or the end of a two-stage import's stand-in pass, so an
+    // edit or an export click since then (export's freeze) cancels it (#255).
+    function scheduleSemanticColour(item, generation, { revision = manualEditRevision } = {}) {
       // Only colour film (or any film under rescue) can use the map: the same
       // test the result is dropped by below, taken before the downsample and
       // the worker. A roll that analyses this import takes over its recipe
@@ -23623,7 +23632,6 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // The anchors are estimated on the auto-WB sample, which does not follow
       // the viewport (#248), whenever it belongs to this source.
       const sampleSource = autoWbSampleFor(autoWbSampleKey()) || source;
-      const revision = manualEditRevision;
       // What stays false once false (the photo left or edited, the user's own
       // white balance, a saved recipe) ends the inference early; passing
       // states (crop mode, Auto Frame, a roll import) count before and after

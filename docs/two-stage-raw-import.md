@@ -169,7 +169,11 @@ instead (step 4 runs it on the full base). It then swaps in one task:
    it, as a single decode's exports wait for it.
 
 One `processNegative` of the full base follows, with today's automatic
-measurements. Then the record is `installed` and semantic colour is scheduled.
+measurements. Then the record is `installed` and semantic colour is scheduled,
+for the edit revision the provisional pass ended with (`settledRevision`, taken
+with `settledSnapshot`): an edit or an export click in the window cancels it
+(the export's click-time freeze bumps `manualEditRevision`), so an export never
+picks up a map that lands while it renders.
 The settle never raises the overlay, sets `studioBusy` or shows a toast.
 
 ### Barriers

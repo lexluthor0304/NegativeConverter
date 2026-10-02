@@ -364,7 +364,7 @@ function prepareFixture({ itemSettings = null, detectFrame = true, learned = 0 }
     liveDisplaySerial: 0,
     state, console, structuredClone, DOMException, AbortController, JSON, Promise,
     loadGeneration: 1, coreReprocessGeneration: 0, processNegativeInFlight: null, importDetectionAbort: null,
-    fullResolutionRenderTimer: null, FULL_RESOLUTION_IDLE_DELAY_MS: 2500,
+    fullResolutionRenderTimer: null, FULL_RESOLUTION_IDLE_DELAY_MS: 2500, manualEditRevision: 0,
     document: { body: { dataset: { photoSwitching: 'true' } } },
     i18n: { en: {} }, currentLang: 'en', aiRepair: { status: 'ready' },
     setTimeout: (fn, ms) => {
@@ -624,8 +624,11 @@ for (const timing of ['during', 'after']) {
   f.edges[0].reply.resolve({ result: { change: {} } });
   await f.answer(0);
   await settle();
+  // The revision moves during the pass (here by hand): the pass's end counts.
+  f.context.manualEditRevision = 5;
   await f.answer(1);
   await done;
+  assert.equal(f.state.provisional.settledRevision, 5, 'the settle\'s semantic colour belongs to the edit revision the pass ended with');
   assert.equal(f.log.filter(entry => entry.learned).length, 0, 'no automaticDefaults from the stand-in');
   assert.equal(f.item.automaticDefaults, undefined);
   assert.deepEqual(typed.map(options => options.record), [false], 'the stand-in does not vote into the roll decision');

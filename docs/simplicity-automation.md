@@ -30,7 +30,10 @@ mid-inference terminates the worker at once: the analyzer polls only what
 stays false once false (the load, the photo, the edit revision, the user's own
 white balance or grey point, a reference lock, a saved recipe). Passing states
 (crop mode, Auto Frame, a roll import) count before and after the inference
-only, so crop mode opened and cancelled meanwhile keeps the map. WebGPU is preferred and probed with a warm-up
+only, so crop mode opened and cancelled meanwhile keeps the map. A two-stage
+import schedules the pass after its swap, for the edit revision its stand-in
+pass ended with: an edit or an export click in the window cancels it, as one
+after an import always did. WebGPU is preferred and probed with a warm-up
 run (a WASM session makes just the real run); initialization, warm-up or
 inference failure rebuilds on WASM. Failure keeps statistical colour. The result is a sanitised 64 × 64 label
 map stored with the photo recipe. Manual WB, a sampled grey point, manual base,
