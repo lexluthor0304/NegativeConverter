@@ -134,6 +134,12 @@ re-measured on the flattened frame and swapped in. The diagnosis shows
 "OpenCV is loading…" until then, then the measured unevenness; if OpenCV
 cannot run in the worker or the page, the global rescue stays and the two
 spatial sliders are disabled. See `docs/crop-apply-and-analysis-worker.md`.
+A fog-surface request joins the one in flight only when it measures the same
+inputs (the positive and its 16-bit plane, the analysis area, the border
+buffer, the uneven-fog strength of the flattening stage, the semantic map);
+otherwise it measures again and supersedes it, so the stored measurement is
+always the newest request's, taken with the settings of its call, as 1703835
+measured every request (`expiredSpatialInputs`, #229 review R1-074).
 
 ## Settings
 
@@ -146,6 +152,21 @@ mean grid). The strengths travel with "Sync color", recipes and
 "Apply strengths to selected"; the analysis is never copied, each frame is
 measured on its own tones. A frame's first measurement fills brightness and
 contrast unless they were already moved off the defaults.
+
+A measurement belongs to the interpretation it was taken on (film type and
+positive mode). A film-type change through a frame's recipe (the roll
+decision's automatic retype of #231, "These are positives", Apply film type
+to roll; `filmTypeOverride.js`) drops it, and puts brightness and contrast
+that still hold the values it set back to the defaults; values the user moved
+stay. The frame is then measured in its new mode like a first measurement:
+when it is opened or converted (the automatic retype converts the open photo
+through `processNegative`), or in its export. "These are positives" only
+converts the open photo again: `remeasureExpiredAfterRetype` measures the
+first frame of the new mode once it has settled, with its 16-bit plane, and
+Studio is busy until then. A semantic colour pass still running when the
+film type changes is dropped (#229 review R1-017). The film-type buttons and
+the positive-mode select in Step 3 still keep the measurement
+(docs/audit-backlog.md).
 
 `state.expiredSession` is the session-level entry: photos added while it is
 on start rescued, and the Studio shows the rescue tab first. It is switched
@@ -170,8 +191,15 @@ are auto-framed exactly as outside the flow.
 ```bash
 node negative2positive/src/pipeline/expiredRescue.test.mjs
 node negative2positive/src/app/expiredRescueOpenCv.test.mjs
+node negative2positive/src/app/expiredMeasurement.test.mjs
 node scripts/smoke-test.mjs --expired-only
 ```
+
+`expiredMeasurement.test.mjs` runs the real main.js functions: a fog-surface
+request with other inputs measures again, and the stored measurement equals
+1703835's (frozen copy) when One-click colour correct resets the strengths
+while a request is in flight; the open photo's automatic retype and "These
+are positives" measure the new mode, equal to the photo opened in that mode.
 
 The OpenCV test loads the real opencv-js build in Node, ages a scene with a
 left-edge fog gradient and a bright wall, and checks the floor map follows

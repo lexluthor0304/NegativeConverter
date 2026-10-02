@@ -260,6 +260,16 @@ Remaining performance proposals below are not claims of completed work.
   studioBackgroundReady() does not look at a pending detection, so the import's film-type flip (flipImportPhoto) and applyImportPositives can persist the open photo with the miss outcome and restore it; the restore installs new diagnostics, which ends the detection without its hit (it counts as stale).  
   _Suggested fix:_ Add `!hasPendingCropDetection()` to studioBackgroundReady (its callers already retry until it holds).
 
+- **low/bug** — The Step-3 film-type buttons and the positive-mode select keep the expired rescue's measurement of the previous interpretation  
+  `negative2positive/src/app/main.js:13954`  
+  Both change state.filmType / state.positiveMode and reconvert through scheduleSilverSourceRefresh (the core reprocess), which never calls maybeAnalyzeExpiredRescue: only processNegative's first frame does. A rescued photo switched from positive to B&W (or between correct and edit) therefore keeps the measurement of the old mode, on screen and in its exports, until Analyze is pressed. 1703835 behaves the same; the recipe path (filmTypeOverride.js, restoreSettings) re-measures since #229 review R1-017.  
+  _Suggested fix:_ In both handlers, drop expiredAnalysis and the brightness and contrast it set when the interpretation changes (the rule of filmTypeOverride.js withoutFilmTypeAnalysis), then call remeasureExpiredAfterRetype().
+
+- **low/bug** — A film-type change across the negative/positive boundary keeps the semantic map of the old interpretation  
+  `negative2positive/src/app/filmTypeOverride.js:10`  
+  The map is a segmentation of the positive render, and a negative read as a positive (or the reverse) renders inverted. applyFilmTypeOverride and applyAutomaticFilmType keep semanticMap, so the re-measured rescue (and, for colour film, the automatic white balance) is weighted by anchors of the other render. For the B&W retypes of #231 the frames are monochrome and the anchors move no pixels; Apply film type to roll between colour and positive does. 1703835 behaves the same.  
+  _Suggested fix:_ Drop semanticMap in withoutFilmTypeAnalysis when one side is 'positive' and the other is not, and schedule semantic colour again for the new render (reset item.semanticAttempted; prepareStudioPhoto schedules it for fresh files only).
+
 - **low/i18n** — Export failure alert and several export-path Error messages are hard-coded English; 'selected folder' fallback leaks into localized toast  
   `negative2positive/src/app/main.js:9010`  
   notifyExportError shows alert(`Export failed: ${message}`) where message is one of several English-only Error strings thrown in the export path ('Full-resolution processing is not ready yet. Please wait…', 'Export payload is not a Blob.', 'No image available for export.', 'JSZip module is unavailable'). Chinese/Japanese users see an English dialog for the most important failure in the app. showDes…  

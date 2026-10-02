@@ -131,7 +131,7 @@ runs (`app/openCvAnalysisTasks.js`):
 | request | page half | worker half |
 |---|---|---|
 | `detect-crop-area` | `buildCropDetectionInput`: <=1 MP sample, region, scale | `detectCropAreaInRegion` |
-| `expired-spatial-maps` | `sampleExpiredSpatialInputSliced`: the 160 px area average, in ~12 ms row slices (yieldToPaint interactively, a task yield in batch export and semantic colour), stopping when the photo or source changes | `measureExpiredSpatialMapsFromSample` |
+| `expired-spatial-maps` | `sampleExpiredSpatialInputSliced`: the 160 px area average, in ~12 ms row slices (yieldToPaint interactively, a task yield in batch export and semantic colour), stopping when the photo or source changes or a newer request with other inputs supersedes it (docs/expired-film-rescue.md) | `measureExpiredSpatialMapsFromSample` |
 | `estimate-alignment` | `sampleAlignmentGray` of both images, a copy of the lab's 8-bit reference | `matchAlignment` and `warpImageData` (`alignAndWarp`) |
 
 - The worker answers these types before its `analyze-frame` branch; any

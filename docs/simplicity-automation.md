@@ -22,13 +22,18 @@ require a full date.
 ## Semantic colour
 
 The bundled Apache-2.0 EfficientViT B1 ADE20K model runs on a maximum 512-pixel
-preview in a disposable worker, after statistical conversion has rendered.
+preview in a disposable worker, after statistical conversion has rendered:
+of the viewport-independent auto-WB sample (#248) when the map anchors the
+white balance, of the frame on screen under expired-film rescue, whose
+measurement of that frame the map weights (as at 1703835).
 It only runs where the map can be used: colour film, or any film under
 expired-film rescue, and not for the frames of a scheduled automatic roll
 analysis, which assigns their recipes meanwhile. A photo left or edited
 mid-inference terminates the worker at once: the analyzer polls only what
 stays false once false (the load, the photo, the edit revision, the user's own
-white balance or grey point, a reference lock, a saved recipe). Passing states
+white balance or grey point, a reference lock, a saved recipe, the film type,
+positive mode and rescue the pass started with: an automatic retype, #231,
+changes the film type without an edit). Passing states
 (crop mode, Auto Frame, a roll import) count before and after the inference
 only, so crop mode opened and cancelled meanwhile keeps the map. A two-stage
 import schedules the pass after its swap, for the edit revision its stand-in
