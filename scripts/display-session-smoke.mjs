@@ -14,7 +14,7 @@
 //  - another window size is served by the proxy: no read, no decode, a
 //    display target of the new size on the same level;
 //  - colour film (an auto-framed 16-bit negative): the settled view opened
-//    from RAM (Tier A, Tier B), the spill and the store (when it has a
+//    from RAM (Tier A, Tier B), the spill and the store (where it has a
 //    budget) equals the same frame opened cold (GPU pixels, white balance,
 //    saved settings), and a Tier A Undo across Confirm image area exports
 //    (PNG16, TIFF16) what a cold reopen of the recipe exports.
@@ -296,8 +296,10 @@ export async function runDisplaySessionSmoke({ send, evaluate, waitFor, fail, in
     expect((await diagnostics()).spillHits === spillHits + 1, 'the colour frame did not open from the spill');
     sameView(await view(), 'spill');
     // Left again, its proxy is stored; the session and the spill go. The
-    // store has no budget at or below its free-space floor (10 GiB, #249
-    // part 3): headless Chrome's temporary profile reports a quota of 10 GiB.
+    // store's budget is a quarter of the free space above a 10 GiB floor
+    // (#249 part 3), and Chrome reports every page a quota of its usage plus
+    // 10 GiB (whatever the disk or a DevTools override): the web store has no
+    // budget there and the store hit is checked where it has one.
     await evaluate(`window.__ncDisplaySessions.force(null)`);
     await open(1, Y);
     await evaluate('window.__ncDisplaySessions.settled()');
@@ -308,7 +310,7 @@ export async function runDisplaySessionSmoke({ send, evaluate, waitFor, fail, in
       expect((await diagnostics()).storeHits === storeHits + 1, 'the colour frame did not open from the store: ' + JSON.stringify({ diagnostics: await diagnostics(), store: await evaluate('window.__ncDisplaySessions.store()') }));
       sameView(await view(), 'store');
     } else {
-      console.log(`note: the display-proxy store has no budget with ${(storeFree / 1024 ** 3).toFixed(2)} GiB free (its floor is 10 GiB): the store hit is not checked here`);
+      console.log(`note: the display-proxy store has no budget with ${(storeFree / 1024 ** 3).toFixed(2)} GiB reported free (its floor is 10 GiB): the store hit is not checked`);
       await open(0, X);
     }
     // A fill (a lane's or the roll pass's decode of a frame not on screen)
@@ -316,7 +318,7 @@ export async function runDisplaySessionSmoke({ send, evaluate, waitFor, fail, in
     // (k > 1, sources of about 16 MP and up), which this smoke does not
     // decode; displaySessions.test.mjs checks that a filled proxy's first
     // open converts what a cold open converts.
-    console.log('ok: a colour frame opened from RAM (Tier A, Tier B) and the spill (and the store, when it has a budget) shows what a cold open shows, with the same white balance and saved settings');
+    console.log('ok: a colour frame opened from RAM (Tier A, Tier B) and the spill (and the store, where it has a budget) shows what a cold open shows, with the same white balance and saved settings');
 
     // ---- Colour film: a Tier A Undo across Confirm image area exports what
     // a cold reopen of the recipe exports (the colour-analysis sample of the
