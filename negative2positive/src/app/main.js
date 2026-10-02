@@ -10956,10 +10956,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // Part 2e, opt-in until the footprint is measured (localStorage
     // nc_hidden_park_v1 = 'on'): while an item is held back, park the open
     // photo: persist its recipe, keep only the decoded base (and the undo
-    // history, which is never dropped) and drop the derived planes. Showing
-    // the window rebuilds them from the base through the cold photo-switch
-    // path (base -> rotation -> mirror -> crop, then conversion) without a
-    // re-decode.
+    // history, which is never dropped, as scalars) and drop the derived
+    // planes. Showing the window rebuilds them from the base through the cold
+    // photo-switch path (base -> rotation -> mirror -> crop, then conversion)
+    // without a re-decode.
     function hiddenParkEnabled() {
       return safeStorageGet('nc_hidden_park_v1') === 'on';
     }
@@ -10975,6 +10975,14 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       ++loadGeneration;
       supersedeActivation();
       invalidatePhotoActivation();
+      // Every step stays, as a cold entry (#244: its pixels are rebuilt from
+      // the base on restore). A hot one pins the very planes dropped below,
+      // so parking would free next to nothing and the held item would stay
+      // paused (R1-136). A dust-stroke entry (#259) patches the objects it
+      // holds and cannot go cold: it is kept as it is.
+      for (const entry of [...undoStack, ...redoStack]) {
+        if (!entry.dustDelta && !entry.refs?.cold) entry.refs = { cold: true };
+      }
       parkedPhoto = {
         item, file: item.file, base: state.loadedBaseImageData, rawMetadata: state.rawMetadata,
         undo: undoStack.slice(), redo: redoStack.slice(), isDirty: item.isDirty

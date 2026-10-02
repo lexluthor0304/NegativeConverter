@@ -1,7 +1,8 @@
 // #241 part 2e: parking the open photo while a hidden job is held back
 // (opt-in). Runs the real main.js functions with the editor stubbed: parking
-// keeps only the decoded base and the undo history, and showing the window
-// rebuilds the planes through the cold photo-switch path without a decode.
+// keeps only the decoded base and the undo history (as cold entries, #229
+// review R1-136), and showing the window rebuilds the planes through the cold
+// photo-switch path without a decode.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
@@ -32,8 +33,9 @@ function fixture({ enabled = true, hidden = true } = {}) {
     dustRemoval: { processing: false, mask: new Uint8Array(4), inpaintedImageData: plane('dust'), cleanSource: plane('clean'), _state: {} },
     zoomLevel: 2, panX: 5, panY: 6
   };
-  const undoStack = [{ label: 'rotate', refs: { originalImageData: state.originalImageData } }];
-  const redoStack = [{ label: 'exposure' }];
+  const stroke = { label: 'dustBrushStroke', dustDelta: { target: state.dustRemoval.inpaintedImageData } };
+  const undoStack = [{ label: 'rotate', refs: { originalImageData: state.originalImageData } }, stroke];
+  const redoStack = [{ label: 'exposure', refs: { processedImageData: state.processedImageData } }];
   const c = vm.createContext({
     state, undoStack, redoStack, SNAPSHOT_REF_KEYS: vm.runInNewContext(refKeys),
     document: { visibilityState: hidden ? 'hidden' : 'visible', body: { dataset: {} } },
@@ -65,7 +67,7 @@ function fixture({ enabled = true, hidden = true } = {}) {
     webglState: { renderer2: { dropPrepared: () => calls.push('dropPrepared') } }
   });
   vm.runInContext(['hiddenParkEnabled', 'parkOpenPhotoForHiddenJob', 'unparkOpenPhoto'].map(functionSource).join('\n'), c);
-  return { c, state, item, base, file, calls, undoStack, redoStack };
+  return { c, state, item, base, file, calls, undoStack, redoStack, stroke };
 }
 
 // Off by default: nothing is parked until the measurement run turns it on.
@@ -101,7 +103,13 @@ function fixture({ enabled = true, hidden = true } = {}) {
   assert.equal(f.c.gpuPreview.prepared, null, 'the GPU preview drops its copy');
   assert.ok(f.calls.includes('dropPrepared'), 'and its texture');
   assert.equal(f.state.loadedBaseImageData, f.base, 'the decoded base stays');
-  assert.equal(f.undoStack.length, 1, 'the undo history is never dropped');
+  assert.equal(f.undoStack.length, 2, 'the undo history is never dropped');
+  // A hot entry would pin the planes just dropped: every step goes cold,
+  // except a dust-brush stroke, which cannot and stays as it is.
+  assert.equal(f.undoStack[0].refs.cold, true);
+  assert.equal(f.redoStack[0].refs.cold, true);
+  assert.equal(f.undoStack[1], f.stroke);
+  assert.equal(f.stroke.dustDelta.target.tag, 'dust');
   assert.equal(f.c.parkOpenPhotoForHiddenJob(), false, 'parked once');
   f.calls.length = 0;
   f.c.document.visibilityState = 'visible';
