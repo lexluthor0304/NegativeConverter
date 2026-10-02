@@ -144,12 +144,14 @@ if (!serverUp) fail('vite dev server did not start');
 // ---- start chrome ----
 const chrome = spawn(chromeBin, [
   '--headless=new', `--remote-debugging-port=${CDP_PORT}`,
+  // The session itself runs over the DevTools pipe (fd 3 in, fd 4 out).
+  '--remote-debugging-pipe',
   `--user-data-dir=${chromeProfileDir}`,
   '--no-first-run', '--hide-scrollbars', '--window-size=1440,900',
   // A fake camera, granted without a prompt, for the live loupe scenario.
   '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream',
   'about:blank',
-], { stdio: ['ignore', 'ignore', 'pipe'] });
+], { stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe'] });
 // execFile buffers stderr and kills the browser after its default 1 MiB
 // limit; repeated WebGPU model sessions can exceed it. Keep a bounded tail.
 let chromeDiagnostics = '';
@@ -158,29 +160,63 @@ chrome.once('error', error => fail(`Chrome startup failed: ${error.message}`));
 chrome.once('exit', (code, signal) => fail(`Chrome exited before the smoke completed (${code ?? signal}): ${chromeDiagnostics}`));
 children.push(chrome);
 
-async function getWsUrl() {
-  for (let i = 0; i < 60; i++) {
-    try {
-      const res = await fetch(`http://127.0.0.1:${CDP_PORT}/json`);
-      const page = (await res.json()).find((t) => t.type === 'page');
-      if (page) return page.webSocketDebuggerUrl;
-    } catch {}
-    await wait(250);
+// The DevTools pipe carries the session, as NUL-delimited JSON. A websocket
+// to the debugging port is closed whenever macOS goes from full to dark wake
+// (a closed lid, a notification that woke it), which ended runs at random
+// steps with "code 1006; Chrome still running"; the pipe stays open. The port
+// stays open for manual inspection.
+const toChrome = chrome.stdio[3];
+const fromChrome = chrome.stdio[4];
+let receiveCdp = () => {};
+let pipeChunks = [];
+fromChrome.on('data', (chunk) => {
+  let start = 0;
+  for (let end = chunk.indexOf(0); end !== -1; end = chunk.indexOf(0, start)) {
+    pipeChunks.push(chunk.subarray(start, end));
+    const message = JSON.parse(Buffer.concat(pipeChunks).toString('utf8'));
+    pipeChunks = [];
+    start = end + 1;
+    receiveCdp(message);
   }
-  fail('chrome did not expose CDP');
-}
+  if (start < chunk.length) pipeChunks.push(chunk.subarray(start));
+});
+const writeCdp = (message) => toChrome.write(`${JSON.stringify(message)}\0`);
+toChrome.on('error', (error) => fail(`Chrome debugging pipe failed: ${error.message}`));
 
-const ws = new WebSocket(await getWsUrl());
-await new Promise((r, j) => { ws.onopen = r; ws.onerror = j; });
-// Why the connection went: the close code, Chrome's own detach or crash
-// event, whether the browser still runs, and the last command sent.
+// The page target, attached in flat mode: page commands carry its session id
+// and page messages are handed on without it, as the page's own websocket
+// gave them; worker sessions (Target.setAutoAttach) keep theirs.
+const handshake = new Map();
+let handshakeId = 0;
+receiveCdp = (msg) => {
+  if (msg.id && handshake.has(msg.id)) { handshake.get(msg.id)(msg); handshake.delete(msg.id); }
+};
+const browserCommand = (method, params = {}) => new Promise((resolve) => {
+  const id = ++handshakeId;
+  const timeout = setTimeout(() => fail(`chrome did not answer ${method} on its debugging pipe`), 30_000);
+  handshake.set(id, (m) => { clearTimeout(timeout); resolve(m); });
+  writeCdp({ id, method, params });
+});
+let pageTargetId = null;
+for (let i = 0; i < 60 && !pageTargetId; i++) {
+  const targets = await browserCommand('Target.getTargets');
+  pageTargetId = targets.result?.targetInfos?.find((t) => t.type === 'page')?.targetId || null;
+  if (!pageTargetId) await wait(250);
+}
+if (!pageTargetId) fail('chrome did not expose a page target');
+const attached = await browserCommand('Target.attachToTarget', { targetId: pageTargetId, flatten: true });
+const pageSessionId = attached.result?.sessionId;
+if (!pageSessionId) fail(`could not attach to the page target: ${JSON.stringify(attached.error || attached)}`);
+// Why the session went: Chrome's own detach or crash event, whether the
+// browser still runs, and the last command sent.
 let inspectorEvent = null;
 let lastCommand = null;
-ws.onclose = (event) => {
+function sessionLost(what) {
   const running = chrome.exitCode === null && chrome.signalCode === null;
-  fail(`Chrome debugging connection closed (code ${event.code}${event.reason ? ` "${event.reason}"` : ''}; Chrome ${running ? 'still running' : `gone: ${chrome.exitCode ?? chrome.signalCode}`}; `
+  fail(`${what} (Chrome ${running ? 'still running' : `gone: ${chrome.exitCode ?? chrome.signalCode}`}; `
     + `${inspectorEvent || 'no Inspector event'}; last command ${lastCommand || 'none'}): ${chromeDiagnostics}`);
-};
+}
+fromChrome.on('close', () => sessionLost('Chrome debugging pipe closed'));
 
 let msgId = 0;
 const pending = new Map();
@@ -194,8 +230,15 @@ function onCdpEvent(listener) {
 // Requests the cross-origin isolated page (#264) had blocked by COEP, CORP or
 // COOP, over the whole run: the Audits domain reports each as an issue.
 const isolationBlocks = [];
-ws.onmessage = (e) => {
-  const msg = JSON.parse(e.data);
+receiveCdp = (msg) => {
+  if (msg.sessionId === pageSessionId) delete msg.sessionId;
+  else if (!msg.sessionId && !msg.id) {
+    // The browser session's own events: only the page session ending matters.
+    if (msg.method === 'Target.detachedFromTarget' && msg.params?.sessionId === pageSessionId) {
+      sessionLost('Chrome detached the page debugging session');
+    }
+    return;
+  }
   if (msg.id && pending.has(msg.id)) {
     pending.get(msg.id)(msg);
     pending.delete(msg.id);
@@ -235,11 +278,12 @@ ws.onmessage = (e) => {
     if (/OpenCV/i.test(text)) {
       pageErrors.push(`OpenCV load failure dialog: ${text.slice(0, 200)}`);
     }
-    ws.send(JSON.stringify({
+    writeCdp({
       id: ++msgId,
       method: 'Page.handleJavaScriptDialog',
       params: { accept: true },
-    }));
+      sessionId: pageSessionId,
+    });
   }
 };
 const send = (method, params = {}) => new Promise((resolve) => {
@@ -247,14 +291,14 @@ const send = (method, params = {}) => new Promise((resolve) => {
   lastCommand = method;
   const timeout = setTimeout(() => fail(`Chrome command timed out: ${method}`), 180_000);
   pending.set(id, (m) => { clearTimeout(timeout); resolve(m); });
-  ws.send(JSON.stringify({ id, method, params }));
+  writeCdp({ id, method, params, sessionId: pageSessionId });
 });
 // A command to an attached target's session (flat mode: a worker, #264).
 const sendTo = (sessionId, method, params = {}) => new Promise((resolve) => {
   const id = ++msgId;
   const timeout = setTimeout(() => { pending.delete(id); resolve({ error: { message: `timed out: ${method}` } }); }, 30_000);
   pending.set(id, (m) => { clearTimeout(timeout); resolve(m); });
-  ws.send(JSON.stringify({ id, method, params, sessionId }));
+  writeCdp({ id, method, params, sessionId });
 });
 async function evaluate(expression) {
   const res = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
