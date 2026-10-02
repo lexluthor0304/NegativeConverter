@@ -45,6 +45,8 @@ function fixture({ enabled = false, mask = null, model = null } = {}) {
     liveDisplaySerial: 0,
     state, coreReprocessToken: 7, dustDetectionRevision: 11, loadGeneration: 3,
     dustDetectionTimer: null, Uint8Array, dustMaskTagSequence: 0, dustAiRefresh: { rects: [] },
+    // No undo or redo restored a dust state here (#259).
+    restoredDust: null,
     syncDustWorkerPin: noop,
     aiRepair: model || { status: 'ready', revision: 5 }, repairStamps: createRepairStamps(), dustPassCache: null,
     aiRepairLoadWatcher: null, DEFAULT_MODEL_URL: '/m.onnx',
@@ -92,7 +94,7 @@ function fixture({ enabled = false, mask = null, model = null } = {}) {
   });
   vm.runInContext([...DISPLAY_SESSION_HELPERS, 'getDustSource', 'nextDustMaskTag', 'noteDustReplaced', 'hasFrameRepairs', 'isCurrentLoad',
     'currentRepairRecipe', 'stampRepairResult', 'commitDustPass', 'dustPassUsesAi',
-    'applyDustResultToState', 'runDustDetection', 'runDustDetectionPass', 'scheduleDustDetection',
+    'applyDustResultToState', 'runDustDetection', 'runDustDetectionPass', 'keepRestoredDust', 'restoredDustInputsHold', 'scheduleDustDetection',
     'prepareCurrentImageForExport', 'renderCurrentImageDataForExport', 'dustMaskHasPixels', 'loadAiRepairForExport',
     'settleAiRepairModel', 'aiRepairLoadArgs', ...(model ? ['aiRepairReady'] : [])].map(functionSource).join('\n'), c);
   const actualRunDustDetection = c.runDustDetection;

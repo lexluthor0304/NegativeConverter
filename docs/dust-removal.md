@@ -108,6 +108,28 @@ the count, all transferred. `DustBrush.test.mjs` checks 200+ random strokes
   budget once every other entry is cold, the oldest stroke entry is dropped
   with everything older on its stack. A photo session cached without its
   planes keeps no stroke entries.
+- **Undo across a conversion.** Undoing or redoing any other step (a core
+  slider, the strength, a crop, an AI-brush stroke) puts back that step's dust
+  state by reference, mask, repaired image and particle count, and converts
+  the frame again. Its landing used to detect dust from scratch and drop every
+  brush refinement. A snapshot records whether its dust state was a finished
+  repair of its clean source (`refs.dustSettled`: no detection, brush repair
+  or learned refresh owed, a known inpainter). The restore hands a settled
+  state to the conversion (`restoredDust`); `resetDustForCleanSource` passes
+  it on when the conversion lands, if only strokes and their undo changed it
+  since, on the same clean source with the same dust inputs; and the
+  detection that follows (`keepRestoredDust`) keeps it as it was once the new
+  frame proves to have the restored clean source's pixels (8 and 16 bits,
+  compared in 32 MB slices: `sameFramePixels`) and the inpainter is the one
+  recorded. The clean source stays the restored object, which the stroke
+  entries name, and the repair's stamp carries over as on a session restore,
+  so the export equals the one made before that step. Anything in doubt
+  detects from scratch, as before: a frame with other pixels (a snapshot taken
+  while its frame lagged its settings, an input outside history), a state its
+  snapshot had not settled (that mark travels with the restored state),
+  other dust inputs or another inpainter. `dustUndoKeep.test.mjs` runs
+  main.js's history, conversion landing, detection and export repair step on
+  real OpenCV detection, TELEA and strokes.
 - **Display.** Only the preview pixels whose bilinear taps fall in R are
   recomputed (`updateDisplayPreviewRect`, exact), the WebGL source texture gets
   a `texSubImage2D` of that rect, the tint cells over the mask box are put on
@@ -160,3 +182,7 @@ the count, all transferred. `DustBrush.test.mjs` checks 200+ random strokes
 
 - Batch export still re-detects dust per file and ignores brush edits
   (`audit-backlog.md`).
+- A history entry the memory budget made cold (#244: after a later edit or
+  under memory pressure, typically from about 30 MP, where history holds the
+  only copies of the step's clean source and repaired image) keeps no dust
+  state: its undo rebuilds the planes from the base and detects dust again.

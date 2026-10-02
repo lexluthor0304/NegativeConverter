@@ -2,11 +2,14 @@
 // place and record only the bytes they changed. Mixed with the reference
 // snapshots of other edits, strict LIFO undo/redo must bring back
 // bit-identical images, masks and counts at every step, keep earlier brush
-// refinements, and retain patch-sized memory per stroke.
+// refinements, and retain patch-sized memory per stroke. This is a model of
+// main.js's rules in which no step converts the frame again; main.js's own
+// undo across a conversion, and the detection after it, is tested in
+// dustUndoKeep.test.mjs.
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
-import { applyStrokePatch, applyDustDelta, amendDustDelta, historyEntryBytes, copyImageRect, pasteImageRect } from './dustStrokeHistory.js';
+import { applyStrokePatch, applyDustDelta, amendDustDelta, historyEntryBytes, copyImageRect, pasteImageRect, sameFramePixels } from './dustStrokeHistory.js';
 import { detectDust, inpaintMasked } from '../silvercore/engine/DustRemoval.js';
 import { applyDustStroke } from '../silvercore/engine/DustBrush.js';
 
@@ -250,4 +253,54 @@ checkUndoRedo('crop, AI export, photo switch');
   assert.equal(historyEntryBytes(big.capture('exposure'), seen), 0, 'shared buffers count once');
 }
 
-console.log('Dust-stroke history: in-place deltas undo/redo bit-identically across sliders, strength, crop, AI export and photo switch');
+// The proof an undo across a conversion keeps its dust state on (#259): two
+// frames hold the same pixels, 8-bit and 16-bit, compared in slices.
+{
+  const a = makeFrame(64, 48, 6);
+  const copy = (image) => {
+    const out = new ImageData(new Uint8ClampedArray(image.data), image.width, image.height);
+    out.__image16 = { width: image.width, height: image.height, data: new Uint16Array(image.__image16.data) };
+    return out;
+  };
+  let pauses = 0;
+  const pause = async () => { pauses++; };
+  assert.equal(await sameFramePixels(a, copy(a), { pause, sliceBytes: 4096 }), true, 'a copy holds the same pixels');
+  // 12 288 8-bit bytes and 24 576 16-bit bytes in 4 KiB slices: a pause before every slice but the first.
+  assert.equal(pauses, 3 + 6 - 1);
+  const last16 = copy(a);
+  last16.__image16.data[last16.__image16.data.length - 1] ^= 1;
+  assert.equal(await sameFramePixels(a, last16, { pause, sliceBytes: 4096 }), false, 'the last 16-bit sample differs');
+  const first8 = copy(a);
+  first8.data[0] ^= 1;
+  pauses = 0;
+  assert.equal(await sameFramePixels(a, first8, { pause, sliceBytes: 4096 }), false, 'the first 8-bit byte differs');
+  assert.equal(pauses, 0, 'a difference ends the comparison at once');
+  const without16 = copy(a);
+  delete without16.__image16;
+  assert.equal(await sameFramePixels(a, without16), false, 'a 16-bit plane on one side only');
+  const plain = (image) => new ImageData(new Uint8ClampedArray(image.data), image.width, image.height);
+  assert.equal(await sameFramePixels(plain(a), plain(a)), true, '8-bit frames compare their bytes');
+  assert.equal(await sameFramePixels(plain(a), plain(first8)), false);
+  assert.equal(await sameFramePixels(a, makeFrame(48, 64, 6)), false, 'another size');
+  assert.equal(await sameFramePixels(a, null), false);
+  // Views that are not 4-byte aligned compare byte by byte.
+  const shifted = (image) => {
+    const data = new Uint8ClampedArray(image.data.length + 1).subarray(1);
+    data.set(image.data);
+    const plane = new Uint16Array(image.__image16.data.length + 1).subarray(1);
+    plane.set(image.__image16.data);
+    const out = new ImageData(data, image.width, image.height);
+    out.__image16 = { width: image.width, height: image.height, data: plane };
+    return out;
+  };
+  assert.equal(await sameFramePixels(shifted(a), a, { sliceBytes: 1000 }), true, 'unaligned views');
+  assert.equal(await sameFramePixels(shifted(last16), a, { sliceBytes: 1000 }), false);
+  // A comparison that is no longer wanted stops (and proves nothing).
+  let current = true;
+  pauses = 0;
+  const stopping = async () => { pauses++; current = false; };
+  assert.equal(await sameFramePixels(a, copy(a), { pause: stopping, isCurrent: () => current, sliceBytes: 4096 }), false);
+  assert.equal(pauses, 1);
+}
+
+console.log('Dust-stroke history: in-place deltas undo/redo bit-identically across sliders, strength, crop, AI export and photo switch; frames compare by their 8- and 16-bit pixels');

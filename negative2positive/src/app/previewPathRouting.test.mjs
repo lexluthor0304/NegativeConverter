@@ -187,6 +187,8 @@ function fixture({ large = true, repairs = false, strokes = 0, aiBrush = false, 
     // The background lanes' gate (#243).
     backgroundGate: { bump: noop },
     noteDustReplaced: noop, syncDustWorkerPin: noop,
+    // No undo or redo restored a dust state here (#259).
+    restoredDust: null,
     // No GPU preview (#239): these frames take the worker path.
     gpuPreviewScheduler: DISABLED_GPU_PREVIEW_SCHEDULER, gpuPreviewCanTake: () => false, gpuPreview: { status: 'none' },
     GPU_PREVIEW_MODE: 'auto', gpuApplyUsable: () => false,
@@ -211,7 +213,7 @@ function fixture({ large = true, repairs = false, strokes = 0, aiBrush = false, 
     'routeCoreRequest', 'beginFullResolutionConversion', 'endFullResolutionConversion',
     'abortSupersededFullResolutionConversion', 'ensureAiBrushPlane',
     'coreReprocessBusy', 'whenCoreReprocessIdle', 'noteCoreReprocessSettled', 'runCoreReprocess',
-    'resetDustForCleanSource', 'rerenderWithCoreControls', 'postPendingPreviewEarly',
+    'resetDustForCleanSource', 'takeRestoredDust', 'restoredDustInputsHold', 'rerenderWithCoreControls', 'postPendingPreviewEarly',
     'retainCorePreviewPlane', 'armCorePreviewCommitTimer', 'releaseCorePreviewRetained',
     'requestCorePreviewCommit', 'maybeCommitCorePreviewPlane', 'settleCorePreviewWaiters',
     'hasSeparateConversionPreview', 'startFullResolutionRender', 'scheduleFullResolutionRender',
@@ -378,6 +380,8 @@ function snapshotFixture(options) {
       'previewSourceImageData', 'histogramSourceImageData', 'webglSourceImageData'],
     structuredClone, sanitizeRepairStrokes: strokes => strokes || [], sanitizeFrameMetadata: () => null,
     createSprocketEdgeSettings: () => null, carryRestoredRepairStamp: noop,
+    // These snapshots' dust states are not kept across a conversion (#259).
+    dustStateSettled: () => false,
     updateMirrorButtonState: noop, updateFileListUI: noop, updateLensCorrectionUI: noop, updateFilmEdgeUI: noop,
     updateDodgeBurnUI: noop, updateLabMatchUI: noop, updateExpiredRescueUI: noop, updateMetadataUI: noop,
     updateFilmModeUI: noop, updateSlidersFromState: noop, renderCurve: noop, updateDustControlsVisibility: noop,

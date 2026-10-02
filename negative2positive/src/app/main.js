@@ -162,7 +162,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       createDustWorkerClient, detectDustInWorker, inpaintDustInWorker, strokeDustInWorker, followDustMaskInWorker,
       pinDustWorker, unpinDustWorker, disposeDustWorker, dustMaskInfo, forgetDustMaskInfo
     } from './dustWorkerClient.js';
-    import { applyStrokePatch, applyDustDelta, amendDustDelta, copyImageRect, pasteImageRect } from './dustStrokeHistory.js';
+    import { applyStrokePatch, applyDustDelta, amendDustDelta, copyImageRect, pasteImageRect, sameFramePixels } from './dustStrokeHistory.js';
     import { loadLocalLensfunAssets } from './lensfunLoader.js';
     import { createOpenCvLoader } from './opencvLoader.js';
     import {
@@ -2660,6 +2660,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // sized, and it holds the clean source it was built for, so it goes with
     // that source and with the photo.
     let dustRefreshRepairMask = null;
+    // An undo or redo that converts the frame again (#259): the dust state it
+    // restored, until the conversion lands (takeRestoredDust), then until the
+    // detection that follows has compared the frames (keepRestoredDust). It
+    // goes whenever the dust state is replaced (noteDustReplaced) and with
+    // the photo.
+    let restoredDust = null;
 
     let fullResolutionRenderTimer = null;
     // The exact render above 16 MP in flight: { controller, token, generation }
@@ -3060,6 +3066,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       refs.dustInpaintedImageData = state.dustRemoval.inpaintedImageData;
       refs.dustCleanSource = state.dustRemoval.cleanSource || null;
       refs.dustState = state.dustRemoval._state;
+      refs.dustParticleCount = state.dustRemoval.particleCount;
+      // The inpainter of a dust state that is a finished repair of its clean
+      // source, which an undo across a conversion can keep (#259); else null.
+      refs.dustSettled = dustStateSettled() ? { usedAi: dustPassUsesAi(), revision: aiRepair.revision } : null;
       // Whether processedImageData is a display preview, and whether it lags
       // the settings: restoring the plane without them could export a
       // display-sized plane or skip a render export still owes.
@@ -3164,9 +3174,19 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       state.dustRemoval.inpaintedImageData = r.dustInpaintedImageData;
       state.dustRemoval.cleanSource = r.dustCleanSource;
       state.dustRemoval._state = r.dustState;
+      if (Number.isFinite(r.dustParticleCount)) state.dustRemoval.particleCount = r.dustParticleCount;
       noteDustReplaced();
       // After the revision moves: a carried stamp names the restored state.
       if (!reprocess) carryRestoredRepairStamp();
+      // The conversion below would start the repairs over and drop the
+      // restored brush refinements (#259): the detection after it keeps this
+      // state when the new frame has its clean source's pixels. A state its
+      // snapshot had not settled is marked so, and detected again.
+      if (reprocess && r.dustCleanSource) {
+        restoredDust = { settled: Boolean(r.dustSettled), inpainter: r.dustSettled, token: coreReprocessToken,
+          cleanSource: r.dustCleanSource, strokes: state.repairStrokes, enabled: state.dustRemoval.enabled,
+          strength: state.dustRemoval.strength, maxParticleSize: state.dustRemoval.maxParticleSize };
+      }
 
       // Sync UI
       updateFilmModeUI();
@@ -3201,7 +3221,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         }
       }
       goToStep(s.currentStep);
-      // A reprocessing restore re-detects dust and pins again when that lands.
+      // A reprocessing restore pins again once the detection after the
+      // conversion lands (it keeps or replaces the restored dust state).
       if (!reprocess || !state.dustRemoval.enabled || !state.dustRemoval.showMask) syncDustWorkerPin();
     }
 
@@ -8041,6 +8062,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     function resetDustForCleanSource(source) {
+      // An undo or redo across this conversion: its dust state waits for the
+      // detection scheduled next, which keeps it after comparing the frames.
+      const kept = takeRestoredDust(source);
       dustDetectionRevision += 1;
       dustPassCache = null;
       dustRefreshRepairMask = null;
@@ -8051,6 +8075,32 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       noteDustReplaced();
       state.dustRemoval.inpaintedImageData = null;
       state.dustRemoval.particleCount = 0;
+      if (kept) restoredDust = { ...kept, revision: state.dustRemoval.revision };
+    }
+
+    // The dust state an undo or redo restored (#259), when the conversion now
+    // landing (`source`) is the one it asked for: the snapshot settled the
+    // state, and since then only brush strokes or their undo changed it, on
+    // the same clean source, with the same dust inputs, and no learned
+    // refresh is owed. Null otherwise: detect from scratch.
+    function takeRestoredDust(source) {
+      const record = restoredDust;
+      const dust = state.dustRemoval;
+      restoredDust = null;
+      if (!record?.settled || record.token !== coreReprocessToken || !source || !dust.mask) return null;
+      if (dust.cleanSource !== record.cleanSource || source.width !== record.cleanSource.width
+        || source.height !== record.cleanSource.height || !restoredDustInputsHold(record)
+        || dustAiRefresh.rects.length) return null;
+      return { ...record, landed: true, mask: dust.mask, maskTag: dust.maskTag, _state: dust._state,
+        particleCount: dust.particleCount, inpaintedImageData: dust.inpaintedImageData };
+    }
+
+    // The detection inputs a restored dust state was made with: dust removal
+    // on or off, its strength and particle size, and the repair strokes.
+    function restoredDustInputsHold(record) {
+      const dust = state.dustRemoval;
+      return state.repairStrokes === record.strokes && dust.enabled === record.enabled
+        && dust.strength === record.strength && dust.maxParticleSize === record.maxParticleSize;
     }
 
     // The AI brush paints on the full-resolution plane, whichever tab is open.
@@ -9140,10 +9190,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     // The mask or the repaired image was replaced outside the brush: pending
-    // strokes, learned-repair refreshes and the tint layer are now stale.
+    // strokes, learned-repair refreshes and the tint layer are now stale, and
+    // so is what an undo or redo restored (#259).
     function noteDustReplaced() {
       state.dustRemoval.revision += 1;
       dustAiRefresh.rects.length = 0;
+      restoredDust = null;
     }
 
     // Brush patches go into the repaired image in place. When there is none
@@ -9330,6 +9382,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           state.dustRemoval.cleanSource = source;
         }
 
+        // An undo or redo across a conversion (#259): the dust state it
+        // restored, once this frame proves to have its clean source's pixels.
+        if (await keepRestoredDust(source, isCurrent)) return;
+        if (!isCurrent() || source !== getDustSource()) return;
+
         const prevState = state.dustRemoval._state;
         const maxParticleSize = dustMaxParticleSizeFor(source);
         const dustEnabled = Boolean(state.dustRemoval.enabled);
@@ -9398,6 +9455,54 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           if (isCurrent()) syncDustWorkerPin();
         }
       }
+    }
+
+    // The detection after an undo or redo's conversion (#259): the dust state
+    // the restore handed over (takeRestoredDust) comes back as it was, brush
+    // refinements, repaired image and count included, when nothing replaced
+    // it meanwhile, the converted frame `source` has the restored clean
+    // source's pixels (8 and 16 bits, compared in slices) and the inpainter
+    // is the one the snapshot recorded. The clean source stays the restored
+    // object, which its history entries and repair stamp name, and the stamp
+    // carries over as a session restore's does. False: detect from scratch.
+    async function keepRestoredDust(source, isCurrent) {
+      const kept = restoredDust;
+      if (!kept?.landed) return false;
+      restoredDust = null;
+      const dust = state.dustRemoval;
+      const untouched = () => isCurrent() && dust.revision === kept.revision && dust.cleanSource === source
+        && restoredDustInputsHold(kept);
+      if (!untouched()) return false;
+      // A load in flight decides the inpainter first, as for a dust pass.
+      if (dust.ai && aiRepair.status === 'loading') await settleAiRepairModel({ load: false, isCurrent });
+      if (!untouched() || dustPassUsesAi() !== kept.inpainter.usedAi || aiRepair.revision !== kept.inpainter.revision) return false;
+      if (!(await sameFramePixels(kept.cleanSource, source, { isCurrent: untouched, pause: yieldTaskForJob })) || !untouched()) return false;
+      dust.cleanSource = kept.cleanSource;
+      dust.mask = kept.mask;
+      dust.maskTag = kept.maskTag;
+      dust._state = kept._state;
+      dust.particleCount = kept.particleCount;
+      dust.inpaintedImageData = kept.inpaintedImageData;
+      noteDustReplaced();
+      carryRestoredRepairStamp();
+      if (dust.particleCount > 0 || state.repairStrokes.length) showDustParticleCount();
+      else updateDustStatusUI(getLocalizedText('dustStatusNone', 'No dust detected'));
+      cancelFullUpdate();
+      applyDustResultToState();
+      updatePreview();
+      rememberRepairMasks(kept.cleanSource);
+      return true;
+    }
+
+    // Whether the dust state is a finished repair of its clean source: a mask
+    // of that source, and a repaired image that no detection, brush repair or
+    // learned refresh still owes anything, from a known inpainter. A state an
+    // undo or redo restored counts only when its snapshot's did (#259).
+    function dustStateSettled() {
+      const dust = state.dustRemoval;
+      return Boolean(dust.cleanSource && dust.mask && dust.mask.length === dust.cleanSource.width * dust.cleanSource.height
+        && !dustMaskIsStale() && !dust.processing && !dustDetectionTimer && !pendingBrushRepairs && !dustDrawing
+        && !dustAiRefresh.rects.length && dustPassUsesAi() !== null && restoredDust?.settled !== false);
     }
 
     function applyDustResultToState() {
@@ -11287,6 +11392,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       state.dustRemoval.cleanSource = null;
       state.dustRemoval._state = null;
       dustRefreshRepairMask = null;
+      restoredDust = null;
       clearFullResolutionRenderState();
       undoStack.length = 0;
       redoStack.length = 0;
@@ -12282,6 +12388,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (dustAiRefresh.timer) { clearTimeout(dustAiRefresh.timer); dustAiRefresh.timer = null; }
       dustAiRefresh.rects.length = 0;
       dustRefreshRepairMask = null;
+      restoredDust = null;
       cancelScheduledFullResolutionRender();
       coreReprocessGeneration += 1;
       coreReprocessToken += 1;

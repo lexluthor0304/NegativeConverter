@@ -119,6 +119,42 @@ export function amendDustDelta(delta, rect, write) {
 }
 
 /**
+ * Whether two frames hold the same pixels: the same size, the same 8-bit
+ * bytes and, when either has one, the same 16-bit plane (a plane on one side
+ * only is a difference). An undo across a conversion keeps the restored dust
+ * state only on this proof. 32 bits at a time, in slices of about
+ * `sliceBytes` with `pause()` awaited between them (a few ms each); a
+ * difference ends it at once, and so does `isCurrent()` turning false.
+ */
+export async function sameFramePixels(a, b, {
+  isCurrent = () => true, pause = () => new Promise(resolve => setTimeout(resolve, 0)), sliceBytes = 32 * 1024 * 1024
+} = {}) {
+  if (!a || !b || a.width !== b.width || a.height !== b.height) return false;
+  const planeA = a.__image16?.data || null;
+  const planeB = b.__image16?.data || null;
+  if (!planeA !== !planeB || !a.data || !b.data) return false;
+  let first = true;
+  for (const [x, y] of planeA ? [[a.data, b.data], [planeA, planeB]] : [[a.data, b.data]]) {
+    if (x.byteLength !== y.byteLength) return false;
+    const wide = x.byteOffset % 4 === 0 && y.byteOffset % 4 === 0 && x.byteLength % 4 === 0;
+    const view = (array) => wide ? new Int32Array(array.buffer, array.byteOffset, array.byteLength / 4)
+      : new Uint8Array(array.buffer, array.byteOffset, array.byteLength);
+    const u = view(x), v = view(y);
+    const step = Math.max(1, Math.floor(sliceBytes / u.BYTES_PER_ELEMENT));
+    for (let start = 0; start < u.length; start += step) {
+      if (!first) {
+        await pause();
+        if (!isCurrent()) return false;
+      }
+      first = false;
+      const end = Math.min(u.length, start + step);
+      for (let i = start; i < end; i++) if (u[i] !== v[i]) return false;
+    }
+  }
+  return true;
+}
+
+/**
  * Bytes a history entry keeps alive that `seen` has not counted yet: a
  * delta's own copies and the objects it patches, or a snapshot's references
  * (image planes, and typed arrays such as the dust mask).

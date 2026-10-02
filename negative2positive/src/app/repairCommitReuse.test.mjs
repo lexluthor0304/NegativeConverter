@@ -70,6 +70,8 @@ function fixture() {
     liveDisplaySerial: 0,
     state, coreReprocessToken: 7, dustDetectionRevision: 11, loadGeneration: 3, dustPassCache: null,
     dustMaskTagSequence: 0, dustAiRefresh: { rects: [], timer: null }, syncDustWorkerPin() {},
+    // No undo or redo restored a dust state here (#259).
+    restoredDust: null,
     Uint8Array, DOMException, console,
     // A loaded model; the release (#236, #241) and the reload are the real ones.
     aiRepair: { status: 'ready', revision: 4, run() {}, release: async () => {}, trim: null, resident: null,
@@ -131,7 +133,8 @@ function fixture() {
   });
   vm.runInContext([...DISPLAY_SESSION_HELPERS, 'getDustSource', 'nextDustMaskTag', 'noteDustReplaced', 'hasFrameRepairs', 'isCurrentLoad', 'currentRepairRecipe',
     'stampRepairResult', 'carryRestoredRepairStamp', 'commitDustPass', 'aiRepairReady', 'dustPassUsesAi',
-    'applyDustResultToState', 'runDustDetection', 'runDustDetectionPass', 'prepareCurrentImageForExport', 'renderCurrentImageDataForExport',
+    'applyDustResultToState', 'runDustDetection', 'runDustDetectionPass', 'keepRestoredDust', 'restoredDustInputsHold',
+    'prepareCurrentImageForExport', 'renderCurrentImageDataForExport',
     'ensureRepairsReadyForExport', 'dustMaskIsStale', 'whenBrushRepairsSettled', 'dustMaskHasPixels', 'loadAiRepairForExport',
     'settleAiRepairModel', 'releaseAiRepairSession', 'aiRepairLoadArgs', 'performAiRepairModelLoad'].map(functionSource).join('\n'), c);
   c.loadAiRepairModel = createAiModelLoader(c.performAiRepairModelLoad, MODEL_URL, value => value instanceof File);
