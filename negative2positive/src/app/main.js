@@ -4962,11 +4962,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
     // The conversion preview for `tier` (#248 part 3): the source itself when it
     // fits the display, else the display target of that size on the level. One
-    // object per size, so an unchanged size keeps its identity.
+    // object per size and tier, so an unchanged size keeps its identity, and a
+    // reduced one never serves the normal tier (#263).
     function conversionTargetFor(source, level, tier = previewTier) {
       const target = getDisplayPreviewSize(source, undefined, tier);
       if (target.width >= source.width && target.height >= source.height) return source;
-      return displayTargetFor(level || source, target);
+      return displayTargetFor(level || source, target, tier);
     }
 
     // The conversion preview of a Tier B session (#249) at `tier`: a display
@@ -5197,7 +5198,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const current = state.conversionPreviewImageData;
       if (current && !reducedDisplayImages.has(current)) previewTierKept = { source, preview: current };
       const base = previewTierKept?.source === source ? previewTierKept.preview : null;
-      const reduced = state.conversionSourceImageData ? conversionTargetFor(source, level, 'reduced') : pendingConversionTarget('reduced');
+      let reduced = state.conversionSourceImageData ? conversionTargetFor(source, level, 'reduced') : pendingConversionTarget('reduced');
+      // Where the kept normal preview has the reduced size already, the tier
+      // changes nothing: it stays, unmarked.
+      if (reduced && isDisplayTarget(reduced) && isDisplayTarget(base) && base.__displayOf === reduced.__displayOf
+        && base.width === reduced.width && base.height === reduced.height) reduced = base;
       if (!reduced || reduced === current) return;
       if (reduced !== source && reduced !== base) reducedDisplayImages.add(reduced);
       state.conversionPreviewImageData = reduced;

@@ -529,15 +529,18 @@ function updateFilteredRect(image, preview, rect, k) {
 // Display targets (#248 part 3): the conversion preview is not a resampled
 // image on the main thread any more, but a size and the level the preview
 // worker resamples it from. One object per (level, size), so identity checks
-// (the GPU preview's tags, history, the worker's caches) stay stable.
+// (the GPU preview's tags, history, the worker's caches) stay stable. The
+// reduced preview tier (#263) has objects of its own: main.js marks every one
+// it converts as unsettled, and a normal-tier target of the same size (a later
+// window) must never carry that mark (#229 review R1-089).
 // ---------------------------------------------------------------------------
 
 const displayTargets = new WeakMap();
 
-export function displayTargetFor(level, { width, height }) {
+export function displayTargetFor(level, { width, height }, tier = 'normal') {
   let byLevel = displayTargets.get(level);
   if (!byLevel) displayTargets.set(level, (byLevel = new Map()));
-  const key = `${width}x${height}`;
+  const key = tier === 'reduced' ? `${width}x${height} reduced` : `${width}x${height}`;
   let target = byLevel.get(key);
   if (!target) byLevel.set(key, (target = { width, height, __displayOf: level }));
   return target;

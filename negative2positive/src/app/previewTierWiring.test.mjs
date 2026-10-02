@@ -542,6 +542,49 @@ for (const largePreviewFrames of [true, false]) {
   assert.ok(bytesEqual(plane.state.previewSourceImageData, baseline.state.previewSourceImageData));
 }
 
+// ---- #229 review R1-089 / R1-122: a reduced target never becomes a normal
+// one. Display targets are cached per (level, size); a later viewport whose
+// normal size equals a reduced session's size gets an unmarked object ----
+{
+  const { f } = await dragAndRelease({ reduced: true });
+  const reducedSize = f.context.getDisplayPreviewSize(f.base, undefined, 'reduced');
+  // A window 428 px high at DPR 2 fits the photo at exactly that size.
+  f.container.height = 428;
+  assert.deepEqual(f.context.getDisplayPreviewSize(f.base, undefined, 'normal'), reducedSize);
+  f.context.refreshDisplayPreviewForViewport();
+  await f.answerAll();
+  const target = f.state.conversionPreviewImageData;
+  assert.deepEqual([target.width, target.height], [reducedSize.width, reducedSize.height], 'the normal target has the reduced size');
+  assert.equal(f.context.reducedDisplayImages.has(target), false, 'and no reduced mark');
+  assert.equal(f.context.displayIsReduced(), false, 'its frame is a settled view');
+  await f.input(31);
+  assert.equal(f.context.displayIsReduced(), false, 'so is every later tick');
+  // Hysteresis still holds for it (a marked target had none).
+  f.container.height = 430;
+  f.context.refreshDisplayPreviewForViewport();
+  assert.equal(f.state.conversionPreviewImageData, target, 'a size inside the band keeps the target');
+
+  // Where the reduced size is the normal one, the tier changes nothing: the
+  // drag converts the normal target and the end adds no conversion.
+  const same = fixture();
+  same.container.height = 428;
+  same.context.refreshDisplayPreviewForViewport();
+  await same.answerAll();
+  const normalTarget = same.state.conversionPreviewImageData;
+  assert.equal(normalTarget.width, reducedSize.width);
+  const count = same.conversions.length;
+  same.context.onPreviewTierChange('reduced');
+  for (const value of [10, 20]) await same.input(value);
+  assert.ok(same.conversions.slice(count).every(entry => entry.input === normalTarget), 'the drag converts the normal target');
+  assert.equal(same.context.displayIsReduced(), false);
+  same.context.onPreviewTierChange('normal');
+  same.handlers.onCommit(20);
+  await same.answerAll();
+  same.runTimers();
+  await same.answerAll();
+  assert.equal(same.conversions.length, count + 2, 'the end converts nothing more');
+}
+
 // ---- Session end diagnostics ----
 {
   const f = fixture();
