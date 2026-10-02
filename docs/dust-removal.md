@@ -124,9 +124,9 @@ and every count equals a full recount.
   `dustStrokeHistory.test.mjs` interleaves strokes with slider, strength, crop,
   AI-export and photo-switch steps. A stroke entry cannot go cold under the
   history budget (#244, `docs/geometry-chain.md`): when history is still over
-  budget once every other entry is cold, the oldest stroke entry is dropped
-  with everything older on its stack. A photo session cached without its
-  planes keeps no stroke entries.
+  budget once every other entry that holds pixels of its own is cold, the
+  oldest stroke entry is dropped with everything older on its stack. A photo
+  session cached without its planes keeps no stroke entries.
 - **Undo across a conversion.** Undoing or redoing any other step (a core
   slider, the strength, a crop, an AI-brush stroke) puts back that step's dust
   state by reference, mask, repaired image and particle count, and converts

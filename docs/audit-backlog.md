@@ -316,6 +316,16 @@ Remaining performance proposals below are not claims of completed work.
   commitUndoSnapshot clears the redo stack for every new entry; rollBackFailedGeometry pops the failed edit's entry only.  
   _Suggested fix:_ Keep the cleared redo entries with a geometry edit's entry until its build lands (counted by the history budget) and put them back on a rollback.
 
+- **low/bug** — A photo switch that supersedes a geometry build holding `studioBusy` loses that lock for the rest of the switch  
+  `negative2positive/src/app/main.js:15252`  
+  switchToFile sets studioBusy, then invalidatePhotoActivation cancels the outgoing build, and releaseGeometryBusy deletes the flag because the build still owns it: the next photo decodes with only photoSwitching set. The workspace stays inert (studioWorkspace counts photoSwitching as busy), and the film strip is inert while such a build runs (the detection tail's builds do not own the lock), so no click starts this switch today; handlers that check studioBusy alone (runStudioAutoFrame, mergeSelectedShots, detectBlankFrameInSelection) would run during it. Found while adding R1-069's test (#229 review).  
+  _Suggested fix:_ Let whoever sets studioBusy while a build owns it take the lock over (geometryBusyOwner = null), or cancel the outgoing build before the switch sets its flags.
+
+- **low/ux** — A photo left before it settled (a geometry build, a conversion or the reprocess debounce still running) loses its undo history  
+  `negative2positive/src/app/main.js:11263`  
+  rememberPhotoSession keeps a snapshot and the undo/redo stacks only for a settled photo; otherwise it stores the base and the recipe, and the return opens the recipe with an empty history. A slider nudged just before clicking the next photo is enough (the reprocess debounce). Sessions without their base already keep their history as scalars in that case (rememberUnsettledDisplaySession, R2-002); the brush-repair case is the same gap. Seen while adding R1-069's test (#229 review).  
+  _Suggested fix:_ Store coldHistory(undoStack) / coldHistory(redoStack) with the base-and-recipe entry, as the unsettled display session does, and restore them under the reopened photo's entries.
+
 ## Engine and rendering
 
 - **medium/bug** — softHigh/softLow (profile defaultSoftHigh/-SoftLow) are 8-bit offsets added to 16-bit clip points, and softClipLayer divides 16-bit overflow by 255  

@@ -72,7 +72,8 @@ In `main.js` the scalars change synchronously and the planes follow:
   which never locks editing.
 - Rotate 90° and mirror turn or flip the current display with CSS at once
   (UI only; composed when edits follow each other); the first paint of the
-  new planes removes it.
+  new planes removes it, on the GL display or on `#canvas`, with the film
+  border or without.
 - A build that fails while it is still the current one (a plane the pool or
   the canvas cannot allocate, the original of a photo restored without it
   that cannot be decoded again, #249) is rolled back, so the settings never
@@ -112,17 +113,29 @@ In `main.js` the scalars change synchronously and the planes follow:
   (`backingBuffers`): the session and history byte counts, and the probe
   that keeps an export from transferring or releasing an editor plane
   (#250), which counts the base and any pixels a reader already built as
-  live. Without a crop the working frame is the output itself.
+  live. The histogram never reads a descriptor, nor the size-only stand-in
+  a photo switch leaves while the next photo decodes: a redraw (a window
+  resize) keeps the last histogram. Without a crop the working frame is the
+  output itself.
 - History counts only the bytes it holds exclusively (`backingBuffers` over
-  undo/redo minus live state). Over 768 MiB the oldest entries become cold
-  (pixel references dropped, scalars kept) instead of being removed; the
-  most recent geometry entry stays hot so undoing it is a reference swap. A
-  cold entry, or one captured while a build was pending, restores its exact
-  scalars and rebuilds its planes from the base in the pool, then converts
-  without new automatic measurements. Dust-brush stroke entries (#259,
-  `docs/dust-removal.md`) patch the objects they hold and cannot go cold;
-  only when history is still over budget after that is the oldest one
-  dropped, with everything older on its stack.
+  undo/redo minus live state), after every edit, Undo and Redo. Over
+  768 MiB the oldest entries become cold (pixel references dropped, scalars
+  kept) instead of being removed: from the bottom of the undo stack, then
+  from the far end of redo; an entry that holds only what live state holds
+  (a slider step on the planes on screen) frees nothing and stays hot. A new
+  edit drops the redo branch before the budget is applied. The geometry
+  entry pushed last stays hot beside the budget (entries are numbered as
+  they are pushed): after an edit the newest geometry entry of the undo
+  stack, after an Undo of a geometry step its redo entry, after a Redo of
+  one the undo entry it pushed. Undo right after a geometry edit, and Redo
+  or Undo right after the other, are reference swaps even when one snapshot
+  is larger than the budget (a 60 MP crop). A cold entry, or one captured
+  while a build was pending, restores its exact scalars and rebuilds its
+  planes from the base in the pool, then converts without new automatic
+  measurements. Dust-brush stroke entries (#259, `docs/dust-removal.md`)
+  patch the objects they hold and cannot go cold; only when history is
+  still over budget after that is the oldest one dropped, with everything
+  older on its stack.
 - Photo sessions: see `docs/photo-sessions.md` (cold session entries,
   releasing the outgoing photo on a switch).
 
@@ -145,3 +158,12 @@ and how many rotated-frame-sized buffers are reachable.
 npm test    # imageGeometry.chain (core vs HEAD, 1–6 bands), geometryPool, geometryMemo, geometryHistory
 PORT=5215 CDP_PORT=9239 npm run test:smoke -- --geometry-only
 ```
+
+The geometry smoke checks the planes against the export chain and, after
+Rotate 90°, what the screen shows: the display preview's aspect turns, the
+GL source texture is uploaded again at that size (`__ncDisplay.frame().texture`)
+or `#canvas` holds the turned frame, and the interim CSS is gone. It repeats
+rotate and mirror with the film border on, on the GL display and in a CPU
+mode. geometryHistory.test covers the budget across Undo and Redo, the
+border's paints, the histogram's redraws without pixels and a photo switch
+while a build is pending.
