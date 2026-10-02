@@ -8656,7 +8656,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // superseded (the worker reuses or drops it). A commit already in flight
     // still delivers to the frame it was asked for, which a snapshot may hold.
     function releaseCorePreviewRetained(next = null) {
-      if (!corePreviewRetained || corePreviewRetained.processed === next) return;
+      if (!corePreviewRetained || corePreviewRetained.processed === next) {
+        // A reset also drops a wish waiting for a frame still on its way.
+        if (!next) corePreviewCommitWanted = false;
+        return;
+      }
       corePreviewRetained = null;
       if (corePreviewCommitTimer) {
         clearTimeout(corePreviewCommitTimer);
@@ -8670,16 +8674,35 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       noteCoreReprocessSettled();
     }
 
+    // The frame that shows a released value may still be converting, queued
+    // or held at its gate (a click on the track, a GPU settle frame): the
+    // wish waits for it, and that frame's landing commits it.
     function requestCorePreviewCommit() {
-      if (!corePreviewRetained) return;
+      if (!corePreviewRetained && !retainingPreviewComing()) return;
       corePreviewCommitWanted = true;
       maybeCommitCorePreviewPlane();
+    }
+
+    // A preview conversion that may keep its plane in the worker is in
+    // flight, queued, or held at its gate.
+    function retainingPreviewComing() {
+      if (!CORE_RETAIN_PREVIEW_PLANE || !hasSeparateConversionPreview()) return false;
+      return Boolean(_coreReprocessPreviewInFlight) || corePreviewQueued();
+    }
+
+    // A preview request waits in the newest-wins slot or at its armed gate:
+    // it is posted next and supersedes the frame on screen.
+    function corePreviewQueued() {
+      return [_coreReprocessPending, coreReprocessTimer && coreReprocessScheduled]
+        .some(request => request && !routeCoreRequest(request).full);
     }
 
     function maybeCommitCorePreviewPlane() {
       const retained = corePreviewRetained;
       if (!retained || !corePreviewCommitWanted || corePreviewCommit) return;
       if (_coreReprocessPreviewInFlight) return;
+      // The wish passes to a newer frame on its way (releaseCorePreviewRetained).
+      if (corePreviewQueued()) return;
       corePreviewCommitWanted = false;
       if (corePreviewCommitTimer) {
         clearTimeout(corePreviewCommitTimer);
@@ -8729,6 +8752,15 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     function settleCorePreviewPlane() {
       if (!corePreviewRetained && !corePreviewCommit) return Promise.resolve();
       const settled = new Promise(resolve => corePreviewSettleWaiters.push(resolve));
+      requestCorePreviewCommit();
+      return settled;
+    }
+
+    // Input on a SilverCore control ended (a release): a GPU frame showing
+    // its value sends its exact frame now (#239), and the plane of the frame
+    // that shows it comes back once that lands. True when the GPU was ahead.
+    function settleCoreInput() {
+      const settled = gpuPreviewScheduler.settleNow();
       requestCorePreviewCommit();
       return settled;
     }
@@ -8955,6 +8987,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       let token = coreReprocessToken;
       if (!displayOnly) {
         token = ++coreReprocessToken;
+        // Input that may go on: its own release, or the idle timer, brings the
+        // plane back, not a wish made before it.
+        if (!options.commit) corePreviewCommitWanted = false;
         abortSupersededFullResolutionConversion();
         cancelScheduledFullResolutionRender();
         // Detection queued before this input would enter its barrier and start
@@ -8976,13 +9011,15 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // for the new conversion instead of writing the previous one.
       if (!displayOnly && hasSeparateConversionPreview()) state.fullResolutionPending = true;
       // #239: the GPU draws the request at the next frame and its exact frame
-      // settles it later. A commit (a select, `commit`) settles at once.
+      // settles it later. A commit (a select, `commit`) settles at once, and
+      // the plane of its exact frame comes back when that lands.
       if (!full && !displayResize && gpuPreviewCanTake()) {
         // Requests still held for the worker would only convert superseded settings.
         clearCoreReprocessTimer();
         coreReprocessScheduled = null;
         if (_coreReprocessPending && !_coreReprocessPending.full) _coreReprocessPending = null;
         gpuPreviewScheduler.request(token, { settle: Boolean(options.commit) });
+        if (options.commit) requestCorePreviewCommit();
         return;
       }
       // A conversion carries the newest settings now; it settles a GPU frame on screen.
@@ -9013,6 +9050,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       } else if (action === 'frame') {
         coreReprocessTimer = coreReprocessGates.armFrame(fireCoreReprocessGate);
       }
+      if (options.commit) requestCorePreviewCommit();
     }
 
     function takeScheduledCoreReprocess() {
@@ -14913,17 +14951,16 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         },
         onCommit: (value) => {
           updateEnlargerUI();
-          // Releasing the slider settles the drag: bring the plane back.
-          requestCorePreviewCommit();
-          // A GPU frame shows this value (#239): its exact frame leaves now.
-          if (gpuPreviewScheduler.settleNow()) return;
+          // Releasing the slider settles the drag: a GPU frame of this value
+          // (#239) sends its exact frame now, and the plane comes back.
+          if (settleCoreInput()) return;
           // An unchanged token proves nothing else asked for a frame since
           // this value's request. The conversion reads live state when it
           // starts, so the queued, running or finished frame already shows it.
           const record = coreSliderCommitRecord;
           if (record && record.key === stateKey && record.value === value
             && record.token === coreReprocessToken) return;
-          scheduleCoreReprocess({ full: false });
+          scheduleCoreReprocess({ full: false, commit: true });
         }
       };
     }

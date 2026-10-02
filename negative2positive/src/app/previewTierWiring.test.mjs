@@ -192,6 +192,7 @@ function fixture({ width = 3000, height = 2000, repairs = false, largePreviewFra
     'fireCoreReprocessGate', 'clearCoreReprocessTimer', 'flushScheduledCoreReprocess',
     'retainCorePreviewPlane', 'armCorePreviewCommitTimer', 'releaseCorePreviewRetained', 'requestCorePreviewCommit',
     'maybeCommitCorePreviewPlane', 'settleCorePreviewWaiters', 'settleCorePreviewPlane',
+    'retainingPreviewComing', 'corePreviewQueued', 'settleCoreInput',
     'currentConvertedPreviewSource', 'displayResizeOrigin', 'displayResizeReplaces',
     'applyProcessedImageToState', 'applyPreviewProcessedImageToState', 'coreReprocessHandlersFor',
     'refreshDisplayPreviewForViewport', 'routeCoreRequest', 'beginFullResolutionConversion',

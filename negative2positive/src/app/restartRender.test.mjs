@@ -109,6 +109,7 @@ function fixture({ repairs = true, locked = false, large = false } = {}) {
     'abortSupersededFullResolutionConversion',
     'retainCorePreviewPlane', 'armCorePreviewCommitTimer', 'releaseCorePreviewRetained', 'requestCorePreviewCommit',
     'maybeCommitCorePreviewPlane', 'settleCorePreviewWaiters', 'ensureConversionPreviewForDisplay',
+    'retainingPreviewComing', 'corePreviewQueued',
   ].map(functionSource).join('\n'), context);
   return { context, state, base, oldPixels, newPixels, applied, clearedTimers, resolveOld, rejectOld };
 }

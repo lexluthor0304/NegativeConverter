@@ -209,6 +209,7 @@ function schedulerFixture({ repairs = false, large = false, gpu = null } = {}) {
     'fireCoreReprocessGate', 'clearCoreReprocessTimer', 'flushScheduledCoreReprocess',
     'retainCorePreviewPlane', 'armCorePreviewCommitTimer', 'releaseCorePreviewRetained', 'requestCorePreviewCommit',
     'maybeCommitCorePreviewPlane', 'settleCorePreviewWaiters', 'settleCorePreviewPlane', 'histogramSourceFor',
+    'retainingPreviewComing', 'corePreviewQueued', 'settleCoreInput',
     'currentConvertedPreviewSource', 'displayResizeOrigin', 'displayResizeReplaces', 'postGpuSettleFrame',
     'ensureConversionPreviewForDisplay',
     'routeCoreRequest', 'beginFullResolutionConversion', 'endFullResolutionConversion',
@@ -1065,4 +1066,128 @@ for (const large of [false, true]) {
   assert.equal(f.context.coreReprocessBusy(), false);
 }
 
-console.log('coreReprocessDispatcher: same-task idle posts, newest-wins busy lane, one post per frame, early handoff, gate cancel/flush/settle, retained 16-bit planes committed on release/idle/export/switch/snapshot, one conversion per commit and the >16 MP preview routing beside an exact render passed');
+// ---- #229 review R1-024: a release's commit waits for the frame on its way ----
+
+const commitTimerArmed = f => [...f.clock.timers.values()].some(timer => timer.delay === 150);
+
+{
+  // After a GPU drag nothing is retained at release. The settle frame keeps
+  // its plane in the worker, and the release's wish waits for it: the plane
+  // comes back after that conversion and one commit round trip, with no
+  // 150 ms idle wait, and the chain is idle at once.
+  const gpu = { enabled: true, drawable: true };
+  const f = sliderFixture({ gpu });
+  await f.drag([10, 20, 30]);
+  f.clock.runFrame();
+  f.fire(f.slider, 'change');
+  await settle();
+  assert.equal(f.conversions.length, 1, 'the release posts the settle frame');
+  assert.equal(f.conversions[0].retain16, true, 'which keeps its plane in the worker');
+  f.conversions[0].resolve(f.retainedResult());
+  await settle();
+  assert.equal(f.commits.length, 1, 'its plane is asked for as soon as it lands');
+  assert.equal(commitTimerArmed(f), false, 'no idle timer is left to wait for');
+  assert.equal(f.context.coreReprocessBusy(), true, 'busy for the round trip');
+  f.commits[0].resolve(new Uint16Array(4));
+  await settle();
+  assert.equal(f.context.coreReprocessBusy(), false, 'idle after the conversion and one round trip');
+}
+
+for (const gpuPath of [false, true]) {
+  // A click on the track: the only frame (or its GPU settle) is still
+  // converting at `change`.
+  const gpu = gpuPath ? { enabled: true, drawable: true } : null;
+  const f = sliderFixture(gpu ? { gpu } : undefined);
+  f.clock.nextFrame();
+  f.slider.value = '40';
+  f.fire(f.slider, 'input');
+  await Promise.resolve();
+  if (gpuPath) f.clock.runFrame();
+  assert.equal(f.conversions.length, gpuPath ? 0 : 1);
+  f.fire(f.slider, 'change');
+  await settle();
+  assert.equal(f.conversions.length, 1, 'one conversion of the clicked value');
+  f.conversions[0].resolve(f.retainedResult());
+  await settle();
+  assert.equal(f.commits.length, 1, `${gpuPath ? 'GPU' : 'worker'} track click: committed when it lands`);
+  assert.equal(commitTimerArmed(f), false);
+  f.commits[0].resolve(new Uint16Array(4));
+  await settle();
+  assert.equal(f.context.coreReprocessBusy(), false);
+}
+
+{
+  // An arrow key: `input` and `change` in one task, the frame still at its
+  // gate. The older frame on screen still holds its plane: it is superseded,
+  // and the wish goes to the frame of the released value.
+  const f = sliderFixture();
+  f.clock.nextFrame();
+  f.slider.value = '1';
+  f.fire(f.slider, 'input');
+  await Promise.resolve();
+  f.conversions[0].resolve(f.retainedResult());
+  await settle();
+  assert.equal(f.commits.length, 0, 'a frame mid-drag keeps its plane');
+  f.clock.nextFrame();
+  f.slider.value = '2';
+  f.fire(f.slider, 'input');
+  f.fire(f.slider, 'change');
+  assert.equal(f.commits.length, 0, 'the superseded frame is not brought back');
+  await Promise.resolve();
+  assert.equal(f.conversions.length, 2);
+  const released = f.retainedResult();
+  f.conversions[1].resolve(released);
+  await settle();
+  assert.equal(f.commits.length, 1);
+  assert.equal(f.commits[0].image, released, 'the frame of the released value is committed');
+  f.commits[0].resolve(new Uint16Array(4));
+  await settle();
+  assert.equal(f.context.coreReprocessBusy(), false);
+}
+
+{
+  // An export barrier while the GPU settle frame converts: the plane is asked
+  // for as the frame lands, not 150 ms later.
+  const gpu = { enabled: true, drawable: true };
+  const f = schedulerFixture({ gpu });
+  f.request(5);
+  f.clock.runFrame();
+  let flushed = false;
+  const flush = f.context.flushScheduledCoreReprocess().then(() => { flushed = true; });
+  await settle();
+  assert.equal(f.conversions.length, 1);
+  f.conversions[0].resolve(f.retainedResult());
+  await settle();
+  assert.equal(f.commits.length, 1, 'committed on landing');
+  assert.equal(flushed, false, 'the barrier waits for the plane');
+  f.commits[0].resolve(new Uint16Array(4));
+  await flush;
+  assert.equal(f.context.coreReprocessBusy(), false);
+}
+
+{
+  // A drag that goes on after a release drops the release's wish: no plane
+  // comes back mid-drag; the idle timer (or the next release) brings it.
+  const f = sliderFixture();
+  f.clock.nextFrame();
+  f.slider.value = '10';
+  f.fire(f.slider, 'input');
+  await Promise.resolve();
+  f.fire(f.slider, 'change');
+  f.clock.nextFrame();
+  f.slider.value = '20';
+  f.fire(f.slider, 'input');
+  f.conversions[0].resolve(f.retainedResult());
+  await settle();
+  assert.equal(f.conversions.length, 2, 'the new tick posts');
+  f.conversions[1].resolve(f.retainedResult());
+  await settle();
+  assert.equal(f.commits.length, 0, 'no commit while the new drag may go on');
+  f.clock.runTimers();
+  assert.equal(f.commits.length, 1, 'the idle timer commits it');
+  f.commits[0].resolve(new Uint16Array(4));
+  await settle();
+  assert.equal(f.context.coreReprocessBusy(), false);
+}
+
+console.log('coreReprocessDispatcher: same-task idle posts, newest-wins busy lane, one post per frame, early handoff, gate cancel/flush/settle, retained 16-bit planes committed on release/idle/export/switch/snapshot (also a frame still on its way at release or flush), one conversion per commit and the >16 MP preview routing beside an exact render passed');
