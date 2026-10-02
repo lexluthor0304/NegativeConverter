@@ -221,6 +221,30 @@ async function drain(f, rounds = 40) {
   assert.equal(c.hiddenJobRunning(), false);
 }
 {
+  // A preview render that the hide stopped is rendered again from the held
+  // base once the window is shown, without a second decode.
+  const f = createLaneFixture({ count: 3, current: 0, prefetch: true, tilesDone: true });
+  const w = hiddenWindow(f);
+  const c = f.context;
+  c.kickBackgroundPhotoWork();
+  await f.clock.advance(250);
+  await f.finishDecode(1);
+  assert.equal(c.photoPrefetch.has(f.items[1]), true, 'the base is held before its preview renders');
+  assert.equal(f.renderOf(1).length, 1);
+  w.setHidden(true);
+  await f.finishRender(1);
+  assert.equal(c.photoPreviews.size, 0, 'a preview that lands hidden is not kept');
+  assert.equal(c.photoPrefetch.has(f.items[1]), true, 'the slot stays: no job ran hidden');
+  await f.clock.advance(1000);
+  assert.equal(f.renderOf(1).length, 1, 'nothing more while hidden');
+  w.setHidden(false);
+  await f.clock.advance(250);
+  assert.equal(f.renderOf(1).length, 2, 'shown again, the preview renders from the held base');
+  assert.equal(f.decodeOf(1).length, 1, 'without a second decode');
+  await f.finishRender(1);
+  assert.equal(c.photoPreviews.peek(f.items[1])?.key, c.photoSettingsKey(f.items[1]));
+}
+{
   // A tile job holding its admission is one: hiding sheds at once.
   const f = createLaneFixture({ count: 3, current: 0, tilesDone: true });
   f.items[2].thumbnail = null;

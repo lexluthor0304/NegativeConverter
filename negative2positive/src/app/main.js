@@ -23432,16 +23432,22 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           prefetchPreviewAttempts.set(item, key);
           if (photoPreviews.peek(item)?.key === key) return;
           const current = () => valid() && key === photoSettingsKey(item);
-          await step();
-          if (!current()) return;
-          const image = await processFileWithSettings(item.file, item.settings, {
-            previewMaxDimension: 1200, updateItemSettings: false, sourceImageData: decoded.base,
-            isCurrent: current, convert: request => backgroundConvert(request),
-            analyzers: backgroundAnalyzers(), beforeHeavyStep: step
-          });
-          if (current()) {
-            photoPreviews.put(item, { key, image });
-            void persistPresentationPreview(item, key, image);
+          try {
+            await step();
+            if (!current()) return;
+            const image = await processFileWithSettings(item.file, item.settings, {
+              previewMaxDimension: 1200, updateItemSettings: false, sourceImageData: decoded.base,
+              isCurrent: current, convert: request => backgroundConvert(request),
+              analyzers: backgroundAnalyzers(), beforeHeavyStep: step
+            });
+            if (current()) {
+              photoPreviews.put(item, { key, image });
+              void persistPresentationPreview(item, key, image);
+            }
+          } finally {
+            // Stopped because a hidden macOS window prefetches nothing: the
+            // preview renders from the held base once the window is shown.
+            if (!current() && hiddenWindowLimited()) prefetchPreviewAttempts.delete(item);
           }
         },
         fail(error) {

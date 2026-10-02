@@ -599,7 +599,8 @@ hides come last. No job starts on a file another lane is working on.
   click's task and the exact positive follows from the base. A new recipe (a
   roll commit) re-renders the preview from the held base; the slot is dropped
   once the user is two photos away from it. A hidden macOS window prefetches
-  nothing (#241): each hidden admission empties the slot again.
+  nothing (#241): each hidden admission empties the slot again. A preview the
+  hide stopped renders from the held base once the window is shown.
 - **Buffers.** A shared, retained or prefetched base is read-only: it is
   listed among the editor's live buffers, so no export transfers it (#244 and
   #249 copy instead).
