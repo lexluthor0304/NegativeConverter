@@ -257,11 +257,10 @@ the record could never be read back. The desktop app keeps records in
 Time Machine's exclusion; the spill of an earlier run is removed at start,
 and the spill of the page before whenever a page starts loading, as on the
 reload after macOS terminated WebContent, R2-008), so no pixels reach
-WebKit's origin storage; the web keeps them in the
-origin-private file system from the worker (IndexedDB where sync access
-handles are missing). WebKit before
-Safari 17 returns promises from four of a sync access handle's methods
-(`getSize`, `truncate`, `flush` and `close`): they are awaited, and a record
+WebKit's origin storage; the web keeps them in the origin-private file
+system from the worker (IndexedDB where sync access handles are missing).
+WebKit before Safari 17 returns promises from four of a sync access handle's
+methods (`getSize`, `truncate`, `flush` and `close`): they are awaited, and a record
 that exists but cannot be read rejects instead of reading as absent (R2-067:
 Safari 16 read every record as empty, and the next start deleted them all).
 The tabs of an origin share those records, and each keeps a copy of their
@@ -282,10 +281,10 @@ off below that floor; on the web, which knows only the origin's quota left
 reports its usage plus 10 GiB), it is `min(setting, half of the quota left)`
 with the store's own records counted as left, off below 512 MiB (R2-068: the
 disk floor kept the web store off in both). Least recently used records go
-out first; the Studio menu shows the size, a limit
-(Off, 1-10 GB, default 2 GB, which a profile that never chose one gets: it
-read as Off before) and **Clear cache** (the size line is built again on a
-language switch, R2-069). The store also keeps #235's
+out first; the Studio menu shows the size, a limit (Off, 1-10 GB, default
+2 GB, which a profile that never chose one gets: it read as Off before) and
+**Clear cache** (the size line is built again on a language switch,
+R2-069). The store also keeps #235's
 1200 px presentation previews as JPEG, keyed by content and a recipe digest,
 which the switch veil shows at once after a restart; they are presentation
 only. The veil shows a stored or spilled hit's presentation copy until the
@@ -703,7 +702,8 @@ settings each time. It then confirms another image area, comes back as
 Tier A, undoes to the earlier area and requires PNG16 and TIFF16 exports
 equal to a cold reopen's (decoded samples). The store hit is checked
 wherever the store has a budget, which Chrome's quota (its usage plus 10 GiB)
-gives it since R2-068; fills only make levels smaller than
+gives it since R2-068 and the default limit (an unset one read as Off);
+fills only make levels smaller than
 their frame (k > 1, about 16 MP and up), so `displaySessions.test.mjs`
 checks a filled proxy's first open, from the spill and from the store,
 against a cold open's conversion request. It also opens a stored frame whose
