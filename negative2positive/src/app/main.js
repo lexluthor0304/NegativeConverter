@@ -24985,7 +24985,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const strokes = state.repairStrokes;
       const useDust = Boolean(aiRepairReady() && dust.enabled && dust.mask);
       if (!useDust && !strokes.length) {
-        if (dustPassUsesAi() !== false && dust.enabled && dust.mask) {
+        if (dust.ai && dust.enabled && dust.mask && (aiRepair.status === 'idle' || aiRepair.status === 'loading')) {
           // AI repair is on and its model is not loaded (#236 or #241
           // released it) or still loading: MI-GAN, not TELEA, is the repair.
           // The rects stay queued and are refreshed once the load ends; a
