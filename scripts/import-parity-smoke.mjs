@@ -19,6 +19,13 @@
 // answer is held while crop mode is opened and cancelled (several 200 ms poll
 // ticks), then released, so the map lands after a crop mode the user left.
 // 1703835 checked only before and after the inference and applied it.
+//
+// IMPORT_PARITY_EXPIRED=1 (R1-085): each file is imported into an expired-roll
+// session (the rescue entry), with Auto Frame off so the frame detector (#251,
+// flagged) stays out of the comparison. The settled recipe then holds the
+// rescue's measurement (expiredAnalysis with its fog surface, the strengths
+// it set, the semantic map). PNG16 file bytes differ by #257's stream; TIFF16
+// compares the same 16-bit pixels.
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename } from 'node:path';
 
@@ -79,7 +86,8 @@ function differences(expected, actual, path = '') {
 export async function runImportParitySmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port,
   files = (process.env.IMPORT_PARITY_FILES || '').split(':').filter(Boolean),
   baselinePath = process.env.IMPORT_PARITY_BASELINE, outPath = process.env.IMPORT_PARITY_OUT,
-  cropDuringSemantic = process.env.IMPORT_PARITY_CROP_DURING_SEMANTIC === '1' }) {
+  cropDuringSemantic = process.env.IMPORT_PARITY_CROP_DURING_SEMANTIC === '1',
+  expired = process.env.IMPORT_PARITY_EXPIRED === '1' }) {
   if (!files.length) fail('IMPORT_PARITY_FILES lists no files');
   const baseline = baselinePath ? JSON.parse(readFileSync(baselinePath, 'utf8')) : null;
   const rows = [];
@@ -92,6 +100,17 @@ export async function runImportParitySmoke({ send, evaluate, waitFor, wait, fail
     await wait(500);
     await evaluate(CAPTURE);
     if (cropDuringSemantic) await evaluate(SEMANTIC_HOLD);
+    if (expired) {
+      await evaluate(`(() => {
+        const crop = document.getElementById('studioImportAutoCrop'); if (crop.checked) crop.click();
+        const frame = document.getElementById('autoFrameEnabledInput');
+        if (frame.checked) { frame.checked = false; frame.dispatchEvent(new Event('change', { bubbles: true })); }
+        const label = document.getElementById('uploadExpiredBtn');
+        label.addEventListener('click', event => event.preventDefault(), { once: true });
+        label.click();
+      })()`);
+      if (!await evaluate(`document.body.classList.contains('studio-expired')`)) fail('the expired-roll entry did not switch the session');
+    }
     const doc = await send('DOM.getDocument');
     const input = await send('DOM.querySelector', { nodeId: doc.result.root.nodeId, selector: '#fileInput' });
     await send('DOM.setFileInputFiles', { files: [path], nodeId: input.result.nodeId });
@@ -108,8 +127,13 @@ export async function runImportParitySmoke({ send, evaluate, waitFor, wait, fail
       const hold = await evaluate(`(() => { const h = window.__paritySemantic; h.release(); return { created: h.created, terminated: h.terminated, delivered: h.delivered }; })()`);
       console.log('import parity: crop mode opened and cancelled during the semantic inference', JSON.stringify(hold));
     }
-    // Background passes that may still change the recipe (semantic colour).
-    await wait(10_000);
+    // Background passes that may still change the recipe (semantic colour,
+    // the rescue's fog surface).
+    if (expired) {
+      await waitFor('parity rescue measured ' + name, `document.getElementById('expiredDiagnosis').dataset.state === 'analysed'
+        && [...document.querySelectorAll('#expiredDiagnosis li')].some(li => /^Uneven fog:/.test(li.textContent))`, 120_000);
+    }
+    await wait(expired ? 20_000 : 10_000);
     await waitFor('parity settled ' + name, ready, 120_000);
     const take = async label => {
       await waitFor(label, `window.__parityDownloads.length > 0`, 600_000);
