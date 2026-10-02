@@ -15,6 +15,8 @@
 //   with identical output; the frame's owned planes are released.
 // - The dust-repaired image the editor patches in place (#259) is marked for
 //   a one-task copy before a single export hands it over, with the same bytes.
+// - A batch frame rendered again after a lost plane frees the failed
+//   attempt's planes before it decodes again.
 import { MEMORY_FUNCTIONS, memoryGlobals } from './memoryHarness.mjs';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -649,6 +651,41 @@ for (const [format, bitDepth] of [['jpeg', 8], ['png', 8], ['tiff', 16], ['png',
     assert.ok(!post.transfers.some((buffer) => secondBuffers.includes(buffer)), 'the second render copied its planes');
   }
   assert.ok(same(lost.bytes, clean.bytes), 'identical output after the re-render');
+
+  // #229 R1-094: the conversion lane lost the frame's geometry output
+  // (INPUT_LOST) while the frame's base, never sent, was still held. The
+  // render from decode starts only after the failed attempt's planes were
+  // released, not with them still resident until it ends.
+  const { f, exportInfo, jobs } = batchContext({ format: 'jpeg', bitDepth: 8 });
+  const process = f.context.processFileWithSettings;
+  const base = markOwnedPlanes(makeProcessed(11));
+  const baseBuffers = planeBuffersOf(base);
+  let attempts = 0;
+  let atRetry = null;
+  f.context.processFileWithSettings = async (file, settings, options) => {
+    attempts++;
+    if (attempts === 1) {
+      options.ownedPlanes.push(base);
+      throw Object.assign(new Error('the lane lost the geometry output'), { code: 'INPUT_LOST' });
+    }
+    atRetry = {
+      released: released.some((items) => items.includes(base)),
+      detached: baseBuffers.every((buffer) => buffer.byteLength === 0)
+    };
+    return process(file, settings, options);
+  };
+  released.length = 0;
+  const written = [];
+  const warn = console.warn;
+  console.warn = () => {};
+  try {
+    assert.equal((await f.context.runBatchExport(jobs, { exportInfo, sink: async (job, blob) => { written.push(blob); } })).successCount, 1);
+  } finally {
+    console.warn = warn;
+  }
+  assert.equal(attempts, 2, 'the frame was rendered again once');
+  assert.deepEqual(atRetry, { released: true, detached: true }, 'the failed attempt\'s base was released before the frame was decoded again');
+  assert.ok(same(await stubBlobText(written[0]), clean.bytes), 'the same file');
 }
 
 {

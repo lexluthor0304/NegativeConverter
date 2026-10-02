@@ -20031,9 +20031,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       } catch (err) {
         // A worker died holding one of this frame's planes. Render the frame
         // once more with copied planes so the file does not depend on the
-        // failure.
+        // failure. That render decodes the file again: the failed attempt's
+        // planes (its base, when the conversion lost a geometry output) are
+        // released first instead of staying under it until it ends.
         if (transferPlanes && (isExportInputLostError(err) || isConversionInputLost(err))) {
           console.warn(`A plane of ${file.name} was lost with its worker; rendering the frame again:`, err?.message || err);
+          releaseOwnedPlanes(...ownedPlanes.splice(0));
           return await renderBatchExportFile(job, position, context, { transferPlanes: false });
         }
         throw err;

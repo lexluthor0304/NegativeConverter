@@ -193,8 +193,10 @@ Now one driver (`runBatchExport` in `main.js`) runs the per-file pipeline
     back. The contact sheet and watch-folder imports never start a map.
   If a worker dies holding a plane (`ExportInputLostError`, or `INPUT_LOST`
   from the conversion lane), the frame is rendered once more from decode
-  with copies, so the file never depends on the failure. The main-thread
-  conversion fallback never sees a detached source.
+  with copies, so the file never depends on the failure. The failed
+  attempt's planes (its base, when the lane lost a geometry output) are
+  released before that render decodes again. The main-thread conversion
+  fallback never sees a detached source.
 - Nothing the frame allocated outlives it: the planes
   `processFileWithSettings` created (decode, geometry, conversion, repairs),
   the adjusted frame and the sprocket frame are stamped export-owned and
