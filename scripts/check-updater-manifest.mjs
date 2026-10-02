@@ -3,12 +3,16 @@
 // lands under the keys tauri-plugin-updater looks up, unsigned ones are left
 // out, URLs are absolute and percent-encoded, and latest.json keeps offering
 // installers only.
+//
+// Then the site endpoints the desktop app uses: the feedback POST reaches the
+// function without a redirect.
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { resolveCorsOrigin } from '../negative2positive/api/_lib/feedback-core.mjs';
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 const script = join(repoRoot, '.github', 'scripts', 'r2_sync_release.py');
@@ -96,3 +100,35 @@ try {
 } finally {
   rmSync(root, { recursive: true, force: true });
 }
+
+// Site endpoints (#229 review R2-047). The desktop app posts its feedback to
+// the site by full URL. The POST carries JSON, so the webview preflights it,
+// and a preflight that gets a redirect fails: the path must be the spelling
+// the site serves as is. Vercel answers the other one with a 308
+// (`trailingSlash` in vercel.json), with no CORS headers.
+const read = (...parts) => readFileSync(join(repoRoot, ...parts), 'utf8');
+const mainJs = read('negative2positive', 'src', 'app', 'main.js');
+const SITE_ORIGIN = 'https://negative-converter.tokugai.com';
+
+const feedback = mainJs.match(/const FEEDBACK_ENDPOINT = isTauriDesktop\(\)\s*\?\s*'([^']*)'\s*:\s*'([^']*)';/);
+assert.ok(feedback, "main.js: `const FEEDBACK_ENDPOINT = isTauriDesktop() ? '<desktop>' : '<web>';` not found");
+const [, desktopFeedback, webFeedback] = feedback;
+assert.ok(existsSync(join(repoRoot, 'negative2positive', 'api', 'feedback.mjs')), 'the feedback function is no longer /api/feedback');
+for (const config of ['vercel.json', join('negative2positive', 'vercel.json')]) {
+  const trailingSlash = JSON.parse(read(config)).trailingSlash === true;
+  const path = trailingSlash ? '/api/feedback/' : '/api/feedback';
+  const why = `${config} has trailingSlash: ${trailingSlash}`;
+  assert.equal(webFeedback, path, `main.js: the web feedback endpoint must be ${path} (${why})`);
+  assert.equal(desktopFeedback, `${SITE_ORIGIN}${path}`, `main.js: the desktop feedback endpoint must be ${SITE_ORIGIN}${path} (${why})`);
+}
+// The function answers both desktop webview origins in production, and the
+// desktop's CSP lets the webview connect to the site.
+for (const origin of ['tauri://localhost', 'http://tauri.localhost']) {
+  assert.equal(resolveCorsOrigin(origin, { allowLocalOrigins: false }), origin, `the feedback function does not answer ${origin}`);
+}
+const tauriConf = JSON.parse(read('src-tauri', 'tauri.conf.json'));
+const connectSrc = String(tauriConf?.app?.security?.csp || '').split(';')
+  .map((directive) => directive.trim().split(/\s+/))
+  .find(([name]) => name === 'connect-src')?.slice(1) || [];
+assert.ok(connectSrc.includes(SITE_ORIGIN), `tauri.conf.json: connect-src must allow ${SITE_ORIGIN}`);
+console.log(`feedback endpoint: ok (desktop ${desktopFeedback}, web ${webFeedback})`);

@@ -102,7 +102,7 @@ keeps the copy path it always had, with the same pixels.
 | GitHub star count (`api.github.com`) | CORS `fetch`, `Access-Control-Allow-Origin: *` (the smoke's isolation step checks it renders, unless offline or rate limited) |
 | update manifest (`download.neoanaloglab.com`, the site), in the app and on `download.html` | CORS `fetch`, `Access-Control-Allow-Origin: *` |
 | the static SEO pages (`guide.html` and the others) | no cross-origin subresources: only links, canonical/alternate `<link>`s and metadata |
-| feedback form | web: same origin; desktop: CORS `fetch`, the API reflects the desktop origins |
+| feedback form (`/api/feedback/`) | web: same origin; desktop: CORS `fetch` to `https://negative-converter.tokugai.com/api/feedback/`, the API reflects the desktop origins. The trailing slash is needed: `trailingSlash: true` answers `/api/feedback` with a 308 without CORS headers, and the desktop's preflight fails on a redirect (`scripts/check-updater-manifest.mjs`) |
 | Vercel Analytics | production loads the same-origin `/_vercel/insights/script.js`; not injected under `vite dev`, where it would load a cross-origin classic script without `crossorigin` |
 | Tauri IPC (`ipc://localhost`, `http://ipc.localhost`) | CORS requests (the IPC answers with `Access-Control-Allow-Origin`) or the postMessage fallback |
 | in-app updater | runs in Rust (tauri-plugin-updater), not in the webview |

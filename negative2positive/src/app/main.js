@@ -1046,9 +1046,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
     // Feedback popup: posts to the Vercel function that files a GitHub issue.
     // The desktop webview has a tauri:// origin, so it must hit the site by full URL.
+    // Keep the trailing slash: the site sets `trailingSlash: true` and answers
+    // /api/feedback with a 308, and the desktop's JSON POST is preflighted,
+    // which fails on a redirect (scripts/check-updater-manifest.mjs).
     const FEEDBACK_ENDPOINT = isTauriDesktop()
-      ? 'https://negative-converter.tokugai.com/api/feedback'
-      : '/api/feedback';
+      ? 'https://negative-converter.tokugai.com/api/feedback/'
+      : '/api/feedback/';
     let feedbackType = 'bug';
     let feedbackSending = false;
     const FEEDBACK_MAX_IMAGES = 3;
