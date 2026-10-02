@@ -1,7 +1,10 @@
-// Tile provenance across an automatic roll import (#229 review: R1-029),
-// on the real main.js functions:
+// Tile provenance across an automatic roll import (#229 review: R1-029,
+// R1-033), on the real main.js functions:
 // 1. a frame's per-frame `analysis` tile is the roll's own tile recipe, so
-//    the commit's tile of the same recipe has the same pixels.
+//    the commit's tile of the same recipe has the same pixels;
+// 2. undo and redo of a roll commit bring each tile back with its kind and
+//    settings key, so a restored camera-JPEG tile is neither counted as
+//    converted nor used as a colour-match target.
 // Run with: node negative2positive/src/app/rollTileProvenance.test.mjs
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
@@ -141,6 +144,94 @@ function negative(width, height, seed = 17) {
   let min = 255, max = 0;
   for (let i = 0; i < committed.data.length; i += 4) { min = Math.min(min, committed.data[i + 1]); max = Math.max(max, committed.data[i + 1]); }
   assert.ok(max - min > 60, `tonal range ${min}..${max}`);
+}
+
+// ---- 2. R1-033: undo/redo of a roll commit restores each tile's kind and key
+{
+  const { createHarness, makeBase } = await import('./geometryTestHarness.mjs');
+  const { aggregateRollAnalysis, sanitizeRollFrameForSettings } = await import('./rollAnalysis.js');
+  const { isTiffContainerRawName } = await import('./rawEmbeddedPreview.js');
+  const h = createHarness(makeBase(40, 30)), c = h.context;
+  const recipe = id => ({ filmType: 'color', filmBase: { r: 210, g: 140, b: 90, method: 'auto' }, filmEdge: { checked: true }, exposure: id });
+  // The open photo and three frames of the roll, with the tiles they show
+  // before the commit: a camera-JPEG inversion, a per-frame analysis look
+  // and a canonical lane tile of the frame's recipe.
+  const open = { id: 'a', file: { name: 'a.dng' }, settings: recipe(0), thumbnail: 'data:live', thumbnailKind: 'processed' };
+  const embedded = { id: 'b', file: { name: 'b.dng' }, settings: recipe(1), thumbnail: 'data:embedded:b', thumbnailKind: 'embedded', thumbnailKey: null };
+  const analysis = { id: 'c', file: { name: 'c.dng' }, settings: recipe(2), thumbnail: 'data:analysis:c', thumbnailKind: 'analysis', thumbnailKey: null };
+  const lane = { id: 'd', file: { name: 'd.dng' }, settings: recipe(3), thumbnail: 'data:lane:d', thumbnailKind: 'processed' };
+  const roll = [embedded, analysis, lane];
+  Object.assign(h.state, { fileQueue: [open, ...roll], currentFileIndex: 0, loadedFile: open.file,
+    rollReference: { applyLock: false }, rollAnalysis: { equalize: false } });
+  open.thumbnailKey = c.photoSettingsKey(open);
+  lane.thumbnailKey = c.photoSettingsKey(lane);
+  const jobs = [];
+  Object.assign(h.target, {
+    automaticRollRevision: 0, automaticRollAnalysisRunning: false, manualRollAnalysisRunning: false, automaticRollImportRunning: false,
+    automaticRollPendingItems: new Set(roll), studioBackgroundReady: () => true, safeStorageGet: () => null,
+    getCurrentQueueItem: () => (h.state.fileQueue[h.state.currentFileIndex]?.file === h.state.loadedFile ? h.state.fileQueue[h.state.currentFileIndex] : null),
+    cloneSettings: value => structuredClone(value), measureNegativeMean: () => 0.4, aggregateRollAnalysis, sanitizeRollFrameForSettings,
+    analyzeSilverCoreFrame: async () => [0, 1, 2].map(() => ({ whitePointOrigin: 50000, blackPointOrigin: 500, meanPoint: 0.5 })),
+    buildCoreConversionSettings: settings => settings, resolveConversionMode: () => 'color',
+    createTileConverter: () => Object.assign(async () => null, { dispose() {} }),
+    // The commit renders each frame's canonical tile from its sample.
+    renderSampleTile: async (item, settings) => ({ thumbnail: `data:commit:${item.id}`, renderKey: c.photoSettingsKey({ ...item, settings }), lensActive: false, source: null }),
+    thumbnailSources: { put() {} },
+    // A cold switch's provisional frame (#235): only its job matters here.
+    provisionalRequest: null, viewerLongSidePx: () => 2000, provisionalToneFor: () => ({}), isTiffContainerRawName,
+    getEmbeddedPreviewPool: () => ({ request: job => { jobs.push(job); return new Promise(() => {}); } }),
+  });
+  h.target.document.getElementById = () => null;
+  h.target.studioWorkspace.photoSwitchPresentation = { showBitmap: () => true };
+  vm.runInContext(['runRollAnalysis', 'publishSampleTile', 'laneTileWanted', 'cancelProvisionalFrame', 'requestProvisionalFrame']
+    .map(functionSource).join('\n'), c);
+  const tileOf = item => [item.thumbnail, item.thumbnailKind, item.thumbnailKey];
+  const ready = item => Boolean(item.thumbnail && item.thumbnailKind === 'processed' && item.thumbnailKey === c.photoSettingsKey(item));
+  const before = new Map(roll.map(item => [item, tileOf(item)]));
+  const samples = { get: async item => ({ id: item.id, __baseSize: { width: 40, height: 30 } }), put: async () => {}, delete: async () => {}, clear: async () => {} };
+
+  const result = await c.runRollAnalysis({ items: roll, automatic: true, samples });
+  assert.equal(result.status, 'committed');
+  assert.deepEqual(h.target.undoStack.map(entry => entry.label), ['rollAnalysis'], 'the commit is one undo step');
+  const after = new Map(roll.map(item => [item, tileOf(item)]));
+  for (const item of roll) {
+    assert.equal(item.thumbnail, `data:commit:${item.id}`);
+    assert.ok(item.settings.rollFrame?.locked, 'the frame is locked to the roll');
+    assert.ok(ready(item), `frame ${item.id}: the commit tile is canonical`);
+  }
+
+  // Cmd+Z: the recipes and the tiles before the commit, with what they were.
+  await c.performUndo();
+  for (const item of roll) {
+    assert.equal(item.settings.rollFrame, undefined, `frame ${item.id}: its pass-1 recipe is back`);
+    assert.deepEqual(tileOf(item), before.get(item), `frame ${item.id}: thumbnail, kind and key are restored together`);
+  }
+  assert.equal(ready(embedded) || ready(analysis), false, 'a restored embedded or analysis tile is pending');
+  assert.equal(ready(lane), true, 'the restored lane tile is the canonical tile of the restored recipe');
+  assert.deepEqual(roll.map(item => c.laneTileWanted(item)), [true, true, false],
+    'the lane renders the restored recipes that have no canonical tile, and only those');
+  // A cold switch to a frame colour-matches its provisional frame only to a
+  // converted tile, never to a restored camera-JPEG inversion.
+  for (const item of roll) {
+    h.state.photoSwitchTarget = item;
+    h.target.document.body.dataset.photoSwitching = 'true';
+    c.requestProvisionalFrame(item);
+  }
+  delete h.target.document.body.dataset.photoSwitching;
+  h.state.photoSwitchTarget = null;
+  assert.deepEqual(jobs.map(job => job.matchTo), [null, 'data:analysis:c', 'data:lane:d']);
+
+  // Cmd+Shift+Z: the commit's tiles come back canonical.
+  await c.performRedo();
+  for (const item of roll) {
+    assert.deepEqual(tileOf(item), after.get(item), `frame ${item.id}: redo restores the commit tile with its key`);
+    assert.ok(ready(item) && !c.laneTileWanted(item), `frame ${item.id}: ready again, nothing to render`);
+  }
+
+  // "These are positives" / apply to the whole roll: the same transaction.
+  const snapshot = c.captureSnapshot('rollFilmType');
+  assert.deepEqual(snapshot.settings.rollTransaction.frames.map(frame => [frame.thumbnailKind, frame.thumbnailKey]),
+    h.state.fileQueue.map(item => [item.thumbnailKind, item.thumbnailKey]), 'a film-type transaction records the tiles\' kind and key too');
 }
 
 console.log('roll tile provenance tests passed');

@@ -106,8 +106,9 @@ reset only when it has not been manually overridden. Positive processing mode
 travels with the choice.
 
 The override is manual and cannot be replaced by automatic pixel/DX detection.
-Undo/redo applies across the roll, and project/recovery serialization preserves
-the choice for unopened photos. Later imports are a separate operation.
+Undo/redo applies across the roll, each frame's tile included with its rank and
+settings key, and project/recovery serialization preserves the choice for
+unopened photos. Later imports are a separate operation.
 
 ## Validation
 

@@ -2996,10 +2996,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       }
       // A roll action changes multiple detached settings records. Capture them
       // with the live state so Undo/Redo is atomic across the whole import.
+      // A tile goes with its rank and settings key (#235): a restored camera
+      // JPEG or analysis look is neither ready nor a converted tile.
       if (label === 'rollAnalysis' || label === 'rollFilmType') {
         settings.rollTransaction = {
           analysis: structuredClone(state.rollAnalysis),
-          frames: state.fileQueue.map(item => ({ id: item.id, filmTypeOverride: item.filmTypeOverride ? { ...item.filmTypeOverride } : null, settings: item.settings ? structuredClone(item.settings) : null, thumbnail: item.thumbnail, status: item.status }))
+          frames: state.fileQueue.map(item => ({ id: item.id, filmTypeOverride: item.filmTypeOverride ? { ...item.filmTypeOverride } : null, settings: item.settings ? structuredClone(item.settings) : null, thumbnail: item.thumbnail, thumbnailKind: item.thumbnailKind, thumbnailKey: item.thumbnailKey, status: item.status }))
         };
       }
       settings.semanticMap = state.semanticMap ? structuredClone(state.semanticMap) : null;
@@ -3110,7 +3112,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         state.rollAnalysis = structuredClone(s.rollTransaction.analysis);
         for (const frame of s.rollTransaction.frames) {
           const item = state.fileQueue.find(item => item.id === frame.id);
-          if (item) Object.assign(item, { settings: frame.settings ? structuredClone(frame.settings) : null, thumbnail: frame.thumbnail, status: frame.status, filmTypeOverride: frame.filmTypeOverride, isDirty: false });
+          if (item) Object.assign(item, { settings: frame.settings ? structuredClone(frame.settings) : null, thumbnail: frame.thumbnail, thumbnailKind: frame.thumbnailKind, thumbnailKey: frame.thumbnailKey, status: frame.status, filmTypeOverride: frame.filmTypeOverride, isDirty: false });
         }
         invalidateSilverCoreCache();
         updateRollAnalysisUI();

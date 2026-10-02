@@ -35,7 +35,9 @@ detected stocks and roll outliers are visible at a glance.
   (`docs/photo-sessions.md`). The canonical lane (the background photo lanes,
   #243) decodes only what is left: unanalysed frames, lens-corrected frames,
   changed geometry, evicted sources. A tile never moves back from `processed`
-  or `analysis` to `embedded` (`data-thumbnail-kind` on each tile). A reopened
+  or `analysis` to `embedded` (`data-thumbnail-kind` on each tile), except
+  that undoing a roll commit or a whole-roll film type puts back each frame's
+  earlier tile with its rank and settings key. A reopened
   roll project restores the tiles it saved. CR3, RAF and other non-TIFF containers
   keep their numbered tile until a converted preview exists. Where workers
   cannot decode images (macOS 10.15 WebKit, older WebKitGTK) tiles decode on the

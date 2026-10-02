@@ -568,7 +568,10 @@ whose recipe the commit leaves alone keeps its pixels. Tiles rank
 `embedded` < `analysis` < `processed` (`thumbnailRank.js`): import-time
 embedded tiles and per-frame analysis tiles only fill empty or `embedded`
 tiles, so a tile never moves back, and neither kind carries a `thumbnailKey`
-or counts as ready.
+or counts as ready. A roll transaction's undo entry (`rollAnalysis`,
+`rollFilmType`) records each frame's tile with its kind and key, so Undo and
+Redo restore a camera-JPEG or analysis tile as what it is: pending, and never
+the colour-match target of a provisional frame.
 
 Lens-corrected photographs with saved repair strokes keep native coordinates
 through repair before the thumbnail is reduced. Other small previews scale
