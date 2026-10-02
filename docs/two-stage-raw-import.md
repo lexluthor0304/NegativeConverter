@@ -260,19 +260,47 @@ quiet.
 - `rawFileLoader.postDecode.test.mjs`: explicit half-size options,
   `__decodeScale`, and the `onLibRawReleased` timing.
 - Smoke (`scripts/two-stage-import-smoke.mjs`, `--two-stage-only`): generated
-  1600×1066 CFA DNGs with `?twoStageMinMp=1`. It checks the stand-in,
-  installation without `studioBusy`, and recipe and PNG 8/16 hashes equal to
-  a single decode. It also covers an export during stage 2, crop mode during
-  stage 2, a failed stage 2, leaving before stage 2 followed by Export All,
-  and Analyze roll clicked during stage 2 after an exposure edit (the roll
-  recipe and the export's decoded 16-bit samples equal one decode's).
+  1600×1066 CFA DNGs with `?twoStageMinMp=1`, stage 2 held or failed through
+  the `?debug=1` hooks. Each of the parity scenarios is compared with the
+  same files decoded once: export after the settle, export during stage 2
+  (each format clicked while stage 2 is held), crop mode open when stage 2
+  lands, a failed stage 2, leaving before stage 2 then Export All, and
+  Analyze roll clicked during stage 2 after an exposure edit. Each compares
+  the whole settled recipe (a roll id aside), every photo's
+  `automaticDefaults` (`__ncTwoStage.status()`), and PNG 8, PNG 16, TIFF 16,
+  JPEG and DNG exports by the SHA-256 of their decoded samples (PNG through
+  the app's decoder, the TIFF and DNG strips, the JPEG's primary image and
+  gain map) and of their bytes (not after a roll analysis: its roll id is new
+  on every run). An export clicked before the photo is exact (during stage
+  2, after a failed stage 2) freezes the recipe at its click, before the
+  photo's semantic colour pass could answer; its reference is one decode
+  exported as soon as the photo shows, with that pass's answer held until
+  the exports are written (on a photo whose semantic colour moves the white
+  balance the two differ). The exposure edit before Analyze roll is made the
+  same way in both runs, before the semantic colour pass answers; that
+  scenario's exports are compared with one decode's Export All of the same
+  recipe, because one decode's own export right after the roll analysis can
+  carry a full-resolution render its edit armed (audit backlog). It also checks the stand-in, installation without
+  `studioBusy` and the ledger under crop mode. The settle and a PNG 16
+  export during stage 2 run once more on a 2800×1866 DNG with
+  `?largeImagePixels=2000000`, the paths of a 60 MP file: its full decode
+  counts as large (the >16 MP rules: display-resolution conversions, a
+  full-resolution render only for exports) and its exports convert on the
+  band pool (over 4 MP), while its stand-in (1.3 MP) is neither; the page's
+  threshold and the band pool's use are checked.
 
 ## Verification on real files (not in the repository)
 
 - Parity: `TWO_STAGE_PARITY_FILES=/raw/L1000617.DNG:/raw/L1009967.dng
-  node scripts/smoke-test.mjs --two-stage-only`. Each file is decoded once
-  with the flag off and then with `?twoStageMinMp=40`, and the settled recipe
-  and PNG 8/16 hashes are compared. Run one 60 MP file at a time.
+  node scripts/smoke-test.mjs --two-stage-only`. After the generated files,
+  each listed file runs the smoke's scenarios and checks above, against one
+  decode of it with the flag off: the settle, an export during stage 2 in
+  each of the five formats, crop mode, a failed stage 2, leaving then Export
+  All and Analyze roll during stage 2, the other photo being a generated
+  DNG. The two-stage runs use `?twoStageMinMp=40`
+  (`TWO_STAGE_PARITY_MIN_MP` sets another threshold, so smaller RAWs can go
+  two-stage too). Run one 60 MP file at a time: a file takes several
+  minutes.
 - Latency and memory: the #230 benchmark (S1 import on `L1000617.DNG`, S7 cold
   switches over `L1000617…628.DNG`), with and without `?twoStageMinMp=40`, in
   concurrent and in forced sequential mode (`&twoStageMode=sequential`). Take

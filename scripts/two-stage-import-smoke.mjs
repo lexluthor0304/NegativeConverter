@@ -1,35 +1,46 @@
 // Two-stage RAW imports (#255) in a real browser, on small generated CFA
 // DNGs (scripts/perf/fixtures.mjs) with the threshold forced to 1 MP
-// (?twoStageMinMp=1) and stage 2 held or failed through ?debug=1 hooks:
-// - reference: the same files decoded once (the flag off): the settled
-//   recipe and 8/16-bit PNG exports of the first, and an Export All in which
-//   it was never opened (a photo left before its full decode is a fresh one);
-// - two stages: a half-size stand-in (scale 0.5) shows first and the full
-//   decode is installed behind it without studioBusy; the settled recipe and
-//   every export are byte-identical to the reference;
-// - an export clicked while stage 2 is held waits, then matches;
+// (?twoStageMinMp=1) and stage 2 held or failed through ?debug=1 hooks.
+// Every scenario of #255's parity criteria is compared with the same files
+// decoded once (the flag off): the settled recipe (all of it), each photo's
+// automaticDefaults (the automatic recipe learning compares edits with) and
+// the exports in PNG 8, PNG 16, TIFF 16, JPEG and DNG. An export is compared
+// by the SHA-256 of its decoded samples (PNG through the app's own decoder,
+// the TIFF and DNG strips, the JPEG's primary image and gain map decoded by
+// the browser) and by its file bytes, except after a roll analysis, whose
+// roll id is new on every run.
+// - export after the settle: a half-size stand-in (scale 0.5) shows first,
+//   and the full decode is installed behind it without studioBusy;
+// - export during stage 2, in each format: it waits, then matches. Such an
+//   export (and the exports after a failed stage 2) freezes the recipe at its
+//   click (exportSingle's manualEditRevision), before the photo's semantic
+//   colour pass could answer: its reference is one decode exported the same
+//   way, with that pass's answer held until the exports are written;
 // - crop mode open when stage 2 lands: the swap waits for it to close, and
 //   meanwhile the memory ledger (#258) counts the full decode with the open
 //   photo;
 // - stage 2 fails: a toast, the photo stays provisional, the export decodes
-//   again and matches;
-// - switching away before stage 2 completes aborts it, and Export All of both
-//   photos matches the reference;
+//   again;
+// - switching away before stage 2 completes aborts it; Export All of both
+//   photos (the left one never got a recipe);
 // - Analyze roll clicked during stage 2, after an exposure edit on the
-//   stand-in, waits for the full decode: the roll recipe and the decoded
-//   samples of the export match one decode with the same edit and click.
+//   stand-in, waits for the full decode (#255 review R2-029); the edit comes
+//   before the photo's semantic colour pass, in its reference too;
+// - the paths a 60 MP file takes, on a 2800x1866 DNG with
+//   ?largeImagePixels=2000000: the full decode counts as large (the >16 MP
+//   rules: display-resolution conversions, a full-resolution render only for
+//   exports) and is over the band pool's 4 MP (the export's conversion
+//   bands), the stand-in (1.3 MP) is neither; for the settle and an export
+//   during stage 2.
 //
 // Opt-in, real files (never in the repo): TWO_STAGE_PARITY_FILES=/abs/a.DNG:/abs/b.dng
-// runs the same comparison (reference with the flag off, then
-// ?twoStageMinMp=40) for each file: one 60 MP file at a time on a 16 GB machine.
-import { createHash } from 'node:crypto';
+// runs the same scenarios for each file, with the second generated DNG as
+// the other photo, at ?twoStageMinMp=TWO_STAGE_PARITY_MIN_MP (default 40, the
+// flag's target). One 60 MP file at a time on a 16 GB machine.
 import { mkdtempSync, rmSync, existsSync } from 'node:fs';
-import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join, basename } from 'node:path';
 import { writeSyntheticDng, previewSizes, stubJpeg } from './perf/fixtures.mjs';
-
-const UPNG = createRequire(import.meta.url)('upng-js');
 
 const ready = `document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy && !document.body.dataset.studioDetecting && !document.querySelector('.loading-overlay.visible')`;
 const status = `window.__ncTwoStage.status()`;
@@ -41,16 +52,84 @@ const CAPTURE = `(() => {
   const pending = new Set();
   const revoke = URL.revokeObjectURL.bind(URL);
   URL.revokeObjectURL = url => { if (!pending.has(url)) revoke(url); };
+  const hex = async bytes => [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))].map(b => b.toString(16).padStart(2, '0')).join('');
+  // The samples, whatever the encoder did: tagged with their layout.
+  const samples = (tag, width, height, parts) => {
+    const head = new TextEncoder().encode(JSON.stringify([tag, width, height]) + '\\n');
+    const all = new Uint8Array(head.length + parts.reduce((sum, part) => sum + part.byteLength, 0));
+    all.set(head);
+    let at = head.length;
+    for (const part of parts) { all.set(new Uint8Array(part.buffer, part.byteOffset, part.byteLength), at); at += part.byteLength; }
+    return hex(all);
+  };
+  const jpegSamples = async (bytes, tag) => {
+    const bitmap = await createImageBitmap(new Blob([bytes], { type: 'image/jpeg' }), { colorSpaceConversion: 'none', premultiplyAlpha: 'none' });
+    const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+    const context = canvas.getContext('2d');
+    context.drawImage(bitmap, 0, 0);
+    const image = context.getImageData(0, 0, bitmap.width, bitmap.height);
+    bitmap.close();
+    return { tag, width: image.width, height: image.height, data: image.data };
+  };
+  // Where a JPEG's first image ends (its EOI), entropy-coded segments skipped.
+  const jpegEnd = u8 => {
+    let at = 2;
+    while (at + 4 <= u8.length) {
+      if (u8[at] !== 0xff) return -1;
+      const marker = u8[at + 1];
+      if (marker === 0xd9) return at + 2;
+      if (marker === 0xd8 || (marker >= 0xd0 && marker <= 0xd7) || marker === 0x01 || marker === 0xff) { at += marker === 0xff ? 1 : 2; continue; }
+      const length = (u8[at + 2] << 8) | u8[at + 3];
+      at += 2 + length;
+      if (marker !== 0xda) continue;
+      while (at + 1 < u8.length && !(u8[at] === 0xff && u8[at + 1] !== 0x00 && !(u8[at + 1] >= 0xd0 && u8[at + 1] <= 0xd7))) at++;
+    }
+    return -1;
+  };
+  const tiffStrips = u8 => {
+    const view = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+    const ifd = view.getUint32(4, true);
+    const tags = {};
+    for (let i = 0, n = view.getUint16(ifd, true); i < n; i++) {
+      const at = ifd + 2 + i * 12;
+      const tag = view.getUint16(at, true), type = view.getUint16(at + 2, true), count = view.getUint32(at + 4, true);
+      const size = type === 3 ? 2 : 4;
+      const base = count * size <= 4 ? at + 8 : view.getUint32(at + 8, true);
+      tags[tag] = Array.from({ length: count }, (_, k) => (type === 3 ? view.getUint16(base + k * 2, true) : view.getUint32(base + k * 4, true)));
+    }
+    const strips = tags[273].map((offset, k) => u8.subarray(offset, offset + tags[279][k]));
+    return { width: tags[256][0], height: tags[257][0], bits: tags[258], photometric: tags[262]?.[0], strips };
+  };
+  window.__twoStageDecoded = async bytes => {
+    const u8 = new Uint8Array(bytes);
+    if (u8[0] === 0x89 && u8[1] === 0x50) {
+      const { loadPngFile } = await import('/src/app/pngFileLoader.js');
+      const image = loadPngFile(bytes);
+      const plane = image.__image16;
+      return plane ? samples('png16', image.width, image.height, [plane.data]) : samples('png8', image.width, image.height, [image.data]);
+    }
+    if (u8[0] === 0x49 && u8[1] === 0x49 && u8[2] === 42) {
+      const tiff = tiffStrips(u8);
+      return samples(['tiff', tiff.bits, tiff.photometric], tiff.width, tiff.height, tiff.strips);
+    }
+    if (u8[0] === 0xff && u8[1] === 0xd8) {
+      // The primary image, then a gain map (MPF) stored after its EOI.
+      const end = jpegEnd(u8);
+      const images = [await jpegSamples(end > 0 ? u8.subarray(0, end) : u8, 'jpeg')];
+      for (let at = Math.max(end, 2); end > 0 && at + 3 < u8.length; at++) {
+        if (u8[at] === 0xff && u8[at + 1] === 0xd8 && u8[at + 2] === 0xff) { images.push(await jpegSamples(u8.subarray(at), 'gain map')); break; }
+      }
+      return samples(images.map(image => [image.tag, image.width, image.height]), images[0].width, images[0].height, images.map(image => image.data));
+    }
+    return 'unknown format';
+  };
   HTMLAnchorElement.prototype.click = function () {
     if (!this.download || !this.href.startsWith('blob:')) return;
     const href = this.href, name = this.download;
     pending.add(href);
     window.__twoStageDownloads.push(fetch(href).then(r => r.arrayBuffer()).then(async bytes => {
       pending.delete(href); revoke(href);
-      // The last file's bytes, for a decoded-sample comparison.
-      window.__twoStageLastBytes = bytes;
-      const digest = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))].map(b => b.toString(16).padStart(2, '0')).join('');
-      return { name, size: bytes.byteLength, sha256: digest };
+      return { name, size: bytes.byteLength, sha256: await hex(bytes), decoded: await window.__twoStageDecoded(bytes) };
     }));
   };
   window.__twoStageBusy = [];
@@ -68,9 +147,39 @@ const CAPTURE = `(() => {
   }).observe(document.body, { childList: true, subtree: true });
 })()`;
 
-// The recipe fields #255 must keep equal to one full decode's.
-const RECIPE_KEYS = ['cropRegion', 'rotationAngle', 'mirrored', 'filmBase', 'filmType', 'filmTypeSource', 'filmTypeConfidence',
-  'filmTypeReason', 'wbR', 'wbG', 'wbB', 'wbAutoConfidence', 'filmEdge', 'autoFrameMeta', 'coreExposure', 'expiredAnalysis'];
+// Holds the semantic colour worker's answers (the analyzer sets `onmessage`)
+// until release(); a pass whose recipe moved on meanwhile then drops them.
+const SEMANTIC_HOLD = `(() => {
+  const hold = window.__twoStageSemantic = { on: true, created: 0, delivered: 0, queued: [] };
+  const NativeWorker = window.Worker;
+  window.Worker = class extends NativeWorker {
+    constructor(url, options) {
+      super(url, options);
+      if (!/semanticWorker/.test(String(url))) return;
+      hold.created++;
+      let handler = null, ended = false;
+      Object.defineProperty(this, 'onmessage', { configurable: true, get: () => handler, set: fn => { handler = fn; } });
+      this.addEventListener('message', event => {
+        const deliver = () => { if (!ended && handler) { hold.delivered++; handler.call(this, event); } };
+        if (hold.on) hold.queued.push(deliver); else deliver();
+      });
+      const terminate = this.terminate.bind(this);
+      this.terminate = () => { ended = true; terminate(); };
+    }
+  };
+  hold.release = () => { hold.on = false; for (const deliver of hold.queued.splice(0)) deliver(); };
+})()`;
+const releaseSemantic = `window.__twoStageSemantic?.release()`;
+
+// The five export formats of the parity criteria.
+const FORMATS = [['png', 8], ['png', 16], ['tiff', 16], ['jpeg', 8], ['dng', 16]];
+const formatKey = ([format, depth]) => format === 'jpeg' || format === 'dng' ? format : `${format}${depth}`;
+// A recipe compared whole. A roll analysis's id is new on every run.
+const comparable = settings => {
+  if (!settings?.rollFrame) return settings ?? null;
+  const { rollId, ...rollFrame } = settings.rollFrame;
+  return { ...settings, rollFrame };
+};
 
 export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port, root,
   parityFiles = (process.env.TWO_STAGE_PARITY_FILES || '').split(':').filter(Boolean) }) {
@@ -81,52 +190,54 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
     if (!input.result?.nodeId) fail('#fileInput not found');
     await send('DOM.setFileInputFiles', { files: paths, nodeId: input.result.nodeId });
   };
-  const boot = async query => {
+  const boot = async (query, { holdSemantic = false } = {}) => {
     const previous = await evaluate('performance.timeOrigin');
     await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en&debug=1${query}` });
     await waitFor('two-stage boot', `performance.timeOrigin !== ${previous} && document.readyState === 'complete' && !!document.getElementById('studioImportAutoCrop') && !!window.__ncTwoStage`);
     await installDialogAutoAccept();
     await wait(800);
     await evaluate(CAPTURE);
+    if (holdSemantic) await evaluate(SEMANTIC_HOLD);
   };
   const take = async label => {
     await waitFor(label, `window.__twoStageDownloads.length > 0`, 600_000);
     return evaluate(`window.__twoStageDownloads.shift()`);
   };
-  const exportSingle = async (depth, label) => {
-    await evaluate(`document.querySelector('.format-btn[data-format="png"]').click(); document.querySelector('.bitdepth-btn[data-bitdepth="${depth}"]').click()`);
+  const selectFormat = async ([format, depth]) => {
+    await evaluate(`(() => {
+      document.querySelector('.format-btn[data-format="${format}"]').click();
+      if (${JSON.stringify(format)} === 'png' || ${JSON.stringify(format)} === 'tiff') document.querySelector('.bitdepth-btn[data-bitdepth="${depth}"]').click();
+    })()`);
     await wait(200);
+  };
+  const exportAs = async (format, label) => {
+    await selectFormat(format);
     await evaluate(`document.getElementById('exportSingleBtn').click()`);
     const entry = await take(label);
     await waitFor('export settled', `!document.getElementById('exportSingleBtn').disabled`, 600_000);
-    return entry.sha256;
+    return entry;
   };
-  // The SHA-256 of the last exported PNG's decoded samples (16-bit samples
-  // as stored, unfiltered), independent of how the file was encoded.
-  const decodedSample = async () => {
-    const base64 = await evaluate(`(() => {
-      const bytes = new Uint8Array(window.__twoStageLastBytes);
-      window.__twoStageLastBytes = null;
-      let text = '';
-      for (let i = 0; i < bytes.length; i += 0x8000) text += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
-      return btoa(text);
-    })()`);
-    const buffer = Buffer.from(base64, 'base64');
-    const png = UPNG.decode(buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength));
-    return createHash('sha256').update(JSON.stringify([png.width, png.height, png.depth, png.ctype])).update(Buffer.from(png.data)).digest('hex');
+  const exportFormats = async (label, formats = FORMATS) => {
+    const out = {};
+    for (const format of formats) out[formatKey(format)] = await exportAs(format, `${label} ${formatKey(format)}`);
+    return out;
   };
-  const exportAll = async (count, label) => {
-    await evaluate(`document.querySelector('.format-btn[data-format="png"]').click(); document.querySelector('.bitdepth-btn[data-bitdepth="16"]').click()`);
-    await wait(200);
-    await evaluate(`document.getElementById('exportAllBtn').click()`);
-    const byName = {};
-    for (let i = 0; i < count; i++) {
-      const entry = await take(`${label} ${i + 1}/${count}`);
-      byName[entry.name] = entry.sha256;
+  // Export All in each format, by file name: the queue order (and so the
+  // download order) may differ.
+  const exportAllFormats = async (count, label) => {
+    const out = {};
+    for (const format of FORMATS) {
+      await selectFormat(format);
+      await evaluate(`document.getElementById('exportAllBtn').click()`);
+      const byName = {};
+      for (let i = 0; i < count; i++) {
+        const entry = await take(`${label} ${formatKey(format)} ${i + 1}/${count}`);
+        byName[entry.name] = entry;
+      }
+      await waitFor('batch settled', `!document.querySelector('.loading-overlay.visible') && !document.getElementById('exportAllBtn').disabled`, 600_000);
+      out[formatKey(format)] = Object.fromEntries(Object.entries(byName).sort(([a], [b]) => a.localeCompare(b)));
     }
-    await waitFor('batch settled', `!document.querySelector('.loading-overlay.visible')`, 600_000);
-    // By name: the queue order (and so the download order) may differ.
-    return Object.fromEntries(Object.entries(byName).sort(([a], [b]) => a.localeCompare(b)));
+    return out;
   };
   // The settled recipe, once background passes (semantic colour) are done.
   const settledRecipe = async () => {
@@ -134,19 +245,274 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
     for (let i = 0; i < 20; i++) {
       await waitFor('recipe settled', `${ready} && ${exact} && !${status}.semanticPending`, 600_000);
       const settings = await evaluate(`JSON.stringify(${status}.settings)`);
-      if (settings === previous) return JSON.parse(settings);
+      if (settings === previous) return comparable(JSON.parse(settings));
       previous = settings;
       await wait(1000);
     }
     fail('the recipe did not settle');
   };
-  const pick = settings => Object.fromEntries(RECIPE_KEYS.map(key => [key, settings?.[key] ?? null]));
+  // Each photo's automaticDefaults, by name (the queue order may differ).
+  const automaticDefaults = async () => {
+    const all = JSON.parse(await evaluate(`JSON.stringify(${status}.automaticDefaults)`));
+    return Object.fromEntries(Object.entries(all).sort(([x], [y]) => x.localeCompare(y)).map(([name, settings]) => [name, comparable(settings)]));
+  };
+  const differingKeys = (a, b) => [...new Set([...Object.keys(a || {}), ...Object.keys(b || {})])]
+    .filter(key => JSON.stringify(a?.[key]) !== JSON.stringify(b?.[key]));
   const same = (label, a, b) => {
-    if (JSON.stringify(a) !== JSON.stringify(b)) fail(`${label} differs from one full decode:\n${JSON.stringify(a)}\n${JSON.stringify(b)}`);
+    if (JSON.stringify(a) === JSON.stringify(b)) return;
+    const keys = a && b && typeof a === 'object' && typeof b === 'object' ? differingKeys(a, b) : [];
+    const detail = keys.length ? keys.map(key => `  ${key}: ${JSON.stringify(a?.[key])?.slice(0, 300)} | one decode: ${JSON.stringify(b?.[key])?.slice(0, 300)}`).join('\n')
+      : `${JSON.stringify(a)?.slice(0, 600)}\n${JSON.stringify(b)?.slice(0, 600)}`;
+    fail(`${label} differs from one full decode:\n${detail}`);
+  };
+  // `bytes: false` after a roll analysis (a new roll id in the metadata).
+  const sameExport = (label, actual, expected, { bytes = true } = {}) => {
+    if (!actual?.decoded || actual.decoded === 'unknown format') fail(`${label}: no decoded samples: ${JSON.stringify(actual)}`);
+    if (actual.decoded !== expected.decoded) fail(`${label}: decoded samples differ from one full decode (${actual.decoded.slice(0, 12)} vs ${expected.decoded.slice(0, 12)})`);
+    if (bytes && actual.sha256 !== expected.sha256) fail(`${label}: same samples, but the file bytes differ from one full decode (${actual.sha256.slice(0, 12)} vs ${expected.sha256.slice(0, 12)})`);
+  };
+  const sameExports = (label, actual, expected, options) => {
+    const keys = Object.keys(actual);
+    if (!keys.length || keys.some(key => !expected[key])) fail(`${label}: exports ${JSON.stringify(keys)}, one full decode ${JSON.stringify(Object.keys(expected))}`);
+    for (const key of keys) sameExport(`${label}: ${key}`, actual[key], expected[key], options);
   };
   const lanesReady = `[...document.querySelectorAll('.file-list-name')].every(button => button.dataset.previewState === 'ready')`;
   const clickStrip = name => evaluate(`[...document.querySelectorAll('.file-list-name')].find(button => button.textContent.includes(${JSON.stringify(name)})).click()`);
   const filename = name => `document.getElementById('studioFilename').textContent === ${JSON.stringify(name)}`;
+  const short = entries => Object.fromEntries(Object.entries(entries).map(([key, entry]) => [key, entry.decoded ? entry.decoded.slice(0, 12) : short(entry)]));
+  const editExposure = `(() => { const el = document.getElementById('coreExposure'); el.value = '15'; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); })()`;
+  const rollCommitted = `window.__twoStageToasts.some(text => /Roll analysis:/.test(text))`;
+
+  // The scenarios for photo `a` (and `b`, the other photo of the roll),
+  // against one decode of the same files with the same query `extra`.
+  // `formats` are exported after each scenario, `duringFormats` while stage 2
+  // is held.
+  const scenarios = async ({ label, a, b, twoStage, extra = '', only = null, formats = FORMATS, duringFormats = formats }) => {
+    const nameA = basename(a), nameB = basename(b);
+    const runs = name => !only || only.includes(name);
+    const one = extra;
+    const two = `${twoStage}${extra}`;
+    // A photo installed and converted, with its recipe settled.
+    const settledPhoto = async () => ({ recipe: await settledRecipe(), defaults: await automaticDefaults() });
+
+    // References: each file decoded once. A opened alone; B opened with A
+    // never opened, the lanes done, then Export All; Analyze roll after an
+    // exposure edit on A.
+    const reference = {};
+    await boot(one);
+    await importFiles([a]);
+    await waitFor(`${label} reference import`, `${ready} && ${filename(nameA)}`, 900_000);
+    Object.assign(reference, await settledPhoto());
+    const referencePlan = await evaluate(`window.__ncTwoStage.diagnostics.plans.at(-1)`);
+    if (referencePlan?.stages !== 1) fail(`${label}: with the flag off the reference decodes once: ` + JSON.stringify(referencePlan));
+    // The decoded size (LibRaw's, which the header's may not be).
+    reference.base = (await evaluate(status)).base;
+    reference.exports = await exportFormats(`${label} reference`, [...formats, ...duringFormats.filter(format => !formats.includes(format))]);
+    console.log(`two-stage smoke ${label} reference:`, JSON.stringify({ crop: reference.recipe.cropRegion, exports: short(reference.exports) }));
+    // Exported as soon as the photo shows, its semantic colour answer held
+    // until the exports are written (each click freezes the recipe): the
+    // reference of exports clicked before the photo settled (during stage 2,
+    // after a failed stage 2). The recipe after that, once settled.
+    if (runs('during') || runs('failure')) {
+      await boot(one, { holdSemantic: true });
+      await importFiles([a]);
+      await waitFor(`${label} click reference import`, `${ready} && ${filename(nameA)}`, 900_000);
+      const exports = await exportFormats(`${label} click reference`, [...formats, ...duringFormats.filter(format => !formats.includes(format))]);
+      await evaluate(releaseSemantic);
+      reference.click = { exports, ...(await settledPhoto()) };
+      console.log(`two-stage smoke ${label} click reference:`, JSON.stringify({ exports: short(exports), wbSemanticApplied: Boolean(reference.recipe.wbSemanticApplied) }));
+    }
+    if (runs('leave')) {
+      await boot(one);
+      await importFiles([b, a]);
+      await waitFor(`${label} reference import B first`, `${ready} && ${filename(nameB)} && ${lanesReady}`, 900_000);
+      await settledRecipe();
+      reference.all = await exportAllFormats(2, `${label} reference Export All`);
+      reference.allDefaults = await automaticDefaults();
+    }
+
+    // 1. Two stages, installed behind the stand-in without locking editing;
+    // exports after the settle.
+    if (runs('settle')) {
+      await boot(two);
+      await evaluate('window.__ncTwoStage.holdFullDecodes()');
+      await importFiles([a]);
+      await waitFor(`${label} stand-in shown`, `${ready} && ${filename(nameA)} && ${status}.pending`, 900_000);
+      const standIn = await evaluate(`({ status: ${status}, stage1: window.__ncTwoStage.diagnostics.stage1.at(-1), plan: window.__ncTwoStage.diagnostics.plans.at(-1) })`);
+      if (standIn.plan?.stages !== 2) fail(`${label}: the threshold did not plan two stages: ` + JSON.stringify(standIn.plan));
+      if (standIn.stage1?.scale !== 0.5 || Math.abs(standIn.status.base?.width * 2 - reference.base.width) > 2) fail(`${label}: stage 1 is not a half-size stand-in: ` + JSON.stringify(standIn));
+      if (!standIn.status.provisional) fail(`${label}: the stand-in is not provisional`);
+      await evaluate(`window.__twoStageBusy.length = 0; window.__twoStageBusyWatch = true; window.__ncTwoStage.releaseFullDecodes()`);
+      await waitFor(`${label} full decode installed`, `${ready} && ${exact}`, 900_000);
+      const installed = await evaluate(`({ status: ${status}, busy: window.__twoStageBusy.slice(), stage2: window.__ncTwoStage.diagnostics.stage2.at(-1), swaps: window.__ncTwoStage.diagnostics.swaps })`);
+      await evaluate('window.__twoStageBusyWatch = false');
+      console.log(`two-stage smoke ${label} install:`, JSON.stringify({ base: installed.status.base, stage2: installed.stage2, swaps: installed.swaps, busy: installed.busy.length }));
+      if (installed.status.base?.width !== reference.base.width || installed.status.base.height !== reference.base.height || installed.status.base.scale !== 1) fail(`${label}: the full decode was not installed: ` + JSON.stringify(installed.status));
+      if (/twoStageMode=sequential/.test(two) && installed.stage2?.mode !== 'sequential') fail(`${label}: forced sequential mode was not used: ` + JSON.stringify(installed.stage2));
+      if (installed.busy.length) fail(`${label}: the swap set studioBusy: ` + JSON.stringify(installed.busy));
+      const settled = await settledPhoto();
+      // The page's large-image threshold (?largeImagePixels): the full
+      // decode is above it and the stand-in below, as for a 60 MP file.
+      const threshold = await evaluate(`import('/src/app/imageMemoryBudget.js').then(m => m.LARGE_IMAGE_PIXELS)`);
+      const pixels = { full: reference.base.width * reference.base.height, standIn: standIn.status.base.width * standIn.status.base.height };
+      console.log(`two-stage smoke ${label} large-image threshold:`, JSON.stringify({ threshold, ...pixels }));
+      if (/largeImagePixels/.test(extra) && !(pixels.full > threshold && pixels.standIn <= threshold)) fail(`${label}: the full decode is not large while its stand-in is not: ` + JSON.stringify({ threshold, ...pixels }));
+      same(`${label}: the settled recipe`, settled.recipe, reference.recipe);
+      same(`${label}: automaticDefaults`, settled.defaults, reference.defaults);
+      sameExports(`${label}: export after the settle`, await exportFormats(`${label} two-stage`, formats), reference.exports);
+      if (/largeImagePixels/.test(extra)) {
+        // The last banded export's conversion ran on the band pool.
+        const bands = await evaluate('window.__ncBatchPipeline.diagnostics.singleExport');
+        console.log(`two-stage smoke ${label} export bands:`, JSON.stringify(bands));
+        if (!((bands?.bandAdjusts || 0) + (bands?.residentAdjusts || 0))) fail(`${label}: the export did not use the band pool: ` + JSON.stringify(bands));
+      }
+      console.log(`ok: ${label}: two stages settle to the single decode's recipe, automaticDefaults and exports, without studioBusy`);
+    }
+
+    // 2. Export clicked while stage 2 is held, in each format: it waits, then
+    // matches.
+    if (runs('during')) {
+      for (const format of duringFormats) {
+        const key = formatKey(format);
+        await boot(two, { holdSemantic: true });
+        await evaluate('window.__ncTwoStage.holdFullDecodes()');
+        await importFiles([a]);
+        await waitFor(`${label} stand-in shown`, `${ready} && ${status}.pending`, 900_000);
+        await selectFormat(format);
+        await evaluate(`document.getElementById('exportSingleBtn').click()`);
+        await wait(1500);
+        if (await evaluate('window.__twoStageDownloads.length')) fail(`${label}: a ${key} export was written from the stand-in`);
+        if (!(await evaluate(`${status}.pending`))) fail(`${label}: the photo left the provisional state while stage 2 was held`);
+        await evaluate('window.__ncTwoStage.releaseFullDecodes()');
+        sameExport(`${label}: ${key} export clicked during stage 2`, await take(`${label} ${key} export during stage 2`), reference.click.exports[key]);
+        await waitFor('export settled', `!document.getElementById('exportSingleBtn').disabled && ${exact}`, 900_000);
+        await evaluate(releaseSemantic);
+        same(`${label}: automaticDefaults after an export during stage 2`, await automaticDefaults(), reference.defaults);
+      }
+      console.log(`ok: ${label}: an export clicked during stage 2 waits for the full decode and matches, in ${duringFormats.map(formatKey).join(', ')}`);
+    }
+
+    // 3. Crop mode open when stage 2 lands: the swap waits for it to close.
+    if (runs('crop')) {
+      await boot(two);
+      await evaluate('window.__ncTwoStage.holdFullDecodes()');
+      await importFiles([a]);
+      await waitFor(`${label} stand-in shown`, `${ready} && ${status}.pending`, 900_000);
+      const { width, height } = reference.base;
+      await evaluate(`document.getElementById('studioTab-composition').click(); document.getElementById('cropBtn').click()`);
+      await waitFor('crop mode', `document.getElementById('canvasContainer').classList.contains('crop-mode')`, 30_000);
+      const editorBefore = await evaluate('window.__ncMemory.snapshot().ledger.editor');
+      await evaluate('window.__ncTwoStage.releaseFullDecodes()');
+      await wait(1500);
+      const during = await evaluate(status);
+      if (during.fullDecode === 'installed' || !during.provisional) fail(`${label}: the full decode was installed under an open crop draft: ` + JSON.stringify(during));
+      // Decoded, waiting for the draft: no plane holds it yet, but the ledger
+      // counts its 8- and 16-bit planes (12 B/px) with the open photo (polled:
+      // the settle's detections borrow the planes for a moment).
+      const fullBytes = width * height * 12;
+      const counted = `${status}.fullDecode === 'decoded' && window.__ncMemory.snapshot().ledger.editor - ${editorBefore} >= ${0.9 * fullBytes}`;
+      await waitFor('stage 2 decoded under the crop draft', counted, 300_000, { soft: true });
+      const editorDuring = await evaluate('window.__ncMemory.snapshot().ledger.editor');
+      console.log(`two-stage smoke ${label} ledger:`, JSON.stringify({ editorBefore, editorDuring, fullBytes, fullDecode: (await evaluate(status)).fullDecode }));
+      if (!(await evaluate(counted))) fail(`${label}: the memory ledger does not count the full decode waiting for the swap: ` + JSON.stringify({ editorBefore, editorDuring, fullBytes }));
+      await evaluate(`document.getElementById('cancelCropBtn').click()`);
+      await waitFor(`${label} installed after crop mode`, `${ready} && ${exact}`, 900_000);
+      const settled = await settledPhoto();
+      same(`${label}: the recipe after crop mode`, settled.recipe, reference.recipe);
+      same(`${label}: automaticDefaults after crop mode`, settled.defaults, reference.defaults);
+      sameExports(`${label}: export after crop mode`, await exportFormats(`${label} after crop mode`, formats), reference.exports);
+      console.log(`ok: ${label}: stage 2 landing during crop mode is installed when the draft closes`);
+    }
+
+    // 4. Stage 2 fails: a toast, still provisional, the export decodes again.
+    if (runs('failure')) {
+      await boot(two, { holdSemantic: true });
+      await evaluate('window.__ncTwoStage.failNextFullDecodes(1)');
+      await importFiles([a]);
+      await waitFor(`${label} stage 2 failed`, `${ready} && ${status}.fullDecode === 'failed'`, 900_000);
+      const failed = await evaluate(`({ status: ${status}, toasts: window.__twoStageToasts.slice() })`);
+      if (!failed.status.pending || !failed.status.provisional) fail(`${label}: a failed stage 2 must leave the photo provisional: ` + JSON.stringify(failed.status));
+      if (!failed.toasts.some(text => /Full resolution could not be loaded/.test(text))) fail(`${label}: no failure toast: ` + JSON.stringify(failed.toasts));
+      // The first export decodes again, in the foreground.
+      const exports = await exportFormats(`${label} after failure`, formats);
+      if (!(await evaluate(exact))) fail(`${label}: the export did not install the full decode`);
+      sameExports(`${label}: export after a failed stage 2`, exports, reference.click.exports);
+      await evaluate(releaseSemantic);
+      const settled = await settledPhoto();
+      same(`${label}: the recipe after a failed stage 2`, settled.recipe, reference.click.recipe);
+      same(`${label}: automaticDefaults after a failed stage 2`, settled.defaults, reference.click.defaults);
+      console.log(`ok: ${label}: a failed stage 2 is reported, and the export decodes again and matches`);
+    }
+
+    // 5. Leaving before stage 2 completes aborts it; Export All matches.
+    if (runs('leave')) {
+      await boot(two);
+      await evaluate('window.__ncTwoStage.holdFullDecodes()');
+      await importFiles([a, b]);
+      await waitFor(`${label} stand-in shown`, `${ready} && ${filename(nameA)} && ${status}.pending`, 900_000);
+      const abandonedBefore = await evaluate('window.__ncTwoStage.diagnostics.abandoned');
+      await clickStrip(nameB);
+      await waitFor('switched', `${filename(nameB)} && window.__ncTwoStage.diagnostics.abandoned > ${abandonedBefore}`, 60_000);
+      await evaluate('window.__ncTwoStage.releaseFullDecodes()');
+      await waitFor(`${label} second photo exact`, `${ready} && ${filename(nameB)} && ${exact} && ${lanesReady}`, 900_000);
+      await settledRecipe();
+      const all = await exportAllFormats(2, `${label} Export All after an early switch`);
+      for (const key of Object.keys(reference.all)) {
+        same(`${label}: Export All file names, ${key}`, Object.keys(all[key]), Object.keys(reference.all[key]));
+        sameExports(`${label}: Export All after leaving before stage 2, ${key}`, all[key], reference.all[key]);
+      }
+      same(`${label}: automaticDefaults after Export All`, await automaticDefaults(), reference.allDefaults);
+      console.log(`ok: ${label}: leaving before stage 2 aborts it, and Export All matches the single decodes`);
+    }
+
+    // 6. Analyze roll during stage 2 (#255 review R2-029): the stand-in gets an
+    // exposure edit, then Analyze roll is clicked while stage 2 is held. The
+    // analysis persists the open photo's recipe and reads it back, so it waits
+    // for the full decode. Compared with one decode given the same edit and
+    // click: the roll recipe, automaticDefaults and the exports' samples. An
+    // edit in the window comes before the photo's semantic colour pass could
+    // answer (none runs on the stand-in), so in both runs its answer is held
+    // until the roll analysis committed: one decode edited as soon as it
+    // shows. One decode's export right after that Analyze roll can carry a
+    // full-resolution render its edit armed, which lands after the roll's
+    // conversion (audit backlog; the two-stage swap drops such renders), so
+    // the exports are compared with one decode's render of the same recipe:
+    // its Export All.
+    if (runs('roll')) {
+      const rollScene = async (query, sceneLabel, { recipeRender = false } = {}) => {
+        const held = query !== one;
+        await boot(query, { holdSemantic: true });
+        if (held) await evaluate('window.__ncTwoStage.holdFullDecodes()');
+        await importFiles([a, b]);
+        await waitFor(`${sceneLabel}: first photo`, `${ready} && ${filename(nameA)} && ${held ? `${status}.pending` : exact}`, 900_000);
+        await evaluate(editExposure);
+        await waitFor(`${sceneLabel}: exposure edited`, `document.getElementById('coreExposureValue').value === '15' && ${ready}`, 30_000);
+        await evaluate(`document.getElementById('analyzeRollBtn').click()`);
+        if (held) {
+          await wait(1500);
+          const during = await evaluate(`({ status: ${status}, committed: ${rollCommitted} })`);
+          if (!during.status.pending || !during.status.provisional) fail(`${sceneLabel}: Analyze roll did not wait for stage 2: ` + JSON.stringify(during.status));
+          if (during.committed) fail(`${sceneLabel}: the roll analysis committed on the stand-in`);
+          await evaluate('window.__ncTwoStage.releaseFullDecodes()');
+        }
+        await waitFor(`${sceneLabel}: roll analysis committed`, `${rollCommitted} && ${ready} && ${exact} && !!${status}.settings?.rollFrame`, 900_000);
+        await evaluate(releaseSemantic);
+        const settled = await settledPhoto();
+        if (recipeRender) return { ...settled, render: await exportAllFormats(2, `${sceneLabel} recipe render`) };
+        return { ...settled, exports: await exportFormats(`${sceneLabel}`, formats) };
+      };
+      const rollReference = await rollScene(one, `${label} roll reference`, { recipeRender: true });
+      if (rollReference.recipe.coreExposure !== 15) fail(`${label}: the reference lost its exposure edit: ` + JSON.stringify(rollReference.recipe.coreExposure));
+      const rollTwoStage = await rollScene(two, `${label} roll during stage 2`);
+      console.log(`two-stage smoke ${label} roll analysis:`, JSON.stringify({ rollFrame: rollTwoStage.recipe.rollFrame, exports: short(rollTwoStage.exports) }));
+      same(`${label}: the roll recipe after Analyze roll during stage 2`, rollTwoStage.recipe, rollReference.recipe);
+      same(`${label}: automaticDefaults after Analyze roll during stage 2`, rollTwoStage.defaults, rollReference.defaults);
+      // The same file of one decode's Export All, by name.
+      const rendered = Object.fromEntries(Object.entries(rollTwoStage.exports).map(([key, entry]) => [key, rollReference.render[key]?.[entry.name] || null]));
+      sameExports(`${label}: export after Analyze roll during stage 2`, rollTwoStage.exports, rendered, { bytes: false });
+      console.log(`ok: ${label}: Analyze roll clicked during stage 2 waits for the full decode, and matches one decode with the same edit`);
+    }
+  };
 
   try {
     // Two small CFA DNGs with SubIFD previews (stub JPEGs): 1600x1066 each.
@@ -157,180 +523,26 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
         previewSizes(size).map(preview => ({ ...preview, jpeg: stubJpeg(preview.width, preview.height) })));
       return path;
     });
-    const [nameA, nameB] = files.map(path => basename(path));
+    const twoStage = '&twoStageMinMp=1&twoStageMode=sequential';
+    await scenarios({ label: 'synthetic', a: files[0], b: files[1], twoStage });
+    // The paths 60 MP files take (#255 review R2-032): the full decode is
+    // large (a separate preview source) and banded on export; the stand-in
+    // is neither.
+    const large = { width: 2800, height: 1866 };
+    const largeFile = join(dir, 'two-stage-large.dng');
+    writeSyntheticDng(largeFile, { ...large, seed: 13, kind: 'color' },
+      previewSizes(large).map(preview => ({ ...preview, jpeg: stubJpeg(preview.width, preview.height) })));
+    await scenarios({ label: 'synthetic, large-image paths', a: largeFile, b: files[1], twoStage, extra: '&largeImagePixels=2000000', only: ['settle', 'during'], duringFormats: [['png', 16]] });
 
-    // 1. References: each file decoded once. A opened alone; then B opened
-    // with A never opened, the lanes done, and Export All.
-    await boot('');
-    await importFiles([files[0]]);
-    await waitFor('reference import', `${ready} && ${filename(nameA)}`, 300_000);
-    const reference = { recipe: pick(await settledRecipe()) };
-    const plan = await evaluate(`window.__ncTwoStage.diagnostics.plans.at(-1)`);
-    if (plan?.stages !== 1) fail('with the flag off a small DNG decodes once: ' + JSON.stringify(plan));
-    reference.png8 = await exportSingle(8, 'reference PNG 8');
-    reference.png16 = await exportSingle(16, 'reference PNG 16');
-    await boot('');
-    await importFiles([files[1], files[0]]);
-    await waitFor('reference import B first', `${ready} && ${filename(nameB)} && ${lanesReady}`, 300_000);
-    await settledRecipe();
-    reference.all = await exportAll(2, 'reference Export All');
-    console.log('two-stage smoke reference:', JSON.stringify({ crop: reference.recipe.cropRegion, png16: reference.png16.slice(0, 12), all: Object.keys(reference.all) }));
-
-    // 2. Two stages, installed behind the stand-in without locking editing.
-    await boot('&twoStageMinMp=1&twoStageMode=sequential');
-    await evaluate('window.__ncTwoStage.holdFullDecodes()');
-    await importFiles([files[0]]);
-    await waitFor('stand-in shown', `${ready} && ${filename(nameA)} && ${status}.pending`, 300_000);
-    const standIn = await evaluate(`({ status: ${status}, stage1: window.__ncTwoStage.diagnostics.stage1.at(-1), plan: window.__ncTwoStage.diagnostics.plans.at(-1) })`);
-    if (standIn.plan?.stages !== 2) fail('the forced threshold did not plan two stages: ' + JSON.stringify(standIn.plan));
-    if (standIn.stage1?.scale !== 0.5 || standIn.status.base?.width !== size.width / 2) fail('stage 1 is not a half-size stand-in: ' + JSON.stringify(standIn));
-    if (!standIn.status.provisional) fail('the stand-in is not provisional');
-    await evaluate(`window.__twoStageBusy.length = 0; window.__twoStageBusyWatch = true; window.__ncTwoStage.releaseFullDecodes()`);
-    await waitFor('full decode installed', `${ready} && ${exact}`, 300_000);
-    const installed = await evaluate(`({ status: ${status}, busy: window.__twoStageBusy.slice(), stage2: window.__ncTwoStage.diagnostics.stage2.at(-1), swaps: window.__ncTwoStage.diagnostics.swaps })`);
-    await evaluate('window.__twoStageBusyWatch = false');
-    console.log('two-stage smoke install:', JSON.stringify({ base: installed.status.base, stage2: installed.stage2, swaps: installed.swaps, busy: installed.busy.length }));
-    if (installed.status.base?.width !== size.width || installed.status.base.scale !== 1) fail('the full decode was not installed: ' + JSON.stringify(installed.status));
-    if (installed.stage2?.mode !== 'sequential') fail('forced sequential mode was not used: ' + JSON.stringify(installed.stage2));
-    if (installed.busy.length) fail('the swap set studioBusy: ' + JSON.stringify(installed.busy));
-    same('the settled recipe', pick(await settledRecipe()), reference.recipe);
-    same('the 8-bit PNG export', await exportSingle(8, 'two-stage PNG 8'), reference.png8);
-    same('the 16-bit PNG export', await exportSingle(16, 'two-stage PNG 16'), reference.png16);
-    console.log('ok: two stages settle to the single decode\'s recipe and exports, without studioBusy');
-
-    // 3. Export clicked while stage 2 is held: it waits, then matches.
-    await boot('&twoStageMinMp=1&twoStageMode=sequential');
-    await evaluate('window.__ncTwoStage.holdFullDecodes()');
-    await importFiles([files[0]]);
-    await waitFor('stand-in shown', `${ready} && ${status}.pending`, 300_000);
-    await evaluate(`document.querySelector('.format-btn[data-format="png"]').click(); document.querySelector('.bitdepth-btn[data-bitdepth="16"]').click()`);
-    await wait(200);
-    await evaluate(`document.getElementById('exportSingleBtn').click()`);
-    await wait(1500);
-    if (await evaluate('window.__twoStageDownloads.length')) fail('an export was written from the stand-in');
-    if (!(await evaluate(`${status}.pending`))) fail('the photo left the provisional state while stage 2 was held');
-    await evaluate('window.__ncTwoStage.releaseFullDecodes()');
-    same('the export clicked during stage 2', (await take('export during stage 2')).sha256, reference.png16);
-    await waitFor('export settled', `!document.getElementById('exportSingleBtn').disabled && ${exact}`, 300_000);
-    console.log('ok: an export clicked during stage 2 waits for the full decode and matches');
-
-    // 4. Crop mode open when stage 2 lands: the swap waits for it to close.
-    await boot('&twoStageMinMp=1&twoStageMode=sequential');
-    await evaluate('window.__ncTwoStage.holdFullDecodes()');
-    await importFiles([files[0]]);
-    await waitFor('stand-in shown', `${ready} && ${status}.pending`, 300_000);
-    await evaluate(`document.getElementById('studioTab-composition').click(); document.getElementById('cropBtn').click()`);
-    await waitFor('crop mode', `document.getElementById('canvasContainer').classList.contains('crop-mode')`, 30_000);
-    const editorBefore = await evaluate('window.__ncMemory.snapshot().ledger.editor');
-    await evaluate('window.__ncTwoStage.releaseFullDecodes()');
-    await wait(1500);
-    const during = await evaluate(status);
-    if (during.fullDecode === 'installed' || !during.provisional) fail('the full decode was installed under an open crop draft: ' + JSON.stringify(during));
-    // Decoded, waiting for the draft: no plane holds it yet, but the ledger
-    // counts its 8- and 16-bit planes (12 B/px) with the open photo (polled:
-    // the settle's detections borrow the planes for a moment).
-    const fullBytes = size.width * size.height * 12;
-    const counted = `${status}.fullDecode === 'decoded' && window.__ncMemory.snapshot().ledger.editor - ${editorBefore} >= ${0.9 * fullBytes}`;
-    await waitFor('stage 2 decoded under the crop draft', counted, 60_000, { soft: true });
-    const editorDuring = await evaluate('window.__ncMemory.snapshot().ledger.editor');
-    console.log('two-stage smoke ledger:', JSON.stringify({ editorBefore, editorDuring, fullBytes, fullDecode: (await evaluate(status)).fullDecode }));
-    if (!(await evaluate(counted))) {
-      fail('the memory ledger does not count the full decode waiting for the swap: ' + JSON.stringify({ editorBefore, editorDuring, fullBytes }));
-    }
-    await evaluate(`document.getElementById('cancelCropBtn').click()`);
-    await waitFor('installed after crop mode', `${ready} && ${exact}`, 300_000);
-    same('the recipe after crop mode', pick(await settledRecipe()), reference.recipe);
-    same('the export after crop mode', await exportSingle(16, 'export after crop mode'), reference.png16);
-    console.log('ok: stage 2 landing during crop mode is installed when the draft closes');
-
-    // 5. Stage 2 fails: a toast, still provisional, the export decodes again.
-    await boot('&twoStageMinMp=1&twoStageMode=sequential');
-    await evaluate('window.__ncTwoStage.failNextFullDecodes(1)');
-    await importFiles([files[0]]);
-    await waitFor('stage 2 failed', `${ready} && ${status}.fullDecode === 'failed'`, 300_000);
-    const failed = await evaluate(`({ status: ${status}, toasts: window.__twoStageToasts.slice() })`);
-    if (!failed.status.pending || !failed.status.provisional) fail('a failed stage 2 must leave the photo provisional: ' + JSON.stringify(failed.status));
-    if (!failed.toasts.some(text => /Full resolution could not be loaded/.test(text))) fail('no failure toast: ' + JSON.stringify(failed.toasts));
-    same('the export after a failed stage 2', await exportSingle(16, 'export after failure'), reference.png16);
-    if (!(await evaluate(exact))) fail('the export did not install the full decode');
-    console.log('ok: a failed stage 2 is reported, and the export decodes again and matches');
-
-    // 6. Leaving before stage 2 completes aborts it; Export All matches.
-    await boot('&twoStageMinMp=1&twoStageMode=sequential');
-    await evaluate('window.__ncTwoStage.holdFullDecodes()');
-    await importFiles(files);
-    await waitFor('stand-in shown', `${ready} && ${filename(nameA)} && ${status}.pending`, 300_000);
-    const abandonedBefore = await evaluate('window.__ncTwoStage.diagnostics.abandoned');
-    await clickStrip(nameB);
-    await waitFor('switched', `${filename(nameB)} && window.__ncTwoStage.diagnostics.abandoned > ${abandonedBefore}`, 60_000);
-    await evaluate('window.__ncTwoStage.releaseFullDecodes()');
-    await waitFor('second photo exact', `${ready} && ${filename(nameB)} && ${exact} && ${lanesReady}`, 300_000);
-    await settledRecipe();
-    const all = await exportAll(2, 'Export All after an early switch');
-    same('Export All after leaving before stage 2', all, reference.all);
-    console.log('ok: leaving before stage 2 aborts it, and Export All matches the single decodes');
-
-    // 7. Analyze roll during stage 2 (#255 review R2-029): the stand-in gets an
-    // exposure edit, then Analyze roll is clicked while stage 2 is held. The
-    // analysis persists the open photo's recipe and reads it back, so it waits
-    // for the full decode; before that wait it committed the photo's bare
-    // defaults (losing the edit) and the swap kept them. Compared with one
-    // decode given the same edit and click: the roll recipe, and the decoded
-    // samples of a 16-bit PNG export.
-    const editExposure = `(() => { const el = document.getElementById('coreExposure'); el.value = '15'; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); })()`;
-    const rollCommitted = `window.__twoStageToasts.some(text => /Roll analysis:/.test(text))`;
-    const rollScene = async (query, label) => {
-      const held = Boolean(query);
-      await boot(query);
-      if (held) await evaluate('window.__ncTwoStage.holdFullDecodes()');
-      await importFiles(files);
-      await waitFor(`${label}: first photo`, `${ready} && ${filename(nameA)} && ${held ? `${status}.pending` : exact}`, 300_000);
-      if (!held) await settledRecipe();
-      await evaluate(editExposure);
-      await waitFor(`${label}: exposure edited`, `document.getElementById('coreExposureValue').value === '15' && ${ready}`, 30_000);
-      await evaluate(`document.getElementById('analyzeRollBtn').click()`);
-      if (held) {
-        await wait(1500);
-        const during = await evaluate(`({ status: ${status}, committed: ${rollCommitted} })`);
-        if (!during.status.pending || !during.status.provisional) fail('Analyze roll did not wait for stage 2: ' + JSON.stringify(during.status));
-        if (during.committed) fail('the roll analysis committed on the stand-in');
-        await evaluate('window.__ncTwoStage.releaseFullDecodes()');
-      }
-      await waitFor(`${label}: roll analysis committed`, `${rollCommitted} && ${ready} && ${exact} && !!${status}.settings?.rollFrame`, 300_000);
-      const settings = await settledRecipe();
-      const { rollId, ...rollFrame } = settings.rollFrame || {};
-      const recipe = { ...pick(settings), rollFrame };
-      await exportSingle(16, `${label}: PNG 16`);
-      return { recipe, sample: await decodedSample() };
-    };
-    const rollReference = await rollScene('', 'roll reference');
-    if (rollReference.recipe.coreExposure !== 15) fail('the reference lost its exposure edit: ' + JSON.stringify(rollReference.recipe));
-    const rollTwoStage = await rollScene('&twoStageMinMp=1&twoStageMode=sequential', 'roll during stage 2');
-    console.log('two-stage smoke roll analysis:', JSON.stringify({ rollFrame: rollTwoStage.recipe.rollFrame, sample: rollTwoStage.sample.slice(0, 12) }));
-    same('the roll recipe after Analyze roll during stage 2', rollTwoStage.recipe, rollReference.recipe);
-    same('the decoded samples after Analyze roll during stage 2', rollTwoStage.sample, rollReference.sample);
-    console.log('ok: Analyze roll clicked during stage 2 waits for the full decode, and matches one decode with the same edit');
-
-    // Opt-in parity on real files: one decode against two stages at 40 MP.
+    // Opt-in parity on real files: one decode against two stages at
+    // TWO_STAGE_PARITY_MIN_MP (40 by default, the flag's target).
+    const minMp = Number(process.env.TWO_STAGE_PARITY_MIN_MP) || 40;
     for (const path of parityFiles) {
       if (!existsSync(path)) fail('parity file missing: ' + path);
       const name = basename(path);
-      const run = async query => {
-        await boot(query);
-        await importFiles([path]);
-        await waitFor('parity import ' + name, `${ready} && ${filename(name)} && ${exact}`, 900_000);
-        const recipe = pick(await settledRecipe());
-        const plans = await evaluate('window.__ncTwoStage.diagnostics.plans.at(-1)');
-        return { recipe, plans, png8: await exportSingle(8, 'parity PNG 8 ' + name), png16: await exportSingle(16, 'parity PNG 16 ' + name) };
-      };
-      const one = await run('');
-      const two = await run('&twoStageMinMp=40');
-      console.log('two-stage parity:', name, JSON.stringify({ one: one.plans, two: two.plans }));
-      if (two.plans?.stages !== 2) console.log('note: not a two-stage file at 40 MP:', name);
-      same(`${name}: settled recipe`, two.recipe, one.recipe);
-      same(`${name}: 8-bit PNG`, two.png8, one.png8);
-      same(`${name}: 16-bit PNG`, two.png16, one.png16);
-      console.log('ok: two stages match one decode for', name);
+      console.log('two-stage parity:', name, 'at twoStageMinMp', minMp);
+      await scenarios({ label: name, a: path, b: files[1], twoStage: `&twoStageMinMp=${minMp}` });
+      console.log('ok: two stages match one decode in every scenario for', name);
     }
   } finally {
     rmSync(dir, { recursive: true, force: true });

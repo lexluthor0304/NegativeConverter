@@ -13392,7 +13392,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           } : null,
           settings: state.originalImageData ? extractCurrentSettings() : null,
           liveCrop: state.cropRegion ? { ...state.cropRegion } : null,
-          semanticPending: semanticColourInFlight > 0
+          semanticPending: semanticColourInFlight > 0,
+          // Each photo's automatic recipe, which learning compares its edits
+          // with (learnedImportSettings), by file name.
+          automaticDefaults: Object.fromEntries(state.fileQueue.map(item => [item.file?.name || '', item.automaticDefaults ? structuredClone(item.automaticDefaults) : null]))
         }),
         exact: () => ensureFullDecode({ reason: 'debug' }),
         ...(DEBUG_UI ? {
