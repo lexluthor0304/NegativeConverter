@@ -219,6 +219,17 @@ class FakeSink {
   assert.equal(detectReleaseEngine(nav('Mozilla/5.0 (Windows NT 10.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36 Edg/140.0'), [{ brand: 'Microsoft Edge' }]), 'chromium', 'WebView2');
   assert.equal(detectReleaseEngine(nav('Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0')), 'none');
   assert.equal(detectReleaseEngine({}), 'none');
+  // Every iOS and iPadOS browser runs WebKit and has no userAgentData there
+  // (#229 R1-095: CriOS used to get Chromium's worker sink).
+  for (const [ua, label] of [
+    ['Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/124.0.6367.111 Mobile/15E148 Safari/604.1', 'Chrome on iPhone'],
+    ['Mozilla/5.0 (iPad; CPU OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/124.0.6367.111 Mobile/15E148 Safari/604.1', 'Chrome on iPad'],
+    ['Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/124.0.6367.111 Safari/605.1.15', 'Chrome on iPadOS, desktop site'],
+    ['Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 EdgiOS/124.0.2478.50 Mobile/15E148 Safari/605.1.15', 'Edge on iPhone'],
+    ['Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) FxiOS/125.0 Mobile/15E148 Safari/605.1.15', 'Firefox on iPhone'],
+    ['Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1', 'Safari on iPhone']
+  ]) assert.equal(detectReleaseEngine(nav(ua)), 'webkit', label);
+  assert.equal(detectReleaseEngine(nav('Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.113 Mobile Safari/537.36')), 'chromium', 'Chrome on Android');
 }
 
 configurePlaneRelease();

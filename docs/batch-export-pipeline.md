@@ -199,16 +199,16 @@ Now one driver (`runBatchExport` in `main.js`) runs the per-file pipeline
   `processFileWithSettings` created (decode, geometry, conversion, repairs),
   the adjusted frame and the sprocket frame are stamped export-owned and
   released once the file is encoded (`releaseOwnedPlanes` in
-  `app/planeRelease.js`: `transfer(0)` on WebKit, a throwaway worker on
-  Chromium), instead of stacking under the next frame's decode until the
-  next major GC. A plane that the editor, a photo session or history still
-  references is never transferred or released (`liveEditorBuffers` in
-  `main.js` names them with the `backingBuffers` walk, which never builds
-  a geometry frame descriptor's pixels, `docs/geometry-chain.md`). Single
-  export does the same with a bridge of its own that it terminates when
-  the export ends; the contact sheet releases a frame's full-resolution
-  planes once its cell exists (the watch folder no longer renders
-  arrivals, #247).
+  `app/planeRelease.js`: `transfer(0)` on WebKit, every iOS browser
+  included, a throwaway worker on Chromium), instead of stacking under the
+  next frame's decode until the next major GC. A plane that the editor, a
+  photo session or history still references is never transferred or
+  released (`liveEditorBuffers` in `main.js` names them with the
+  `backingBuffers` walk, which never builds a geometry frame descriptor's
+  pixels, `docs/geometry-chain.md`). Single export does the same with a
+  bridge of its own that it terminates when the export ends; the contact
+  sheet releases a frame's full-resolution planes once its cell exists (the
+  watch folder no longer renders arrivals, #247).
 - Batch frames run frame detection silently (`processFileWithSettings`
   `silent: true`): a never-analysed frame gets no blocking overlay and no
   frame wait, so a hidden window keeps exporting. A job fixes its export

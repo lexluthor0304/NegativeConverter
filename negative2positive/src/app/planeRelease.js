@@ -12,10 +12,10 @@
 //
 // Release frees the backing store now instead of at the owning isolate's next
 // major GC, which after an export may be minutes away:
-// - WebKit (WKWebView, WebKitGTK, Safari): `ArrayBuffer.prototype.transfer(0)`
-//   frees without a GC and throws instead of copying. Older WebKit only drops
-//   the references. Never a worker sink there: transferring a buffer WebKit
-//   cannot detach copies it.
+// - WebKit (WKWebView, WebKitGTK, Safari, every iOS browser):
+//   `ArrayBuffer.prototype.transfer(0)` frees without a GC and throws instead
+//   of copying. Older WebKit only drops the references. Never a worker sink
+//   there: transferring a buffer WebKit cannot detach copies it.
 // - Chromium: `transfer(0)` does not free buffers Blink co-owns (ImageData and
 //   message-received buffers), so one throwaway `blob:` worker receives every
 //   buffer of the call in a single transfer list and is terminated.
@@ -133,7 +133,11 @@ export function detectReleaseEngine(env = globalThis) {
   const brands = nav.userAgentData && Array.isArray(nav.userAgentData.brands) ? nav.userAgentData.brands : null;
   if (brands && brands.some((brand) => /Chromium|Google Chrome|Microsoft Edge/i.test(brand.brand || ''))) return 'chromium';
   const ua = String(nav.userAgent || '');
-  if (/Chrome\/|Chromium\/|CriOS\/|Edg\//.test(ua)) return 'chromium';
+  // Every browser on iOS and iPadOS runs WebKit, Chrome (CriOS), Edge
+  // (EdgiOS) and Firefox (FxiOS) included, and none of them has
+  // userAgentData there: never the worker sink.
+  if (/AppleWebKit\//.test(ua) && /\b(?:iPhone|iPad|iPod)\b|\b(?:CriOS|EdgiOS|FxiOS)\//.test(ua)) return 'webkit';
+  if (/Chrome\/|Chromium\/|Edg\//.test(ua)) return 'chromium';
   if (/AppleWebKit\//.test(ua)) return 'webkit';
   return 'none';
 }
