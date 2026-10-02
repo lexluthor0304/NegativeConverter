@@ -21907,11 +21907,20 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       return item === getCurrentQueueItem() && Boolean(state.loadedBaseImageData) && !state.rawDecodePending
         && !state.provisional && !state.loadedBaseImageData.__decodeScale;
     }
-    function studioBackgroundReady() {
-      // A two-stage import's roll persist and sample wait for its full decode (#255).
+    function studioBackgroundReady({ exact = false } = {}) {
+      // A two-stage import's window holds background work while its full
+      // decode runs or settles (#255). A failed one holds nothing, as in
+      // foregroundInteractionBusy: the lanes and the automatic roll import go
+      // on beside the stand-in until an exact consumer decodes again (#255
+      // review R2-033). The roll import still never persists or samples the
+      // stand-in (persistCurrentFileSettings, canReuseLoadedRollSource). What
+      // changes the open photo's own recipe (flipImportPhoto,
+      // applyImportPositives) asks for `exact`: it persists and reads back
+      // that recipe, so it waits for the exact photo.
       return state.currentStep >= 3 && getCurrentQueueItem()?.file === state.loadedFile
         && !document.body.dataset.studioBusy && !processNegativeInFlight
-        && !isDesktopBatchExportLocked() && !state.rawDecodePending && !state.provisional;
+        && !isDesktopBatchExportLocked()
+        && ((!state.rawDecodePending && !state.provisional) || (!exact && state.fullDecode?.status === 'failed'));
     }
     // A saved recipe processFileWithSettings renders without reading the
     // decoded pixels for detection: frame detection and the film-edge read
@@ -27600,7 +27609,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         && item === getCurrentQueueItem() && Boolean(importFilmTypeTarget(record, item));
       record.flipping = true;
       try {
-        while (current() && (!studioBackgroundReady() || state.cropping)) {
+        while (current() && (!studioBackgroundReady({ exact: true }) || state.cropping)) {
           if (!wait) { scheduleImportFilmTypeUpdate(record, 250); return false; }
           await new Promise(resolve => setTimeout(resolve, 250));
         }
@@ -27659,7 +27668,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // is left alone.
     function applyImportPositives(record) {
       if (record.corrected) return;
-      if (!state.originalImageData || !studioBackgroundReady() || state.cropping) {
+      if (!state.originalImageData || !studioBackgroundReady({ exact: true }) || state.cropping) {
         if (state.fileQueue.some(item => record.items.includes(item))) setTimeout(() => applyImportPositives(record), 250);
         return;
       }

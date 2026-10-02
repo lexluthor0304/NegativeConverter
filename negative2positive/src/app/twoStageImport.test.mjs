@@ -31,7 +31,11 @@
 //   Apply flat field to selected measures new photos' defaults on the full
 //   decode. Each as on one decode, each with a control without the fix;
 // - stage 2's reservation goes only once the ledger counts the full base,
-//   so the admission its release runs sees it.
+//   so the admission its release runs sees it;
+// - a failed stage 2 holds no background work (the lanes, the automatic roll
+//   import), while the roll import's persist and sample still refuse the
+//   stand-in and its film-type changes to the open photo wait for the exact
+//   photo.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
@@ -1403,6 +1407,180 @@ function flatFieldFixture({ twoStage, old = false }) {
   assert.equal(control.reads[0].full, false, 'control: the admission read the ledger without the full base');
   assert.ok(control.lane, 'control: the lane was admitted');
   assert.equal(control.grant.rule, 'fits', 'control: as if the full base did not exist');
+}
+
+// ---- a failed stage 2 and background work (#255 review R2-033) ---------------------------------
+// After a failed stage 2 the photo stays provisional until an exact consumer
+// decodes again. That holds no background work (foregroundInteractionBusy
+// already said so): studioBackgroundReady lets the lanes and the automatic
+// roll import go on, while the roll import's persist and sample still refuse
+// the stand-in and its film-type changes to the open photo wait for the
+// exact photo. Before, studioBackgroundReady required no provisional photo at
+// all, so the lanes polled and the roll import rescheduled itself for as
+// long as the user stayed on the photo. Asked for `exact`, it is the old
+// predicate.
+const OLD_BACKGROUND_READY = `function studioBackgroundReady() {
+      return state.currentStep >= 3 && getCurrentQueueItem()?.file === state.loadedFile
+        && !document.body.dataset.studioBusy && !processNegativeInFlight
+        && !isDesktopBatchExportLocked() && !state.rawDecodePending && !state.provisional;
+    }`;
+{
+  // Old against new over every state the predicate reads: the same answer,
+  // except that a failed full decode no longer holds background work; asked
+  // for `exact`, always the same answer.
+  const target = { state: {}, document: { body: { dataset: {} } }, processNegativeInFlight: null, locked: false, current: null };
+  const context = vm.createContext(target);
+  vm.runInContext('function getCurrentQueueItem() { return current; }\nfunction isDesktopBatchExportLocked() { return locked; }', context);
+  vm.runInContext(functionSource('studioBackgroundReady').replace('function studioBackgroundReady', 'function readyNow'), context);
+  vm.runInContext(OLD_BACKGROUND_READY.replace('function studioBackgroundReady', 'function readyBefore'), context);
+  const file = { name: 'a.dng' };
+  let cases = 0, changed = 0;
+  for (const step of [1, 3]) for (const loaded of [true, false]) for (const busy of [false, true]) for (const converting of [false, true])
+  for (const locked of [false, true]) for (const pending of [false, true]) for (const provisional of [false, true])
+  for (const status of [null, 'waiting', 'running', 'decoded', 'swapped', 'installed', 'failed', 'abandoned']) {
+    target.state = { currentStep: step, loadedFile: file, rawDecodePending: pending, provisional: provisional ? {} : null, fullDecode: status ? { status } : null };
+    target.current = { file: loaded ? file : { name: 'b.dng' } };
+    target.document.body.dataset = busy ? { studioBusy: 'true' } : {};
+    target.processNegativeInFlight = converting ? Promise.resolve() : null;
+    target.locked = locked;
+    const label = JSON.stringify({ step, loaded, busy, converting, locked, pending, provisional, status });
+    const rest = step >= 3 && loaded && !busy && !converting && !locked;
+    assert.equal(context.readyNow({ exact: true }), context.readyBefore(), `${label}: exact, as before`);
+    if (status === 'failed') {
+      assert.equal(context.readyNow(), rest, `${label}: a failed full decode holds nothing`);
+      if (context.readyNow() !== context.readyBefore()) changed++;
+    } else {
+      assert.equal(context.readyNow(), context.readyBefore(), `${label}: as before`);
+    }
+    cases++;
+  }
+  assert.deepEqual([cases, changed], [2 ** 7 * 8, 3], 'only a failed full decode beside a ready studio changed');
+}
+{
+  const f = fixture();
+  const stage2 = await loadedStandIn(f);
+  f.state.provisional.start = { fresh: true, snapshot: f.context.extractCurrentSettings(), detectFrame: false, readEdge: false };
+  f.state.provisional.settledSnapshot = f.context.extractCurrentSettings();
+  f.state.currentStep = 3;
+  assert.equal(f.context.studioBackgroundReady(), false, 'while stage 2 runs, background work waits');
+  f.context.startProvisionalSettle(f.state.fullDecode);
+  stage2.reject(new Error('decode failed'));
+  await flush();
+  assert.equal(f.state.fullDecode.status, 'failed');
+  assert.deepEqual([f.state.rawDecodePending, Boolean(f.state.provisional), f.context.currentPhotoExact()], [true, true, false], 'the photo stays provisional');
+  assert.equal(f.context.studioBackgroundReady(), true, 'a failed stage 2 holds no background work');
+  assert.equal(f.context.persistCurrentFileSettings({ force: true, silent: true }), false, 'the roll import\'s persist still refuses the stand-in');
+  assert.equal(f.item.settings, null);
+  assert.equal(f.context.canReuseLoadedRollSource(f.item), false, 'and so does its sample');
+  assert.equal(f.context.rememberPhotoBase(f.item), false, 'and the photo sessions');
+  // An export decodes again: background work waits for that decode.
+  const exporting = f.context.ensureFullDecode({ reason: 'export' });
+  await flush();
+  assert.equal(f.state.fullDecode.status, 'running');
+  assert.equal(f.context.studioBackgroundReady(), false, 'the retry holds background work again');
+  f.stage2[1].resolve(image(FULL));
+  assert.equal(await exporting, true);
+  assert.equal(f.context.studioBackgroundReady(), true, 'and the exact photo releases it');
+  // Control: before, a failed stage 2 held it for good.
+  const control = fixture();
+  vm.runInContext(OLD_BACKGROUND_READY, control.context);
+  const controlStage2 = await loadedStandIn(control);
+  control.state.provisional.start = { fresh: true, snapshot: control.context.extractCurrentSettings(), detectFrame: false, readEdge: false };
+  control.state.provisional.settledSnapshot = control.context.extractCurrentSettings();
+  control.state.currentStep = 3;
+  control.context.startProvisionalSettle(control.state.fullDecode);
+  controlStage2.reject(new Error('decode failed'));
+  await flush();
+  assert.equal(control.context.studioBackgroundReady(), false, 'control: the failed photo held every lane and the roll import');
+}
+// The real automatic roll import (fake timers) beside a failed stage 2: it
+// runs, persists and samples nothing of the stand-in, and ends as without the
+// failure once an export installs the full decode.
+async function automaticRollAfterFailure({ old = false } = {}) {
+  const f = actionFixture(WINDOW);
+  if (old) vm.runInContext(OLD_BACKGROUND_READY, f.context);
+  for (const item of f.state.fileQueue.slice(1)) item.settings = { filmType: 'color', filmTypeSource: 'auto', filmBase: { r: 205, g: 141, b: 92 }, filmEdge: { checked: true }, coreExposure: 0 };
+  const marker = { begins: 0, finishes: 0 };
+  const sampled = [];
+  const buildRollSample = f.target.buildRollSample;
+  Object.assign(f.target, {
+    createJobMarker: () => ({ begin() { marker.begins++; }, record() {}, setEdited() {}, finish() { marker.finishes++; } }),
+    watchRollSamples: { take: () => null },
+    planRollAnalysisLanes: async () => ({ decodeSlots: 1, framesInFlight: 1, slotBytes: Infinity }),
+    createRollAnalysisWorkers: () => ({ frames: null, slots: null, analyzers: null, configure() {}, dispose() {} }),
+    runRollAnalysisPass: async () => {},
+    buildRollSample: (img, settings) => { sampled.push(img.width); return buildRollSample(img, settings); }
+  });
+  vm.runInContext(functionSource('scheduleAutomaticRollImport'), f.context);
+  const stage2 = await loadedStandIn(f);
+  await importPass(f);
+  stage2.reject(new Error('decode failed'));
+  await flush();
+  assert.equal(f.state.fullDecode.status, 'failed');
+  const timers = fakeTimers(f.target);
+  f.context.scheduleAutomaticRollImport(f.state.fileQueue, { prepared: true });
+  await timers.advance(1200 + 750 * 3);
+  const window = { begins: marker.begins, settings: f.item.settings, standInSamples: sampled.filter(width => width !== FULL.width).length };
+  // An export decodes again; the import then ends as it does without the failure.
+  const exporting = f.context.ensureFullDecode({ reason: 'export' });
+  await flush();
+  f.stage2[1].resolve(image(FULL));
+  assert.equal(await exporting, true);
+  await timers.advance(750 * 4);
+  assert.equal(f.context.currentPhotoExact(), true);
+  assert.equal(f.target.automaticRollPendingItems.size, 0, 'the import ended');
+  assert.equal(timers.pending, 0, 'nothing is left waiting');
+  assert.equal(f.item.settings.rollFrame?.locked, true, 'the open photo is locked to the roll');
+  assert.deepEqual([f.item.settings.coreContrast, f.item.settings.rotationAngle], [5, 0.5], 'with its own recipe');
+  return { window, marker };
+}
+{
+  const fixed = await automaticRollAfterFailure();
+  assert.equal(fixed.window.begins, 1, 'the automatic roll import runs beside the failed stage 2');
+  assert.equal(fixed.window.settings, null, 'without persisting the stand-in');
+  assert.equal(fixed.window.standInSamples, 0, 'or sampling it');
+  assert.deepEqual([fixed.marker.begins, fixed.marker.finishes], [1, 1]);
+  const control = await automaticRollAfterFailure({ old: true });
+  assert.equal(control.window.begins, 0, 'control: the import rescheduled itself while the photo stayed provisional');
+}
+{
+  // Its film-type changes to the open photo (the decision's flip, "These are
+  // positives") persist and read back the open photo's recipe: they ask
+  // studioBackgroundReady for the exact photo and wait beside a failed stage 2.
+  const run = async (name, status) => {
+    const calls = [];
+    const item = { file: { name: 'a.dng' }, settings: { filmType: 'bw', filmTypeSource: 'auto', filmTypeReason: 'rollMonochrome' } };
+    const record = { flipping: false, corrected: false, items: [item], typed: new Map([[item, { filmType: 'bw' }]]), timer: null };
+    const failed = status === 'failed';
+    const target = {
+      state: {
+        currentStep: 3, loadedFile: item.file, originalImageData: {}, cropping: false, fileQueue: [item], rollAnalysis: {}, positiveMode: 'correct',
+        fullDecode: { status }, rawDecodePending: failed, provisional: failed ? {} : null
+      },
+      document: { body: { dataset: {} } }, processNegativeInFlight: null, isDesktopBatchExportLocked: () => false,
+      loadGeneration: 1, automaticRollRevision: 0, ROLL_MONOCHROME, Promise,
+      isCurrentLoad: () => true, getCurrentQueueItem: () => item, importFilmTypeActive: () => true,
+      importFilmTypeTarget: () => ({ filmType: 'color', confidence: 'medium', reason: 'roll' }), sanitizeFilmTypeOverride,
+      applyFilmTypeOverride: settings => settings,
+      scheduleImportFilmTypeUpdate: (_record, ms) => calls.push(`schedule ${ms}`),
+      setTimeout: (_fn, ms) => calls.push(`retry ${ms}`), clearTimeout() {},
+      persistCurrentFileSettings: () => { calls.push('persist'); return !failed; },
+      retypeImportItem: () => calls.push('retype'), pushUndo: label => calls.push(`undo ${label}`),
+      restoreSettings: () => calls.push('restore'), processNegative: async () => { calls.push('convert'); },
+      invalidateSilverCoreCache() {}, usesSilverCoreConversion: () => false, schedulePreviewUpdate() {}, updateFileListUI() {},
+      updateRollAnalysisUI() {}, scheduleProjectRecovery() {}, showToast() {}, getInterpolatedText: () => ''
+    };
+    const context = vm.createContext(target);
+    vm.runInContext([name, 'studioBackgroundReady'].map(functionSource).join('\n'), context);
+    assert.equal(context.studioBackgroundReady(), true, `${status}: background work may run`);
+    if (name === 'flipImportPhoto') await context.flipImportPhoto(record);
+    else context.applyImportPositives(record);
+    return calls;
+  };
+  assert.deepEqual(await run('flipImportPhoto', 'failed'), ['schedule 250'], 'the flip waits beside a failed stage 2');
+  assert.deepEqual(await run('flipImportPhoto', 'installed'), ['persist', 'retype', 'restore', 'convert'], 'and runs on the exact photo');
+  assert.deepEqual(await run('applyImportPositives', 'failed'), ['retry 250'], '"These are positives" waits too');
+  assert.deepEqual(await run('applyImportPositives', 'installed'), ['persist', 'undo rollFilmType', 'restore']);
 }
 
 

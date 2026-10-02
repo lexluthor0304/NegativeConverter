@@ -31,7 +31,14 @@
 //   rules: display-resolution conversions, a full-resolution render only for
 //   exports) and is over the band pool's 4 MP (the export's conversion
 //   bands), the stand-in (1.3 MP) is neither; for the settle and an export
-//   during stage 2.
+//   during stage 2;
+// - a failed stage 2 holds no background work: with three photos the other
+//   two get their thumbnails while the open one stays provisional, nothing of
+//   its stand-in is persisted, and an export then decodes again (#255 review
+//   R2-033).
+//
+// TWO_STAGE_SCENES (comma-separated: settle, during, crop, failure, leave,
+// roll, failure-lanes) runs only those scenes.
 //
 // Opt-in, real files (never in the repo): TWO_STAGE_PARITY_FILES=/abs/a.DNG:/abs/b.dng
 // runs the same scenarios for each file, with the second generated DNG as
@@ -100,6 +107,19 @@ const CAPTURE = `(() => {
     const strips = tags[273].map((offset, k) => u8.subarray(offset, offset + tags[279][k]));
     return { width: tags[256][0], height: tags[257][0], bits: tags[258], photometric: tags[262]?.[0], strips };
   };
+  // Width, height and bit depth as the file states them.
+  window.__twoStageLayout = bytes => {
+    const u8 = new Uint8Array(bytes);
+    if (u8[0] === 0x89 && u8[1] === 0x50) {
+      const view = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+      return { format: 'png', width: view.getUint32(16), height: view.getUint32(20), bits: [u8[24]] };
+    }
+    if (u8[0] === 0x49 && u8[1] === 0x49 && u8[2] === 42) {
+      const tiff = tiffStrips(u8);
+      return { format: 'tiff', width: tiff.width, height: tiff.height, bits: tiff.bits, photometric: tiff.photometric };
+    }
+    return null;
+  };
   window.__twoStageDecoded = async bytes => {
     const u8 = new Uint8Array(bytes);
     if (u8[0] === 0x89 && u8[1] === 0x50) {
@@ -129,7 +149,7 @@ const CAPTURE = `(() => {
     pending.add(href);
     window.__twoStageDownloads.push(fetch(href).then(r => r.arrayBuffer()).then(async bytes => {
       pending.delete(href); revoke(href);
-      return { name, size: bytes.byteLength, sha256: await hex(bytes), decoded: await window.__twoStageDecoded(bytes) };
+      return { name, size: bytes.byteLength, sha256: await hex(bytes), decoded: await window.__twoStageDecoded(bytes), layout: window.__twoStageLayout(bytes) };
     }));
   };
   window.__twoStageBusy = [];
@@ -287,9 +307,12 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
   // against one decode of the same files with the same query `extra`.
   // `formats` are exported after each scenario, `duringFormats` while stage 2
   // is held.
-  const scenarios = async ({ label, a, b, twoStage, extra = '', only = null, formats = FORMATS, duringFormats = formats }) => {
+  const scenarios = async ({ label, a, b, c = null, twoStage, extra = '', only = null, formats = FORMATS, duringFormats = formats }) => {
     const nameA = basename(a), nameB = basename(b);
-    const runs = name => !only || only.includes(name);
+    // TWO_STAGE_SCENES=crop,failure-lanes runs only those scenes (their
+    // references still run).
+    const scenes = (process.env.TWO_STAGE_SCENES || '').split(',').filter(Boolean);
+    const runs = name => (!only || only.includes(name)) && (!scenes.length || scenes.includes(name));
     const one = extra;
     const two = `${twoStage}${extra}`;
     // A photo installed and converted, with its recipe settled.
@@ -512,6 +535,32 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
       sameExports(`${label}: export after Analyze roll during stage 2`, rollTwoStage.exports, rendered, { bytes: false });
       console.log(`ok: ${label}: Analyze roll clicked during stage 2 waits for the full decode, and matches one decode with the same edit`);
     }
+
+    // 7. A failed stage 2 holds no background work (#255 review R2-033). With
+    // three photos the lanes and the automatic roll import go on: the other
+    // two get their thumbnails while the open photo stays provisional, its
+    // stand-in neither persisted nor learned from (no roll forms without it).
+    // An export then decodes again.
+    if (runs('failure-lanes') && c) {
+      const nameC = basename(c);
+      await boot(two);
+      await evaluate('window.__ncTwoStage.failNextFullDecodes(1)');
+      await importFiles([a, b, c]);
+      await waitFor(`${label} lanes: stage 2 failed`, `${ready} && ${filename(nameA)} && ${status}.fullDecode === 'failed'`, 900_000);
+      const othersReady = `[...document.querySelectorAll('.file-list-name')].filter(button => !button.textContent.includes(${JSON.stringify(nameA)}))`
+        + `.every(button => button.dataset.previewState === 'ready')`;
+      await waitFor(`${label} lanes: thumbnails beside the failed stage 2`, othersReady, 120_000);
+      const during = await evaluate(`({ status: ${status}, committed: ${rollCommitted}, tiles: [...document.querySelectorAll('.file-list-name')].map(button => [button.textContent.trim(), button.dataset.previewState]) })`);
+      console.log(`two-stage smoke ${label} lanes after a failed stage 2:`, JSON.stringify({ fullDecode: during.status.fullDecode, pending: during.status.pending, tiles: during.tiles, committed: during.committed }));
+      if (!during.status.pending || !during.status.provisional || during.status.fullDecode !== 'failed') fail(`${label}: the photo left the failed provisional state: ` + JSON.stringify(during.status));
+      if (during.status.automaticDefaults?.[nameA]) fail(`${label}: learned from the stand-in: ` + JSON.stringify(during.status.automaticDefaults[nameA]));
+      if (during.committed) fail(`${label}: a roll was analysed beside the failed stage 2 with ${nameB} and ${nameC} alone`);
+      // An export decodes again and is the full decode's 16-bit image.
+      const exported = await exportAs(['tiff', 16], `${label} lanes: export after the failure`);
+      if (!(await evaluate(exact))) fail(`${label}: the export did not install the full decode`);
+      if (exported.layout?.width * 2 <= reference.base.width || exported.layout?.bits?.some(bits => bits !== 16)) fail(`${label}: the export after the failure is not the full 16-bit image: ` + JSON.stringify(exported.layout));
+      console.log(`ok: ${label}: a failed stage 2 lets the lanes and the roll import go on without persisting or sampling its stand-in`);
+    }
   };
 
   try {
@@ -524,7 +573,11 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
       return path;
     });
     const twoStage = '&twoStageMinMp=1&twoStageMode=sequential';
-    await scenarios({ label: 'synthetic', a: files[0], b: files[1], twoStage });
+    // A third photo for the lanes beside a failed stage 2.
+    const third = join(dir, 'two-stage-c.dng');
+    writeSyntheticDng(third, { width: size.width, height: size.height, seed: 17, kind: 'color' },
+      previewSizes(size).map(preview => ({ ...preview, jpeg: stubJpeg(preview.width, preview.height) })));
+    await scenarios({ label: 'synthetic', a: files[0], b: files[1], c: third, twoStage });
     // The paths 60 MP files take (#255 review R2-032): the full decode is
     // large (a separate preview source) and banded on export; the stand-in
     // is neither.

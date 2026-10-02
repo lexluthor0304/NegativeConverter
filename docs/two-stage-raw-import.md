@@ -182,7 +182,7 @@ the stand-in:
 | Export All, ZIP export, contact sheet, settings sync, roll reference, Save settings | wait before reading the current photo's recipe |
 | Analyze roll, Auto Frame and Auto Frame Selected, Apply film type to roll, Save Project | wait with "Preparing full resolution…" before they persist the current photo's recipe (`persistCurrentFileSettings` refuses in the window) and read it back or detect its frame |
 | AI brush, dust brush, "Use as flat field", and "Apply flat field to selected" (and "Find blank frame") when a photo without settings gets defaults measured on the open frame (`flatFieldDefaultsImage`) | wait with "Preparing full resolution…" |
-| automatic roll analysis, "These are positives", lanes, prefetch | `studioBackgroundReady` / `foregroundBusyForBackground` wait |
+| automatic roll analysis, "These are positives", lanes, prefetch | `studioBackgroundReady` / `foregroundBusyForBackground` wait while stage 2 runs or settles (after a failure, see below) |
 | photo sessions, roll samples | refuse the stand-in (`rememberPhotoSession`, `rememberPhotoBase`, `canReuseLoadedRollSource`) |
 
 Once an exact consumer is waiting, the swap no longer waits for input to go
@@ -196,6 +196,16 @@ quiet.
   fails that consumer. It never falls back to the stand-in. A concurrent
   stage 2 can fail while the stand-in still decodes: its record keeps the
   failure, and the toast comes when the stand-in is installed.
+  A failed stage 2 holds no background work (`studioBackgroundReady`, as
+  `foregroundInteractionBusy`): the lanes and the automatic roll import go
+  on beside the stand-in until an exact consumer decodes again, which they
+  then wait for. The roll import never persists or samples the stand-in
+  (`persistCurrentFileSettings`, `canReuseLoadedRollSource`), and its
+  film-type flip and "These are positives" wait for the exact photo. It
+  analyses the other frames without the open photo: a roll formed meanwhile
+  leaves it out, as a frame whose decode failed; where fewer than three
+  others share its roll none forms meanwhile, and it is analysed with them
+  once exact. The prefetch stays off while the open photo is provisional.
 - **Abort**: the record's controller follows the activation (#243). A switch
   disposes stage 2's LibRaw and post-decode workers in the same task
   (`abandonFullDecode`).
@@ -256,7 +266,11 @@ quiet.
   photos' defaults on the full decode. Each ends as on one decode. Each
   window case has a control without the fix. The admission that stage 2's
   release runs reads a ledger (a real `createMemoryBudget`) that counts the
-  full base.
+  full base. After a failed stage 2 background work goes on (old and new
+  `studioBackgroundReady` agree on every other state), the real automatic
+  roll import runs without persisting or sampling the stand-in and ends as
+  without the failure, and the roll's film-type changes to the open photo
+  wait.
 - `restartRender.test.mjs`: the provisional pass holds its side effects back;
   switch-back to a photo left in the window decides as its pass began.
 - `processFileWithSettings.parity.test.mjs`: Export All of a photo left in
@@ -291,7 +305,9 @@ quiet.
   counts as large (the >16 MP rules: display-resolution conversions, a
   full-resolution render only for exports) and its exports convert on the
   band pool (over 4 MP), while its stand-in (1.3 MP) is neither; the page's
-  threshold and the band pool's use are checked.
+  threshold and the band pool's use are checked. With three photos and the
+  open one's stage 2 failed, the other two get their thumbnails while it
+  stays provisional, and no roll is analysed from its stand-in.
 
 ## Verification on real files (not in the repository)
 
