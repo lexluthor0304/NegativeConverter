@@ -19,6 +19,9 @@
 // the same decode, before any bytes are handed over, and the page stops
 // asking for threads. Both builds decode to the same pixels, so this changes
 // only the speed.
+//
+// Every instance's worker is watched (`watchLibRawWorker`): one that fails
+// fails the decode at once instead of leaving it to the loader's timeout.
 import LibRaw from 'libraw-wasm';
 import { isCrossOriginIsolated, sharedMemoryAvailable } from './crossOriginIsolation.js';
 
@@ -79,7 +82,7 @@ export function createLibRaw({ background = false, LibRawClass = LibRaw, env = g
   // Threads need shared memory, not only the isolation flag: macOS WKWebView
   // reports crossOriginIsolated without a SharedArrayBuffer constructor.
   const isolated = sharedMemoryAvailable(env);
-  if (!support || !isolated || threadedStartFailed) return { raw: new LibRawClass(), threads: 1, threaded: false };
+  if (!support || !isolated || threadedStartFailed) return { raw: watchLibRawWorker(new LibRawClass()), threads: 1, threaded: false };
   const threads = planLibRawThreads({
     isolated, background, maxThreads: support.maxThreads,
     hardwareConcurrency: env?.navigator?.hardwareConcurrency
@@ -93,7 +96,7 @@ export function createLibRaw({ background = false, LibRawClass = LibRaw, env = g
 // posted, so the bytes `open()` transfers are still here when the instance
 // fails to start, and the single-threaded build decodes them instead.
 function threadedLibRaw(LibRawClass, threads, startTimeoutMs) {
-  let current = new LibRawClass({ threads });
+  let current = watchLibRawWorker(new LibRawClass({ threads }));
   let started = null;
   let disposed = false;
   const decoder = {
@@ -127,7 +130,7 @@ function threadedLibRaw(LibRawClass, threads, startTimeoutMs) {
         threadedStartFailed = true;
         console.warn('[RAW] the threaded LibRaw build did not start; decoding with the single-threaded build:', err?.message || err);
         disposeInstance(current);
-        current = new LibRawClass();
+        current = watchLibRawWorker(new LibRawClass());
         decoder.threads = 1;
         decoder.threaded = false;
       } finally {
@@ -152,6 +155,60 @@ function disposeInstance(raw) {
     if (typeof raw?.dispose === 'function') raw.dispose();
     else raw?.worker?.terminate?.();
   } catch { /* gone */ }
+}
+
+const LIBRAW_CALLS = ['open', 'metadata', 'imageData', 'rawImageData', 'thumbnailData', 'runtimeInfo'];
+
+/**
+ * libraw-wasm's instance behind its own interface, with its worker watched
+ * (#229 review R2-046). A worker that fails fires 'error' and never answers:
+ * its script did not load (an isolated page refuses a worker script that a
+ * browser cached before the site sent COEP) or an error escaped it.
+ * libraw-wasm 1.6.0 does not listen, so each call would wait out the
+ * loader's timeout (30 s for `open()`). Here the instance is disposed at once
+ * and every pending and later call rejects with the loader's timeout code,
+ * so rawFileLoader.js takes its timeout path (the embedded JPEG) without the
+ * wait. `dispose()` (an abort) rejects as before, with "LibRaw disposed".
+ * An instance without a worker to watch is returned as it is.
+ */
+export function watchLibRawWorker(raw) {
+  const worker = raw?.worker;
+  if (typeof worker?.addEventListener !== 'function') return raw;
+  let failure = null;
+  const pending = new Set();
+  const onError = (event) => {
+    if (failure) return;
+    failure = new Error(`LibRaw's worker failed: ${event?.message || 'its script did not load'}`);
+    failure.code = 'RAW_DECODE_TIMEOUT';
+    console.warn('[RAW]', failure.message);
+    worker.removeEventListener('error', onError);
+    for (const entry of pending) entry.reject(failure);
+    pending.clear();
+    disposeInstance(raw);
+  };
+  worker.addEventListener('error', onError);
+  const watched = {
+    get worker() { return raw.worker; },
+    dispose() {
+      worker.removeEventListener('error', onError);
+      disposeInstance(raw);
+    }
+  };
+  for (const fn of LIBRAW_CALLS) {
+    if (typeof raw[fn] !== 'function') continue;
+    watched[fn] = (...args) => {
+      if (failure) return Promise.reject(failure);
+      return new Promise((resolve, reject) => {
+        const entry = { reject };
+        pending.add(entry);
+        Promise.resolve(raw[fn](...args)).then(
+          (value) => { pending.delete(entry); resolve(value); },
+          (error) => { pending.delete(entry); reject(error); }
+        );
+      });
+    };
+  }
+  return watched;
 }
 
 // The script URL LibRaw starts its worker from: constructed once with the
@@ -209,7 +266,11 @@ export async function probeLibRawWorker({ pageIsolated = isCrossOriginIsolated()
     }
     const url = captureLibRawWorkerUrl(LibRawClass);
     if (!url) return { error: 'no worker URL' };
-    const response = await fetchImpl(url, { cache: 'no-store' });
+    // The response the worker load gets, from the HTTP cache where it has
+    // one: a copy cached before the site sent COEP is refused by the
+    // isolated page, while a fresh fetch would report it isolated (#229
+    // review R2-046).
+    const response = await fetchImpl(url, { cache: 'default' });
     const coep = String(response.headers.get('cross-origin-embedder-policy') || '').trim().toLowerCase();
     try { await response.body?.cancel?.(); } catch { /* already read */ }
     const embedderPolicy = coep === 'require-corp' || coep === 'credentialless';

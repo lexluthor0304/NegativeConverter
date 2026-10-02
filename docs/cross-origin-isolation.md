@@ -145,6 +145,14 @@ it (#229 review R2-041, R2-046).
   decode), changed in this release (#264's isolation probe), so returning
   browsers fetch it whole, with COEP. The pages change with every build
   (their script names).
+- **If a LibRaw worker fails anyway** (its script refused, or an error
+  escaping it), the decode fails at once instead of after the 30 s open
+  timeout: `librawRuntime.js` watches the worker's `error` event, disposes
+  the instance and rejects its calls with the loader's timeout code, so the
+  embedded JPEG opens without the wait (`docs/raw-decoding.md`). The
+  isolation report's LibRaw entry fetches the worker script through the HTTP
+  cache, as the worker load does, so a cached copy without COEP reads as not
+  isolated (`cache: 'no-store'` reported it isolated).
 
 ## Per platform
 

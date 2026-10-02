@@ -30,7 +30,11 @@ loadRawFile ── createRawDecoder (nativeRawDecoder.js)
 
 After LibRaw, whichever ran: no image (the HE-compressed NEFs) or a decode
 timeout gives the embedded JPEG (8 bits), and un-demosaiced output the same;
-a post-decode worker that dies holding the pixels too.
+a post-decode worker that dies holding the pixels too. A libraw-wasm worker
+that fails (its script refused, or an error escaping it) takes the timeout's
+path at once: `librawRuntime.js` watches every instance's worker, disposes a
+failed one and rejects its calls with the loader's timeout code, where
+libraw-wasm 1.6.0 left `open()` to wait out its 30 s (#229 review R2-046).
 
 One flag caps a background lane on either decoder: `loadFileToImageData`'s
 `priority: 'background'` (roll analysis, Export All, warm switching). The
