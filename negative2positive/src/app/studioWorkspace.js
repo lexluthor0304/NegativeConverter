@@ -404,7 +404,7 @@ export function createPhotoSortControl({ select, onSortFiles }) {
   };
 }
 
-export function mountStudioWorkspace({ getState, getLanguage, getText, isExportLocked, onTabSelect = () => {}, onStyle, onReset, onResetAll, onRestart, onNewSession, onSync, onSortFiles, onRetry, onConfirm, onExportBorder, onAutoCrop, onRestoreFrame, onConfirmAnalysis, onMergeShots, onLoupe, onSaveProject, onOpenProject, onRestoreProject, onExpiredMode, onColorCorrect }) {
+export function mountStudioWorkspace({ getState, getLanguage, getText, isExportLocked, isCropAreaDetecting = () => false, onTabSelect = () => {}, onStyle, onReset, onResetAll, onRestart, onNewSession, onSync, onSortFiles, onRetry, onConfirm, onExportBorder, onAutoCrop, onRestoreFrame, onConfirmAnalysis, onMergeShots, onLoupe, onSaveProject, onOpenProject, onRestoreProject, onExpiredMode, onColorCorrect }) {
   const $ = id => document.getElementById(id);
   const t = key => (studioText[getLanguage()] || studioText.en)[key];
   const move = (id, target) => target.append($(id));
@@ -919,13 +919,19 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
     const frameMeta = state.autoFrame.lastDiagnostics;
     // The provisional positive is shown while the frame detection finishes.
     const detecting = body.dataset.studioDetecting;
+    // So is the one Apply Crop converts with the crop-area detection's miss
+    // outcome (#245): until that detection ends, the outcome is not a
+    // request to confirm the image area (R1-148).
+    const areaDetecting = isCropAreaDetecting();
+    const frameDetecting = detecting === 'frame' || areaDetecting;
+    const areaReview = Boolean(frameMeta?.analysisNeedsReview) && !areaDetecting;
     // A photo restored without its original (#249) rebuilds it for a tool.
     const preparing = body.dataset.studioPreparing === 'original';
     set(node.studioConfirmAnalysis, 'disabled', !loaded || locked || state.cropping || busy);
-    set(node.studioAnalysisStatus, 'textContent', t(frameMeta?.analysisNeedsReview ? 'analysisReview' : 'analysisHint'));
-    set(node.studioFrameNotice, 'hidden', Boolean(switching) || !ready || (!preparing && detecting !== 'frame' && !frameMeta?.importAuto) || Boolean(state.samplingMode));
-    set(node.studioFrameNotice, 'textContent', t(preparing ? 'preparingOriginal' : detecting === 'frame' ? 'detectingFrame' : frameMeta?.analysisNeedsReview ? 'analysisReview' : frameMeta?.appliedMode === 'crop' ? 'frameApplied' : frameMeta?.frameIncomplete ? 'frameIncomplete' : frameMeta?.imageArea ? 'frameAnalysis' : 'frameReview'));
-    set(node.studioFrameNotice, 'dataset.status', preparing ? 'preparing' : detecting === 'frame' ? 'detecting' : frameMeta?.appliedMode || '');
+    set(node.studioAnalysisStatus, 'textContent', t(areaReview ? 'analysisReview' : 'analysisHint'));
+    set(node.studioFrameNotice, 'hidden', Boolean(switching) || !ready || (!preparing && !frameDetecting && !frameMeta?.importAuto) || Boolean(state.samplingMode));
+    set(node.studioFrameNotice, 'textContent', t(preparing ? 'preparingOriginal' : frameDetecting ? 'detectingFrame' : areaReview ? 'analysisReview' : frameMeta?.appliedMode === 'crop' ? 'frameApplied' : frameMeta?.frameIncomplete ? 'frameIncomplete' : frameMeta?.imageArea ? 'frameAnalysis' : 'frameReview'));
+    set(node.studioFrameNotice, 'dataset.status', preparing ? 'preparing' : frameDetecting ? 'detecting' : frameMeta?.appliedMode || '');
     set(node.studioFrameNotice, 'disabled', Boolean(state.cropping || busy));
     set(panel, 'inert', busy);
     // The toolbar (rotate, mirror, crop) and the brushes and samplers on the

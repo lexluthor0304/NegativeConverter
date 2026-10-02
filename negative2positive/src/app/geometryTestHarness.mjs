@@ -95,7 +95,7 @@ const FUNCTIONS = [
   // Apply Crop's pending crop-area detection (#245).
   'getCropDraftSize', 'hasPendingCropDetection', 'noteConversionStarted', 'cancelCropDetection', 'sameCropRect',
   'isCurrentCropDetection', 'settlePendingCropDetection', 'startCropDetection', 'detectCropArea',
-  'applyCropDetectionOutcome', 'appliedCropDiagnostics',
+  'applyCropDetectionOutcome', 'appliedCropDiagnostics', 'cropAreaDetecting',
   // Display-resolution sessions (#249).
   ...DISPLAY_SESSION_HELPERS, 'applyGeometryWithoutBase', 'decodeRouteOf', 'describeBase', 'analysisAreaOf',
   'liveDisplayProxyKey', 'conversionTargetFor', 'autoWbSampleFor', 'displaySessionEligible', 'coldHistory', 'displayStandIns',

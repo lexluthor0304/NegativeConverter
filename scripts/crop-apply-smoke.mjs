@@ -8,6 +8,9 @@
 //   before the geometry build or the crop-area detection starts;
 // - the detection runs in the auto-frame worker, a miss converts once and a
 //   hit at most twice, and the page never boots its own OpenCV;
+// - while the detection runs, the frame notice reports it and nothing asks
+//   to confirm the image area; that request comes with a miss (forced here
+//   by a uniform region), not with a hit;
 // - one-click colour correction measures the fog surface in the worker too;
 //   with the worker forced to fail it falls back to the page's OpenCV with
 //   the same analysis and one warning;
@@ -34,6 +37,27 @@ const IMPORT_FIXTURE = `
     const input = document.getElementById('fileInput'); input.files = dt.files;
     input.dispatchEvent(new Event('change', { bubbles: true }));`;
 const READY = `document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy && !window.__ncGeometry.pending()`;
+// What Studio says about the image area: the frame notice, the composition
+// pane's status and whether the filmstrip flags the frame for review.
+const AREA_STATE = `(async () => {
+  const { studioText } = await import('/src/app/studioWorkspace.js');
+  const { i18n } = await import('/src/app/i18n.js');
+  const key = text => Object.keys(studioText.en).find(name => studioText.en[name] === text) || text;
+  const notice = document.getElementById('studioFrameNotice');
+  return { notice: notice.hidden ? null : key(notice.textContent), status: notice.dataset.status || '',
+    analysis: key(document.getElementById('studioAnalysisStatus').textContent),
+    flagged: [...document.querySelectorAll('.file-list-badge.needs-review')].some(badge => badge.title.includes(i18n.en.reviewFrame)) };
+})()`;
+// Renders the filmstrip now (a sort round trip), as an edit or a thumbnail
+// would at any time.
+const RENDER_FILMSTRIP = `(() => {
+  const select = document.getElementById('studioPhotoSort'), original = select.value;
+  for (const value of [original === 'name-asc' ? 'name-desc' : 'name-asc', original]) {
+    select.value = value;
+    select.dispatchEvent(new Event('change'));
+  }
+  return !select.disabled;
+})()`;
 
 export async function runCropApplySmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port }) {
   await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en` });
@@ -113,6 +137,21 @@ export async function runCropApplySmoke({ send, evaluate, waitFor, wait, fail, i
   await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: corner.x, y: corner.y, button: 'left', clickCount: 1 });
   await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: corner.toX, y: corner.toY, button: 'left', buttons: 1 });
   await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: corner.toX, y: corner.toY, button: 'left', clickCount: 1 });
+  // The detection request waits in the page until the provisional positive
+  // has been checked, then goes out over a uniform region, which the
+  // detector misses.
+  await evaluate(`(() => {
+    const probe = window.__cropApplyProbe = { held: [] };
+    const post = Worker.prototype.postMessage;
+    Worker.prototype.postMessage = function (message, transfer) {
+      if (probe.held && message && message.type === 'detect-crop-area') {
+        probe.held.push(() => { message.region.data.fill(128); post.call(this, message, transfer); });
+        return;
+      }
+      return post.apply(this, arguments);
+    };
+    probe.release = () => { const held = probe.held; probe.held = null; for (const deliver of held) deliver(); };
+  })()`);
   const firstFrame = await evaluate(`(async () => {
     const before = { started: window.__ncAnalysis.detection.started, jobs: window.__ncGeometry.pool.jobs, conversions: window.__ncAnalysis.detection.conversions };
     window.__cropApplyBefore = before;
@@ -130,6 +169,21 @@ export async function runCropApplySmoke({ send, evaluate, waitFor, wait, fail, i
     fail('the Apply overlay was not opaque in the first frame, before any work: ' + JSON.stringify(firstFrame));
   }
   await waitFor('crop applied and converted', `${ready} && !document.getElementById('canvasContainer').classList.contains('crop-mode') && !document.querySelector('.loading-overlay.visible')`, 120_000);
+  // The provisional positive, converted with the miss outcome, is on screen
+  // while the detection waits: the frame notice reports the detection, and
+  // neither the composition pane nor a filmstrip rendered meanwhile asks to
+  // confirm the image area (R1-148).
+  if (!await waitFor('provisional positive, detection held', `window.__ncAnalysis.pendingDetection() && window.__cropApplyProbe.held?.length === 1`, 60_000, { soft: true })) {
+    fail('Apply did not leave its detection pending behind the provisional positive: ' + JSON.stringify(await evaluate(`({ pending: window.__ncAnalysis.pendingDetection(), held: window.__cropApplyProbe.held?.length })`)));
+  }
+  if (!await evaluate(RENDER_FILMSTRIP)) fail('the photo sort control is disabled after Apply');
+  await wait(100);
+  const detecting = { ...await evaluate(AREA_STATE), provisional: await evaluate(`window.__ncAnalysis.diagnostics()`) };
+  if (!detecting.provisional?.analysisNeedsReview || detecting.notice !== 'detectingFrame' || detecting.status !== 'detecting'
+    || detecting.analysis !== 'analysisHint' || detecting.flagged) {
+    fail('while the crop-area detection runs, Studio asks to confirm the image area: ' + JSON.stringify(detecting));
+  }
+  await evaluate(`window.__cropApplyProbe.release()`);
   const applied = await evaluate(`window.__ncAnalysis.settle().then(() => {
     const before = window.__cropApplyBefore, d = window.__ncAnalysis.detection;
     return { started: d.started - before.started, conversions: d.conversions - before.conversions, hits: d.hits, misses: d.misses, reconversions: d.reconversions,
@@ -140,7 +194,12 @@ export async function runCropApplySmoke({ send, evaluate, waitFor, wait, fail, i
   if (applied.hits && (applied.conversions > 2 || applied.diagnostics?.method !== 'manual-image-window' || applied.diagnostics?.analysisNeedsReview)) fail('a hit must complete the diagnostics in at most two conversions: ' + JSON.stringify(applied));
   if (applied.misses && !applied.diagnostics?.analysisNeedsReview) fail('a miss must keep analysisNeedsReview: ' + JSON.stringify(applied));
   if (applied.cv !== 'undefined' || applied.script || applied.tasks.fallback) fail('Apply Crop booted OpenCV in the page: ' + JSON.stringify(applied));
+  const missed = await evaluate(AREA_STATE);
+  if (!applied.misses || missed.notice !== 'analysisReview' || missed.status === 'detecting' || missed.analysis !== 'analysisReview' || !missed.flagged) {
+    fail('the forced miss did not ask to confirm the image area: ' + JSON.stringify({ missed, applied }));
+  }
   console.log(`ok: Apply overlay opaque in the first frame (${firstFrame.ms.toFixed(0)} ms), detection in the worker (${applied.hits ? 'hit' : 'miss'}, ${applied.conversions} conversion(s)), no OpenCV in the page`);
+  console.log('ok: while the detection ran the frame notice read "detecting" and nothing asked to confirm the image area; the forced miss then did (notice, composition pane, filmstrip)');
 
   // ---- One-click colour correction in the worker, then the page fallback ----
   const correct = async (label) => {
@@ -260,6 +319,10 @@ async function runEditWhileDetecting({ send, evaluate, waitFor, wait, fail, inst
       }
       const provisional = await evaluate(view);
       if (!provisional.diagnostics?.analysisNeedsReview) fail(label + ': the provisional conversion did not use the miss outcome: ' + JSON.stringify(provisional));
+      const pendingArea = await evaluate(AREA_STATE);
+      if (pendingArea.notice !== 'detectingFrame' || pendingArea.analysis !== 'analysisHint' || pendingArea.flagged) {
+        fail(label + ': while the crop-area detection runs, Studio asks to confirm the image area: ' + JSON.stringify(pendingArea));
+      }
       await slider(['pointerdown', 'input'], 12);
       await evaluate(`window.__cropEditProbe.release()`);
       await evaluate(`window.__ncAnalysis.settle()`);
@@ -271,6 +334,11 @@ async function runEditWhileDetecting({ send, evaluate, waitFor, wait, fail, inst
     }
     const edited = await evaluate(view);
     if (edited.diagnostics?.method !== 'manual-image-window' || edited.diagnostics?.analysisNeedsReview) fail(label + ': the detection did not hit: ' + JSON.stringify(edited));
+    // A hit asks for nothing (R1-148).
+    const hitArea = await evaluate(AREA_STATE);
+    if (['detectingFrame', 'analysisReview'].includes(hitArea.notice) || hitArea.status === 'detecting' || hitArea.analysis !== 'analysisHint' || hitArea.flagged) {
+      fail(label + ': after the hit, Studio still reports the detection or asks to confirm the image area: ' + JSON.stringify(hitArea));
+    }
     const editedFiles = await exportBoth(label);
     const undoState = `({ magenta: document.getElementById('magenta').value, undoDisabled: document.getElementById('undoBtn').disabled,
       busy: document.body.dataset.studioBusy || null, ready: ${READY}, converting: window.__ncAnalysis.converting(),

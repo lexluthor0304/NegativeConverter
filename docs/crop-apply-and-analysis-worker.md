@@ -119,6 +119,18 @@ worker meanwhile (`startCropDetection`):
   Its auto white balance is measured on that second conversion, so a
   conversion setting changed before it lands (core exposure, a film preset)
   is part of what it measures; a Step-3 edit (C/M/Y, curves, gains) is not.
+- Until the detection ends, that miss outcome is no request to confirm the
+  image area (`cropAreaDetecting()`, a current pending detection): Studio's
+  frame notice reads `detectingFrame` with the `detecting` status, as during
+  an import's detection tail, the composition pane shows its hint, and the
+  filmstrip does not flag the photo for review (`frameNeedsReview(...,
+  { areaPending })`). The notice is re-read when the detection starts and
+  ends, and the filmstrip is rendered once when it ends, so a miss then asks
+  for the image area and a hit does not. Unlike the import tail it sets no
+  `studioDetecting`: editing, undo and the strip stay unlocked. The
+  crop-apply smoke holds the request, checks the notice, the pane and a
+  filmstrip rendered meanwhile, then forces a miss (a uniform region) and
+  checks that all three ask for the image area; after a hit none does.
 
 ## The page's OpenCV analyses in the warm worker
 

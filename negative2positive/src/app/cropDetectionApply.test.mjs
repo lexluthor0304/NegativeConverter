@@ -22,6 +22,8 @@
 //   before Apply, are left alone (R1-072, R1-134).
 // - Applying, editing at once and exporting gives what applying, waiting for
 //   the detection, editing and exporting gives (synthetic parity).
+// - Until the detection ends, Studio reads it as running (the frame notice,
+//   the filmstrip's review flag); it re-reads both when it ends (R1-148).
 
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
@@ -139,6 +141,48 @@ const hitPoints = input => {
   assert.equal(t.conversions.length, 1, 'a miss converts once');
   assert.deepEqual(t.h.state.autoFrame.lastDiagnostics, expected, 'a miss leaves the meta as installed');
   assert.equal(t.h.target.cropDetectionStats.misses, 1);
+}
+
+// ---- R1-148: until the detection ends, its miss outcome asks for nothing ----
+// Studio re-reads the frame notice when the detection starts and ends, and
+// renders the filmstrip once when it ends by itself (a miss then flags the
+// photo, a hit does not); Apply marks the photo dirty, which renders the
+// filmstrip in a roll, once the detection is pending.
+for (const outcome of ['miss', 'hit', 'undo']) {
+  const t = setup({ points: outcome === 'miss' ? null : hitPoints });
+  let syncs = 0, renders = 0;
+  const pendingWhenDirty = [];
+  Object.assign(t.h.target, {
+    studioWorkspace: { sync() { syncs++; }, text: key => key },
+    updateFileListUI: () => { renders++; },
+    markCurrentFileDirty: () => { pendingWhenDirty.push(t.c.cropAreaDetecting()); }
+  });
+  t.openDraft();
+  const applying = t.c.applyCropHandler();
+  await t.finishConversion();
+  await applying;
+  assert.deepEqual(pendingWhenDirty, [true], outcome + ': the photo is marked dirty once the detection is pending');
+  assert.equal(t.c.cropAreaDetecting(), true, outcome + ': the provisional positive is on screen while the detection runs');
+  assert.equal(t.h.state.autoFrame.lastDiagnostics.analysisNeedsReview, true);
+  const before = { syncs, renders };
+  if (outcome === 'undo') {
+    for (let i = 0; i < 50 && !t.detection.resolve; i++) await tick();
+    t.c.performUndo();
+    await settle();
+    assert.ok(syncs > before.syncs, 'undo: Studio re-reads the frame notice');
+    // The restore renders on its own; the late answer of the detection the
+    // undo ended adds nothing.
+    before.renders = renders;
+    await t.answer();
+  } else {
+    await t.answer();
+    if (outcome === 'hit') await t.finishConversion();
+    await t.c.settlePendingCropDetection();
+  }
+  assert.equal(t.c.cropAreaDetecting(), false, outcome + ': the detection has ended');
+  assert.ok(syncs > before.syncs, outcome + ': Studio re-reads the frame notice');
+  assert.equal(renders - before.renders, outcome === 'undo' ? 0 : 1, outcome + ': one filmstrip render when the detection ends by itself, none when it is ended');
+  assert.equal(t.h.state.autoFrame.lastDiagnostics?.analysisNeedsReview ?? null, outcome === 'hit' ? false : outcome === 'miss' ? true : null);
 }
 
 // ---- A hit after the conversion started: converted again, never mid-conversion ----

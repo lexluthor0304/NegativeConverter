@@ -227,7 +227,15 @@ assert.match(source, /set\(panel, 'inert', busy\);/);
 // container keeps zoom, pan and drops).
 assert.match(source, /set\(panel, 'inert', busy\);\n(?:\s+\/\/.*\n)*\s+set\(node\.previewToolbar, 'inert', busy\);\n\s+set\(node\.canvasTransformWrapper, 'inert', busy\);/);
 assert.match(source, /const STUDIO_SYNC_IDS = \[[^\]]*'previewToolbar', 'canvasTransformWrapper',/);
-assert.match(source, /t\(preparing \? 'preparingOriginal' : detecting === 'frame' \? 'detectingFrame' :/, 'the frame notice reports the running detection, or the original being prepared (#249)');
+assert.match(source, /t\(preparing \? 'preparingOriginal' : frameDetecting \? 'detectingFrame' : areaReview \? 'analysisReview' :/, 'the frame notice reports the running detection, or the original being prepared (#249)');
+// R1-148: Apply Crop's pending crop-area detection is a running detection,
+// and the miss outcome its provisional positive was converted with asks for
+// no confirmation, in the notice or the composition pane, until it ends.
+assert.match(source, /const areaDetecting = isCropAreaDetecting\(\);\n\s+const frameDetecting = detecting === 'frame' \|\| areaDetecting;\n\s+const areaReview = Boolean\(frameMeta\?\.analysisNeedsReview\) && !areaDetecting;/);
+assert.match(source, /set\(node\.studioAnalysisStatus, 'textContent', t\(areaReview \? 'analysisReview' : 'analysisHint'\)\);/);
+assert.match(source, /set\(node\.studioFrameNotice, 'dataset\.status', preparing \? 'preparing' : frameDetecting \? 'detecting' :/);
+assert.match(mainSource, /isCropAreaDetecting: cropAreaDetecting,/);
+assert.match(mainSource, /frameNeedsReview\(item, state, \{ areaPending: cropAreaDetecting\(\) \}\)/);
 console.log('studioWorkspace: shared localized sort select, callback ownership and navigation locks passed');
 
 // #261: every sync() in one synchronous burst is one flush at the next

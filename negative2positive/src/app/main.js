@@ -17743,6 +17743,14 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         && state.autoFrame.lastDiagnostics === detection.meta && detection.isFrame(state);
     }
 
+    // Whether the detection is still deciding the image area of the frame on
+    // screen. Until it ends, the miss outcome the provisional positive was
+    // converted with is no request to confirm the area: Studio's frame notice
+    // reads "detecting" and the photo is not flagged for review (R1-148).
+    function cropAreaDetecting() {
+      return Boolean(cropDetection) && isCurrentCropDetection(cropDetection);
+    }
+
     // Resolves once no crop-area detection is pending, a hit's conversion
     // included.
     async function settlePendingCropDetection() {
@@ -17773,9 +17781,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       detection.finish = () => {
         if (cropDetection === detection) cropDetection = null;
         resolveSettled();
+        studioWorkspace?.sync();
       };
       cropDetection = detection;
       cropDetectionStats.started++;
+      studioWorkspace?.sync();
       detection.outcome = detectCropArea(detection, frame, cropRegion, ready).catch(error => {
         console.warn('Crop analysis detection failed; keeping the previous color reference:', error);
         return null;
@@ -17783,7 +17793,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       detection.done = detection.outcome
         .then(points => applyCropDetectionOutcome(detection, points))
         .catch(error => console.error('Crop analysis update failed:', error))
-        .finally(() => detection.finish());
+        .finally(() => {
+          const ended = cropDetection === detection;
+          detection.finish();
+          // A miss now flags the photo for review in the filmstrip; a hit
+          // does not (R1-148).
+          if (ended) updateFileListUI();
+        });
       return detection;
     }
 
@@ -17952,9 +17968,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         resetZoomPan();
         // With the crop in place this reads no pixels.
         setStep2Mode(suggestStep2Mode());
-        markCurrentFileDirty();
         exitCropMode({ restore: false });
         const detection = detect ? startCropDetection({ meta: nextMeta, base, frame, cropRegion, ready }) : null;
+        // After the detection is pending: a filmstrip this renders does not
+        // flag the provisional miss outcome for review (R1-148).
+        markCurrentFileDirty();
 
         await afterGeometry(ready, async isCurrent => {
           // With the rescue on, the conversion waits for the detection, as
@@ -21239,7 +21257,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       updateFileListUI();
       studioWorkspace?.sync();
     }
-    const reviewForItem = item => frameNeedsReview(item, item.file === state.loadedFile ? state : null);
+    const reviewForItem = item => (item.file === state.loadedFile
+      ? frameNeedsReview(item, state, { areaPending: cropAreaDetecting() })
+      : frameNeedsReview(item));
     function updateReviewFilter() {
       const button = document.getElementById('studioReviewFilter');
       const count = state.fileQueue.filter(item => reviewForItem(item).needs).length;
@@ -29400,6 +29420,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         getState: () => state,
         getLanguage: () => currentLang,
         isExportLocked: () => singleExportActive || isDesktopBatchExportLocked(),
+        isCropAreaDetecting: cropAreaDetecting,
         // Opening the Repair tab is the usual intent to repair: load MI-GAN
         // then, so the first stroke rarely waits for it.
         onTabSelect: key => { if (key === 'repair') ensureAiRepairPreload(); syncBrushTools(); },
