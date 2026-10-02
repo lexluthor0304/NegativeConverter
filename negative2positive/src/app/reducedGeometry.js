@@ -75,6 +75,17 @@ export function renderReducedGeometry(base, geometry, { step, fullWidth = base.w
 }
 
 /**
+ * Whether renderReducedGeometry gives exactly the full-resolution chain
+ * followed by the downsample: the strided plan on a full-size base. An
+ * 8-bit source at a non-right angle and a half-size decode are decimated
+ * first instead, so a measurement taken on that tile (the automatic gray
+ * point, the expired rescue) differs from one taken on the old tile.
+ */
+export function reducedGeometryExact(base, geometry, { fullWidth = base.width, fullHeight = base.height } = {}) {
+  return fullWidth === base.width && fullHeight === base.height && Boolean(planGeometry(base, geometry));
+}
+
+/**
  * What a retained tile source depends on besides the recipe's colours: the
  * geometry, the base it was taken from and the analysis area its reference
  * sample covers. A different key means the source no longer shows the frame.

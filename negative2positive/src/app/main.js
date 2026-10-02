@@ -44,7 +44,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     import { detectFrameWithFallback, runImportAnalyses } from './autoFrameExecution.js';
     import { importConversionKey } from './importDetection.js';
     import { createAnalysisSampleStore } from './analysisSampleStore.js';
-    import { reducedTileGeometry, renderReducedGeometry, tileGeometryKey } from './reducedGeometry.js';
+    import { reducedTileGeometry, renderReducedGeometry, reducedGeometryExact, tileGeometryKey } from './reducedGeometry.js';
     import { createThumbnailSourceCache, TILE_ANALYSIS_REFERENCE_PIXELS } from './thumbnailSources.js';
     import { createRollSampleCache } from './rollSampleCache.js';
     import { mountStudioWorkspace } from './studioWorkspace.js';
@@ -20010,8 +20010,15 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // A light-table tile without active lens correction never builds the
       // full-resolution frame (#247 part 1): the post-geometry size is known
       // from the base size, and the working image is taken at the step the
-      // preview downsample would have applied to that frame.
-      const reducedGeometry = Boolean(previewMax) && !options.stage && !lensCorrectionActive(settings);
+      // preview downsample would have applied to that frame. A render without
+      // a recipe prepares one, with the gray point and the expired rescue
+      // measured on its tile, and exports reuse them: where the reduced image
+      // is not exactly the chain's (an 8-bit source at a non-right angle), it
+      // takes the full chain and the downsample, as 1703835 did (#229 review,
+      // R1-081).
+      const tileGeometry = Boolean(previewMax) && !options.stage && !lensCorrectionActive(settings);
+      const reducedGeometry = tileGeometry && (Boolean(savedSettings)
+        || reducedGeometryExact(imageData, geometry, { fullWidth: baseSize.width, fullHeight: baseSize.height }));
       let workingData;
       let fullWorkingShortSide;
       if (reducedGeometry) {
@@ -20075,10 +20082,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const sourceRole = workingData !== imageData && !sharesPlaneBuffers(workingData, imageData) ? 'derived' : 'base';
 
       // Every preview-size render goes through the one tile renderer (#247
-      // 2a). A reduced render's working image is also what a later recipe
-      // change re-renders the tile from (`onTileSource`, 2d).
+      // 2a). A tile's working image (reduced, or the full chain downsampled)
+      // is also what a later recipe change re-renders the tile from
+      // (`onTileSource`, 2d).
       if (previewMax) {
-        const tileSource = reducedGeometry && typeof options.onTileSource === 'function' ? {
+        const tileSource = tileGeometry && typeof options.onTileSource === 'function' ? {
           working: workingData, baseSize, geometryKey: tileGeometryKey(settings, baseSize),
           reference: tileAnalysisReference(settings, imageData)
         } : null;
