@@ -78,7 +78,7 @@ function setup({ strokes = [] } = {}) {
     'cropDustMask', 'repairStrokeMaskFor', 'runDustAiRefresh', 'noteBrushRepairSettled', 'aiRepairReady',
     'dustPassUsesAi', 'settleAiRepairModel', 'aiRepairLoadArgs', 'assertRepairCurrent', 'countAiRepairRun',
     'baseSizeSource'].map(functionSource).join('\n')
-    + '\nlet dustRefreshRepairMask = { strokes: null, source: null, mask: null };', context);
+    + '\nlet dustRefreshRepairMask = null;', context);
   return { context, state, timers, displayed, runs: () => runs };
 }
 

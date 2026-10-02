@@ -2,7 +2,8 @@
 // dust brush brings it back: a dust-brush stroke's refresh loads the model and
 // drains its queue, so a photo with repair strokes settles and a switch keeps
 // its snapshot and history; a model that cannot be loaded drains the queue
-// too. Runs the real functions from main.js.
+// too. The refresh's repair-stroke mask goes with the photo (switch, New
+// session). Runs the real functions from main.js.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
@@ -13,6 +14,7 @@ import { createAiModelLoader } from './aiModelLoading.js';
 import { createPhotoSessionCache } from './photoSessionCache.js';
 import { exactSettingsKey } from './settingsKey.js';
 import { displaySessionStubs, DISPLAY_SESSION_HELPERS } from './displaySessionHarness.mjs';
+import { createHarness, makeBase, settle } from './geometryTestHarness.mjs';
 
 globalThis.ImageData ||= class ImageData {
   constructor(data, width, height) { this.data = data; this.width = width; this.height = height; }
@@ -108,7 +110,7 @@ function settleFixture({ loadFails = false } = {}) {
     'runDustAiRefresh', 'noteBrushRepairSettled', 'aiRepairReady', 'dustPassUsesAi', 'settleAiRepairModel',
     'aiRepairLoadArgs', 'assertRepairCurrent', 'countAiRepairRun', 'noteAiRepairUsed', 'releaseIdleAiRepair',
     'canReleaseIdleAiRepair', 'releaseAiRepairSession', 'performAiRepairModelLoad'].map(functionSource).join('\n')
-    + '\nlet dustRefreshRepairMask = { strokes: null, source: null, mask: null };', context);
+    + '\nlet dustRefreshRepairMask = null;', context);
   const loader = createAiModelLoader(context.performAiRepairModelLoad, context.DEFAULT_MODEL_URL);
   context.loadAiRepairModel = (...args) => { loads.push(JSON.stringify(args)); return loader(...args); };
   context.failLoads = loadFails;
@@ -193,4 +195,64 @@ for (const loadFails of [false, true]) {
   assert.equal(session.undo[0].dustDelta, entry, 'the dust-brush stroke stays undoable');
 }
 
-console.log('AI refresh settle: a released model is loaded by the dust brush and its queue drains (a failed load drains it too), so a switch keeps the settled view and history');
+// ---- 2. The refresh's repair-stroke mask goes with the photo ---------------
+// A real switch (cold to B, then warm back to A, which skips
+// releaseOutgoingPhotoPlanes) and a real New session, in the geometry
+// harness. The mask holds A's clean source and a frame-sized mask.
+{
+  const base = makeBase(64, 48, 3);
+  const h = createHarness(base), c = h.context;
+  c.restoreSettings({ rotationAngle: 0, mirrored: false, cropRegion: { left: 4, top: 4, width: 40, height: 26 } });
+  await h.state.geometryReady;
+  assert.ok(h.state.croppedImageData, 'A is cropped');
+  h.state.currentStep = 3;
+  h.state.processedImageData = h.state.croppedImageData;
+  const itemA = { file: { name: 'a.png' }, settings: null, isDirty: true };
+  const itemB = { file: { name: 'b.png' }, settings: null };
+  Object.assign(h.state, { fileQueue: [itemA, itemB], currentFileIndex: 0, loadedFile: itemA.file });
+  h.target.getCurrentQueueItem = () => h.state.fileQueue[h.state.currentFileIndex];
+  h.target.persistCurrentFileSettings = () => {
+    const item = h.state.fileQueue[h.state.currentFileIndex];
+    item.settings = { rotationAngle: h.state.rotationAngle, mirrored: h.state.mirrored, cropRegion: h.state.cropRegion };
+  };
+  h.target.loadFile = async file => {
+    const other = makeBase(40, 30, 9);
+    Object.assign(h.state, { loadedFile: file, loadedBaseImageData: other, originalImageData: other, croppedImageData: null,
+      cropRegion: null, rotationAngle: 0, mirrored: false, processedImageData: null, currentStep: 1 });
+    return { status: 'loaded' };
+  };
+  const kept = () => ({ strokes: [repairStroke], source: h.state.processedImageData, mask: new Uint8Array(64 * 48) });
+  h.target.dustRefreshRepairMask = kept();
+  await c.switchToFile(1);
+  await settle();
+  assert.equal(h.state.loadedFile, itemB.file);
+  assert.equal(h.target.dustRefreshRepairMask, null, 'a cold switch drops the outgoing photo\'s mask and source');
+  h.state.currentStep = 3;
+  h.state.processedImageData = h.state.originalImageData;
+  h.target.dustRefreshRepairMask = kept();
+  await c.switchToFile(0);
+  await settle();
+  assert.equal(h.state.loadedFile, itemA.file);
+  assert.equal(h.state.loadedBaseImageData, base, 'A came back from its warm session, without a decode');
+  assert.equal(h.state.processedImageData, h.state.croppedImageData);
+  assert.equal(h.target.dustRefreshRepairMask, null, 'so does a warm one');
+
+  // New session: closePhotoSession and its dust reset, for real.
+  Object.assign(h.target, {
+    thumbnailSources: { clear() {} }, watchRollSamples: { clear() {} }, previewRepairWorker: { dispose() {} },
+    composeDisplaySprocketFrame: { clear() {} }, zoomControls: { style: {} }, fileInput: { value: '', click() {} },
+  });
+  h.target.document.getElementById = () => ({ style: {} });
+  vm.runInContext(['closePhotoSession', 'clearDustState'].map(functionSource).join('\n'), c);
+  h.target.dustRefreshRepairMask = kept();
+  c.closePhotoSession();
+  assert.equal(h.state.loadedFile, null, 'the session closed');
+  assert.equal(h.target.dustRefreshRepairMask, null, 'New session drops it');
+  // A new clean source (a reconversion of the same photo) does too.
+  vm.runInContext(functionSource('resetDustForCleanSource'), c);
+  h.target.dustRefreshRepairMask = kept();
+  c.resetDustForCleanSource(makeBase(8, 8, 1));
+  assert.equal(h.target.dustRefreshRepairMask, null, 'a new clean source drops it');
+}
+
+console.log('AI refresh settle: a released model is loaded by the dust brush and its queue drains (a failed load drains it too), so a switch keeps the settled view and history; the repair-stroke mask goes with the photo');

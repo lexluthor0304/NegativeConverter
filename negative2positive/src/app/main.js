@@ -2656,6 +2656,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // (MI-GAN) has not been redone since TELEA patched them.
     let dustMaskTagSequence = 0;
     const dustAiRefresh = { rects: [], timer: null };
+    // The refresh's mask of the repair strokes (repairStrokeMaskFor): frame
+    // sized, and it holds the clean source it was built for, so it goes with
+    // that source and with the photo.
+    let dustRefreshRepairMask = null;
 
     let fullResolutionRenderTimer = null;
     // The exact render above 16 MP in flight: { controller, token, generation }
@@ -8030,6 +8034,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     function resetDustForCleanSource(source) {
       dustDetectionRevision += 1;
       dustPassCache = null;
+      dustRefreshRepairMask = null;
       state.dustRemoval.cleanSource = source || null;
       state.dustRemoval._state = null;
       state.dustRemoval.mask = null;
@@ -8986,6 +8991,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           }
           // Reset dust removal state for new conversion
           dustPassCache = null;
+          dustRefreshRepairMask = null;
           state.dustRemoval._state = null;
           state.dustRemoval.mask = null;
           state.dustRemoval.maskTag = null;
@@ -9405,6 +9411,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     function clearDustState() {
       dustDetectionRevision += 1;
       dustPassCache = null;
+      dustRefreshRepairMask = null;
       unpinDustWorker();
       disposeDustWorker();
       clearRepairedPreview();
@@ -11254,6 +11261,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       state.dustRemoval.inpaintedImageData = null;
       state.dustRemoval.cleanSource = null;
       state.dustRemoval._state = null;
+      dustRefreshRepairMask = null;
       clearFullResolutionRenderState();
       undoStack.length = 0;
       redoStack.length = 0;
@@ -12245,6 +12253,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       unpinDustWorker();
       if (dustAiRefresh.timer) { clearTimeout(dustAiRefresh.timer); dustAiRefresh.timer = null; }
       dustAiRefresh.rects.length = 0;
+      dustRefreshRepairMask = null;
       cancelScheduledFullResolutionRender();
       coreReprocessGeneration += 1;
       coreReprocessToken += 1;
@@ -24984,11 +24993,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       return any ? out : null;
     }
 
-    let dustRefreshRepairMask = { strokes: null, source: null, mask: null };
     function repairStrokeMaskFor(target) {
       const strokes = state.repairStrokes;
       const source = state.dustRemoval.cleanSource;
-      if (dustRefreshRepairMask.strokes !== strokes || dustRefreshRepairMask.source !== source) {
+      if (!dustRefreshRepairMask || dustRefreshRepairMask.strokes !== strokes || dustRefreshRepairMask.source !== source) {
         const base = baseSizeSource();
         const geometry = { ...localExposureGeometryFor(state, base), width: target.width, height: target.height };
         dustRefreshRepairMask = { strokes, source,

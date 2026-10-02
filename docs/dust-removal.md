@@ -151,6 +151,10 @@ the count, all transferred. `DustBrush.test.mjs` checks 200+ random strokes
   be loaded (offline without a cached copy) the export fails with a message
   instead of shipping TELEA in its place. A settled repair keeps its stamp
   across the release and is exported without a load.
+- **The refresh's memory.** The refresh keeps the repair strokes' frame-sized
+  mask with the clean source it was built for, and drops both with that source
+  (a new conversion, `clearDustState`) and with the photo
+  (`invalidatePhotoActivation`: every switch, New session, a parked photo).
 
 ## Known limits
 
