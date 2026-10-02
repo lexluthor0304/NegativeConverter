@@ -80,7 +80,10 @@ own decode since #232, so there is no idle one to terminate.) MI-GAN keeps its `
 same model on the same provider on demand without bumping `aiRepair.revision`,
 so photo keys, thumbnails, repair stamps and the kept dust pass stay valid: a
 settled repair exports without a reload, and an export after a dust-brush
-stroke reloads the model and repairs from scratch (`technical-depth.md`).
+stroke reloads the model and repairs from scratch (`technical-depth.md`). The
+stroke's own learned refresh loads it too (`dust-removal.md`). The release
+also takes the model of a repair brush armed on Retouch; showing the window
+loads it again for that brush.
 An idle window that is only briefly hidden keeps its warm caches. Showing the window releases waiting items and
 restarts the background photo lanes; caches (the prefetch slot too) refill and workers respawn lazily.
 

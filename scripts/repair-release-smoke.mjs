@@ -2,11 +2,12 @@
 // browser, on the bundled MI-GAN model and the WASM provider. #236's idle
 // release and #241's hidden-window release drop the model session
 // (releaseAiRepairSession, forced here through the ?debug=1 hook). A
-// dust-brush stroke after the release patches the repair in place (#259),
-// so the export must load the model again and repair from scratch: its PNG
-// 8-bit and TIFF 16-bit files equal, byte for byte, those of a session that
-// kept its model and brushed the same stroke. A settled repair is exported
-// after a release as it is: no load, no tile inferred.
+// dust-brush stroke after the release patches the repair in place (#259);
+// its learned refresh loads the released model again, on its provider and
+// under its revision, and drains (R1-035). The export repairs from
+// scratch: its PNG 8-bit and TIFF 16-bit files equal, byte for byte, those of
+// a session that kept its model and brushed the same stroke. A settled repair
+// is exported after a release as it is: no load, no tile inferred.
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 
@@ -110,8 +111,10 @@ export async function runRepairReleaseSmoke({ send, evaluate, waitFor, wait, fai
     })()`);
     await waitFor(`${label}: stroke committed`, `window.__strokes === 1 && window.__dustStatusUpdates > 0
       && /^Detected [0-9]+ dust particles$/.test(document.getElementById('dustStatus').textContent)`, 60_000);
-    // The model's learned refresh of the stroke (a ready model only) settles first.
-    await wait(1500);
+    // The stroke's learned refresh settles first; a released model is loaded
+    // for it.
+    await waitFor(`${label}: refresh drained`, `(() => { const s = window.__ncAiRepair.state(); return s.status === 'ready' && s.queued === 0; })()`, 120_000);
+    await wait(500);
     await waitFor(`${label}: brush settled`, ready, 60_000);
     await evaluate(`document.getElementById('dustShowMask').click()`);
     await waitFor(`${label}: mask hidden`, ready, 30_000);
@@ -135,7 +138,12 @@ export async function runRepairReleaseSmoke({ send, evaluate, waitFor, wait, fai
   const kept = await session('kept');
   console.log('repair release parity:', JSON.stringify({ released, kept }, (key, value) => key === 'committed' ? undefined : value));
 
-  if (released.before.status !== 'idle') fail('the released session reloaded the model before its export: ' + JSON.stringify(released.before));
+  // The refresh brought the released model back for the stroke (R1-035): the
+  // same model on its provider, under its revision, with nothing left queued.
+  if (released.before.status !== 'ready' || released.before.provider !== 'wasm' || released.before.revision !== released.committed.revision
+    || released.before.queued) {
+    fail('the dust-brush stroke did not load the released model for its refresh: ' + JSON.stringify(released.before));
+  }
   if (released.afterPng.status !== 'ready' || released.afterPng.provider !== 'wasm' || released.afterPng.revision !== released.committed.revision) {
     fail('the export did not load the released model on its provider under its revision: ' + JSON.stringify(released.afterPng));
   }

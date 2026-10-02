@@ -8,6 +8,7 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { inpaintWithModel, maskBoundingBoxes, tilesForBox, uniqueTiles, TILE, CONTEXT } from './aiInpaint.js';
 import { amendDustDelta, applyDustDelta, copyImageRect, pasteImageRect } from './dustStrokeHistory.js';
+import { createRepairStamps } from './repairReuse.js';
 
 globalThis.ImageData ||= class ImageData {
   constructor(data, width, height) { this.data = data; this.width = width; this.height = height; }
@@ -39,11 +40,15 @@ for (let y = 150; y < height; y += 400) for (let x = 150; x < width; x += 450) d
 const wholeMaskTiles = uniqueTiles(maskBoundingBoxes(mask, width, height)
   .flatMap(box => tilesForBox(box, width, height, { tile: TILE }))).length;
 
-function setup() {
+// An AI-brush stroke's repair mask, a disc beside the speck at (1050, 550).
+const strokeMask = new Uint8Array(width * height);
+for (let y = 535; y < 565; y++) for (let x = 1055; x < 1066; x++) strokeMask[y * width + x] = 255;
+
+function setup({ strokes = [] } = {}) {
   let runs = 0;
   const state = {
     dustRemoval: { enabled: true, mask, cleanSource: clean, inpaintedImageData: repaired, revision: 4, ai: true },
-    repairStrokes: [], loadedBaseImageData: clean, originalImageData: clean, conversionSourceImageData: clean,
+    repairStrokes: strokes, loadedBaseImageData: clean, originalImageData: clean, conversionSourceImageData: clean,
   };
   const timers = [];
   const displayed = [];
@@ -58,8 +63,12 @@ function setup() {
     }, tiles: 0, ms: 0 },
     updateAiRepairUI: () => {}, showToast: () => {}, console, DOMException, DEFAULT_MODEL_URL: '/m.onnx',
     inpaintWithModel, copyImageRect, pasteImageRect, amendDustDelta, ImageData, performance,
-    AI_TILE: TILE, AI_CONTEXT: CONTEXT, repairMask: () => assert.fail('no repair strokes here'),
+    AI_TILE: TILE, AI_CONTEXT: CONTEXT,
     localExposureGeometryFor: () => ({}),
+    buildRepairMask: () => ({ mask: strokeMask, bounds: { x: 1055, y: 535, width: 11, height: 30 } }),
+    // Each run restarts #236's idle release.
+    aiRepairRunsInFlight: 0, used: 0, noteAiRepairUsed: () => { context.used++; },
+    repairStamps: createRepairStamps(),
     refreshDustDisplay: (target, rects) => displayed.push(rects),
     loadAiRepairModel: async () => {},
     setTimeout: (callback) => { timers.push(callback); return timers.length; },
@@ -67,7 +76,8 @@ function setup() {
   });
   vm.runInContext(['queueDustAiRefresh', 'mergeDustRefreshRects', 'dustAiWindow', 'cropDustImage',
     'cropDustMask', 'repairStrokeMaskFor', 'runDustAiRefresh', 'noteBrushRepairSettled', 'aiRepairReady',
-    'dustPassUsesAi', 'settleAiRepairModel', 'aiRepairLoadArgs', 'assertRepairCurrent'].map(functionSource).join('\n')
+    'dustPassUsesAi', 'settleAiRepairModel', 'aiRepairLoadArgs', 'assertRepairCurrent', 'countAiRepairRun',
+    'baseSizeSource'].map(functionSource).join('\n')
     + '\nlet dustRefreshRepairMask = { strokes: null, source: null, mask: null };', context);
   return { context, state, timers, displayed, runs: () => runs };
 }
@@ -92,6 +102,8 @@ disc(1050, 550, 6);
   assert.equal(context.dustAiRefresh.rects.length, 0, 'the refreshed rect leaves the queue');
   assert.equal(entry.patches.length, 1, 'the refresh amends the stroke entry');
   assert.equal(entry.aiCleanAfter, true);
+  assert.equal(context.used, 1, 'the run counts as use of the model (#236 idle release)');
+  assert.equal(context.aiRepairRunsInFlight, 0);
   assert.equal(JSON.stringify(displayed), JSON.stringify([[rect]]));
   // Only masked pixels inside R changed.
   let changed = 0;
@@ -165,4 +177,50 @@ for (const [label, off] of [
   assert.equal(JSON.stringify(displayed), JSON.stringify([[rect]]));
 }
 
-console.log(`Dust AI refresh: 1 tile instead of ${wholeMaskTiles} after a stroke; amended history, dropped when overtaken; TELEA only with AI repair off or failed, a released model is loaded and refreshes`);
+// With AI-brush repair strokes too, a released model is loaded and the queued
+// rect drains once it is back, with no other stroke: both layers (the dust and
+// the strokes inside the rect) are inferred again and the history entry is
+// amended, so the photo can settle (#229 review: the queue used to stay full).
+const stroke = { size: 0.01, points: [{ x: 0.35, y: 0.275 }] };
+{
+  const { context, state, timers, displayed, runs } = setup({ strokes: [stroke] });
+  const run = context.aiRepair.run;
+  Object.assign(context.aiRepair, { status: 'idle', released: true, run: null, sourceRef: '/m.onnx', prefer: 'wasm' });
+  const loads = [];
+  context.loadAiRepairModel = async (...args) => {
+    loads.push(args);
+    Object.assign(context.aiRepair, { status: 'ready', run, released: false });
+  };
+  const before = copyImageRect(repaired, rect);
+  const entry = { target: repaired, mask, cleanSource: clean, patches: [], maskRect: rect,
+    maskBefore: new Uint8Array(rect.width * rect.height), maskAfter: new Uint8Array(rect.width * rect.height), aiCleanBefore: true, aiCleanAfter: false };
+  context.undoStack.push({ label: 'dustBrushStroke', dustDelta: entry });
+  context.queueDustAiRefresh([rect]);
+  timers.length = 0;
+  await context.runDustAiRefresh();
+  assert.equal(runs(), 0, 'nothing is inferred without the model');
+  assert.equal(JSON.stringify(context.dustAiRefresh.rects), JSON.stringify([rect]), 'the rect stays queued');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(JSON.stringify(loads), JSON.stringify([['/m.onnx', { refresh: false, prefer: 'wasm' }]]), 'the released model is loaded');
+  assert.equal(timers.length, 1, 'the refresh is armed again once it is back');
+  await timers.shift()();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(context.dustAiRefresh.rects.length, 0, 'the queued rect drains without another stroke');
+  assert.equal(runs(), 2, 'the dust and the repair strokes in the rect are inferred again');
+  assert.equal(context.used, 2, 'both runs count as use');
+  assert.equal(entry.patches.length, 1, 'the stroke entry is amended');
+  assert.equal(entry.aiCleanAfter, true);
+  assert.equal(JSON.stringify(displayed), JSON.stringify([[rect]]));
+  const cached = vm.runInContext('dustRefreshRepairMask', context);
+  assert.ok(cached.mask === strokeMask && cached.source === clean && cached.strokes === state.repairStrokes, 'the strokes\' mask is kept for the next refresh');
+  // The strokes' pixels outside the dust mask changed too.
+  let strokePixels = 0;
+  for (let y = rect.y; y < rect.y + rect.height; y++) for (let x = rect.x; x < rect.x + rect.width; x++) {
+    const i = ((y - rect.y) * rect.width + (x - rect.x)) * 4;
+    if (strokeMask[y * width + x] && !mask[y * width + x] && repaired.data[(y * width + x) * 4] !== before.rgba8[i]) strokePixels++;
+  }
+  assert.ok(strokePixels > 0, 'the repair strokes inside the rect are repaired again');
+  applyDustDelta(entry, 'undo');
+}
+
+console.log(`Dust AI refresh: 1 tile instead of ${wholeMaskTiles} after a stroke; amended history, dropped when overtaken; TELEA only with AI repair off or failed, a released model is loaded and refreshes the dust and the repair strokes; runs count as use`);

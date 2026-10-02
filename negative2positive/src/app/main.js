@@ -10037,8 +10037,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // The worker pooled the tint cells over the rect it changed (#254 B).
       patchDustTint(dust.mask, stroke.baseTag, stroke.tag, patch.maskRect, patch.tint || null);
       refreshDustDisplay(target, [patch.rect]);
-      // TELEA now stands in over any MI-GAN pixels inside the rect.
-      if (aiRepairReady() || state.repairStrokes.length) queueDustAiRefresh([patch.rect]);
+      // TELEA now stands in over any MI-GAN pixels inside the rect: they are
+      // refreshed while MI-GAN is the dust inpainter, its model released or
+      // loading too (the refresh loads it), and wherever repair strokes lie.
+      if ((dust.ai && aiRepair.status !== 'error') || state.repairStrokes.length) queueDustAiRefresh([patch.rect]);
     }
 
     // Undo/redo of a stroke: the bytes go back into the objects the stroke
@@ -10069,7 +10071,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       showDustParticleCount();
       followDustMaskInWorker(restored.cleanSource, restored.worker).catch(() => {});
       if (restored.aiClean) dustAiRefresh.rects.length = 0;
-      else if (aiRepairReady() || state.repairStrokes.length) queueDustAiRefresh(restored.rects);
+      else if ((dust.ai && aiRepair.status !== 'error') || state.repairStrokes.length) queueDustAiRefresh(restored.rects);
       syncDustWorkerPin();
     }
 
@@ -10602,6 +10604,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         // it stopped. Caches refill on use and workers respawn lazily.
         if (parkedPhoto) void unparkOpenPhoto().catch(error => console.warn('Rebuilding the parked photo failed:', error));
         if (state.fileQueue.length) kickBackgroundPhotoWork();
+        reloadAiRepairForArmedBrush();
       }
       refreshHiddenJobStatus();
     });
@@ -24508,11 +24511,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     // Idle release (#236): a warmed MI-GAN session holds 0.6-1.7 GB. After
-    // about 5 minutes without a run, with no run, brush repair, dust pass or
-    // long job (batch export, contact sheet) pending, the session and its
-    // worker are released the way a hidden window releases them, so the next
-    // load brings back the same model under the same `revision` and warm
-    // photo sessions with dust on stay cache hits.
+    // about 5 minutes without a run (a dust-brush refresh is one), with no
+    // run, brush repair, dust pass or long job (batch export, contact sheet)
+    // pending and no repair brush armed, the session and its worker are
+    // released the way a hidden window releases them, so the next load brings
+    // back the same model under the same `revision` and warm photo sessions
+    // with dust on stay cache hits.
     const AI_REPAIR_IDLE_RELEASE_MS = 5 * 60 * 1000;
     const AI_REPAIR_IDLE_RECHECK_MS = 30 * 1000;
     let aiRepairIdleTimer = null;
@@ -24525,8 +24529,20 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     function canReleaseIdleAiRepair(now = getPerfNow()) {
       return aiRepair.status === 'ready' && typeof aiRepair.release === 'function'
         && !aiRepairRunsInFlight && !pendingBrushRepairs && !activeLongJobs
-        && !state.dustRemoval.processing && !dustDetectionTimer
+        && !state.dustRemoval.processing && !dustDetectionTimer && !aiRepairBrushArmed()
         && now - aiRepairLastUsed >= AI_REPAIR_IDLE_RELEASE_MS;
+    }
+    // A brush that repairs with MI-GAN is armed where it can paint: the AI
+    // brush, or the dust brush with AI repair on, on the Retouch tab of a
+    // visible window. Its model stays past the idle rule. A hidden window
+    // still releases it (#241, and the idle rule while hidden); showing the
+    // window brings it back.
+    function aiRepairBrushArmed() {
+      if (document.visibilityState === 'hidden') return false;
+      return canPaintAiBrush() || Boolean(state.dustRemoval.ai && dustBrushToolActive() && retouchTabSelected());
+    }
+    function reloadAiRepairForArmedBrush() {
+      if (aiRepairBrushArmed()) ensureAiRepairPreload();
     }
     async function releaseIdleAiRepair() {
       aiRepairIdleTimer = null;
@@ -24543,7 +24559,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     if (DEBUG_UI) {
       window.__ncAiRepair = {
         state: () => ({ status: aiRepair.status, provider: aiRepair.provider, revision: aiRepair.revision,
-          released: aiRepair.released, tiles: aiRepair.tiles }),
+          released: aiRepair.released, tiles: aiRepair.tiles, queued: dustAiRefresh.rects.length,
+          strokes: state.repairStrokes.length }),
         release: () => releaseAiRepairSession(),
         load: (prefer) => loadAiRepairModel(DEFAULT_MODEL_URL, { prefer, refresh: false })
       };
@@ -24608,9 +24625,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       return result.imageData;
     }
 
+    function retouchTabSelected() {
+      return document.getElementById('studioTab-repair')?.getAttribute('aria-selected') === 'true';
+    }
+
     function canPaintAiBrush() {
-      return Boolean(document.getElementById('aiBrushEnabled')?.checked
-        && document.getElementById('studioTab-repair')?.getAttribute('aria-selected') === 'true'
+      return Boolean(document.getElementById('aiBrushEnabled')?.checked && retouchTabSelected()
         && state.currentStep >= 3 && !state.cropping && !state.samplingMode);
     }
 
@@ -24983,17 +25003,21 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const queued = dustAiRefresh.rects.slice();
       if (!queued.length || !target || !dust.cleanSource) return;
       const strokes = state.repairStrokes;
-      const useDust = Boolean(aiRepairReady() && dust.enabled && dust.mask);
+      // MI-GAN redoes the rects' dust while AI repair is on, and the repair
+      // strokes inside them.
+      const aiDust = Boolean(dust.ai && dust.enabled && dust.mask);
+      if ((aiDust || strokes.length) && (aiRepair.status === 'idle' || aiRepair.status === 'loading')) {
+        // Its model is not loaded (#236 or #241 released it) or still
+        // loading: the rects stay queued, the model is loaded the way a
+        // commit loads it, and they are refreshed once the load ends. A failed
+        // load leaves 'error', which no stroke loads again on its own (one
+        // load per release, not one per stroke).
+        const rearm = () => { if (dustAiRefresh.rects.length) queueDustAiRefresh([]); };
+        void settleAiRepairModel().then(rearm, rearm);
+        return;
+      }
+      const useDust = aiDust && aiRepairReady();
       if (!useDust && !strokes.length) {
-        if (dust.ai && dust.enabled && dust.mask && (aiRepair.status === 'idle' || aiRepair.status === 'loading')) {
-          // AI repair is on and its model is not loaded (#236 or #241
-          // released it) or still loading: MI-GAN, not TELEA, is the repair.
-          // The rects stay queued and are refreshed once the load ends; a
-          // failed load leaves TELEA, and that refresh empties the queue.
-          const rearm = () => { if (dustAiRefresh.rects.length) queueDustAiRefresh([]); };
-          void settleAiRepairModel().then(rearm, rearm);
-          return;
-        }
         // TELEA is the repair when AI repair is off or its model failed.
         dustAiRefresh.rects.length = 0;
         return;
@@ -25014,7 +25038,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           for (const layer of [useDust ? mask : null, repair]) {
             const layerMask = layer && cropDustMask(layer, target.width, win, rect);
             if (!layerMask) continue;
-            const pass = await inpaintWithModel(image, layerMask, aiRepair.run, { shouldContinue: isCurrent });
+            // A counted run: brushing keeps the model from the idle release.
+            const pass = await countAiRepairRun(() => inpaintWithModel(image, layerMask, aiRepair.run, { shouldContinue: isCurrent }));
             image = pass.imageData;
             tiles += pass.tiles;
           }
