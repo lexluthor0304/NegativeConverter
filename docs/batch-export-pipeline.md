@@ -535,7 +535,8 @@ npm test            # includes batchExportScheduler, conversion pool, export poo
                     # planRollAnalysis, rollFrameTask (worker steps vs the lane sequence)
 npm run test:smoke -- --roll-frame-only  # OpenCV shared module, roll-frame worker and parallel detector in Chrome
 npm run test:smoke  # batch export scenario (ZIP fallback to individual downloads), roll import
-npm run test:smoke -- --gain-map-only  # real-worker 16-bit result and gain map, gain-map requests per export intent
+npm run test:smoke -- --gain-map-only  # real-worker 16-bit result and gain map, gain-map requests per export intent,
+                                       # a second JPEG export of the photo is the same file
 npm run test:smoke -- --png16-only     # PNG16 band pool in real workers: same bytes for 1/2/6 workers, one worker and the main thread
 npm run test:smoke -- --export-ownership-only  # worker PNG8/JPEG parity, per-export workers, plane hand-off
 npm run test:smoke -- --batch-pipeline-only    # Export All serial vs staged (byte cap, decode-ahead, band pool, resident Step 3), banded single export, overlap count of a slow-write ZIP

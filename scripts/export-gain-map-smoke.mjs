@@ -5,8 +5,10 @@
 // main-thread path; part 2 checks through the Studio export that the gain-map
 // request follows the export's intent (sent for a plain JPEG, not for the
 // sprocket frame, which drops the map, nor for the contact sheet). Since #250
-// the map travels in the JPEG's own `encodeImage` request.
+// the map travels in the JPEG's own `encodeImage` request. A second export of
+// the same photo must be the same file (#229 review, R1-144).
 import { join } from 'node:path';
+import { PAGE_EXPORT_DIGEST } from './export-parity-digest.mjs';
 
 const ready = `document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy`;
 
@@ -15,6 +17,7 @@ export async function runExportGainMapSmoke({ send, evaluate, waitFor, wait, fai
   await waitFor('gain-map smoke boot', `!!document.getElementById('studioImportAutoCrop')`);
   await installDialogAutoAccept();
   await wait(300);
+  await evaluate(PAGE_EXPORT_DIGEST);
 
   // ---- 1. real Worker, real ImageData, real structured clone ----
   const worker = await evaluate(`(async () => {
@@ -121,8 +124,9 @@ export async function runExportGainMapSmoke({ send, evaluate, waitFor, wait, fai
       const bytes = new Uint8Array(await blob.arrayBuffer());
       const text = new TextDecoder('latin1').decode(bytes);
       const segments = listJpegSegments(bytes);
+      const file = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), b => b.toString(16).padStart(2, '0')).join('');
       return {
-        type: blob.type, size: bytes.length,
+        type: blob.type, size: bytes.length, file, digest: await window.__ncExportDigest(bytes),
         mpf: segments.some(s => s.marker === 0xE2 && new TextDecoder().decode(s.data.subarray(0, 4)) === 'MPF\\0'),
         gainMapMax: /hdrgm:GainMapMax="([^"]+)"/.exec(text)?.[1] || null,
         gainMap16: p.requests.filter(t => t === 'gainMap16').length,
@@ -140,9 +144,21 @@ export async function runExportGainMapSmoke({ send, evaluate, waitFor, wait, fai
     if (plain.encodeWithMap !== 1 || plain.gainMap16 !== 0 || plain.adjust16 !== 0) {
       fail('a plain JPEG must send its map in exactly one encodeImage request, with no separate gain-map pass or 16-bit adjustment: ' + JSON.stringify(plain));
     }
-    // A second export (a fresh per-export worker) must describe the same map.
+    // A second export of the unchanged photo must be the same file. Since #250
+    // it runs in a fresh per-export worker with its own plane hand-off; the
+    // encoders are deterministic and the file carries no clock time (its EXIF
+    // and XMP dates are the roll's), so any difference means the export read a
+    // stale, partly released or foreign plane or map, which #229's exact
+    // exports rule out. The digests name what moved: the decoded primary, its
+    // metadata, the gain-map bytes from the MPF index.
     const again = await exportJpeg('repeat JPEG with gain map');
-    if (again.gainMapMax !== plain.gainMapMax || again.encodeWithMap !== 1) fail('repeated JPEG export differs: ' + JSON.stringify({ plain, again }));
+    if (again.encodeWithMap !== 1) fail('the repeated JPEG export must send its map in one encodeImage request: ' + JSON.stringify(again));
+    if (again.file !== plain.file || again.size !== plain.size) {
+      const moved = ['pixels', 'metadata', 'gainMap'].filter(key => JSON.stringify(again.digest[key]) !== JSON.stringify(plain.digest[key]));
+      fail(`repeated JPEG export differs (${moved.join(', ') || 'outside the decoded primary, its metadata and the gain map'}): ` + JSON.stringify({ plain, again }));
+    }
+    if (!plain.digest.gainMap || plain.digest.gainMap.bytes < 100) fail('the plain JPEG has no gain-map image in its MPF index: ' + JSON.stringify(plain.digest));
+    console.log('repeat JPEG export: the same file', JSON.stringify({ size: again.size, file: again.file.slice(0, 16), digest: again.digest }));
 
     await setBorder(true);
     const framed = await exportJpeg('sprocket JPEG');
