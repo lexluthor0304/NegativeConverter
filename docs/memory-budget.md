@@ -113,7 +113,9 @@ the rest.
 index. Every job holds at most one reservation while it waits for the next
 (Auto Frame Selected and the roll analysis release per frame; the blank-frame
 search keeps its best candidate as retained, in the ledger, not as a
-reservation), and every handle is released in `finally`. The hidden-job gate
+reservation; an Export All lane that went on before a write keeps only that
+payload's bytes, which its in-order sink releases without waiting on any
+admission), and every handle is released in `finally`. The hidden-job gate
 is always passed before the budget, never after. `batchExportScheduler.test.mjs`
 runs three lanes against a budget that fits 1.5 items with a slow first sink,
 and against a gate that admits the newest waiter first, where a lane that
