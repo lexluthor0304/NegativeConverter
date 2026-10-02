@@ -89,7 +89,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     import { createBandedExportBridge } from './bandedExportBridge.js';
     import { bandsSupported } from '../pipeline/silverBands.js';
     import { routeCoreConversion, keepsFullPlaneOnDowngrade, fullResolutionIsStale, restoredFrameFlags, viewportRefreshBranch, repairsNeedSettling } from './fullResolutionRouting.js';
-    import { poolRepairMask } from './repairedPreview.js';
+    import { poolRepairMask, repoolRepairMaskRect, countPooledCells } from './repairedPreview.js';
     import {
       planBatchParallelism, planPng16BandWorkers, runBatchPipeline, planGeometryBandsInFlight, LANE_BYTES_PER_PIXEL,
       createLearningBarrier, planDecodeAhead, EXPORT_MAX_UNWRITTEN_BYTES, planRollAnalysis, createDecodeSlots, ROLL_ANALYSIS_MIN_RAM_BYTES,
@@ -8332,12 +8332,19 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // dustMask, strokes, dustEnabled }. They outlive the idle pass's reset:
     // during the wait for new ones they are what the preview is filled with.
     let repairedPreviewMasks = null;
+    // The fill of the conversion preview: { base, masks, image, negative,
+    // revision }, made at the dust mask's `revision`. `negative` names the
+    // display negative the preview repair worker kept.
     let repairedPreview = null;
     let repairedPreviewBuild = null;
+    // The masks pooled to the fill's size, at the dust mask's `revision`:
+    // { base, masks, pooled, strokes, marked, revision }. A brush stroke pools
+    // its own box into it (#229 review R1-104).
+    let repairedPreviewPool = null;
     // The display preview frame that was converted from a repaired source.
     let repairedPreviewShown = null;
-    // A display preview of a new size is filled once input pauses: no dust
-    // request starts while input continues.
+    // A display preview of a new size, or a mask the brush changed, is filled
+    // once input pauses: no dust request starts while input continues.
     const REPAIRED_PREVIEW_IDLE_MS = 300;
     let repairedPreviewTimer = null;
 
@@ -8349,22 +8356,52 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       }, REPAIRED_PREVIEW_IDLE_MS);
     }
 
-    function rememberRepairMasks(source) {
+    // `strokeRect`: a dust-brush stroke (#259) changed the mask in place inside
+    // this box of the frame. The pooled masks follow it there and the fill is
+    // made again once input pauses, from the display negative the preview
+    // repair worker kept: a stroke scans no whole mask, asks the preview worker
+    // for nothing and posts no image (#229 review R1-104).
+    function rememberRepairMasks(source, strokeRect = null) {
       const conversionSource = state.conversionSourceImageData;
       if (!source || !conversionSource || !hasFrameRepairs() || !hasSeparateConversionPreview()) {
         clearRepairedPreview();
         return;
       }
       const dustEnabled = Boolean(state.dustRemoval.enabled);
-      repairedPreviewMasks = { conversionSource, width: source.width, height: source.height,
-        dustMask: dustEnabled ? state.dustRemoval.mask : null, strokes: state.repairStrokes, dustEnabled };
-      ensureRepairedPreview();
+      const dustMask = dustEnabled ? state.dustRemoval.mask : null;
+      const masks = repairedPreviewMasks;
+      const patched = Boolean(strokeRect) && repairedPreviewMatches(masks) && masks.dustMask === dustMask
+        && masks.width === source.width && masks.height === source.height;
+      if (!patched) {
+        repairedPreviewMasks = { conversionSource, width: source.width, height: source.height,
+          dustMask, strokes: state.repairStrokes, dustEnabled };
+      }
+      if (!strokeRect) {
+        ensureRepairedPreview();
+        return;
+      }
+      if (patched) poolRepairStroke(strokeRect);
+      scheduleRepairedPreviewAfterInput();
+    }
+
+    // The stroke's box, pooled into the pool of the current masks when that
+    // pool holds the mask as it was right before the stroke. Any other change
+    // since (an undo or redo of a stroke) leaves it to a whole pooling.
+    function poolRepairStroke(rect) {
+      const pool = repairedPreviewPool;
+      const masks = repairedPreviewMasks;
+      const revision = state.dustRemoval.revision;
+      if (!pool || pool.masks !== masks || !masks.dustMask || pool.revision !== revision - 1) return;
+      pool.marked += repoolRepairMaskRect(masks.dustMask, masks.width, masks.height, pool.pooled,
+        pool.base.width, pool.base.height, rect, pool.strokes);
+      pool.revision = revision;
     }
 
     function clearRepairedPreview() {
       repairedPreviewMasks = null;
       repairedPreview = null;
       repairedPreviewBuild = null;
+      repairedPreviewPool = null;
       repairedPreviewShown = null;
       if (repairedPreviewTimer) clearTimeout(repairedPreviewTimer);
       repairedPreviewTimer = null;
@@ -8381,52 +8418,86 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       return entry.image;
     }
 
-    // Fills the current display preview source with the remembered masks,
-    // unless that is done or under way.
+    // Fills the current display preview source with the remembered masks as
+    // they are now, unless that is done or under way.
     function ensureRepairedPreview() {
       const masks = repairedPreviewMasks;
       const base = state.conversionPreviewImageData;
       if (!repairedPreviewMatches(masks) || !base || base === state.conversionSourceImageData) return;
-      if (repairedPreview?.base === base && repairedPreview.masks === masks) return;
+      const revision = state.dustRemoval.revision;
+      if (repairedPreview?.base === base && repairedPreview.masks === masks && repairedPreview.revision === revision) return;
+      // One under way finishes first, and asks again when it filled an older mask.
       if (repairedPreviewBuild?.base === base && repairedPreviewBuild.masks === masks) return;
-      const build = { base, masks };
+      const build = { base, masks, revision };
       repairedPreviewBuild = build;
       void buildRepairedPreview(build).catch((error) => {
         // An entry without an image: the next tick does not try again.
         if (repairedPreviewBuild === build) {
           repairedPreviewBuild = null;
-          repairedPreview = { base, masks, image: null };
+          repairedPreview = { base, masks, image: null, negative: null, revision: build.revision };
         }
         if (error?.name !== 'AbortError') console.warn('Repaired preview failed:', error?.message || error);
       });
     }
 
-    async function buildRepairedPreview(build) {
-      const { base, masks } = build;
-      // Leave the task that asked: pooling reads the whole frame's mask.
-      await new Promise(resolve => setTimeout(resolve, 0));
-      if (repairedPreviewBuild !== build) return;
+    // The masks pooled to `base`'s size as they are now: the kept pool when it
+    // is that one, else a new one from the whole masks.
+    function currentRepairPool(base, masks) {
+      const revision = state.dustRemoval.revision;
+      const kept = repairedPreviewPool;
+      if (kept && kept.base === base && kept.masks === masks && kept.revision === revision) return kept;
       const pooled = new Uint8Array(base.width * base.height);
-      let any = poolRepairMask(masks.dustMask, masks.width, masks.height, pooled, base.width, base.height);
+      poolRepairMask(masks.dustMask, masks.width, masks.height, pooled, base.width, base.height);
+      // The repair strokes stay pooled apart too: a stroke's box is pooled again over them.
+      let strokes = null;
       if (masks.strokes.length) {
         const geometry = { ...localExposureGeometryFor(state), width: masks.width, height: masks.height };
         const { mask, bounds } = buildRepairMask(masks.strokes, geometry, masks.conversionSource.__lensMapping || null);
-        if (bounds) any = poolRepairMask(mask, masks.width, masks.height, pooled, base.width, base.height, bounds) || any;
+        if (bounds) {
+          strokes = new Uint8Array(base.width * base.height);
+          poolRepairMask(mask, masks.width, masks.height, strokes, base.width, base.height, bounds);
+          for (let i = 0; i < pooled.length; i++) if (strokes[i]) pooled[i] = 255;
+        }
       }
-      // Main holds no display negative of a display target (#248): the preview
-      // worker sends a copy of the one it converts.
-      let pixels = base;
-      if (any && isDisplayTarget(base)) {
-        // The conversion's own settings and sample, so the worker keeps its caches.
-        pixels = await convertPreviewFrameInWorker.displayNegative({ ...previewRequestImage(base), settings: buildRouterSettings(state),
-          options: { preview: true, analysisImageData: getColorAnalysisSample(state) } });
-        if (repairedPreviewBuild !== build) return;
+      repairedPreviewPool = { base, masks, pooled, strokes, marked: countPooledCells(pooled), revision };
+      return repairedPreviewPool;
+    }
+
+    async function buildRepairedPreview(build) {
+      const { base } = build;
+      // Leave the task that asked: pooling may read the whole frame's mask.
+      await new Promise(resolve => setTimeout(resolve, 0));
+      if (repairedPreviewBuild !== build) return;
+      let pool = currentRepairPool(base, build.masks);
+      // The display negative the preview repair worker kept from the last fill
+      // of this target is filled again without being sent (#229 review R1-104).
+      const kept = repairedPreview?.base === base ? repairedPreview.negative : null;
+      let pixels = pool.marked && kept && previewRepairWorker.holds(kept) ? kept : null;
+      let handOver = false;
+      if (pool.marked && !pixels) {
+        pixels = base;
+        // Main holds no display negative of a display target (#248): the
+        // preview worker sends a copy of the one it converts, which moves on
+        // to the preview repair worker.
+        if (isDisplayTarget(base)) {
+          // The conversion's own settings and sample, so the worker keeps its caches.
+          pixels = await convertPreviewFrameInWorker.displayNegative({ ...previewRequestImage(base), settings: buildRouterSettings(state),
+            options: { preview: true, analysisImageData: getColorAnalysisSample(state) } });
+          if (repairedPreviewBuild !== build) return;
+          handOver = true;
+          // A stroke may have landed meanwhile.
+          pool = currentRepairPool(base, build.masks);
+        }
       }
-      const image = any ? await previewRepairWorker.inpaint(pixels, pooled, 3) : null;
+      build.revision = pool.revision;
+      const image = pool.marked ? await previewRepairWorker.inpaint(pixels, pool.pooled, 3, { transferSource: handOver }) : null;
       if (repairedPreviewBuild !== build) return;
       repairedPreviewBuild = null;
-      // Nothing to fill is an entry too, so no tick builds it again.
-      repairedPreview = { base, masks, image };
+      // Nothing to fill is an entry too, so no tick builds it again. It still
+      // names the display negative the worker may keep.
+      repairedPreview = { base, masks: build.masks, image, negative: image ? pixels : kept, revision: build.revision };
+      // A stroke landed while it filled: the newer mask follows once input pauses.
+      if (build.revision !== state.dustRemoval.revision) scheduleRepairedPreviewAfterInput();
     }
 
     // The exact frame of a repair pass, applied while the repaired preview
@@ -8556,7 +8627,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           // preview is the source, whose plane feeds the 16-bit export.
           const retain16 = CORE_RETAIN_PREVIEW_PLANE && Boolean(hasSmallPreview) && options.retain16 !== false;
           const repairedSource = hasSmallPreview ? repairedPreviewSourceFor(state.conversionPreviewImageData) : null;
-          if (hasSmallPreview && !repairedSource && repairedPreviewMasks) scheduleRepairedPreviewAfterInput();
+          // Input also postpones a fill that waits for it (a stroke's, #229 review R1-104).
+          if (hasSmallPreview && repairedPreviewMasks && (!repairedSource || repairedPreviewTimer)) scheduleRepairedPreviewAfterInput();
           const previewRef = state.conversionPreviewImageData;
           const previewProcessed = await convertFromCurrentSource(state, { preview: hasSmallPreview, interactive: true, includeAnalysisPreview: false, retain16,
             previewSource: repairedSource });
@@ -10499,7 +10571,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         const patch = await strokeDustOffMainThread(source, stroke, isStrokeCurrent);
         if (!isStrokeCurrent() || !patch) return;
         commitDustStroke(patch, stroke);
-        rememberRepairMasks(source);
+        rememberRepairMasks(source, patch.maskRect);
       } catch (err) {
         if (!isCurrent() || err?.name === 'AbortError') return;
         console.error('Dust brush failed:', err);

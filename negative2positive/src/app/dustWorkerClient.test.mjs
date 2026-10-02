@@ -190,4 +190,58 @@ assert.equal(idleWorker.terminated, true, 'idle OpenCV/source heap is released')
   assert.ok(current.terminated, 'idle release applies again after unpin');
   assert.equal(pinnedClient.pinned, false);
 }
-console.log('Dust worker client source reuse, precision, pinning, sliced planes, strokes, timeout, cancellation and cleanup passed');
+// ---- #229 review R1-104: the preview repair worker keeps the display
+// negative it was handed; a later fill sends the mask only ----
+{
+  const width = 40, height = 30;
+  const negative = new ImageData(new Uint8ClampedArray(width * height * 4).fill(70), width, height);
+  negative.__image16 = { width, height, data: new Uint16Array(width * height * 4).fill(17990) };
+  const pooled = new Uint8Array(width * height);
+  pooled[33] = 255;
+  const posted = [];
+  let current = null;
+  const repairs = createDustWorkerClient({ idleTimeoutMs: 5, workerFactory: () => current = {
+    postMessage(message, transfers) {
+      const copy = structuredClone(message, { transfer: transfers });
+      posted.push(copy);
+      queueMicrotask(() => this.onmessage({ data: { id: copy.id, image: { width, height,
+        data: new Uint8ClampedArray(width * height * 4), image16: new Uint16Array(width * height * 4) } } }));
+    },
+    terminate() { this.terminated = true; }
+  } });
+  const bytes = (message) => Object.values(message)
+    .reduce((sum, value) => sum + (ArrayBuffer.isView(value) ? value.byteLength : 0), 0);
+  assert.equal(repairs.holds(negative), false);
+  await repairs.inpaint(negative, pooled, 3, { transferSource: true });
+  assert.equal(posted[0].rgba.length, width * height * 4, 'the 8-bit plane arrives whole');
+  assert.equal(posted[0].image16.length, width * height * 4, 'and the 16-bit plane');
+  assert.equal(negative.data.byteLength, 0, 'handed over: the page keeps no copy');
+  assert.equal(negative.__image16.data.byteLength, 0);
+  assert.equal(pooled.byteLength, width * height, 'the mask is copied, never moved');
+  assert.equal(repairs.holds(negative), true, 'the worker holds the negative');
+  posted.length = 0;
+  pooled[34] = 255;
+  await repairs.inpaint(negative, pooled, 3);
+  assert.equal(posted[0].reuseSource, true);
+  assert.equal(bytes(posted[0]), width * height, 'a later fill sends the mask only');
+  assert.equal(posted[0].mask[34], 255);
+  // Released when idle: the page asks again instead of sending a dead copy.
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.ok(current.terminated);
+  assert.equal(repairs.holds(negative), false);
+  // Without the hand-over the planes are copied, as before.
+  const kept = new ImageData(new Uint8ClampedArray(width * height * 4).fill(5), width, height);
+  kept.__image16 = { width, height, data: new Uint16Array(width * height * 4).fill(1285) };
+  await repairs.inpaint(kept, pooled, 3);
+  assert.equal(kept.data.byteLength, width * height * 4);
+  assert.equal(kept.__image16.data.byteLength, width * height * 8);
+  // A view on part of a larger buffer is copied even when handed over.
+  const shared = new Uint8ClampedArray(width * height * 4 + 4);
+  const partial = new ImageData(shared.subarray(4), width, height);
+  await repairs.inpaint(partial, pooled, 3, { transferSource: true });
+  assert.equal(shared.byteLength, width * height * 4 + 4, 'the larger buffer stays');
+  repairs.dispose();
+  assert.equal(repairs.holds(partial), false);
+}
+
+console.log('Dust worker client source reuse, precision, pinning, sliced planes, strokes, timeout, cancellation, cleanup and the handed-over repair source passed');

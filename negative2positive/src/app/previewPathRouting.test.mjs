@@ -7,7 +7,7 @@ import {
   restoredFrameFlags, viewportRefreshBranch, repairsNeedSettling
 } from './fullResolutionRouting.js';
 import { isLargeImage } from './imageMemoryBudget.js';
-import { poolRepairMask } from './repairedPreview.js';
+import { poolRepairMask, repoolRepairMaskRect, countPooledCells } from './repairedPreview.js';
 import { DISABLED_GPU_PREVIEW_SCHEDULER } from './gpuPreviewScheduler.js';
 import { step3FrameReference } from './displayCanvas.js';
 import { getSprocketFrameLayout } from './sprocketFrame.js';
@@ -175,9 +175,10 @@ function fixture({ large = true, repairs = false, strokes = 0, aiBrush = false, 
     createPerfTrace: (label, details) => { log.push(`render:${details.reason}`); return { end: noop, mark: noop }; },
     getImageDataPixelCount: image => (image ? image.width * image.height : 0),
     // Phase 2: the preview-repair dust worker and the stroke mask builder.
-    poolRepairMask, previewRepairWorker: {
-      inpaint: (image, mask, radius) => new Promise(resolve => previewRepairs.push({ image, mask, radius, resolve })),
-      dispose: noop,
+    poolRepairMask, repoolRepairMaskRect, countPooledCells, previewRepairWorker: {
+      inpaint: (image, mask, radius) => new Promise(resolve => previewRepairs.push({ image, mask: mask.slice(), radius, resolve })),
+      // It keeps the image it filled last.
+      holds: image => previewRepairs.at(-1)?.image === image, dispose: noop,
     },
     buildRepairMask: (strokes, geometry) => {
       const mask = new Uint8Array(geometry.width * geometry.height);
@@ -186,7 +187,7 @@ function fixture({ large = true, repairs = false, strokes = 0, aiBrush = false, 
     },
     localExposureGeometryFor: () => ({}),
     repairedPreviewMasks: null, repairedPreview: null, repairedPreviewBuild: null, repairedPreviewShown: null,
-    repairedPreviewTimer: null, REPAIRED_PREVIEW_IDLE_MS: 300,
+    repairedPreviewPool: null, repairedPreviewTimer: null, REPAIRED_PREVIEW_IDLE_MS: 300,
     // #263: outside a reduced preview-tier session the preview is sized as before.
     previewTier: 'normal', previewTierKept: null, previewTierPrebuilt: null, reducedDisplayImages: new WeakSet(),
     previewTierController: { active: false }, schedulePreviewTierPrebuild: noop,
@@ -237,6 +238,7 @@ function fixture({ large = true, repairs = false, strokes = 0, aiBrush = false, 
     'whenBrushRepairsSettled', 'noteBrushRepairSettled', 'getDustSource', 'cancelPendingTimers',
     'trimHistorySnapshot', 'rememberRepairMasks', 'clearRepairedPreview', 'repairedPreviewMatches',
     'repairedPreviewSourceFor', 'ensureRepairedPreview', 'buildRepairedPreview', 'applyExactPlaneKeepingView',
+    'poolRepairStroke', 'currentRepairPool',
     'scheduleRepairedPreviewAfterInput', 'clearFullResolutionRenderState', 'ensureConversionPreviewForDisplay', 'noteTierImage',
     'previewRequestImage', 'convertRequestOnMain', 'installDisplayFor', 'installDisplayPreview', 'cancelDisplayPreviewRebuild',
     'rebuildDisplayPreview', 'flushDisplayPreviewRebuild', 'countMainResample', 'updateConversionTarget', 'conversionTargetFor',
@@ -975,6 +977,62 @@ for (const large of [false, true]) {
   assert.equal(f.context.repairedPreviewSourceFor(f.state.conversionPreviewImageData), null);
 }
 
+// ---- #229 review R1-104: a dust stroke's fill waits for input to pause and
+// is made from the display negative the preview repair worker kept, with the
+// stroke's box pooled into the kept masks ----
+{
+  const f = fixture({ large: false, repairs: true, size: { width: 800, height: 600 }, target: { width: 400, height: 300 } });
+  const dustMask = new Uint8Array(800 * 600);
+  dustMask[300 * 800 + 500] = 255;
+  f.state.dustRemoval.mask = dustMask;
+  f.state.dustRemoval.revision = 1;
+  f.context.rememberRepairMasks(f.fullPlane);
+  f.clock.run(0);
+  await settle();
+  assert.equal(f.displayNegatives.length, 1);
+  f.previewRepairs[0].resolve({ width: 400, height: 300, name: 'first fill' });
+  await settle();
+  // The stroke patched the mask in place and moved its revision (#259).
+  dustMask[100 * 800 + 120] = 255;
+  f.state.dustRemoval.revision += 1;
+  f.context.rememberRepairMasks(f.fullPlane, { x: 120, y: 100, width: 1, height: 1 });
+  assert.equal(f.previewRepairs.length, 1, 'the stroke itself fills nothing');
+  assert.ok(f.clock.delays().includes(300));
+  // A drag right after it converts the last fill, and every tick postpones
+  // the new one: no dust request while input continues.
+  for (let tick = 0; tick < 3; tick++) {
+    const armed = f.context.repairedPreviewTimer;
+    f.nextFrame();
+    f.context.scheduleCoreReprocess({ full: false });
+    await Promise.resolve();
+    await settle();
+    assert.equal(f.clients.preview.at(-1).request.imageData.name, 'first fill', 'the drag converts the last fill');
+    assert.ok(f.context.repairedPreviewTimer && f.context.repairedPreviewTimer !== armed, 'the tick postpones the stroke\'s fill');
+    f.reply('preview');
+    await settle();
+  }
+  assert.equal(f.previewRepairs.length, 1);
+  f.clock.run(300);
+  f.clock.run(0);
+  await settle();
+  assert.equal(f.previewRepairs.length, 2, 'filled once input paused');
+  assert.equal(f.displayNegatives.length, 1, 'no display negative asked again');
+  assert.equal(f.previewRepairs[1].image, f.previewRepairs[0].image, 'the kept negative is filled again');
+  const expected = new Uint8Array(400 * 300);
+  poolRepairMask(dustMask, 800, 600, expected, 400, 300);
+  assert.deepEqual([...f.previewRepairs[1].mask], [...expected], 'with the masks as the stroke left them');
+  f.previewRepairs[1].resolve({ width: 400, height: 300, name: 'second fill' });
+  await settle();
+  f.nextFrame();
+  f.context.scheduleCoreReprocess({ full: false });
+  await Promise.resolve();
+  await settle();
+  assert.equal(f.clients.preview.at(-1).request.imageData.name, 'second fill');
+  assert.equal(f.context.repairedPreviewTimer, null, 'nothing waits any more');
+  f.reply('preview');
+  await settle();
+}
+
 // ---- #249: a Tier B session converts previews from its display proxy (the
 // display level, #248) while its source is pending; a full conversion and
 // the export barrier wait for ensureSource() ----
@@ -1091,4 +1149,4 @@ for (const large of [true, false]) {
   await assert.rejects(f.context.ensureFullResolutionReadyForExport(), /Error loading file/);
 }
 
-console.log('previewPathRouting: downgraded undo/reset routing, kept planes, idle repair pass, restore flags and paint, viewport branches, Step-3 gate, export repair waits at both entry points, cleared masks and strokes in the idle window, aborted exact renders, the repaired preview source and the colour-analysis sample barrier passed');
+console.log('previewPathRouting: downgraded undo/reset routing, kept planes, idle repair pass, restore flags and paint, viewport branches, Step-3 gate, export repair waits at both entry points, cleared masks and strokes in the idle window, aborted exact renders, the repaired preview source, a stroke fill after input and the colour-analysis sample barrier passed');

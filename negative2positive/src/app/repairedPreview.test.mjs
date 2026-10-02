@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { poolRepairMask } from './repairedPreview.js';
+import { poolRepairMask, repoolRepairMaskRect, countPooledCells } from './repairedPreview.js';
 import { resizeDisplayPreview } from './displayPreview.js';
 
 globalThis.ImageData ||= class {
@@ -69,4 +69,47 @@ for (const [width, height, targetWidth, targetHeight] of [[97, 61, 23, 15], [640
   assert.deepEqual(shifted, words);
 }
 
-console.log('repairedPreview: pooled repair masks cover every resampled speck, stay local, honour bounds and agree across scans');
+// #229 review R1-104: a brush stroke changes the mask inside its box; pooling
+// that box again into the kept raster (with another raster OR-ed in) equals
+// pooling the whole mask again, for added and removed pixels, at the frame's
+// edges and corners, and the count moves by what changed.
+{
+  let seed = 7;
+  const random = () => ((seed = (seed * 1103515245 + 12345) >>> 0) / 4294967296);
+  for (const [width, height, targetWidth, targetHeight] of [[403, 211, 97, 51], [640, 480, 181, 136], [300, 200, 186, 124], [97, 61, 23, 15]]) {
+    const mask = new Uint8Array(width * height);
+    for (let i = 0; i < 60; i++) mask[Math.floor(random() * mask.length)] = 255;
+    // A pooled repair-stroke raster that never changes.
+    const extra = new Uint8Array(targetWidth * targetHeight);
+    for (let i = 0; i < 25; i++) extra[Math.floor(random() * extra.length)] = 255;
+    const full = () => {
+      const out = new Uint8Array(targetWidth * targetHeight);
+      poolRepairMask(mask, width, height, out, targetWidth, targetHeight);
+      for (let i = 0; i < out.length; i++) if (extra[i]) out[i] = 255;
+      return out;
+    };
+    const kept = full();
+    let marked = countPooledCells(kept);
+    for (let stroke = 0; stroke < 120; stroke++) {
+      const w = 1 + Math.floor(random() * 40), h = 1 + Math.floor(random() * 40);
+      // Boxes reach past every edge now and then, as a stroke's box is clipped.
+      const rect = { x: Math.floor(random() * (width + 20)) - 10, y: Math.floor(random() * (height + 20)) - 10, width: w, height: h };
+      const remove = random() < 0.4;
+      for (let y = Math.max(0, rect.y); y < Math.min(height, rect.y + h); y++) {
+        for (let x = Math.max(0, rect.x); x < Math.min(width, rect.x + w); x++) {
+          if (remove) mask[y * width + x] = 0;
+          else if (random() < 0.08) mask[y * width + x] = 255;
+        }
+      }
+      marked += repoolRepairMaskRect(mask, width, height, kept, targetWidth, targetHeight, rect, extra);
+      const expected = full();
+      assert.deepEqual(kept, expected, `stroke ${stroke} on ${width}x${height} -> ${targetWidth}x${targetHeight}`);
+      assert.equal(marked, countPooledCells(expected), 'the count follows');
+    }
+  }
+  // A box off the frame changes nothing.
+  const out = new Uint8Array(12);
+  assert.equal(repoolRepairMaskRect(new Uint8Array(64), 8, 8, out, 4, 3, { x: 20, y: 20, width: 4, height: 4 }), 0);
+}
+
+console.log('repairedPreview: pooled repair masks cover every resampled speck, stay local, honour bounds and agree across scans; a stroke box pooled again equals the whole mask pooled again');

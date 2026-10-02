@@ -193,7 +193,13 @@ export function createDustWorkerClient({
     return Promise.all(replies).then(() => undefined);
   }
 
-  function request(type, image, options, decode) {
+  // A view that spans its whole buffer, so the buffer can move as it is.
+  const wholeBuffer = view => view.byteOffset === 0 && view.byteLength === view.buffer.byteLength;
+
+  // `transferSource`: the caller hands `image` over. Planes it sends move to
+  // the worker without a copy and are empty on the page afterwards; `image`
+  // still names the worker's source for later requests (`holds`).
+  function request(type, image, options, decode, { transferSource = false } = {}) {
     // Masks are copied now: the page patches its mask in place afterwards.
     const extra = { ...options };
     const transfers = [];
@@ -210,12 +216,12 @@ export function createDustWorkerClient({
       const shared16 = isSharedPlane(plane16) ? plane16 : null;
       const derive8 = !reuseSource && Boolean(shared16) && hasDerivedEightBit(image);
       if (!reuseSource && !derive8) {
-        message.rgba = image.data.slice();
+        message.rgba = transferSource && wholeBuffer(image.data) ? image.data : image.data.slice();
         moved.push(message.rgba.buffer);
       }
       const image16 = type === 'detect' && !shared16 ? null : plane16;
       if (image16 && (!reuseSource || precision !== image16)) {
-        message.image16 = shared16 || image16.slice();
+        message.image16 = shared16 || (transferSource && wholeBuffer(image16) ? image16 : image16.slice());
         if (!shared16) moved.push(message.image16.buffer);
       }
       if (derive8) message.derive8 = true;
@@ -289,7 +295,10 @@ export function createDustWorkerClient({
 
   return {
     detect,
-    inpaint: (image, mask, radius = 3) => request('inpaint', image, { mask, radius }, decodeImage),
+    inpaint: (image, mask, radius = 3, { transferSource = false } = {}) =>
+      request('inpaint', image, { mask, radius }, decodeImage, { transferSource }),
+    /** Whether the worker holds `image` as its source: a request with it sends no pixels. */
+    holds: image => Boolean(image) && source === image,
     stroke,
     maskDelta,
     /** Keeps the worker (and `image`'s planes, and `mask` under `tag`) until unpin. */
