@@ -12,7 +12,7 @@ export const DISPLAY_SESSION_HELPERS = [
 export function displaySessionDiagnosticsStub() {
   return {
     tierA: 0, tierB: 0, demotions: 0, spills: 0, spillWrites: 0, spillFailures: 0, ramHits: 0, spillHits: 0, storeHits: 0,
-    recipeChanged: 0, provisional: 0, baseDecodes: 0, sourceBuilds: 0, baseMismatches: 0, selfChecks: 0,
+    recipeChanged: 0, provisional: 0, baseDecodes: 0, sourceBuilds: 0, baseMismatches: 0, baseFailures: 0, selfChecks: 0,
     selfCheckMismatches: 0, sampleMisses: 0, fills: 0, fillSkips: 0, force: null
   };
 }

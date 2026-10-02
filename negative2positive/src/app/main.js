@@ -2707,7 +2707,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // exercise the tiers.
     const displaySessionDiagnostics = {
       tierA: 0, tierB: 0, demotions: 0, spills: 0, spillWrites: 0, spillFailures: 0, ramHits: 0, spillHits: 0, storeHits: 0,
-      recipeChanged: 0, provisional: 0, baseDecodes: 0, sourceBuilds: 0, baseMismatches: 0, selfChecks: 0,
+      recipeChanged: 0, provisional: 0, baseDecodes: 0, sourceBuilds: 0, baseMismatches: 0, baseFailures: 0, selfChecks: 0,
       selfCheckMismatches: 0, sampleMisses: 0, fills: 0, fillSkips: 0, force: null
     };
 
@@ -11510,13 +11510,40 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
     // A failed switch after the outgoing planes were released: take the
     // outgoing session back from the cache through the normal warm or
-    // base-only activation.
-    function reactivateReleasedPhoto(item) {
+    // base-only activation. `history` ({ undo, redo }) goes back under the
+    // reopened photo's own entries once it is open again (reopenLivePhoto).
+    function reactivateReleasedPhoto(item, { history = null } = {}) {
       const index = state.fileQueue.indexOf(item);
       if (index < 0) return false;
       state.loadedFile = null;
-      void switchToFile(index);
+      const reopening = switchToFile(index);
+      if (history) {
+        void reopening.then(() => {
+          if (getCurrentQueueItem() !== item) return;
+          // An entry the reopened photo made itself ends the redo stack.
+          if (!undoStack.length) redoStack.splice(0, redoStack.length, ...history.redo);
+          undoStack.unshift(...history.undo);
+          if (undoStack.length > MAX_UNDO) undoStack.splice(0, undoStack.length - MAX_UNDO);
+          updateUndoRedoButtons();
+        });
+      }
       return true;
+    }
+
+    // Opens the live photo again from its file when its session cannot go on
+    // without an original it no longer gets (R2-005): one that decodes
+    // differently, or a recipe-changed activation that cannot read it. The
+    // recipe is saved first, while the photo is still the current one, and
+    // the history comes back as scalars (#244's cold entries): its planes
+    // belong to the session being dropped.
+    function reopenLivePhoto(item, message = null) {
+      // A build waiting for that original is not a failed edit: the edit is
+      // in the recipe saved here.
+      cancelGeometryJob();
+      persistCurrentFileSettings({ silent: true, force: true });
+      const history = { undo: coldHistory(undoStack), redo: coldHistory(redoStack) };
+      if (message) showToast(message, 6000);
+      return reactivateReleasedPhoto(item, { history });
     }
 
     // ===========================================
@@ -12117,7 +12144,14 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // base, and so does the colour-analysis sample of an area the session
       // was not left with (a recipe that moved the area while it was away).
       if (!fileItem.settings?.autoFrameMeta || !fileItem.settings?.filmEdge?.checked || colorAnalysisSampleMissing()) {
-        if (!(await ensureBase()) || !isCurrentLoad(generation)) return;
+        if (!(await ensureBase())) {
+          // Without it the kept planes would stay converted under the
+          // recipe they were left with: the photo opens from its file
+          // instead, with its recipe and history (R2-005).
+          if (isCurrentLoad(generation) && getCurrentQueueItem() === fileItem) reopenLivePhoto(fileItem);
+          return;
+        }
+        if (!isCurrentLoad(generation)) return;
       }
       await prepareStudioPhoto(generation, fileItem, { quiet: true });
     }
@@ -12202,19 +12236,40 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const claim = createFrameClaim(file, {
         priority: 'foreground', signal, label: `original ${file.name}`, bytesFor: decodeReservationBytes
       });
+      // Reported once, to a photo still on screen; what it means for the
+      // edit, tool or export that asked is reported by them.
+      const unreadable = () => {
+        displaySessionDiagnostics.baseFailures++;
+        if (isCurrentLoad(generation) && state.baseDescriptor === descriptor) {
+          showToast(getLocalizedText('originalUnreadable', "This photo's original file could not be read."), 5000);
+        }
+      };
       const decoding = (async () => {
         const lease = sharedDecodes.adopt(file, { signal }) || sharedDecodes.open(file, { signal, context: { claim } });
         try {
           const decoded = await lease.result;
           if (!isCurrentLoad(generation) || state.baseDescriptor !== descriptor || state.loadedFile !== file) return null;
           const base = decoded?.base;
-          if (!base || base.width !== descriptor.width || base.height !== descriptor.height
-            || Boolean(base.__image16?.data) !== descriptor.has16 || decodeRouteOf(file, base) !== descriptor.route) {
+          const route = base ? decodeRouteOf(file, base) : null;
+          // No pixels, or the embedded preview a RAW decode falls back to (a
+          // LibRaw open timeout, a lost post-decode worker): a failed decode,
+          // not another original (R2-005). The session keeps its planes, its
+          // records and its edits; the caller reports the failure (a
+          // geometry edit is rolled back).
+          if (!base || (route === 'raw-fallback' && descriptor.route !== 'raw-fallback')) {
+            console.warn('The original of a restored photo could not be decoded; its session is kept.', file.name);
+            unreadable();
+            return null;
+          }
+          if (base.width !== descriptor.width || base.height !== descriptor.height
+            || Boolean(base.__image16?.data) !== descriptor.has16 || route !== descriptor.route) {
             displaySessionDiagnostics.baseMismatches++;
             console.warn('The decoded original differs from the one this photo was left with; opening it again.', file.name);
             const item = getCurrentQueueItem();
-            if (item) forgetDisplayProxies(item);
-            if (item) reactivateReleasedPhoto(item);
+            if (item) {
+              forgetDisplayProxies(item);
+              reopenLivePhoto(item, getLocalizedText('originalReopened', "This photo's original decoded differently from before, so it was opened again from its file with your edits."));
+            }
             return null;
           }
           geometryBaseIds.set(base, geometryBaseId(descriptor));
@@ -12237,7 +12292,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           }
           return base;
         } catch (error) {
-          if (error?.name !== 'AbortError') console.warn('Decoding the original of a restored photo failed:', error);
+          if (error?.name !== 'AbortError') {
+            console.warn('Decoding the original of a restored photo failed:', error);
+            unreadable();
+          }
           return null;
         } finally {
           lease.release();
@@ -15467,7 +15525,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // name no geometry of this base: the settings stay, and the conversion
     // and export barriers refuse them (geometryOutOfStep).
     function rollBackFailedGeometry(job) {
-      // Superseded since it failed: its successor owns the settings.
+      // Superseded since it failed: its successor owns the settings (a photo
+      // reopened from its file has saved the edit with its recipe).
       if (job.token !== geometryToken || !isCurrentLoad(job.generation)) return;
       clearInterimGeometryDisplay();
       const planes = workingGeometryKey();

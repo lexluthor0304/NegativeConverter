@@ -1149,4 +1149,177 @@ for (const [tier, area, decodes] of [['A', AREA, 0], ['A', AREA3, 1], ['B', AREA
     'with the record\'s sample (before the fix) the engine converted other pixels');
 }
 
-console.log('displaySessions: Tier A, Tier B, demotion, spill, ensureBase/ensureSource, invalidation, the proxy invariant, the colour-analysis sample across Undo, Redo and recipe changes (export parity), the settled-view parity of filled proxies and the sample check of stored proxies (export parity) passed');
+// ---- Failure paths that lose work (R1-065, R2-005, R2-002) ----
+// A Tier A photo back from another one, on the real switch: the recipe saved
+// on leaving holds its sliders as well as its geometry.
+async function returnedTierA({ tier = 'A', conversionRequests = false } = {}) {
+  const photo = await convertedPhoto({ sessionBudget: 1 << 30, conversionRequests });
+  const { h, c, item } = photo;
+  const itemB = { id: 2, file: { name: 'b.dng' }, settings: null };
+  wireSwitching(h, [item, itemB]);
+  h.target.persistCurrentFileSettings = () => {
+    const current = h.target.getCurrentQueueItem();
+    if (current) current.settings = { ...current.settings, ...settingsFor(h.state), exposure: h.state.exposure };
+  };
+  vm.runInContext(functionSource('ensureFullResolutionReadyForExport'), c);
+  h.target.displaySessionDiagnostics.force = tier;
+  await c.switchToFile(1);
+  assert.equal(h.target.photoSessions.get(item)?.tier, tier, `kept as Tier ${tier}`);
+  await c.switchToFile(0);
+  assert.ok(!h.state.loadedBaseImageData && h.state.baseDescriptor, `a Tier ${tier} return, without the base`);
+  return { ...photo, itemB };
+}
+const NO_TURN = 'matrix(1, 0, 0, 1, 0, 0)';
+
+// A geometry edit on it whose original cannot be decoded again: the decode
+// is rejected (a LibRaw error), or falls back to the 8-bit embedded preview
+// (a LibRaw open timeout, a lost post-decode worker: route 'raw-fallback').
+// That is a failed decode, not another original: the session is kept with
+// its edits, and the edit is rolled back with a message.
+for (const failure of ['rejected', 'raw-fallback']) {
+  for (const edit of ['rotation', 'mirror', 'restoreFullFrame']) {
+    const { h, c, base, crop, item } = await returnedTierA();
+    const label = `${failure}, ${edit}`;
+    c.pushUndo('exposure');
+    h.state.exposure = 7;
+    const depth = h.target.undoStack.length;
+    const recipe = settingsFor(h.state);
+    const loads = h.target.loadFile;
+    let reopened = 0;
+    h.target.loadFile = (...args) => { reopened++; return loads(...args); };
+    h.target.decodeBase = failure === 'rejected' ? () => Promise.reject(new Error('LibRaw open timed out'))
+      : () => { const preview = makeBase(48, 32, 5); delete preview.__image16; return preview; };
+    let editing;
+    if (edit === 'rotation') editing = c.applyRotation(90);
+    else if (edit === 'mirror') editing = c.applyMirror();
+    else {
+      // The Studio's Restore full frame button, as main.js wires it.
+      const entry = c.pushUndo('restoreFullFrame');
+      Object.assign(h.state, { rotationAngle: 0, mirrored: false, cropRegion: null });
+      editing = c.rebuildGeometryFromBase({ edit: entry });
+    }
+    assert.equal(h.target.document.body.dataset.studioPreparing, 'original', `${label}: it waits for the original`);
+    await editing;
+    await settle();
+    assert.equal(h.target.displaySessionDiagnostics.baseFailures, 1, `${label}: counted as a failed decode`);
+    assert.equal(h.target.displaySessionDiagnostics.baseMismatches, 0, `${label}: not as another original`);
+    assert.equal(reopened, 0, `${label}: the photo is not reopened`);
+    assert.ok(h.state.baseDescriptor && !h.state.loadedBaseImageData, `${label}: the session is kept`);
+    assert.deepEqual(settingsFor(h.state), recipe, `${label}: the settings are the kept planes' geometry`);
+    assert.equal(h.state.croppedImageData, crop, `${label}: the kept planes stay`);
+    assert.equal(h.state.exposure, 7, `${label}: the slider edit is kept`);
+    assert.equal(h.target.undoStack.length, depth, `${label}: the failed edit leaves no undo entry, the others stay`);
+    assert.equal(h.target.canvasTransformWrapper.style.transform, NO_TURN, `${label}: no interim turn is left`);
+    assert.equal(h.target.toasts.length, 2, `${label}: the user is told`);
+    assert.match(h.target.toasts[0], /original file could not be read/, `${label}: that the original could not be read`);
+    assert.match(h.target.toasts[1], /could not be applied/, `${label}: and that the edit was not applied`);
+    assert.equal(h.target.document.body.dataset.studioPreparing, undefined);
+    assert.equal(c.geometryOutOfStep(), false);
+    // The conversion and the export read the kept planes under their settings.
+    await c.processNegative({ quiet: true });
+    assert.equal(h.conversions.at(-1).source, crop, `${label}: converted from the kept source`);
+    samePixels(crop, exportChain(base, settingsFor(h.state)), `${label}: the kept planes are the settings' chain`);
+    await c.ensureFullResolutionReadyForExport();
+    // Left again, the recipe saved holds the slider edit, and the return shows it with its history.
+    await c.switchToFile(1);
+    assert.equal(item.settings.exposure, 7, `${label}: the saved recipe holds the slider edit`);
+    assert.deepEqual({ rotationAngle: item.settings.rotationAngle, mirrored: item.settings.mirrored, cropRegion: item.settings.cropRegion },
+      recipe, `${label}: and the geometry of the planes`);
+    await c.switchToFile(0);
+    assert.equal(h.state.exposure, 7);
+    assert.equal(h.target.undoStack.length, depth, `${label}: the history survives`);
+  }
+}
+
+// The original decodes to another image (another size): the photo is opened
+// again from its file, but its recipe is saved first, while it is still the
+// current photo, edits made since the return and the edit that asked for the
+// original included, and its history comes back as scalars. Also when the
+// reopening switch first waits (a preview plane still held): the build that
+// waited for the original is not taken for a failed edit.
+for (const switchWaits of [false, true]) {
+  const { h, c, base, item } = await returnedTierA();
+  if (switchWaits) {
+    h.target.corePreviewRetained = {};
+    h.target.settleCorePreviewPlane = async () => { await settle(); h.target.corePreviewRetained = null; };
+  }
+  c.pushUndo('exposure');
+  h.state.exposure = 7;
+  const reopenedBase = makeBase(base.width + 8, base.height, 9);
+  h.target.decodeBase = () => reopenedBase;
+  h.target.loadFile = async file => {
+    Object.assign(h.state, {
+      loadedFile: file, loadedBaseImageData: reopenedBase, originalImageData: reopenedBase, croppedImageData: null, cropRegion: null,
+      rotationAngle: 0, mirrored: false, baseDescriptor: null, sourcePending: null, processedImageData: null,
+      conversionSourceImageData: null, conversionPreviewImageData: null, previewSourceImageData: null, currentStep: 1
+    });
+    h.target.undoStack.length = 0; h.target.redoStack.length = 0;
+    return { status: 'loaded' };
+  };
+  h.target.prepareStudioPhoto = async () => { await c.processNegative({ quiet: true }); };
+  await c.applyRotation(90);
+  for (let i = 0; i < 4; i++) { await settle(); await h.state.geometryReady; }
+  assert.equal(h.target.displaySessionDiagnostics.baseMismatches, 1);
+  assert.equal(item.settings.exposure, 7, 'the saved recipe holds the slider edit');
+  assert.equal(item.settings.rotationAngle, 91.3, 'and the rotation');
+  assert.equal(h.state.loadedBaseImageData, reopenedBase, 'reopened from the file');
+  assert.equal(h.state.exposure, 7, 'the reopened photo shows the slider edit');
+  assert.equal(h.state.rotationAngle, 91.3, 'and the rotation');
+  samePixels(h.state.croppedImageData, exportChain(reopenedBase, settingsFor(h.state)), 'its planes are the chain of the saved recipe');
+  assert.equal(h.target.undoStack.length, 2, 'the history came back (the slider edit and the rotation)');
+  assert.ok(h.target.undoStack.every(entry => entry.refs.cold), 'as scalars: its planes were of the other decode');
+  assert.equal(h.target.geometryDiagnostics.rollbacks, 0, 'the rotation was not rolled back');
+  assert.deepEqual(h.target.toasts.map(message => /opened again/.test(message)), [true], 'the user is told, once');
+  // Undo steps back through it on the reopened photo.
+  await c.performUndo();
+  assert.equal(h.state.rotationAngle, 1.3);
+  await settle();
+  samePixels(h.state.croppedImageData, exportChain(reopenedBase, settingsFor(h.state)), 'undo rebuilds from the reopened original');
+}
+
+// A recipe-changed activation that needs the original (here the colour-
+// analysis sample of an area the recipe moved to while the photo was away)
+// and cannot read it: the kept planes would stay converted under the recipe
+// they were left with, so the photo opens from its file instead, with the
+// item's recipe and the session's history.
+for (const tier of ['A', 'B']) {
+  const { h, c, base, item } = await convertedPhoto({ sessionBudget: 1 << 30 });
+  h.target.displaySessionDiagnostics.force = tier;
+  wireSwitching(h, [item, { id: 2, file: { name: 'b.dng' }, settings: null }]);
+  h.state.exposure = 0;
+  c.pushUndo('exposure');
+  await c.switchToFile(1);
+  assert.equal(h.target.photoSessions.get(item).tier, tier);
+  item.settings = { ...item.settings, autoFrameMeta: { imageArea: AREA3 }, exposure: 4 };
+  h.target.restoreAutoFrameDiagnostics = meta => { h.state.autoFrame.lastDiagnostics = meta ? structuredClone(meta) : null; };
+  h.target.decodeBase = () => { const preview = makeBase(48, 32, 5); delete preview.__image16; return preview; };
+  const opened = [];
+  h.target.loadFile = async file => {
+    opened.push(file);
+    Object.assign(h.state, {
+      loadedFile: file, loadedBaseImageData: base, originalImageData: base, croppedImageData: null, cropRegion: null,
+      rotationAngle: 0, mirrored: false, baseDescriptor: null, sourcePending: null, processedImageData: null,
+      conversionSourceImageData: null, conversionPreviewImageData: null, previewSourceImageData: null, currentStep: 1
+    });
+    h.target.undoStack.length = 0; h.target.redoStack.length = 0;
+    return { status: 'loaded' };
+  };
+  h.target.persistCurrentFileSettings = () => {
+    const current = h.target.getCurrentQueueItem();
+    if (current) current.settings = { ...current.settings, ...settingsFor(h.state), exposure: h.state.exposure };
+  };
+  const prepared = [];
+  h.target.prepareStudioPhoto = async () => { prepared.push(h.state.loadedBaseImageData); };
+  await c.switchToFile(0);
+  for (let i = 0; i < 3; i++) { await settle(); await h.state.geometryReady; }
+  assert.equal(h.target.displaySessionDiagnostics.baseFailures, 1, `Tier ${tier}: the original could not be read`);
+  assert.equal(h.target.toasts.length, 1, `Tier ${tier}: and the user is told`);
+  assert.deepEqual(opened, [item.file], `Tier ${tier}: the photo opened from its file`);
+  assert.deepEqual(prepared, [base], `Tier ${tier}: and was prepared from the decoded file, never from the kept planes`);
+  assert.equal(h.state.exposure, 4, `Tier ${tier}: under the item's recipe`);
+  assert.deepEqual(settingsFor(h.state), { rotationAngle: 1.3, mirrored: false, cropRegion: CROP });
+  assert.equal(h.target.undoStack.length, 1, `Tier ${tier}: with its history`);
+  assert.equal(h.target.document.body.dataset.photoSwitching, undefined);
+}
+
+console.log('displaySessions: Tier A, Tier B, demotion, spill, ensureBase/ensureSource, invalidation, the proxy invariant, the colour-analysis sample across Undo, Redo and recipe changes (export parity), the settled-view parity of filled proxies, the sample check of stored proxies (export parity) and failed geometry builds and decodes passed');

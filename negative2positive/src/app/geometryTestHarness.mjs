@@ -90,7 +90,7 @@ const FUNCTIONS = [
   'restoreColdSnapshotPixels', 'liveHistoryRoots', 'hotGeometrySnapshot', 'historyExclusiveBytes',
   'pruneHistoryForMemory', 'trimHistorySnapshot', 'commitUndoSnapshot', 'pushUndo', 'performUndo', 'performRedo',
   'rememberPhotoSession', 'releaseOutgoingPhotoPlanes', 'photoSettingsKey', 'switchToFile',
-  'reactivateReleasedPhoto', 'invalidatePhotoActivation', 'getCropDraftTotalAngle', 'scaleCropRect',
+  'reactivateReleasedPhoto', 'reopenLivePhoto', 'invalidatePhotoActivation', 'getCropDraftTotalAngle', 'scaleCropRect',
   'interactiveGeometryBands',
   // Apply Crop's pending crop-area detection (#245).
   'getCropDraftSize', 'hasPendingCropDetection', 'noteConversionStarted', 'cancelCropDetection', 'sameCropRect',

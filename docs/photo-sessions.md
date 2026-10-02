@@ -123,8 +123,17 @@ area; no viewport, since the level serves any window.
   until the decode returns (#258: the photo on screen waits for it, so it never
   queues behind lanes), checks its size, depth and route against
   the descriptor and installs it under the same geometry id, so the kept planes
-  stay valid; a decode that differs purges the photo's proxies and reopens it
-  cold. The base then samples the area in use itself, as on a cold open, and
+  stay valid. A decode that differs purges the photo's proxies and opens it
+  again from its file; its live recipe is saved first, while it is still the
+  current photo (the edit that asked for the original included), its history
+  comes back as scalars (#244's cold entries) and a toast says so. A decode
+  that fails, or falls back to the embedded preview (route `raw-fallback`: a
+  LibRaw open timeout, a lost post-decode worker), is a failed decode, not
+  another original: the session keeps its planes, records and edits; a
+  geometry edit waiting for it is rolled back (`docs/geometry-chain.md`), an
+  export fails as below, and a recipe-changed activation that needs it opens
+  the photo from its file with the item's recipe and the session's history.
+  The base then samples the area in use itself, as on a cold open, and
   every sample the descriptor carried must be the one the base gives (a
   stored record's may come from another build's decode or sampler). A sample
   that differs counts as a self-check mismatch: the photo's stored copies are
@@ -642,3 +651,8 @@ record carries another build's colour-analysis sample: the record is purged,
 the photo converts and exports with the base's own sample (with real
 SilverCore, the export equals a cold open's), and an auto-WB estimate taken
 from the record is taken again.
+`displaySessions.test.mjs` covers the failure paths: a geometry edit whose
+original cannot be decoded again (rejected, or the `raw-fallback` embedded
+preview) keeps the session and rolls the edit back; an original that decodes
+differently reopens the photo with its recipe and history; a recipe-changed
+activation that cannot read its original opens the photo from its file.
