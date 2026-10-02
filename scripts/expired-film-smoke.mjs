@@ -418,4 +418,101 @@ export async function runExpiredFilmSmoke({ send, evaluate, waitFor, wait, fail,
   const realm = await evaluate(`({ cv: typeof window.cv, script: !!document.querySelector('script[data-opencv-loader]'), tasks: { ...window.__ncAnalysis.tasks } })`);
   if (realm.cv !== 'undefined' || realm.script || realm.tasks.fallback || realm.tasks.worker < 2) fail('the expired rescue loaded OpenCV in the page: ' + JSON.stringify(realm));
   console.log(`ok: fog surfaces measured in the worker (${realm.tasks.worker} requests), no OpenCV in the page`);
+
+  await runExpiredRollRetypeSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port });
+}
+
+// #229 review R1-017: an expired-roll session imports a B&W roll without
+// rebates (as bw-roll-import-smoke.mjs). The leader shows a holder edge and no
+// film evidence of its own (noMask): it opens as a positive and is measured as
+// one, then the roll's decision (#231) flips it to B&W. Its stored rescue
+// measurement, and the strengths it sets, must be of the B&W frame. The scans
+// are dense (mostly dark), so the B&W reading is bright where the positive
+// reading is dark: the leveled midtones sit high and the rescue darkens
+// (brightness <= 0), where the positive's measurement lifts. "These are
+// positives" then brings the positive reading and its measurement back.
+export async function runExpiredRollRetypeSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port }) {
+  const count = 5;
+  const ready = `document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy`;
+  await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en` });
+  await waitFor('expired roll boot', `!!document.getElementById('autoRollOnImport') && !!document.getElementById('uploadExpiredBtn')`);
+  await installDialogAutoAccept();
+  await wait(1000);
+  // The roll decision needs automatic roll import (see bw-roll-import-smoke.mjs).
+  const autoRollBefore = await evaluate(`(() => { const key = 'nc_auto_roll_import_v1', before = localStorage.getItem(key); localStorage.setItem(key, 'on'); document.getElementById('autoRollOnImport').checked = true; return before; })()`);
+  await evaluate(`(() => {
+    const crop = document.getElementById('studioImportAutoCrop'); if (crop.checked) crop.click();
+    const auto = document.getElementById('importFilmTypeAuto'); if (!auto.checked) auto.click();
+    const projects = window.__expiredRollProjects = [];
+    const actions = window.__expiredRollActions = [];
+    new MutationObserver(records => { for (const record of records) for (const node of record.addedNodes) {
+      const action = node.querySelector?.('.toast-action');
+      if (action?.dataset.toastAction === 'rollPositives') actions.push(action);
+    } }).observe(document.getElementById('toastContainer'), { childList: true });
+    const revoke = URL.revokeObjectURL.bind(URL), pending = new Set();
+    URL.revokeObjectURL = url => { if (!pending.has(url)) revoke(url); };
+    HTMLAnchorElement.prototype.click = function () {
+      if (!this.download.endsWith('.ncroll.json')) return;
+      const url = this.href; pending.add(url);
+      projects.push(fetch(url).then(r => r.json()).finally(() => { pending.delete(url); revoke(url); }));
+    };
+    const label = document.getElementById('uploadExpiredBtn');
+    label.addEventListener('click', event => event.preventDefault(), { once: true });
+    label.click();
+  })()`);
+  if (!await evaluate(`document.body.classList.contains('studio-expired')`)) fail('the expired-roll entry did not switch the session');
+  await evaluate(`(async () => {
+    const dt = new DataTransfer();
+    for (let n = 1; n <= ${count}; n++) {
+      const canvas = document.createElement('canvas'); canvas.width = 200; canvas.height = 150;
+      const ctx = canvas.getContext('2d'), image = ctx.createImageData(200, 150);
+      for (let y = 0; y < 150; y++) for (let x = 0; x < 200; x++) {
+        const t = ((x + y * 2 + n * 17) % 170) / 169, v = 18 + Math.round(150 * t * t);
+        image.data.set(n === 1 && x < 32 ? [34, 44, 70, 255] : [v, v, v, 255], (y * 200 + x) * 4);
+      }
+      ctx.putImageData(image, 0, 0);
+      const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+      dt.items.add(new File([blob], 'expired-roll-' + n + '.png', { type: 'image/png', lastModified: n }));
+    }
+    const input = document.getElementById('folderInput'); input.files = dt.files; input.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+  await waitFor('expired roll analysed', `${ready} && document.getElementById('rollAnalysisStatus').textContent.includes('${count}/${count}')`, 180000);
+  await waitFor('expired roll leader flipped to B&W', `${ready} && document.querySelector('.film-type-btn.active')?.dataset.type === 'bw'`, 30000);
+  await waitFor('expired roll leader measured', `${ready} && document.getElementById('expiredDiagnosis').dataset.state === 'analysed'
+    && [...document.querySelectorAll('#expiredDiagnosis li')].some(li => /^Uneven fog:/.test(li.textContent))`, 120000);
+  await wait(1500);
+  const leaderMeasurement = async label => {
+    await waitFor('expired roll settled', ready, 60000);
+    await evaluate(`document.getElementById('studioSaveProject').click()`);
+    await waitFor('expired roll project', `window.__expiredRollProjects.length > 0`);
+    const project = await evaluate(`window.__expiredRollProjects.shift()`);
+    const leader = project.files.find(file => file.name === 'expired-roll-1.png')?.settings;
+    const measured = leader?.expiredAnalysis ? {
+      filmType: leader.filmType, reason: leader.filmTypeReason, enabled: leader.expiredEnabled,
+      leveledMedian: leader.expiredAnalysis.leveledMedian, lumMedian: leader.expiredAnalysis.lumMedian, spatial: Boolean(leader.expiredAnalysis.spatial),
+      brightness: leader.expiredBrightness, contrast: leader.expiredContrast
+    } : { filmType: leader?.filmType, enabled: leader?.expiredEnabled, analysis: null };
+    console.log(`expired roll leader ${label}:`, JSON.stringify(measured));
+    return measured;
+  };
+  try {
+    const flipped = await leaderMeasurement('after the flip');
+    if (flipped.filmType !== 'bw' || !flipped.enabled || !flipped.spatial) fail('the expired roll leader was not rescued as B&W: ' + JSON.stringify(flipped));
+    if (!(flipped.leveledMedian > 0.55) || !(flipped.brightness <= 0)) fail('the leader kept the measurement of its positive reading after the flip: ' + JSON.stringify(flipped));
+    console.log('ok: an expired roll\'s leader flipped to B&W is measured as B&W, with the strengths that measurement sets');
+    // "These are positives" converts the open leader again (no processNegative):
+    // the positive reading is measured once its frame has settled.
+    if (!await evaluate(`window.__expiredRollActions.length > 0`)) fail('no "These are positives" action was offered');
+    await evaluate(`window.__expiredRollActions[0].click()`);
+    await waitFor('expired roll corrected to positive', `${ready} && document.querySelector('.film-type-btn.active')?.dataset.type === 'positive'
+      && document.getElementById('expiredDiagnosis').dataset.state === 'analysed'
+      && [...document.querySelectorAll('#expiredDiagnosis li')].some(li => /^Uneven fog:/.test(li.textContent))`, 120000);
+    await wait(1500);
+    const corrected = await leaderMeasurement('after These are positives');
+    if (corrected.filmType !== 'positive' || !corrected.enabled || !corrected.spatial) fail('the corrected leader was not rescued as a positive: ' + JSON.stringify(corrected));
+    if (!(corrected.leveledMedian < 0.45) || !(corrected.brightness > 0)) fail('the leader kept the B&W measurement after These are positives: ' + JSON.stringify(corrected));
+    console.log('ok: These are positives measures the leader\'s positive reading again, with its strengths');
+  } finally {
+    await evaluate(`(() => { const key = 'nc_auto_roll_import_v1', before = ${JSON.stringify(autoRollBefore ?? null)}; if (before === null) localStorage.removeItem(key); else localStorage.setItem(key, before); })()`);
+  }
 }
