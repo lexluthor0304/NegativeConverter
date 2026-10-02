@@ -4755,9 +4755,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // A decoded base caches the sample of the area last asked for; a base
     // descriptor (#249) carries `samples`, one per area key.
     const colorAnalysisSamples = new WeakMap();
-    // The descriptor a conversion of the live photo missed its sample on:
+    // Descriptors a conversion of the live photo missed its sample on:
     // ensureBase() converts that photo again once its base is back.
-    let colorAnalysisSampleMissedBy = null;
+    const colorAnalysisSampleMisses = new WeakSet();
     function getColorAnalysisSample(settings = state, source = baseSizeSource()) {
       if (!source) return null;
       const meta = settings === state ? state.autoFrame.lastDiagnostics : settings.autoFrameMeta;
@@ -4771,7 +4771,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (source.released) {
         if (source.samples?.has(key)) return source.samples.get(key);
         displaySessionDiagnostics.sampleMisses++;
-        if (source === state.baseDescriptor) colorAnalysisSampleMissedBy = source;
+        if (source === state.baseDescriptor) colorAnalysisSampleMisses.add(source);
         return null;
       }
       const cached = colorAnalysisSamples.get(source);
@@ -12152,10 +12152,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           reviveFrameDescriptor();
           // A frame converted without its colour-analysis sample meanwhile (a
           // slider preview) is converted again with it.
-          if (colorAnalysisSampleMissedBy === descriptor) {
-            colorAnalysisSampleMissedBy = null;
-            scheduleCoreReprocess({ full: true });
-          }
+          if (colorAnalysisSampleMisses.delete(descriptor)) scheduleCoreReprocess({ full: true });
           return base;
         } catch (error) {
           if (error?.name !== 'AbortError') console.warn('Decoding the original of a restored photo failed:', error);

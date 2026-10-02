@@ -41,7 +41,7 @@ export function displaySessionStubs(overrides = {}) {
     requestSourceForDisplay: () => {}, ensureSource: async () => true, ensureBase: async () => null,
     // Every photo has its base: no colour-analysis sample is ever missing.
     colorAnalysisSampleMissing: () => false, ensureColorAnalysisSample: async () => true,
-    colorAnalysisSampleMissedBy: null, analysisSamplesFor: () => new Map(),
+    colorAnalysisSampleMisses: new WeakSet(), analysisSamplesFor: () => new Map(),
     forgetDisplayProxies: () => {}, readSpilledDisplaySession: async () => null,
     fillDisplayProxy: async () => false, displayProxyFillPlan: () => null,
     // Part 3: no persistent store.

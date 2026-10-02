@@ -212,7 +212,7 @@ export function createHarness(base, { historyBudget = 768 * 1024 * 1024, session
     displaySessionDiagnostics: displaySessionDiagnosticsStub(), displayProxySpill: emptyDisplayProxySpill(),
     // No persistent store unless a test gives one (part 3).
     displayProxyStore: null, displayProxyFileKeys: new WeakMap(), DISPLAY_PROXY_HASHES: { decoder: 'wasm', code: 'code' },
-    colorAnalysisSamples: new WeakMap(), displayProxyKey: displayProxy.displayProxyKey,
+    colorAnalysisSamples: new WeakMap(), colorAnalysisSampleMisses: new WeakSet(), displayProxyKey: displayProxy.displayProxyKey,
     displayPlaneHash: displayProxy.displayPlaneHash, checksum32: displayProxy.checksum32,
     displayPreviewSize: displayPreview.displayPreviewSize, resizeDisplayPreview: displayPreview.resizeDisplayPreview,
     // The display level (#248): the proxy of a display session.
