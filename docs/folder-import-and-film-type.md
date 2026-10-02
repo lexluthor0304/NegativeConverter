@@ -62,7 +62,9 @@ prompt asks for Positive when it is a print or slide.
 ## Roll film-type decision
 
 Each import transaction of at least three frames, with automatic roll import on
-(watch-folder batches included), keeps every frame's own verdict in import order.
+(and a folder watch's roll: three or more arrivals whose recipes landed within
+2.5 s of each other, `docs/simplicity-workflow.md`), keeps every frame's own
+verdict in import order.
 `rollFilmType.js` splits the import into contiguous segments. A segment of at
 least three frames of which at least two thirds are B&W is a B&W segment:
 

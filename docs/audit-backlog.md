@@ -277,6 +277,16 @@ Remaining performance proposals below are not claims of completed work.
 
 
 
+- **low/perf** — A watch-folder arrival's full-resolution recipe render runs under its tile job's memory claim (#247, #258)  
+  `negative2positive/src/app/main.js:22325`  
+  The light-table lane makes a watch-folder arrival's recipe as 1703835's arrival handler did, with a full-resolution render (geometry, conversion, dust removal, the gray point and the expired-film measurement; #229 review, R1-124), inside the tile job. That job reserved decode peak + 12 B/px (frameReservationBytes), or nothing when its base is a retained session or the prefetch slot. A RAW's decode peak is past by then and about covers the working and converted planes; a PNG, JPEG or TIFF scan's come on top (roughly 12-24 B/px), and a retained base reserves nothing for them. 1703835 ran the render outside any budget.  
+  _Suggested fix:_ In runBackgroundPhotoJob, reserve laneReservationBytes (the export lane's constant) for a tile job whose item is a watch-folder arrival without a recipe, also when its base is retained.
+
+- **low/perf** — The lane's first render of an 8-bit frame at a non-right angle rotates the whole frame on the main thread (#247)  
+  `negative2positive/src/app/main.js:19206`  
+  A lane render that prepares a recipe measures 1703835's tile (#229 review, R1-081): where the geometry core cannot plan the chain (an 8-bit source at a non-right angle, the usual auto-frame straighten of a JPEG or 8-bit TIFF scan), renderGeometryChain falls back to applyGeometryChainToImageData, the 2D-canvas rotation of the full frame, once per frame before its recipe exists. #247 had avoided it with a decimated tile whose measurements, and so exports, differed from 1703835's. Later renders of the frame keep the reduced tile.  
+  _Suggested fix:_ Rotate 8-bit frames in the geometry pool with an OffscreenCanvas once its bytes are shown equal to the page canvas's in Chrome and WebKit, or measure lane recipes from an input that does not depend on the tile (a flagged change).
+
 - **low/quality** — Update check bookkeeping: 'Later' is not persisted (dead last-seen key), a failed/offline launch suppresses the next check for 24 h, and any pre-release tag silently disables the check _(verified)_  
   `negative2positive/src/app/main.js:1629`  
   Three small defects in the desktop update logic: (1) `DESKTOP_UPDATE_LAST_SEEN_LATEST_KEY` is written at 1624 but never read anywhere, and the 'Later' button only calls `hideDesktopUpdateBanner()`, so a user who declines is nagged again on the next 24-hour check for every launch until they update. (2) `markDesktopUpdateChecked()` sits in `finally`, so when the app starts offline (or `get_app_versi…  

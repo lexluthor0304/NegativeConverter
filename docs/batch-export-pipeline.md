@@ -218,8 +218,10 @@ Now one driver (`runBatchExport` in `main.js`) runs the per-file pipeline
   bridge of its own that it disposes of when the export ends (no worker
   starts on it afterwards; a gain map left running by a failed canvas
   encode is cancelled there, and Cancel reaches that map too); the contact
-  sheet releases a frame's full-resolution planes once its cell exists (the
-  watch folder no longer renders arrivals, #247).
+  sheet releases a frame's full-resolution planes once its cell exists, and
+  the light-table lane those of a watch-folder arrival's recipe render
+  (`stage: 'processed'`, no adjustments) once the recipe is measured (#229
+  review, R1-124).
 - Batch frames run frame detection silently (`processFileWithSettings`
   `silent: true`): a never-analysed frame gets no blocking overlay and no
   frame wait, so a hidden window keeps exporting. A job fixes its export

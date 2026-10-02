@@ -494,7 +494,14 @@ The lanes render a tile without a new decode whenever they can (#247):
   resampling); an 8-bit source at a non-right angle is decimated first and
   the small image rotated. The router settings, analysis region, strokes and
   dust size still read the full base size, and the colour analysis reference
-  still comes from the full base.
+  still comes from the full base. A render without a recipe prepares the one
+  the lane stores (the automatic gray point and the expired-film measurement
+  are taken on its tile), and exports reuse it: where the reduced image is not
+  exactly the chain's (`reducedGeometryExact`: an 8-bit source at a non-right
+  angle, the usual auto-frame straighten of a JPEG scan), that render takes
+  the full chain and the preview downsample instead, as 1703835 did, so the
+  recipe is the one 1703835 measured (#229 review, R1-081). Renders with a
+  saved recipe only show it and keep the reduced path.
 - **Half-size decodes.** A RAW frame with a settled recipe (frame detection
   and the film-edge read done) and no tile source is decoded at half size in
   16 bits without the sensor-defect pass (`halfSize`, `outputBps: 16`,

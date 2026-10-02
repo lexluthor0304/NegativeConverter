@@ -41,14 +41,21 @@ temporary, symlink and nested files are excluded. A file whose name and size
 are already queued is not read again. Files are read through a session grant
 in checked chunks and take the normal import path (#247): arrivals within a
 second of each other are queued in one batch, and nothing is converted on
-arrival. The light-table lane prepares each frame's recipe and final tile from
-one silent background decode, with no blocking overlay, exactly as for a
-frame imported with the picker; a batch of three or more (a burst, or “Import
-existing files too”) starts the automatic roll import at once, one decode per
-file. Captures that trickle in are counted across the session: 2.5 s after
-the last one, three or more frames no roll analysis has covered form a roll
-(roll analysis then decodes them once more for its samples). The review toast
-counts watch-folder frames that have a recipe.
+arrival. The first arrival opens when no photo is open. The light-table lane
+gives every other one its recipe and final tile from one silent background
+decode, with no blocking overlay. That recipe is the one 1703835's watch made
+(#229 review, R1-124): a full-resolution render of the frame (stopping before
+the adjustments), so its automatic gray point and expired-film measurement
+are the whole frame's, not the tile's, and it is not marked automatic; exports
+use it as it is. A frame imported with the picker keeps the lane's tile recipe.
+A batch (a burst, or “Import existing files too”) starts no roll import of its
+own. Each arrival counts toward a roll once its recipe exists: 2.5 s after the
+last recipe, three or more counted since the previous quiet period (still
+queued, unedited and not taken by a roll analysis) form a roll on top of their
+recipes, with the 900 px samples the lane kept from its decodes; fewer are
+dropped. Full-resolution captures arriving one by one therefore rarely form a
+roll, as before #247. The review toast counts watch-folder frames that have a
+recipe.
 
 Stop or a new session revokes the grant. The watch never persists across app
 launches. There is no web menu entry. Grant/stability/chunk tests run with
