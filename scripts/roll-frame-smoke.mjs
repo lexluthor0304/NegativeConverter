@@ -14,6 +14,11 @@
 //    its two helpers against a plain worker without them, on a window frame
 //    and on one that takes the fallback: identical results, with the helpers
 //    having run units or passes.
+// 4. The frame's display proxy fill (#249, R2-003) in the app's geometry
+//    workers: the level of its recipe from the planes the roll-frame worker
+//    hands back (plain: their 16-bit rows are copied, at most 1.5x the rows
+//    the window reads) and from the same planes in shared memory (views:
+//    nothing copied on the page) equals the level of the whole output.
 export async function runRollFrameSmoke({ evaluate, fail }) {
   const result = await evaluate(`(async () => {
     const { createAutoFrameWorkerClient, analyzeFrameInWorker, warmUpAutoFrameWorker } = await import('/src/app/autoFrameWorkerClient.js');
@@ -72,7 +77,8 @@ export async function runRollFrameSmoke({ evaluate, fail }) {
     const held = await adapter.run(input, postOptions);
     const workerMs = Math.round(performance.now() - started);
     const moved = input.data.buffer.byteLength === 0;
-    const { sample } = await adapter.held.sample(rollSampleSettings(settings), { tileMax: 288 });
+    // The planes come back with the sample, as for a frame whose proxy is to be filled (step 4).
+    const { sample, base: handedBack } = await adapter.held.sample(rollSampleSettings(settings), { tileMax: 288, returnPlanes: true });
     pool.dispose();
     const planes = async value => [await hex(value.data), value.__image16 ? await hex(value.__image16.data) : null];
     out.roll = {
@@ -119,6 +125,35 @@ export async function runRollFrameSmoke({ evaluate, fail }) {
     }
     plain.dispose();
     out.parallel.helpersAlive = analyzeFrameInWorker.helpersAlive;
+
+    // 4. The display proxy fill's level, from the handed-back planes and
+    // from a shared copy of them.
+    {
+      const { createGeometryPool } = await import('/src/app/geometryPool.js');
+      const { planGeometry, renderGeometry, geometrySourceRect } = await import('/src/app/imageGeometry.js');
+      const { buildDisplayLevel } = await import('/src/app/displayPreview.js');
+      const plan = planGeometry(handedBack, { rotationAngle: settings.rotationAngle || 0, mirrored: Boolean(settings.mirrored), cropRegion: settings.cropRegion || null });
+      const k = 2;
+      const read = geometrySourceRect(plan, 0, Math.floor(plan.outHeight / k) * k);
+      const geometryPool = createGeometryPool();
+      const fromRows = await geometryPool.renderDisplayLevel(handedBack, plan, { k });
+      const rowsCopied = geometryPool.counters.copiedBytes;
+      let views = null;
+      if (typeof SharedArrayBuffer === 'function') {
+        const shared16 = new Uint16Array(new SharedArrayBuffer(handedBack.__image16.data.byteLength));
+        shared16.set(handedBack.__image16.data);
+        const shared = new ImageData(handedBack.data, width, height);
+        shared.__image16 = { width, height, data: shared16 };
+        views = await hex((await geometryPool.renderDisplayLevel(shared, plan, { k })).__image16.data);
+      }
+      out.fill = {
+        kind: plan.kind, plain: handedBack.__image16.data.buffer instanceof ArrayBuffer,
+        expected: await hex(buildDisplayLevel(renderGeometry(handedBack, plan), k).__image16.data),
+        rows: await hex(fromRows.__image16.data), views, rowsCopied, viewsCopied: geometryPool.counters.copiedBytes - rowsCopied,
+        read: read.width * read.height * 8, workerBands: geometryPool.counters.workerBands, syncBands: geometryPool.counters.syncBands
+      };
+      geometryPool.dispose();
+    }
     return out;
   })()`);
   console.log('roll frame / OpenCV:', JSON.stringify(result));
@@ -136,5 +171,12 @@ export async function runRollFrameSmoke({ evaluate, fail }) {
   }
   if (parallel.outline.angleCount >= 2 && !parallel.outline.remote) fail('the helpers took no work on the fallback frame: ' + JSON.stringify(parallel.outline));
   if (parallel.outline.angleCount < 2) console.log('note: the outline frame did not take the multi-angle fallback in this browser: ' + JSON.stringify(parallel.outline));
-  console.log('ok: OpenCV shared module, roll-frame worker equals the lane sequence, parallel detection equals serial');
+  const { fill } = result;
+  if (!fill.plain) fail('the roll-frame worker handed back shared planes; the fill check expects plain ones: ' + JSON.stringify(fill));
+  if (fill.rows !== fill.expected) fail('a fill level from copied rows differs from the whole output\'s level: ' + JSON.stringify(fill));
+  if (!(fill.rowsCopied > 0 && fill.rowsCopied <= 1.5 * fill.read)) fail('a fill copied more than 1.5x the rows its window reads: ' + JSON.stringify(fill));
+  if (fill.views === null) fail('no SharedArrayBuffer on the smoke page: ' + JSON.stringify(fill));
+  if (fill.views !== fill.expected || fill.viewsCopied !== 0) fail('a fill of a shared base copied rows or differs: ' + JSON.stringify(fill));
+  if (fill.syncBands || !fill.workerBands) fail('the fill bands did not run in geometry workers: ' + JSON.stringify(fill));
+  console.log('ok: OpenCV shared module, roll-frame worker equals the lane sequence, parallel detection equals serial, fill levels from copied rows and shared views');
 }
