@@ -6795,11 +6795,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // The source is remembered as an identity (rasterIdentity), never held: a
     // photo's converted frame (up to 240 MB + 480 MB at 60 MP) must not outlive
     // its session, its eviction or the next decode for the sake of its tile.
-    // Only the open photo's pair is kept (invalidatePhotoActivation forgets
-    // the rest).
+    // Brush patches (#259) change its pixels in place: they move
+    // convertedPixelsRevision, which the pair records too. Only the open
+    // photo's pair is kept (invalidatePhotoActivation forgets the rest).
     let studioThumbnailInputs = new WeakMap();
     const rasterIdentities = new WeakMap();
     let nextRasterIdentity = 1;
+    let convertedPixelsRevision = 0;
     const STUDIO_THUMBNAIL_SETTLE_MS = 250;
     // Long side of the light-table lane's render before the 144 px tile.
     const STUDIO_TILE_PREVIEW_MAX = 288;
@@ -10005,8 +10007,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // what the display derives from it (preview source, WebGL texture,
     // histogram on idle) for those rects only, then repaints. A repaired
     // image that is not the one on screen is shown the ordinary way. The
-    // caller patches the tint (patchDustTint).
+    // caller patches the tint (patchDustTint). Every in-place writer of the
+    // converted pixels comes through here (a stroke, the MI-GAN refresh) or
+    // through restoreDustDelta (undo, redo).
     function refreshDustDisplay(target, rects) {
+      // Same objects, other pixels: the active tile made before is stale.
+      convertedPixelsRevision += 1;
       if (state.processedImageData !== target || state.processedImageDataIsPreview) {
         applyProcessedImageToState(target, { deferDisplay: true });
         updatePreview();
@@ -10067,6 +10073,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       repairStamps.forget(delta.target);
       forgetDustMaskInfo(delta.mask);
       const restored = applyDustDelta(delta, direction);
+      // In place, also when it is shown the ordinary way below.
+      convertedPixelsRevision += 1;
       const displayed = state.processedImageData === restored.target && dust.mask === restored.mask;
       const tagBefore = dust.maskTag;
       dust.cleanSource = restored.cleanSource;
@@ -22431,11 +22439,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const signature = studioThumbnailSignature(adjustments);
       const sourceId = rasterIdentity(source);
       const rendered = studioThumbnailInputs.get(item);
-      if (!rendered || rendered.sourceId !== sourceId || rendered.signature !== signature
-        || rendered.thumbnail !== item.thumbnail || item.thumbnailKind !== 'processed') {
+      if (!rendered || rendered.sourceId !== sourceId || rendered.pixelsRevision !== convertedPixelsRevision
+        || rendered.signature !== signature || rendered.thumbnail !== item.thumbnail || item.thumbnailKind !== 'processed') {
         item.thumbnail = thumbnailDataUrl(createAdjustedPhotoPreview(source, adjustments));
         item.thumbnailKind = 'processed';
-        studioThumbnailInputs.set(item, { sourceId, signature, thumbnail: item.thumbnail });
+        studioThumbnailInputs.set(item, { sourceId, pixelsRevision: convertedPixelsRevision, signature, thumbnail: item.thumbnail });
       }
       item.thumbnailKey = photoSettingsKey(item);
       item.thumbnailErrorKey = null;
@@ -22450,7 +22458,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (!source || !item.thumbnail) return;
       cancelStudioThumbnailUpdate();
       studioThumbnailInputs.set(item, {
-        sourceId: rasterIdentity(source), signature: studioThumbnailSignature(buildAdjustmentSettings(state)), thumbnail: item.thumbnail
+        sourceId: rasterIdentity(source), pixelsRevision: convertedPixelsRevision,
+        signature: studioThumbnailSignature(buildAdjustmentSettings(state)), thumbnail: item.thumbnail
       });
     }
 

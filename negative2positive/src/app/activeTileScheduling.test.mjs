@@ -4,6 +4,10 @@ import v8 from 'node:v8';
 import vm from 'node:vm';
 import { exactSettingsKey } from './settingsKey.js';
 import { createStudioThumbnail } from './studioSettings.js';
+import { applyStrokePatch, applyDustDelta, amendDustDelta, copyImageRect, pasteImageRect } from './dustStrokeHistory.js';
+import { updateDisplayPreviewRect } from './displayPreview.js';
+import { createRepairStamps } from './repairReuse.js';
+import { TILE as AI_TILE, CONTEXT as AI_CONTEXT } from './aiInpaint.js';
 import { createHarness, makeBase, settle } from './geometryTestHarness.mjs';
 
 v8.setFlagsFromString('--expose-gc');
@@ -57,7 +61,7 @@ function fixture() {
   const puts = [];
   const context = vm.createContext({
     state, loadGeneration: 1, exactSettingsKey, ImageData: TestImageData, Uint8ClampedArray, Uint8Array,
-    studioThumbnailInputs: new WeakMap(), rasterIdentities: new WeakMap(), nextRasterIdentity: 1,
+    studioThumbnailInputs: new WeakMap(), rasterIdentities: new WeakMap(), nextRasterIdentity: 1, convertedPixelsRevision: 0,
     STUDIO_THUMBNAIL_SETTLE_MS: 250,
     studioThumbnailUpdateTimer: 0, studioThumbnailUpdateFrame: 0, thumbnailCanvas: null,
     previewTier: 'normal', reducedDisplayImages: new WeakSet(), coreReprocessTimer: null, coreReprocessBusy: () => false,
@@ -246,6 +250,151 @@ function fixture() {
   assert.equal(itemB.thumbnail, 'data:image/jpeg;base64,b');
 }
 
+// R1-026: dust-brush strokes, their undo and redo, and MI-GAN's refresh of the
+// stroked rects patch the converted frame in place (#259). The real writers,
+// display refresh and tile: each rebuilds the tile from the patched pixels
+// before its key is stamped again, on the settle timer and on the leave path.
+function checksum(data) {
+  let hash = 2166136261;
+  for (let i = 0; i < data.length; i++) hash = Math.imul(hash ^ data[i], 16777619);
+  return (hash >>> 0).toString(16);
+}
+function dustFixture() {
+  const width = 160, height = 120;
+  const frame = fill => {
+    const image = new TestImageData(new Uint8ClampedArray(width * height * 4).fill(fill), width, height);
+    image.__image16 = { width, height, data: new Uint16Array(width * height * 4).fill(fill * 257) };
+    return image;
+  };
+  const clean = frame(140), target = frame(140);
+  const mask = new Uint8Array(width * height);
+  const file = { name: 'dust.png' };
+  const item = { file, settings: { cyan: 0 }, thumbnailKind: 'processed' };
+  const log = [];
+  let key = null;
+  Object.defineProperty(item, 'thumbnailKey', {
+    get: () => key, set: value => { key = value; log.push(['stamp', item.thumbnail]); }, enumerable: true
+  });
+  const state = {
+    fileQueue: [item], currentFileIndex: 0, loadedFile: file, cyan: 0, currentStep: 3,
+    curves: { r: Uint8Array.from({ length: 256 }, (_, i) => i), g: new Uint8Array(256), b: new Uint8Array(256) },
+    processedImageData: target, previewSourceImageData: target, webglSourceImageData: null, displayImageData: null,
+    processedImageDataIsPreview: false, fullResolutionPending: false, repairStrokes: [],
+    loadedBaseImageData: clean, originalImageData: clean, conversionSourceImageData: clean,
+    dustRemoval: { enabled: true, ai: true, mask, cleanSource: clean, inpaintedImageData: target,
+      particleCount: 1, maskTag: 1, revision: 4 },
+  };
+  const timers = [];
+  let lastPut = null;
+  const sample = image => {
+    const thumb = createStudioThumbnail(image, 144);
+    return new TestImageData(thumb.data.map(value => value + state.cyan), thumb.width, thumb.height);
+  };
+  const context = vm.createContext({
+    state, loadGeneration: 1, exactSettingsKey, ImageData: TestImageData, Uint8ClampedArray, Uint8Array, Uint16Array,
+    studioThumbnailInputs: new WeakMap(), rasterIdentities: new WeakMap(), nextRasterIdentity: 1, convertedPixelsRevision: 0,
+    STUDIO_THUMBNAIL_SETTLE_MS: 250, studioThumbnailUpdateTimer: 0, studioThumbnailUpdateFrame: 0, thumbnailCanvas: null,
+    previewTier: 'normal', reducedDisplayImages: new WeakSet(), coreReprocessTimer: null, coreReprocessBusy: () => false,
+    setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length; },
+    clearTimeout: id => { if (timers[id - 1]) timers[id - 1].fn = null; },
+    requestAnimationFrame: () => assert.fail('no full render here'), cancelAnimationFrame: () => {},
+    isCurrentLoad: generation => generation === context.loadGeneration,
+    buildAdjustmentSettings: settings => ({ cyan: settings.cyan, curves: { ...settings.curves } }),
+    createAdjustedPhotoPreview: source => sample(source), createStudioThumbnail,
+    photoSettingsKey: entry => JSON.stringify(entry.settings), updateFileThumbnail: () => {},
+    document: { createElement: () => ({
+      width: 0, height: 0, getContext: () => ({ putImageData: image => { lastPut = image; } }),
+      toDataURL: () => { log.push(['encode']); return `data:image/jpeg;base64,${checksum(lastPut.data)}`; }
+    }) },
+    // The display the patches refresh (refreshDustDisplay, restoreDustDelta).
+    applyProcessedImageToState: image => { state.processedImageData = image; },
+    updatePreview: () => context.scheduleStudioThumbnailUpdate(),
+    updateDisplayPreviewRect, webglUploadSourceRect: () => {}, scheduleDustHistogramRefresh: () => {},
+    // A stroke and its history (commitDustStroke, restoreDustDelta).
+    repairStamps: createRepairStamps(), forgetDustMaskInfo: () => {}, applyStrokePatch, applyDustDelta,
+    undoStack: [], pushUndoDelta: (label, delta) => context.undoStack.push({ label, dustDelta: delta }),
+    showDustParticleCount: () => {}, patchDustTint: () => {}, followDustMaskInWorker: () => Promise.resolve(),
+    syncDustWorkerPin: () => {}, dustDetectionRevision: 0, dustDetectionTimer: null,
+    // MI-GAN's refresh of the stroked rect (runDustAiRefresh), with a stand-in
+    // inpainter that paints the masked pixels 30.
+    dustAiRefresh: { rects: [], timer: null }, coreReprocessToken: 3, pendingBrushRepairs: 0, brushRepairWaiters: [],
+    aiRepair: { status: 'ready', revision: 1, run: () => {}, tiles: 0, ms: 0 }, aiRepairRunsInFlight: 0,
+    noteAiRepairUsed: () => {}, updateAiRepairUI: () => {}, showToast: () => {}, console, DOMException, performance,
+    copyImageRect, pasteImageRect, amendDustDelta, AI_TILE, AI_CONTEXT, DEFAULT_MODEL_URL: '/m.onnx',
+    loadAiRepairModel: async () => {}, localExposureGeometryFor: () => ({}), buildRepairMask: () => ({ mask: null }),
+    inpaintWithModel: async (image, layerMask) => {
+      const out = new TestImageData(image.data.slice(), image.width, image.height);
+      out.__image16 = { width: image.width, height: image.height, data: image.__image16.data.slice() };
+      for (let i = 0; i < layerMask.length; i++) {
+        if (!layerMask[i]) continue;
+        for (let c = 0; c < 3; c++) { out.data[i * 4 + c] = 30; out.__image16.data[i * 4 + c] = 30 * 257; }
+      }
+      return { imageData: out, tiles: 1 };
+    },
+  });
+  vm.runInContext([...TILE_FUNCTIONS, 'refreshDustDisplay', 'commitDustStroke', 'restoreDustDelta', 'runDustAiRefresh',
+    'queueDustAiRefresh', 'mergeDustRefreshRects', 'dustAiWindow', 'cropDustImage', 'cropDustMask', 'repairStrokeMaskFor',
+    'noteBrushRepairSettled', 'aiRepairReady', 'dustPassUsesAi', 'settleAiRepairModel', 'aiRepairLoadArgs',
+    'assertRepairCurrent', 'countAiRepairRun', 'baseSizeSource'].map(functionSource).join('\n')
+    + '\nlet dustRefreshRepairMask = null;', context);
+  // Fires the pending timers of one kind: the tile's settle (250 ms) or the
+  // refresh's debounce (200 ms), whose run then completes.
+  const fire = async ms => {
+    for (const timer of timers.slice()) {
+      if (!timer.fn || timer.ms !== ms) continue;
+      const fn = timer.fn; timer.fn = null;
+      fn();
+      await new Promise(resolve => setImmediate(resolve));
+    }
+  };
+  // The tile a fresh build of the frame on screen gives.
+  const expectedTile = () => `data:image/jpeg;base64,${checksum(sample(target).data)}`;
+  return { context, state, item, target, mask, log, fire, expectedTile, width, height };
+}
+{
+  const f = dustFixture(), c = f.context;
+  c.updateStudioThumbnail();
+  const clean = f.item.thumbnail;
+  assert.equal(clean, f.expectedTile());
+  // A stroke over a speck: TELEA's stand-in (200) inside its rect, the mask
+  // refined there, and the rect queued for MI-GAN.
+  const rect = { x: 60, y: 40, width: 24, height: 20 };
+  const rgba8 = new Uint8ClampedArray(rect.width * rect.height * 4).fill(200);
+  const rgba16 = new Uint16Array(rgba8.length).fill(200 * 257);
+  const maskBytes = new Uint8Array(rect.width * rect.height);
+  for (let y = 6; y < 14; y++) for (let x = 8; x < 16; x++) maskBytes[y * rect.width + x] = 255;
+  const step = async (label, action) => {
+    f.log.length = 0;
+    await action();
+    await f.fire(250);
+    assert.deepEqual(f.log.map(([kind]) => kind), ['encode', 'stamp'], `${label}: the tile is rebuilt before its key is stamped`);
+    assert.equal(f.log[1][1], f.expectedTile(), `${label}: the stamped tile shows the patched pixels`);
+    return f.item.thumbnail;
+  };
+  const stroked = await step('stroke', () => {
+    c.commitDustStroke({ rect, rgba8, rgba16, maskRect: rect, maskBytes, particleCount: 2 }, { baseTag: 1, tag: 2 });
+    assert.equal(c.dustAiRefresh.rects.length, 1, 'the stroked rect is queued for MI-GAN');
+  });
+  assert.notEqual(stroked, clean);
+  const refreshed = await step('MI-GAN refresh', () => f.fire(200));
+  assert.equal(c.dustAiRefresh.rects.length, 0, 'the rect was refreshed');
+  assert.notEqual(refreshed, stroked, 'MI-GAN replaced the stroke\'s stand-in');
+  const entry = c.undoStack.at(-1).dustDelta;
+  assert.equal(await step('undo', () => c.restoreDustDelta(entry, 'undo')), clean, 'undo shows the frame before the stroke again');
+  assert.equal(await step('redo', () => c.restoreDustDelta(entry, 'redo')), refreshed, 'redo shows the refreshed stroke again');
+  // Leaving right after a patch: persistCurrentFileSettings rebuilds the
+  // outgoing tile before it stamps the key (the settle timer is cancelled).
+  f.log.length = 0;
+  c.restoreDustDelta(entry, 'undo');
+  c.updateStudioThumbnail();
+  assert.deepEqual(f.log.map(([kind]) => kind), ['encode', 'stamp'], 'leave: rebuilt before it is stamped');
+  assert.equal(f.item.thumbnail, clean);
+  // Nothing patched since: a redraw only stamps.
+  f.log.length = 0;
+  c.scheduleStudioThumbnailUpdate(); await f.fire(250);
+  assert.deepEqual(f.log.map(([kind]) => kind), ['stamp']);
+}
+
 // A 116-photo roll in the geometry harness, photo A open and settled: the
 // real switchToFile, persist and tile. A's session is kept without planes
 // (#244's cold sessions), so after a switch nothing but a leak can keep its
@@ -261,7 +410,7 @@ function rollHarness() {
   t.geometryDiagnostics.coldSessions = true;
   const counts = { encodes: 0, rows: 0 };
   Object.assign(t, {
-    studioThumbnailInputs: new WeakMap(), rasterIdentities: new WeakMap(), nextRasterIdentity: 1,
+    studioThumbnailInputs: new WeakMap(), rasterIdentities: new WeakMap(), nextRasterIdentity: 1, convertedPixelsRevision: 0,
     STUDIO_THUMBNAIL_SETTLE_MS: 250, studioThumbnailUpdateTimer: 0, thumbnailCanvas: null, state: h.state,
     updateFileThumbnail: () => { counts.rows++; },
     extractCurrentSettings: () => ({ ...h.state.fileQueue[h.state.currentFileIndex].settings }),
@@ -307,4 +456,4 @@ function rollHarness() {
 }
 
 console.log('activeTileScheduling: trailing settle timer, next-frame full renders, exact skip/restamp, zoom carry, warm adoption, '
-  + 'tile inputs without pixels');
+  + 'tile inputs without pixels, in-place patches rebuild the tile');
