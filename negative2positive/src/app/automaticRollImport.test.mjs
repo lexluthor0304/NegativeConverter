@@ -22,6 +22,17 @@ import { displaySessionStubs, DISPLAY_SESSION_HELPERS } from './displaySessionHa
 import { createDecodeSlots, rollAnalysisFootprint, planBatchParallelism, planRollAnalysis, ROLL_ANALYSIS_MIN_RAM_BYTES } from './batchExportScheduler.js';
 import { primeFilmStats } from './filmStatsCache.js';
 import { rollSampleSettings } from './rollSample.js';
+import { cachedAutoDetectFilmBase, cachedDetectFilmType } from './filmStatsCache.js';
+import { detectedImportSettings } from './filmTypeDetection.js';
+import { autoDetectFilmBase } from './filmBaseDetection.js';
+import { EXPIRED_RESCUE_DEFAULTS } from '../pipeline/expiredRescue.js';
+import { sanitizeFrameMetadata } from './analogMetadata.js';
+import { canAutoApplyImportFrame } from './autoFrameFormats.js';
+import { imageAreaFromDetection } from './analysisRegion.js';
+import { sanitizeFilmEdgeForSettings } from './filmEdgeReader.js';
+import { normalizeAngleDegrees } from './imageGeometry.js';
+import { computeFilmStats } from './rawPostDecode.js';
+import { rollFrameFilmType } from '../workers/rollFrameTask.js';
 
 // Test the actual orchestration functions, not a second scheduler. Deferred
 // decoders/analysis replies make navigation and recipe races deterministic.
@@ -29,7 +40,9 @@ const source = readFileSync(new URL('./main.js', import.meta.url), 'utf8');
 function functionSource(name) {
   const match = new RegExp(`^    (?:async )?function ${name}\\(`, 'm').exec(source);
   assert.ok(match, `${name} exists`);
-  const end = source.indexOf('\n    }', match.index);
+  // The closing brace alone on its line (a destructured parameter list also
+  // starts a line with "    }").
+  const end = source.indexOf('\n    }\n', match.index);
   return source.slice(match.index, end + 6);
 }
 const deferred = () => {
@@ -896,7 +909,8 @@ for (const verdicts of [['noMask', 'mono', 'mono', 'mono', 'mono'], ['mono', 'mo
 // #252: RAW frames decode into their lane's roll-frame worker, which keeps
 // the planes, detects the frame and reads the edge; the page merges its
 // results with today's functions and the worker builds the sample.
-function workerRoll(f, { analysisFor = () => ({}), dng = true, holdAnalysis = null } = {}) {
+function workerRoll(f, { analysisFor = () => ({}), dng = true, holdAnalysis = null, size = { width: 10, height: 10 }, pageImage = null } = {}) {
+  const { width, height } = size;
   f.context.rollFrameWorkerUsable = () => true;
   if (dng) for (const item of f.items) item.file.name = `${item.id}.dng`;
   const adapters = [];
@@ -916,10 +930,10 @@ function workerRoll(f, { analysisFor = () => ({}), dng = true, holdAnalysis = nu
     const id = Number(file.name.split('.')[0]);
     f.decoded.push(id);
     // The loader gate: LibRaw's size and decode estimate.
-    await claim?.atDecode({ kind: 'raw', width: 10, height: 10, estimatedBytes: 5000 });
-    if (!postDecode) { pageReads.push(id); return { width: 10, height: 10, id }; }
+    await claim?.atDecode({ kind: 'raw', width, height, estimatedBytes: 5000 });
+    if (!postDecode) { pageReads.push(id); return pageImage ? pageImage(id) : { width, height, id }; }
     // The worker packs the planes, reports it, then analyses the frame.
-    postDecode.onPacked?.({ width: 10, height: 10 });
+    postDecode.onPacked?.({ width, height });
     if (holdAnalysis) await holdAnalysis(id);
     const extra = analysisFor(id, postDecode.options) || {};
     postDecode.analysis = {
@@ -927,48 +941,134 @@ function workerRoll(f, { analysisFor = () => ({}), dng = true, holdAnalysis = nu
       filmStats: { borderBufferPct: 10, filmType: { filmType: f.make(id).filmType }, filmBase: { r: 1, g: 2, b: 3 } }, ...extra
     };
     const held = {
-      id, width: 10, height: 10, samples: [], released: false,
+      id, width, height, samples: [], released: false,
       async sample(settings, options) {
         held.samples.push({ settings, options });
-        const sample = { id, width: 10, height: 10, fromWorker: true, __baseSize: { width: 10, height: 10 }, __analysisReference: null };
+        const sample = { id, width, height, fromWorker: true, __baseSize: { width, height }, __analysisReference: null };
         // Asked for them, the worker hands the planes back with the sample.
-        return options?.returnPlanes ? { sample, base: { id, width: 10, height: 10, planesFromWorker: true } } : { sample };
+        return options?.returnPlanes ? { sample, base: { id, width, height, planesFromWorker: true } } : { sample };
       },
       release() { held.released = true; }
     };
     heldFrames.push(held);
     postDecode.held = held;
-    return { held: true, width: 10, height: 10 };
+    return { held: true, width, height };
   };
   return { pool, adapters, pageReads, heldFrames };
 }
 
+// The page's own merge (#229 review R2-016): createDefaultSettings (the
+// frame's film type and film base, from its pixels or from statistics primed
+// on a pixel-less frame), analyzeStudioImportFrame and mergeImportFilmEdge
+// from main.js, with the modules they read, in place of the fixture's stubs.
+const MERGE_FUNCTIONS = ['getImageDataPixelCount', 'clampBetween', 'sanitizeNumeric', 'makeLinearCurveLut',
+  'createDefaultLensCorrectionSettings', 'autoDetectFilmBase', 'defaultSettingsInputs', 'createDefaultSettings',
+  'autoFrameEffectiveAngle', 'rotate180CropRegion', 'mirrorCropForRotatedFrame', 'analyzeStudioImportFrame', 'mergeImportFilmEdge'];
+function useRealMerge(f) {
+  Object.assign(f.context, {
+    detectedImportSettings, cachedDetectFilmType, cachedAutoDetectFilmBase, EXPIRED_RESCUE_DEFAULTS, sanitizeFrameMetadata,
+    canAutoApplyImportFrame, imageAreaFromDetection, sanitizeFilmEdgeForSettings, normalizeAngleDegrees,
+    recordPerfStages: () => {}, updateMetadataUI: () => {}
+  });
+  f.state.autoFrame = { enabled: true, onImport: true, highConfidence: 0.72, rotate180Default: false };
+  f.state.filmType = 'color';
+  vm.runInContext(MERGE_FUNCTIONS.map(functionSource).join('\n'), f.context);
+}
+
+// A decoded frame per id: an orange-masked negative whose rebate and image
+// differ from frame to frame, so a frame given another's statistics,
+// detection or read gets another recipe.
+const FRAME = { width: 96, height: 64 };
+function framePlanes(id) {
+  const { width, height } = FRAME;
+  const rgba16 = new Uint16Array(width * height * 4);
+  const rgba8 = new Uint8ClampedArray(width * height * 4);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const inside = x >= 8 + id && x < 84 && y >= 6 && y < 58;
+      const rgb = inside
+        ? [30000 + ((x * 37 + y * 11 + id * 101) % 9000), 16000 + ((x * 13) % 5000), 9000 + ((y * 17) % 3000)]
+        : [56000 + id * 900, 37000 + id * 500, 23000 - id * 400];
+      const at = (y * width + x) * 4;
+      for (let c = 0; c < 3; c++) { rgba16[at + c] = rgb[c]; rgba8[at + c] = rgb[c] >>> 8; }
+      rgba16[at + 3] = 65535;
+      rgba8[at + 3] = 255;
+    }
+  }
+  return { width, height, data: rgba8, __image16: { width, height, data: rgba16 }, id };
+}
+// A tilted crop and an edge-text read (frame number; frame 2 mirrored).
+function frameDetection(id) {
+  const angle = 0.25 * id;
+  const rotated = rotatedDimensions(FRAME.width, FRAME.height, angle);
+  return {
+    angle, cropRegion: { left: 6 + id, top: 4, width: 70, height: 48 }, confidence: 0.91, confidenceLevel: 'high', detectedFormat: '135',
+    rotatedWidth: rotated.width, rotatedHeight: rotated.height, rotatedIsSource: false, diagnostics: { method: 'opencv-line-window' }
+  };
+}
+const frameEdge = id => ({ found: true, text: { text: 'KODAK 400', frameNumber: String(10 + id), mirrorDetected: id === 2, year: 2026 } });
+
 {
-  // The worker path gives every frame the recipe the page path gives it.
+  // The worker path gives every frame the recipe the page path gives it,
+  // through the real merge (R2-016). The page decodes each frame's planes,
+  // computes its statistics from them and detects; the worker hands over the
+  // statistics it computed on the same planes (computeFilmStats), its
+  // detection and its film-edge read, merged on a pixel-less frame.
   const page = fixture();
-  page.state.filmType = 'color';
+  useRealMerge(page);
   for (const item of page.items) item.file.name = `${item.id}.dng`;
+  page.context.loadFileToImageData = async (file) => {
+    const id = Number(file.name.split('.')[0]);
+    page.decoded.push(id);
+    return framePlanes(id);
+  };
+  page.context.runImportDetections = async (image, options) => {
+    page.importRequests.push(options);
+    return { image, detection: { result: frameDetection(image.id) }, read: { result: frameEdge(image.id) } };
+  };
   page.context.scheduleAutomaticRollImport(page.items);
   await page.fire(1200);
   const f = fixture();
+  useRealMerge(f);
   const detections = [];
   const analyze = f.context.analyzeStudioImportFrame;
   f.context.analyzeStudioImportFrame = async (image, settings, options) => {
-    detections.push({ size: [image.width, image.height], detection: options.detection, filmType: options.filmType });
+    detections.push({ size: [image.width, image.height], pixels: Boolean(image.data), detection: options.detection, filmType: options.filmType });
     return analyze(image, settings, options);
   };
-  f.state.filmType = 'color';
-  const { pool, adapters, pageReads, heldFrames } = workerRoll(f);
+  const { pool, adapters, pageReads, heldFrames } = workerRoll(f, {
+    size: FRAME,
+    analysisFor: (id) => {
+      const planes = framePlanes(id);
+      const filmStats = computeFilmStats(planes.__image16, planes.data, 10);
+      return { frameFilmType: rollFrameFilmType({ automatic: true }, filmStats), filmStats, detection: frameDetection(id), edge: frameEdge(id) };
+    }
+  });
   f.context.scheduleAutomaticRollImport(f.items);
   await f.fire(1200);
-  assert.equal(JSON.stringify(f.items.map(item => item.settings)), JSON.stringify(page.items.map(item => item.settings)), 'same recipes');
+  const recipes = fixture => JSON.stringify(fixture.items.map(item => item.settings));
+  assert.equal(recipes(f), recipes(page), 'same recipes');
+  // What each frame's recipe holds of its own measurements: its tilted crop,
+  // its edge read and its film base.
+  for (const item of f.items.slice(1)) {
+    const settings = item.settings;
+    assert.equal(settings.autoFrameMeta?.appliedMode, 'crop', `frame ${item.id} framed`);
+    assert.equal(settings.rotationAngle, 0.25 * item.id);
+    assert.equal(settings.frameMetadata.frameNumber, String(10 + item.id), `frame ${item.id} read`);
+    assert.equal(settings.mirrored, item.id === 2);
+    assert.deepEqual(settings.filmBase, autoDetectFilmBase(framePlanes(item.id), 10), `frame ${item.id}'s own film base`);
+  }
+  assert.notDeepEqual(f.items[1].settings.filmBase, f.items[2].settings.filmBase);
+  assert.deepEqual(page.decoded, [1, 2, 3]);
+  assert.equal(page.importRequests.length, 3, 'the page path detected each frame');
   assert.deepEqual(f.decoded, [1, 2, 3], 'one decode per background frame');
   assert.deepEqual(pageReads, [], 'no frame fell back to the page');
   assert.equal(f.importRequests.length, 0, 'no detection request on the page');
   assert.deepEqual(f.samplesBuilt, [0], 'only the open photo\'s sample is built on the page');
   assert.ok(heldFrames.every(held => held.samples.length === 1 && held.samples[0].options.tileMax === 288), 'the worker built each sample');
   assert.deepEqual(heldFrames[0].samples[0].settings, rollSampleSettings(f.items[1].settings), 'from the recipe\'s geometry');
-  assert.ok(detections.every(entry => entry.size.join() === '10,10' && entry.detection.result === null && entry.filmType === 'color'));
+  assert.deepEqual(detections.map(entry => entry.detection.result.angle).sort(), [0.25, 0.5, 0.75], 'each frame\'s own detection');
+  assert.ok(detections.every(entry => entry.size.join() === '96,64' && !entry.pixels && entry.filmType === 'color'), 'merged on a pixel-less frame');
   assert.ok(adapters.every(adapter => adapter.options.frame.settings.filmType === 'color' && adapter.options.filmEdge === true
     && adapter.options.filmTypeChoice.automatic === true), 'options snapshotted when each job started');
   assert.equal(f.rollPools.length, 1, 'one roll-frame pool per roll');
