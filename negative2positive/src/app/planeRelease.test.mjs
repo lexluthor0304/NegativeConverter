@@ -92,6 +92,18 @@ class FakeSink {
   const wrapper = { width: 2, height: 2, data: display.data };
   assert.ok(isLiveMutableBuffer(wrapper.data.buffer));
   assert.equal(isLiveMutableBuffer(frame().data.buffer), false);
+  // The dust-repaired image (#259) is patched in both planes: marking the
+  // image marks its 8-bit data and its 16-bit plane.
+  const repaired = frame();
+  markLiveMutableBuffer(repaired);
+  assert.ok(isLiveMutableBuffer(repaired.data.buffer), '8-bit data');
+  assert.ok(isLiveMutableBuffer(repaired.__image16.data.buffer), '16-bit plane');
+  assert.ok(isLiveMutableBuffer(repaired.__image16.data), 'a view names its buffer');
+  const plane = frame().__image16;
+  markLiveMutableBuffer(plane.data);
+  assert.ok(isLiveMutableBuffer(plane.data.buffer), 'a typed array marks its buffer');
+  markLiveMutableBuffer(null);
+  markLiveMutableBuffer(undefined);
 }
 
 // ------------------------------------------------------------ release rules

@@ -32,7 +32,9 @@ result is checked (type, 4·w·h samples, size) before use; a failure warns
 once per session and falls back. `{ planeOnly: true }` returns only the
 plane, for the gain map, and the main-thread fallback has the matching
 `applyPreparedAdjustmentsToPlane16`. The kept input plane is copied for the
-worker in 32 MiB slices, one per task. Tests: `workerBridge.test.mjs` (an
+worker in 32 MiB slices, one per task; a plane the editor patches in place
+(the dust-repaired image, #259) is copied in one task instead, so an undo
+during the export cannot tear it. Tests: `workerBridge.test.mjs` (an
 `ImageData` stub that throws on the wrong length, as browsers do) and
 `exportWorkerParity.test.mjs` (the real worker handler behind the real
 bridge, through structured clone, bit-identical to the main-thread path for

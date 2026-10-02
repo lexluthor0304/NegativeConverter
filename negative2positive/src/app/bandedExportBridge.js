@@ -76,7 +76,7 @@ export function createBandedExportBridge(bridge, pool, { bands = () => pool.size
       count('residentAdjusts');
       return handle.adjust(serializeSettings(settings), { bits16: true, mirror8, signal });
     }
-    // The CPU display buffer is rewritten in place: one copy, in one task.
+    // A plane the editor rewrites in place (#259): one copy, in one task.
     const data16 = isLiveMutableBuffer(plane.data.buffer) ? new Uint16Array(plane.data) : plane.data;
     count('bandAdjusts');
     return pool.adjust({ width: plane.width, height: plane.height, data16 }, serializeSettings(settings), {
@@ -128,7 +128,7 @@ export function createBandedExportBridge(bridge, pool, { bands = () => pool.size
         count('residentAdjusts');
         result = await handle.adjust(serializeSettings(settings), { bits8: true, signal: opts.signal || null });
       } else {
-        // The CPU display buffer is rewritten in place: one copy, in one task.
+        // A plane the editor rewrites in place (#259): one copy, in one task.
         const data8 = isLiveMutableBuffer(imageData.data.buffer) ? new Uint8ClampedArray(imageData.data) : imageData.data;
         count('bandAdjusts');
         result = await pool.adjust({ width, height, data8 }, serializeSettings(settings), {

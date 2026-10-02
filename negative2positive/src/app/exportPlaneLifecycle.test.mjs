@@ -13,6 +13,8 @@
 // - A 1-lane batch uses a pool of one, disposes it, never the module bridge;
 //   it transfers the frame's planes; a lost plane re-renders the frame once
 //   with identical output; the frame's owned planes are released.
+// - The dust-repaired image the editor patches in place (#259) is marked for
+//   a one-task copy before a single export hands it over, with the same bytes.
 import { MEMORY_FUNCTIONS, memoryGlobals } from './memoryHarness.mjs';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -83,7 +85,9 @@ const { bandThreadFactory } = await import('./bandWorkerThreads.mjs');
 const { bandsSupported } = await import('../pipeline/silverBands.js');
 
 const bridgeModule = await import('../workers/workerBridge.js');
-const { markOwnedPlanes, planeBuffersOf, releaseOwnedPlanes, setLiveReferenceProbe, configurePlaneRelease } = await import('./planeRelease.js');
+const {
+  markOwnedPlanes, planeBuffersOf, releaseOwnedPlanes, setLiveReferenceProbe, configurePlaneRelease, markLiveMutableBuffer, isLiveMutableBuffer
+} = await import('./planeRelease.js');
 const { requestExportGainMap, gainMapInputsMatch } = await import('./exportGainMap.js');
 const adjustment = await import('./adjustmentPipeline.js');
 const encoders = await import('./exportImageEncoders.js');
@@ -107,7 +111,7 @@ const runtime = [
   'exportSingle', 'applyAdjustmentsWithSettings', 'applyPreparedAdjustmentsWithWorkers', 'startExportGainMap',
   'imageDataToBlob', 'png16EncodeSettings', 'makeExportCancelledError', 'createBatchExportWorkers',
   'renderBatchExportFile', 'runBatchExport', 'batchPipelineMode', 'batchDecodeAhead', 'mayLearnFromExport',
-  'encodeResidentFrame', 'createExportBands', 'convertForExportInBands', ...MEMORY_FUNCTIONS
+  'encodeResidentFrame', 'createExportBands', 'convertForExportInBands', 'markInPlaceEditedPlanes', ...MEMORY_FUNCTIONS
 ].map(functionSource).join('\n')
   // vm scripts have no dynamic import: hand the module over directly.
   .replaceAll("await import('./gainMapJpeg.js')", 'await importGainMapJpeg()');
@@ -219,7 +223,9 @@ function createContext({ gainMap = 'on' } = {}) {
     gainMapInputsMatch, requestExportGainMap,
     ...adjustment,
     adjustmentLutScratch: adjustment.createAdjustmentLutScratch(),
-    markOwnedPlanes, planeBuffersOf,
+    markOwnedPlanes, planeBuffersOf, markLiveMutableBuffer,
+    // History: dust-stroke entries patch the images they hold (#259).
+    undoStack: [], redoStack: [],
     releaseOwnedPlanes: (...items) => { released.push(items); return releaseOwnedPlanes(...items); },
     isExportInputLostError: bridgeModule.isExportInputLostError,
     isConversionInputLost: (err) => Boolean(err) && err.code === 'INPUT_LOST',
@@ -376,6 +382,50 @@ for (const [format, bitDepth] of [['tiff', 16], ['png', 16], ['png', 8], ['jpeg'
   }
   // No export plane on live state.
   assert.equal(f.state.displayImageData, null);
+}
+
+// ================================== single export of an image patched in place
+// #259: with dust removal on, the export's source is the repaired image that
+// brush strokes and their undo and redo patch in place, and undo is not
+// blocked while an export runs. The export marks it, and every image a stroke
+// entry patches, before it hands the planes to the bridge, which then copies
+// them in one task (workerBridgeOwnership.test.mjs: no torn rows). The bytes
+// are those of the same export without dust.
+for (const [format, bitDepth] of [['tiff', 16], ['png', 16], ['png', 8], ['jpeg', 8]]) {
+  const label = `dust ${format}${bitDepth}`;
+  const plain = createContext();
+  Object.assign(plain.state, { exportFormat: format, exportBitDepth: bitDepth });
+  saved.length = 0;
+  assert.equal((await plain.context.exportSingle()).saved, true, `${label}: reference export`);
+  const expected = await stubBlobText(saved[0]);
+  for (const image of [plain.processed]) {
+    for (const buffer of planeBuffersOf(image)) assert.equal(isLiveMutableBuffer(buffer), false, `${label}: without dust nothing is marked`);
+  }
+
+  const f = createContext();
+  Object.assign(f.state, { exportFormat: format, exportBitDepth: bitDepth });
+  const repaired = f.state.processedImageData;
+  const earlier = makeProcessed(3);
+  const redone = makeProcessed(5);
+  f.state.dustRemoval = { enabled: true, inpaintedImageData: repaired, mask: new Uint8Array(W * H) };
+  f.context.undoStack.push({ label: 'dustBrushStroke', dustDelta: { target: earlier } }, { label: 'exposure', refs: { processedImageData: repaired } });
+  f.context.redoStack.push({ label: 'dustBrushStroke', dustDelta: { target: redone } });
+  saved.length = 0;
+  assert.equal((await f.context.exportSingle()).saved, true, label);
+  for (const image of [repaired, earlier, redone]) {
+    for (const buffer of planeBuffersOf(image)) assert.ok(isLiveMutableBuffer(buffer), `${label}: patched-in-place planes are marked`);
+  }
+  assert.ok(same(await stubBlobText(saved[0]), expected), `${label}: the same bytes`);
+
+  // The clean source standing in for a repaired image (no dust found yet) is
+  // never patched: a stroke clones it first. It keeps its sliced copy.
+  const clean = createContext();
+  Object.assign(clean.state, { exportFormat: format, exportBitDepth: bitDepth });
+  clean.state.dustRemoval = { enabled: true, inpaintedImageData: clean.processed, cleanSource: clean.processed, mask: new Uint8Array(W * H) };
+  saved.length = 0;
+  assert.equal((await clean.context.exportSingle()).saved, true, `${label}: clean-source stand-in`);
+  for (const buffer of planeBuffersOf(clean.processed)) assert.equal(isLiveMutableBuffer(buffer), false, `${label}: the clean source is not marked`);
+  assert.ok(same(await stubBlobText(saved[0]), expected), `${label}: clean-source bytes`);
 }
 
 // ============================================= single export on the band pool

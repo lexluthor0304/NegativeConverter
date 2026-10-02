@@ -20,8 +20,9 @@
  * sets `transferPlane` and the buffer is stamped export-owned and referenced by
  * no live editor plane (app/planeRelease.js); then the buffer itself moves to
  * the worker. Copies of large planes are spread over several tasks, except for
- * the display buffer the editor rewrites in place, which is copied in one task
- * so it cannot tear. When the worker fails before it wrote a transferred input
+ * planes the editor rewrites in place (the dust-repaired image, #259, marked
+ * with markLiveMutableBuffer), which are copied in one task so an undo cannot
+ * tear them. When the worker fails before it wrote a transferred input
  * it hands the buffer back and the bridge re-attaches it (the request then
  * resolves null and the caller falls back); otherwise the request rejects with
  * ExportInputLostError and the caller renders the frame again.
@@ -151,8 +152,9 @@ function yieldToEventLoop() {
  * Copy a typed array's bytes into a new ArrayBuffer, one `sliceBytes` slice
  * per task, so copying a 480 MB plane does not block the main thread for one
  * long task. The destination is allocated once; the abort signal is honoured
- * between slices. The source must not be written while the copy runs
- * (conversion planes and export frames are write-once).
+ * between slices. The source must not be written while the copy runs:
+ * conversion planes and export frames are write-once, and prepareInput copies
+ * a plane the editor rewrites in place (isLiveMutableBuffer) in one task.
  * @returns {Promise<ArrayBuffer>}
  */
 export async function copyTypedArrayInSlices(view, { sliceBytes = COPY_SLICE_BYTES, signal = null } = {}) {
@@ -198,8 +200,8 @@ function isPlatformImageData(value) {
 /**
  * The buffer a request sends for `view`: the buffer itself when the caller
  * may give it away (`transfer`, a whole-buffer view of an export-owned plane
- * nothing live references), a one-task copy of the display buffer the editor
- * rewrites in place, and a sliced copy otherwise. Small inputs are copied
+ * nothing live references), a one-task copy of a plane the editor rewrites in
+ * place, and a sliced copy otherwise. Small inputs are copied
  * synchronously, so a request still reaches the worker in the caller's task.
  * @returns {{buffer: ArrayBuffer, transferred: boolean}|Promise<{buffer: ArrayBuffer, transferred: boolean}>}
  */

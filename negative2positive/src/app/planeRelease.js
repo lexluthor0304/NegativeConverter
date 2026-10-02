@@ -69,13 +69,15 @@ export function isOwnedBuffer(buffer) {
 }
 
 /**
- * Mark a buffer the editor rewrites in place (the full-resolution CPU display
- * buffer). A copy spread over several tasks could tear, so the bridge copies
- * it in one task.
+ * Mark the planes of an item the editor rewrites in place: its `.data` and
+ * `.__image16.data` buffers (or the buffer of a typed array). The
+ * dust-repaired image is one (#259): brush strokes, their undo and redo and
+ * the learned-repair refresh patch it, and undo is not blocked while an
+ * export runs. A copy spread over several tasks could mix rows from before
+ * and after a write, so the bridges copy a marked plane in one task.
  */
 export function markLiveMutableBuffer(value) {
-  const buffer = bufferOf(value) || bufferOf(value && value.data);
-  if (buffer) liveMutableBuffers.add(buffer);
+  for (const buffer of planeBuffersOf(value)) liveMutableBuffers.add(buffer);
 }
 
 export function isLiveMutableBuffer(value) {

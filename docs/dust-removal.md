@@ -103,7 +103,11 @@ and every count equals a full recount.
 
 - **Private buffer.** Patches go into `state.dustRemoval.inpaintedImageData` in
   place; `cleanSource` is never patched. When there is no repaired image yet,
-  the clean source is cloned once, at pin time.
+  the clean source is cloned once, at pin time. Undo and redo are not blocked
+  while an export runs, so a single export marks the repaired image and every
+  image a stroke entry patches (`markInPlaceEditedPlanes`) before it hands the
+  planes to its worker: the bridge copies a marked plane in one task, never
+  in 32 MiB slices an undo could land between.
 - **Revision.** `state.dustRemoval.revision` changes on every patch, undo, redo,
   detection and clear. Export and the learned-repair refresh compare it
   instead of mask identity; the tint follows the mask's tag. Export reads a

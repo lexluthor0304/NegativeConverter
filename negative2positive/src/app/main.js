@@ -206,6 +206,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       exportWorkerResidentBytes
     } from '../workers/workerBridge.js';
     import {
+      markLiveMutableBuffer,
       markOwnedPlanes,
       planeBuffersOf,
       releaseOwnedPlanes,
@@ -10614,6 +10615,22 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
     setLiveReferenceProbe(liveEditorBuffers);
 
+    // The images the editor patches in place (#259): the dust-repaired image,
+    // which brush strokes, their undo and redo and the learned-repair refresh
+    // write into, and every image a stroke's history entry patches. Undo is
+    // not blocked while an export runs, so a single export marks them right
+    // before it hands the open photo's planes to a bridge, after its repairs
+    // settled: the bridges copy a marked plane in one task, where a copy
+    // spread over several tasks could mix rows from before and after a write.
+    // (Batch frames and contact-sheet cells are planes of their own.) The
+    // clean source standing in for a repaired image is never patched: a
+    // stroke clones it first (ensureDustPrivateBuffer).
+    function markInPlaceEditedPlanes() {
+      const dust = state.dustRemoval;
+      if (dust.inpaintedImageData !== dust.cleanSource) markLiveMutableBuffer(dust.inpaintedImageData);
+      for (const entry of [...undoStack, ...redoStack]) markLiveMutableBuffer(entry.dustDelta?.target);
+    }
+
     // Exact, not memoised: equal only when the JSON of these values is equal
     // (settingsKey.js), with the curve LUTs of settings and studioColors
     // appended as bytes instead of index-keyed JSON objects.
@@ -17822,6 +17839,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // Step 3 always adjusts the processed frame in the export worker (the
       // main thread only without one), on the engine's 16-bit plane for a
       // 16-bit export. No display buffer is ever an export's pixels (#242).
+      // The request copies the editor's planes: one task for those the
+      // editor patches in place.
+      if (state.currentStep >= 3 && state.processedImageData) markInPlaceEditedPlanes();
       if (bitDepth === 16 && state.currentStep >= 3 && state.processedImageData?.__image16) {
         return await applyAdjustmentsWithSettings(state.processedImageData, state, { bitDepth: 16, bridge, planeOnly });
       }
@@ -17944,8 +17964,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           if (state.exportSprocketHolesEnabled) return imageData;
           // The unadjusted plane and the recipe, captured now; imageDataToBlob
           // sends them with the SDR encode (#250). The plane is the editor's:
-          // it is copied, never transferred. The SDR frame is this export's
-          // own: no display buffer is an export frame (#242).
+          // it is copied (in one task if the editor patches it in place),
+          // never transferred. The SDR frame is this export's own: no display
+          // buffer is an export frame (#242).
+          markInPlaceEditedPlanes();
           imageData.__gainMapSource = { processed: state.processedImageData, adjustmentSettings: buildAdjustmentSettings(state), transferPlane: false };
           return imageData;
         }
@@ -17996,9 +18018,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (fused) {
         await prepareCurrentImageForExport({ onModelLoad });
         // getCurrentExportImageData's 16-bit trigger: the editor's plane is
-        // sent as a sliced copy (it belongs to the editor).
+        // sent as a copy (it belongs to the editor), sliced unless the
+        // editor patches it in place.
         if (state.currentStep >= 3 && state.processedImageData?.__image16) {
           onEncoding?.();
+          markInPlaceEditedPlanes();
           const blob = await encodeFused16(state.processedImageData, buildAdjustmentSettings(state), exportInfo, { bridge, metadata, onProgress, signal });
           if (blob) return blob;
         }

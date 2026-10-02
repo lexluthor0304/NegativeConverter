@@ -362,6 +362,115 @@ async function withEventLoopAlive(fn) {
   await request2;
 }
 
+// ------------------------------- in-place patches during a copy (#259)
+
+{
+  // A dust-brush stroke patches the repaired image in place, and so do its
+  // undo and redo, which an export does not block. main.js marks that image
+  // (markInPlaceEditedPlanes) before a single export hands it over: both of
+  // its planes are then copied in one task, so an undo that lands at the
+  // copy's first yield cannot leave the worker a mix of rows from before and
+  // after it. The real sliced copy and the real stroke history run here; the
+  // 16-bit plane is 4096 rows of one 32 MiB slice plus 4 more, and the stroke
+  // covers rows on both sides of that boundary.
+  const { applyStrokePatch, applyDustDelta } = await import('../app/dustStrokeHistory.js');
+  const width = 1024;
+  const height = 4100;
+  assert.equal(width * 4 * 2 * 4096, COPY_SLICE_BYTES);
+  const rect = { x: 96, y: height - 8, width: 256, height: 8 };
+  const strokedImage = () => {
+    const data16 = new Uint16Array(width * height * 4);
+    const data8 = new Uint8ClampedArray(width * height * 4);
+    for (let i = 0; i < data16.length; i++) {
+      data16[i] = (i & 3) === 3 ? 65535 : (i * 2654435761) >>> 16;
+      data8[i] = data16[i] >>> 8;
+    }
+    const image = new ImageData(data8, width, height);
+    image.__image16 = { width, height, data: data16 };
+    const count = rect.width * rect.height;
+    const patch = {
+      rect, maskRect: rect, particleCount: 1,
+      rgba8: new Uint8ClampedArray(count * 4).fill(201), rgba16: new Uint16Array(count * 4).fill(51717),
+      maskBytes: new Uint8Array(count).fill(255)
+    };
+    const delta = applyStrokePatch(image, new Uint8Array(width * height), patch, { cleanSource: null, countBefore: 0, tagBefore: 1, tagAfter: 2 });
+    return { image, delta };
+  };
+  // Which state each row of the stroke's rect shows in a copied plane:
+  // 'stroke' (before the undo), 'undone' (after it), or 'other'.
+  const rectRows = (plane, delta) => {
+    const { before16, after16 } = delta.patches[0];
+    const row = rect.width * 4;
+    const rows = [];
+    for (let y = 0; y < rect.height; y++) {
+      const start = ((rect.y + y) * width + rect.x) * 4;
+      const copied = plane.subarray(start, start + row);
+      const matches = (expected) => copied.every((v, i) => v === expected[y * row + i]);
+      rows.push(matches(after16) ? 'stroke' : matches(before16) ? 'undone' : 'other');
+    }
+    return rows;
+  };
+  const RealMessageChannel = globalThis.MessageChannel;
+  let atFirstYield = null;
+  globalThis.MessageChannel = class extends RealMessageChannel {
+    constructor() {
+      super();
+      const hook = atFirstYield;
+      atFirstYield = null;
+      if (hook) hook();
+    }
+  };
+  const requests = {
+    'fused 16-bit': {
+      send: (bridge, image) => bridge.workerAdjust16AndEncode(image, identity(), { format: 'tiff' }),
+      reply: () => ({ kind: 'blob' }),
+      plane: (message) => message.inputBuffer
+    },
+    'JPEG gain map': {
+      send: (bridge, image) => bridge.workerEncodeImage(markOwnedPlanes(new ImageData(new Uint8ClampedArray(width * height * 4), width, height)), {
+        mimeType: 'image/jpeg', transferPlane: true, onRestore: () => {}, gainMap: { source: image, settings: identity() }
+      }),
+      reply: () => ({ kind: 'respond', respond: () => ({ data: { type: 'imageResult', blob: new Blob(['x']), gain: null } }) }),
+      plane: (message) => message.gainMap.plane
+    }
+  };
+  try {
+    for (const [label, request] of Object.entries(requests)) {
+      for (const marked of [true, false]) {
+        const { image, delta } = strokedImage();
+        if (marked) markLiveMutableBuffer(image);
+        let copied = null;
+        let undone = false;
+        const undo = () => { applyDustDelta(delta, 'undo'); undone = true; };
+        const bridge = fresh((message) => {
+          copied = new Uint16Array(request.plane(message).slice(0));
+          return request.reply();
+        });
+        atFirstYield = undo;
+        const pending = request.send(bridge, image);
+        if (!undone) {
+          // A one-task copy never yields: the undo comes after the call.
+          atFirstYield = null;
+          assert.ok(copied, `${label}: copied and posted in the caller's task`);
+          undo();
+        }
+        await pending;
+        const rows = rectRows(copied, delta);
+        if (marked) {
+          assert.deepEqual(rows, Array(rect.height).fill('stroke'), `${label}: the marked plane is copied whole before the undo`);
+        } else {
+          // The control: an unmarked plane goes in slices, and the same undo
+          // tears it (the rows of the second slice are already undone).
+          assert.deepEqual(rows, [...Array(4).fill('stroke'), ...Array(4).fill('undone')], `${label}: control copy`);
+        }
+        assert.ok(rectRows(image.__image16.data, delta).every((state) => state === 'undone'), `${label}: the undo landed`);
+      }
+    }
+  } finally {
+    globalThis.MessageChannel = RealMessageChannel;
+  }
+}
+
 // ------------------------------------------------------ adjust16AndEncode
 
 {
