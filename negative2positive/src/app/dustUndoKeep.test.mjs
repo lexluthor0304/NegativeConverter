@@ -53,7 +53,7 @@ const FUNCTIONS = [
   // History.
   'captureSnapshot', 'restoreSnapshot', 'cancelPendingTimers', 'liveHistoryRoots', 'hotGeometrySnapshot',
   'historyExclusiveBytes', 'pruneHistoryForMemory', 'trimHistorySnapshot', 'commitUndoSnapshot', 'noteManualEdit',
-  'pushUndo', 'pushUndoDelta', 'performUndo', 'performRedo',
+  'pushHistoryEntry', 'pushUndo', 'pushUndoDelta', 'performUndo', 'performRedo',
   // The conversion and its landing.
   'runCoreReprocess', 'rerenderWithCoreControls', 'routeCoreRequest', 'conversionSourceSize',
   'beginFullResolutionConversion', 'endFullResolutionConversion', 'abortSupersededFullResolutionConversion',
