@@ -130,7 +130,12 @@ it (#229 review R2-041, R2-046).
   assets (wasm, the lensfun data, fonts) keep their names: they are fetched
   from the same origin, where COEP asks nothing of them, so returning
   visitors keep those cached copies. The desktop bundle (relative base
-  `./`, assets embedded) is not affected either way.
+  `./`, assets embedded) is not affected either way. Measured on this
+  release's build (2026-10-02, Vite 8.2.2): without the suffix, 13 of its
+  47 scripts carry a 1703835 name again, libraw-wasm's worker
+  (`worker-BpdlSnKn.js`) and both ONNX Runtime bundles its pthreads start
+  from among them; with it, none (`opencv-glue-<sha>.js`, named by its
+  plugin, is new in this release).
 - **The check.** `scripts/check-dist-asset-names.mjs` fails when a build's
   `assets/` holds a script name that production served at 1703835, the last
   release without COEP (34 scripts, read from the site), or when a worker
@@ -153,6 +158,14 @@ it (#229 review R2-041, R2-046).
   isolation report's LibRaw entry fetches the worker script through the HTTP
   cache, as the worker load does, so a cached copy without COEP reads as not
   isolated (`cache: 'no-store'` reported it isolated).
+- **Checked in Chrome 154** (headless, 2026-10-02; a local server with
+  Vercel's `/assets/` caching, libraw-wasm 1.6.0 and `librawRuntime.js`):
+  LibRaw's worker script, cached by a page without COEP, is refused when an
+  isolated page on the same origin and profile starts it (DevTools issue
+  `CoepFrameResourceNeedsCoepHeader`), with no request to the server.
+  `new LibRaw().open()` then never settles; the app's watched instance
+  rejects in 2 ms, and the report's entry reads not isolated. The same
+  files under a URL the profile never fetched start and answer.
 
 ## Per platform
 
