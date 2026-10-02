@@ -602,4 +602,20 @@ the DNG GPU sample hash and zoom matched before/after. The NEF decoder used
 its existing embedded-preview fallback in this run, so this is not evidence
 of full-precision NEF decoding. That run forced no export; since #249 the
 RAW regression keeps import auto-frame on and ends with a 16-bit export
-before and after an A/B/A switch, which must be byte-identical.
+before and after an A/B/A switch, which must be byte-identical. Photo A must
+be auto-framed (a crop or a rotation) and is left as a display session (the
+tier is forced to A, as a 60 MP frame takes it, so a smaller RAW exercises
+it too) that comes back without its base.
+
+The display-session regression also opens an auto-framed 16-bit colour
+negative cold (read and decoded), then from RAM as Tier A and Tier B, from
+the spill and, where the store has a budget, from the store, and requires the
+cold open's GPU sample hash, white balance (gains and confidence) and saved
+settings each time. It then confirms another image area, comes back as
+Tier A, undoes to the earlier area and requires PNG16 and TIFF16 exports
+equal to a cold reopen's (decoded samples). Chrome reports a page's quota as
+its usage plus 10 GiB, the store's floor, so the web store has no budget in
+Chrome and that hit is skipped there; fills only make levels smaller than
+their frame (k > 1, about 16 MP and up), so `displaySessions.test.mjs`
+checks a filled proxy's first open, from the spill and from the store,
+against a cold open's conversion request.
