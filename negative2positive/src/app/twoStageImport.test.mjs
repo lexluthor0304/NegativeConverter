@@ -20,7 +20,10 @@
 //   its return to the swap, and nothing of it once the photo is left;
 // - the settle, and the fresh recipe of a photo left in the window with an
 //   edit, decide as their pass began (learned defaults, the roll's film type):
-//   one decode's recipe plus the edit.
+//   one decode's recipe plus the edit;
+// - Analyze roll, Auto Frame Selected, Apply film type to roll and Save
+//   Project clicked in the window wait for the exact photo and end as on one
+//   decode; crop mode and the automatic roll import still complete.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
@@ -34,7 +37,8 @@ import { rotatedDimensions, sanitizeCropRect, normalizeAngleDegrees } from './im
 import { mergeStudioColors } from './studioSettings.js';
 import { MEMORY_FUNCTIONS, memoryGlobals } from './memoryHarness.mjs';
 import { backingBuffers } from './photoSessionCache.js';
-import { applyAutomaticFilmType, sanitizeFilmTypeOverride } from './filmTypeOverride.js';
+import { aggregateRollAnalysis, groupAutomaticRollFrames, sanitizeRollFrameForSettings } from './rollAnalysis.js';
+import { applyAutomaticFilmType, applyFilmTypeOverride, sanitizeFilmTypeOverride } from './filmTypeOverride.js';
 import { applyLearnedDefaults, learnedDefaultsKey } from './learnedDefaults.js';
 import { decideRollFilmType, mergeRollDecision, ownFilmTypeVerdict, rollDecisionFrame, rollFilmTypeTarget, ROLL_MONOCHROME } from './rollFilmType.js';
 
@@ -719,6 +723,273 @@ assert.equal(JSON.parse(reference).coreExposure, 18);
     assert.notEqual(left, await decide(OLD, pattern, at, null, { leftInWindow: true }), `${pattern} left@${at}: not the edit's`);
   }
   assert.equal(cases, PATTERNS.length * (1 + (LOCKS.length - 1) * 5));
+}
+
+// ---- persist-then-read flows in the window (#255 review R2-029) --------------------------
+// Analyze roll, Auto Frame Selected, Apply film type to roll and Save Project
+// persist the open photo's recipe and read it back. persistCurrentFileSettings
+// refuses in the window, so each waits for the installed full decode first;
+// the open photo then ends as after the same action on one decode. Each flow
+// runs on one decode, on two stages, and once as before the barrier, which
+// loses the photo's own values.
+const CHANNELS = [0, 1, 2].map(() => ({ whitePointOrigin: 50000, blackPointOrigin: 500, meanPoint: 0.5 }));
+const ACTION_FUNCTIONS = ['runRollAnalysis', 'analyzeRollFromButton', 'runStudioAutoFrame', 'applyAutoFrameToSelected',
+  'applyFilmTypeToRoll', 'saveProject', 'buildCurrentProject'];
+function actionFixture(options) {
+  const f = flowFixture(options);
+  const { target, state } = f;
+  state.rollAnalysis = {};
+  f.saved = [];
+  Object.assign(target, {
+    studioAutoFrameRunning: false, automaticRollAnalysisRunning: false, manualRollAnalysisRunning: false,
+    automaticRollImportRunning: false, automaticRollPendingItems: new Set(), liveSampleStores: new Set(),
+    applyFilmTypeOverride, applyAutomaticFilmType, sanitizeFilmTypeOverride,
+    aggregateRollAnalysis, sanitizeRollFrameForSettings, groupAutomaticRollFrames,
+    hiddenJobs: { safeMode: false, admit: async () => () => {} }, hiddenJobBytesFor: async () => 0,
+    createFrameClaim: () => ({ release() {} }), runHiddenJobItem: (_files, work) => work(),
+    loadFileToImageData: async () => image(FULL),
+    createAnalysisSampleStore: () => {
+      const values = new Map();
+      return { get: async key => values.get(key) || null, put: async (key, value) => { values.set(key, value); },
+        delete: async key => { values.delete(key); }, clear: async () => { values.clear(); } };
+    },
+    buildRollSample: (_img, settings) => ({ width: 32, height: 21, crop: settings.cropRegion || null }),
+    measureNegativeMean: () => 0.4, requiresFilmBase: () => true, analyzeSilverCoreFrame: async () => CHANNELS,
+    createTileConverter: () => ({ dispose() {} }), usesSilverCoreConversion: () => false,
+    goToStep: step => { state.currentStep = step; }, autoFrameEffectiveAngle: angle => angle,
+    buildRollProject: project => structuredClone(project), serializeRollProject: project => JSON.stringify(project),
+    saveBlob: async blob => { f.saved.push(JSON.parse(await blob.text())); return { saved: true }; }
+  });
+  vm.runInContext(ACTION_FUNCTIONS.map(functionSource).join('\n'), f.context);
+  return f;
+}
+const SINGLE = { twoStage: false };
+const WINDOW = { twoStage: true };
+// Recipes compared without their timestamps (roll id, detection time).
+const recipeOf = settings => JSON.stringify({
+  ...settings, rollFrame: settings?.rollFrame ? { ...settings.rollFrame, rollId: 'roll' } : null,
+  autoFrameMeta: settings?.autoFrameMeta ? { ...settings.autoFrameMeta, detectedAt: 0 } : null
+});
+// One decode, then two stages with the action clicked while stage 2 is held.
+async function runFlow(action, { twoStage, before = null }) {
+  const f = actionFixture({ twoStage });
+  const stage2 = twoStage ? await loadedStandIn(f) : (await loadedSingle(f), null);
+  await importPass(f);
+  await before?.(f);
+  const running = action(f);
+  if (twoStage) {
+    await flush();
+    assert.equal(f.state.fullDecode.status, 'running', 'the action waits for stage 2');
+    assert.equal(f.item.settings, null, 'nothing is persisted from the stand-in');
+    assert.equal(f.target.document.body.dataset.studioBusy, undefined, 'and nothing is locked while it waits');
+    assert.ok(f.toasts.includes('Preparing full resolution…'));
+    stage2.resolve(image(FULL));
+  }
+  await running;
+  await flush();
+  assert.equal(f.context.currentPhotoExact(), true);
+  return f;
+}
+const AUTO_FRAME = { angle: 1.2, rotatedWidth: FULL.width, rotatedHeight: FULL.height,
+  cropRegion: { left: 600, top: 400, width: 8000, height: 5400 }, confidenceLevel: 'high', confidence: 0.9 };
+const detectsFrame = f => {
+  f.target.runImportDetections = async (img, options) => { f.detections.push({ width: img.width, options }); return { image: img, detection: { result: { ...AUTO_FRAME } }, read: null }; };
+};
+{
+  // Analyze roll: the open photo keeps its auto-frame crop and learned contrast.
+  const analyze = f => f.context.analyzeRollFromButton();
+  const one = await runFlow(analyze, SINGLE);
+  const two = await runFlow(analyze, WINDOW);
+  const settings = two.item.settings;
+  assert.equal(settings.rollFrame?.locked, true, 'the roll analysis committed');
+  assert.deepEqual(settings.cropRegion, { left: 476, top: 316, width: 8582, height: 5702 }, 'the full decode\'s auto-frame crop');
+  assert.equal(settings.coreContrast, 5, 'the learned contrast');
+  assert.equal(recipeOf(settings), recipeOf(one.item.settings), 'Analyze roll in the window commits what one decode commits');
+  assert.equal(recipeOf(two.context.extractCurrentSettings()), recipeOf(one.context.extractCurrentSettings()), 'and the open photo shows it');
+  // On one decode nothing changes: the old handler ran the analysis directly.
+  assert.equal(recipeOf((await runFlow(f => f.context.runRollAnalysis(), SINGLE)).item.settings), recipeOf(one.item.settings), 'one decode: as before');
+  // Before the barrier the button ran the analysis at once: the open photo's
+  // recipe came from bare defaults and the swap kept it as the user's edit.
+  const f = actionFixture(WINDOW);
+  const stage2 = await loadedStandIn(f);
+  await importPass(f);
+  await f.context.runRollAnalysis();
+  stage2.resolve(image(FULL));
+  await flush(40);
+  f.context.persistCurrentFileSettings({ silent: true, force: true });
+  assert.deepEqual([f.item.settings.cropRegion, f.item.settings.coreContrast], [null, 0], 'control: without the barrier the crop and the learned contrast are lost');
+}
+{
+  // Auto Frame Selected: the new frame over the photo's own recipe.
+  const one = await runFlow(f => f.context.runStudioAutoFrame(true), { ...SINGLE, before: detectsFrame });
+  const two = await runFlow(f => f.context.runStudioAutoFrame(true), { ...WINDOW, before: detectsFrame });
+  assert.equal(JSON.stringify(two.item.settings.cropRegion), JSON.stringify(AUTO_FRAME.cropRegion), 'the detected frame');
+  assert.equal(two.item.settings.coreContrast, 5, 'the learned contrast stays');
+  assert.equal(recipeOf(two.item.settings), recipeOf(one.item.settings), 'Auto Frame Selected in the window gives what one decode gives');
+  assert.equal(recipeOf(two.context.extractCurrentSettings()), recipeOf(one.context.extractCurrentSettings()));
+  // runStudioAutoFrame's body as before the barrier.
+  const unguarded = async f => {
+    f.context.persistCurrentFileSettings({ silent: true, force: true });
+    f.target.goToStep(1);
+    await f.context.applyAutoFrameToSelected();
+  };
+  assert.equal(recipeOf((await runFlow(unguarded, { ...SINGLE, before: detectsFrame })).item.settings), recipeOf(one.item.settings), 'one decode: as before');
+  const f = actionFixture(WINDOW);
+  const stage2 = await loadedStandIn(f);
+  await importPass(f);
+  detectsFrame(f);
+  await unguarded(f);
+  stage2.resolve(image(FULL));
+  await flush(40);
+  f.context.persistCurrentFileSettings({ silent: true, force: true });
+  assert.equal(f.item.settings.coreContrast, 0, 'control: without the barrier the learned contrast is lost');
+}
+{
+  // Save Project: the open photo's recipe goes into the project.
+  const one = await runFlow(f => f.context.saveProject(), SINGLE);
+  const two = await runFlow(f => f.context.saveProject(), WINDOW);
+  const saved = two.saved[0].files[0].settings;
+  assert.ok(saved, 'the open photo is saved with a recipe');
+  assert.equal(saved.coreContrast, 5);
+  assert.equal(recipeOf(saved), recipeOf(one.saved[0].files[0].settings), 'Save Project in the window saves what one decode saves');
+  const before = await runFlow(f => { f.saved.push(JSON.parse(f.target.serializeRollProject(f.context.buildCurrentProject({ persist: true })))); }, SINGLE);
+  assert.equal(JSON.stringify(before.saved[0]), JSON.stringify(one.saved[0]), 'one decode: the project as before');
+  const f = actionFixture(WINDOW);
+  await loadedStandIn(f);
+  await importPass(f);
+  assert.equal(f.context.buildCurrentProject({ persist: true }).files[0].settings, null, 'control: without the barrier it is saved without one');
+}
+{
+  // Apply film type to roll on a revisited photo (a recipe from an earlier
+  // visit) with an exposure edit made in the window: the edit stays.
+  const recipe = { rotationAngle: 0, mirrored: false, cropRegion: { ...SAVED }, coreExposure: 0, coreContrast: 5, filmType: 'color',
+    filmTypeSource: 'auto', filmTypeConfidence: 'high', filmTypeReason: null, filmEdge: { checked: true }, filmBase: { r: 205, g: 141, b: 92 } };
+  const revisit = async (twoStage) => {
+    const f = actionFixture({ twoStage });
+    f.item.settings = structuredClone(recipe);
+    const stage2 = twoStage ? await loadedStandIn(f, { settled: structuredClone(recipe) }) : (await loadedSingle(f), null);
+    f.context.restoreSettings(f.item.settings, { refreshDisplay: false });
+    f.state.currentStep = 3;
+    if (twoStage) {
+      f.state.provisional.start = { fresh: false, snapshot: f.context.extractCurrentSettings(), detectFrame: false, readEdge: false, userEdited: false };
+      f.state.provisional.settledSnapshot = f.context.extractCurrentSettings();
+      f.context.startProvisionalSettle(f.state.fullDecode);
+    }
+    f.item.userEdited = true;
+    f.state.coreExposure = 18;
+    return { f, stage2 };
+  };
+  // The handler as before the barrier.
+  const unguarded = f => {
+    f.context.persistCurrentFileSettings({ silent: true, force: true });
+    for (const item of f.state.fileQueue) {
+      item.filmTypeOverride = { filmType: 'color', positiveMode: 'correct' };
+      if (item.settings) item.settings = applyFilmTypeOverride(item.settings, item.filmTypeOverride);
+    }
+    f.context.restoreSettings(f.item.settings, { refreshDisplay: false });
+  };
+  const single = await revisit(false);
+  await single.f.context.applyFilmTypeToRoll();
+  const before = await revisit(false);
+  unguarded(before.f);
+  assert.equal(recipeOf(before.f.item.settings), recipeOf(single.f.item.settings), 'one decode: as before');
+  const { f, stage2 } = await revisit(true);
+  const applying = f.context.applyFilmTypeToRoll();
+  await flush();
+  assert.equal(f.state.fileQueue.some(item => item.filmTypeOverride), false, 'it waits for stage 2');
+  stage2.resolve(image(FULL));
+  await applying;
+  await flush();
+  assert.equal(f.item.settings.coreExposure, 18, 'the window edit is in the persisted recipe');
+  assert.ok(f.state.fileQueue.every(item => item.filmTypeOverride?.filmType === 'color'));
+  assert.equal(recipeOf(f.item.settings), recipeOf(single.f.item.settings), 'Apply film type to roll in the window gives what one decode gives');
+  assert.equal(recipeOf(f.context.extractCurrentSettings()), recipeOf(single.f.context.extractCurrentSettings()));
+  const control = await revisit(true);
+  unguarded(control.f);
+  control.stage2.resolve(image(FULL));
+  await flush(40);
+  assert.equal(control.f.state.coreExposure, 0, 'control: without the barrier the window edit is lost');
+}
+{
+  // Crop mode opened while Save Project waits: the swap waits for the draft,
+  // and closing it lets both finish.
+  const f = actionFixture(WINDOW);
+  const stage2 = await loadedStandIn(f);
+  await importPass(f);
+  const saving = f.context.saveProject();
+  await flush();
+  f.state.cropping = true;
+  stage2.resolve(image(FULL));
+  await flush(40);
+  assert.deepEqual([f.saved.length, f.state.fullDecode.status], [0, 'decoded'], 'the swap waits for the crop draft, and the save for the swap');
+  f.state.cropping = false;
+  for (const resolve of f.target.cropModeWaiters.splice(0)) resolve();
+  await saving;
+  assert.equal(f.saved.length, 1, 'saved once crop mode closed');
+  assert.equal(f.saved[0].files[0].settings.coreContrast, 5);
+}
+// The automatic roll import waits on studioBackgroundReady (fake timers): a
+// window neither blocks it for good nor deadlocks with the barrier.
+function fakeTimers(target) {
+  let now = 0, id = 0;
+  const timers = new Map();
+  target.setTimeout = (fn, ms = 0) => { timers.set(++id, { fn, at: now + (ms || 0) }); return id; };
+  target.clearTimeout = timer => { timers.delete(timer); };
+  return {
+    get pending() { return timers.size; },
+    async advance(ms) {
+      const end = now + ms;
+      for (;;) {
+        await flush();
+        const [next] = [...timers].filter(([, timer]) => timer.at <= end).sort((a, b) => a[1].at - b[1].at);
+        if (!next) break;
+        timers.delete(next[0]);
+        now = next[1].at;
+        next[1].fn();
+      }
+      now = end;
+      await flush(40);
+    }
+  };
+}
+async function automaticRollInWindow({ click }) {
+  const f = actionFixture(WINDOW);
+  for (const item of f.state.fileQueue.slice(1)) item.settings = { filmType: 'color', filmTypeSource: 'auto', filmBase: { r: 205, g: 141, b: 92 }, filmEdge: { checked: true }, coreExposure: 0 };
+  const marker = { begins: 0, finishes: 0 };
+  Object.assign(f.target, {
+    createJobMarker: () => ({ begin() { marker.begins++; }, record() {}, setEdited() {}, finish() { marker.finishes++; } }),
+    watchRollSamples: { take: () => null },
+    planRollAnalysisLanes: async () => ({ decodeSlots: 1, framesInFlight: 1, slotBytes: Infinity }),
+    createRollAnalysisWorkers: () => ({ frames: null, slots: null, analyzers: null, configure() {}, dispose() {} }),
+    runRollAnalysisPass: async () => {}
+  });
+  vm.runInContext(functionSource('scheduleAutomaticRollImport'), f.context);
+  const stage2 = await loadedStandIn(f);
+  await importPass(f);
+  const timers = fakeTimers(f.target);
+  f.context.scheduleAutomaticRollImport(f.state.fileQueue, { prepared: true });
+  await timers.advance(1200 + 750 * 3);
+  assert.equal(marker.begins, 0, 'no attempt starts in the window');
+  assert.equal(f.target.automaticRollPendingItems.size, 3, 'the import is still pending');
+  const clicked = click ? f.context.analyzeRollFromButton() : null;
+  stage2.resolve(image(FULL));
+  await flush(40);
+  await clicked;
+  await timers.advance(750 * 4);
+  assert.equal(f.context.currentPhotoExact(), true);
+  assert.equal(f.target.automaticRollPendingItems.size, 0, 'the import ended');
+  assert.equal(timers.pending, 0, 'nothing is left waiting');
+  assert.equal(f.item.settings.rollFrame?.locked, true, 'the open photo is locked to the roll');
+  assert.deepEqual([f.item.settings.coreContrast, f.item.settings.rotationAngle], [5, 0.5], 'with its own recipe');
+  return { f, marker };
+}
+{
+  const automatic = await automaticRollInWindow({ click: false });
+  assert.deepEqual([automatic.marker.begins, automatic.marker.finishes], [1, 1], 'the automatic import ran once the photo was exact');
+  // Analyze roll clicked in the window: the manual analysis runs once the
+  // photo is exact and supersedes the import, which ends without running.
+  const manual = await automaticRollInWindow({ click: true });
+  assert.deepEqual([manual.marker.begins, manual.f.target.automaticRollRevision], [0, 1]);
 }
 
 console.log('twoStageImport: header routing, stage options and start, abort on switch, barrier, retry, exact crop across the swap, history rebase, window edits and the ledger\'s open photo passed');

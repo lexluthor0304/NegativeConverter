@@ -14,15 +14,22 @@
 // - stage 2 fails: a toast, the photo stays provisional, the export decodes
 //   again and matches;
 // - switching away before stage 2 completes aborts it, and Export All of both
-//   photos matches the reference.
+//   photos matches the reference;
+// - Analyze roll clicked during stage 2, after an exposure edit on the
+//   stand-in, waits for the full decode: the roll recipe and the decoded
+//   samples of the export match one decode with the same edit and click.
 //
 // Opt-in, real files (never in the repo): TWO_STAGE_PARITY_FILES=/abs/a.DNG:/abs/b.dng
 // runs the same comparison (reference with the flag off, then
 // ?twoStageMinMp=40) for each file: one 60 MP file at a time on a 16 GB machine.
+import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync, existsSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join, basename } from 'node:path';
 import { writeSyntheticDng, previewSizes, stubJpeg } from './perf/fixtures.mjs';
+
+const UPNG = createRequire(import.meta.url)('upng-js');
 
 const ready = `document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy && !document.body.dataset.studioDetecting && !document.querySelector('.loading-overlay.visible')`;
 const status = `window.__ncTwoStage.status()`;
@@ -40,6 +47,8 @@ const CAPTURE = `(() => {
     pending.add(href);
     window.__twoStageDownloads.push(fetch(href).then(r => r.arrayBuffer()).then(async bytes => {
       pending.delete(href); revoke(href);
+      // The last file's bytes, for a decoded-sample comparison.
+      window.__twoStageLastBytes = bytes;
       const digest = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))].map(b => b.toString(16).padStart(2, '0')).join('');
       return { name, size: bytes.byteLength, sha256: digest };
     }));
@@ -91,6 +100,20 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
     const entry = await take(label);
     await waitFor('export settled', `!document.getElementById('exportSingleBtn').disabled`, 600_000);
     return entry.sha256;
+  };
+  // The SHA-256 of the last exported PNG's decoded samples (16-bit samples
+  // as stored, unfiltered), independent of how the file was encoded.
+  const decodedSample = async () => {
+    const base64 = await evaluate(`(() => {
+      const bytes = new Uint8Array(window.__twoStageLastBytes);
+      window.__twoStageLastBytes = null;
+      let text = '';
+      for (let i = 0; i < bytes.length; i += 0x8000) text += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+      return btoa(text);
+    })()`);
+    const buffer = Buffer.from(base64, 'base64');
+    const png = UPNG.decode(buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength));
+    return createHash('sha256').update(JSON.stringify([png.width, png.height, png.depth, png.ctype])).update(Buffer.from(png.data)).digest('hex');
   };
   const exportAll = async (count, label) => {
     await evaluate(`document.querySelector('.format-btn[data-format="png"]').click(); document.querySelector('.bitdepth-btn[data-bitdepth="16"]').click()`);
@@ -246,6 +269,47 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
     const all = await exportAll(2, 'Export All after an early switch');
     same('Export All after leaving before stage 2', all, reference.all);
     console.log('ok: leaving before stage 2 aborts it, and Export All matches the single decodes');
+
+    // 7. Analyze roll during stage 2 (#255 review R2-029): the stand-in gets an
+    // exposure edit, then Analyze roll is clicked while stage 2 is held. The
+    // analysis persists the open photo's recipe and reads it back, so it waits
+    // for the full decode; before that wait it committed the photo's bare
+    // defaults (losing the edit) and the swap kept them. Compared with one
+    // decode given the same edit and click: the roll recipe, and the decoded
+    // samples of a 16-bit PNG export.
+    const editExposure = `(() => { const el = document.getElementById('coreExposure'); el.value = '15'; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); })()`;
+    const rollCommitted = `window.__twoStageToasts.some(text => /Roll analysis:/.test(text))`;
+    const rollScene = async (query, label) => {
+      const held = Boolean(query);
+      await boot(query);
+      if (held) await evaluate('window.__ncTwoStage.holdFullDecodes()');
+      await importFiles(files);
+      await waitFor(`${label}: first photo`, `${ready} && ${filename(nameA)} && ${held ? `${status}.pending` : exact}`, 300_000);
+      if (!held) await settledRecipe();
+      await evaluate(editExposure);
+      await waitFor(`${label}: exposure edited`, `document.getElementById('coreExposureValue').value === '15' && ${ready}`, 30_000);
+      await evaluate(`document.getElementById('analyzeRollBtn').click()`);
+      if (held) {
+        await wait(1500);
+        const during = await evaluate(`({ status: ${status}, committed: ${rollCommitted} })`);
+        if (!during.status.pending || !during.status.provisional) fail('Analyze roll did not wait for stage 2: ' + JSON.stringify(during.status));
+        if (during.committed) fail('the roll analysis committed on the stand-in');
+        await evaluate('window.__ncTwoStage.releaseFullDecodes()');
+      }
+      await waitFor(`${label}: roll analysis committed`, `${rollCommitted} && ${ready} && ${exact} && !!${status}.settings?.rollFrame`, 300_000);
+      const settings = await settledRecipe();
+      const { rollId, ...rollFrame } = settings.rollFrame || {};
+      const recipe = { ...pick(settings), rollFrame };
+      await exportSingle(16, `${label}: PNG 16`);
+      return { recipe, sample: await decodedSample() };
+    };
+    const rollReference = await rollScene('', 'roll reference');
+    if (rollReference.recipe.coreExposure !== 15) fail('the reference lost its exposure edit: ' + JSON.stringify(rollReference.recipe));
+    const rollTwoStage = await rollScene('&twoStageMinMp=1&twoStageMode=sequential', 'roll during stage 2');
+    console.log('two-stage smoke roll analysis:', JSON.stringify({ rollFrame: rollTwoStage.recipe.rollFrame, sample: rollTwoStage.sample.slice(0, 12) }));
+    same('the roll recipe after Analyze roll during stage 2', rollTwoStage.recipe, rollReference.recipe);
+    same('the decoded samples after Analyze roll during stage 2', rollTwoStage.sample, rollReference.sample);
+    console.log('ok: Analyze roll clicked during stage 2 waits for the full decode, and matches one decode with the same edit');
 
     // Opt-in parity on real files: one decode against two stages at 40 MP.
     for (const path of parityFiles) {

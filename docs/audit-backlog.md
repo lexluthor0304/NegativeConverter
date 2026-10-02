@@ -60,11 +60,6 @@ Remaining performance proposals below are not claims of completed work.
   Typing into a slider's value box applies each keystroke via the `input` handler (state mutated, no undo). On blur/Enter commitFromInput() calls pushUndo(stateKey) *after* the mutation, so the snapshot equals the current state and undo is a no-op. It also pushes unconditionally, so merely focusing and leaving a value box adds a junk undo entry and clears the redo stack.  
   _Suggested fix:_ Capture `preEditSnapshot = captureSnapshot(stateKey)` on `focus` of valueInput, and in commitFromInput push it only when the committed value differs from the snapshot's value; reset it to null afterwards (same pattern as preDragSnapshot).
 
-- **medium/bug** — applyAutoFrameToSelected discards the current file's unsaved adjustments  
-  `negative2positive/src/app/main.js:7451`  
-  The batch builds each item's settings from item.settings (last persisted) or createDefaultSettings(), never from live state, sets item.isDirty = false, and finally calls restoreSettings(currentItem.settings). For the current file that overwrites every live adjustment with the stale persisted copy — or, if the file was never saved, with factory defaults (film type, film base, all sliders). switchTo…  
-  _Suggested fix:_ Call persistCurrentFileSettings({ silent: true }) before the loop, or for `item === getCurrentQueueItem()` seed `existing` from extractCurrentSettings() instead of item.settings.
-
 - **medium/bug** — Auto Frame Selected stores createDefaultSettings as the file's saved settings, so auto-framed unviewed files skip the automatic gray point and keep a film base sampled before the crop  
   `negative2positive/src/app/main.js:7451`  
   applyAutoFrameToSelected builds `existing = createDefaultSettings(imageData)` for files without settings and assigns it to `item.settings`. That snapshot has wbR/wbG/wbB = 1, grayPointSampled false and no wbAutoConfidence, and its filmBase was measured by `autoDetectFilmBase(imageData, 10)` on the unrotated, uncropped decode — the border the auto-frame is about to crop away is sampled as if it wer…  
@@ -94,6 +89,11 @@ Remaining performance proposals below are not claims of completed work.
   `negative2positive/src/app/main.js:10569`  
   clearFileListBtn empties the queue and sets currentFileIndex = 0 but keeps the loaded image on screen. openAddFilesPicker then appends files and only loads one `if (!state.originalImageData ...)` — which is false — so nothing is loaded. Now getCurrentQueueItem() returns the first newly added (never loaded) file: the 'Current File' label shows its name, markCurrentFileDirty flags it on every slider…  
   _Suggested fix:_ Either keep the displayed image as a queue entry when clearing (clear everything except the current item), or set `state.currentFileIndex = -1` after clearing and make openAddFilesPicker load the first added file when the index is invalid; guard persistCurrentFileSettings/markCur…
+
+- **medium/bug** — "Find blank frame in selection" never runs: detectBlankFrameInSelection reads `items` and `automatic`, which it does not declare, and throws a ReferenceError on every click  
+  `negative2positive/src/app/main.js detectBlankFrameInSelection`  
+  Its first lines (`const selectedItems = items || state.fileQueue.filter(...)`, `selectedItems.length < (automatic ? 3 : 2)`) come from runRollAnalysis's signature, but the function takes no parameters, so the promise the click handler drops rejects before anything is selected or decoded; the button shows no result and no message. Present at 1703835. Found while auditing the persist-then-read flows of #255 (review R2-029).  
+  _Suggested fix:_ `const selectedItems = state.fileQueue.filter(item => item.selected); if (selectedItems.length < 2) return;`, a test that runs it with two selected frames, and (#255, review R2-034) the full-decode barrier before flatFieldDefaultsImage reads the open frame.
 
 - **medium/quality** — main.js refactor map: 10,779 lines decompose into ~20 cohesive blocks; six can be extracted with almost no coupling _(verified)_  
   `negative2positive/src/app/main.js:76`  
@@ -174,6 +174,11 @@ Remaining performance proposals below are not claims of completed work.
   `negative2positive/src/app/main.js renderCurrentImageDataForExport`  
   Each read is whole since the #229 review (R1-049/R1-126: a plane the editor patches in place is copied in one task), so no copy mixes rows of two states, but the SDR frame and the map can still describe different edits, inside a stroke's rect or over the whole frame for a recipe step. Undo is not blocked while an export runs (the overlay covers the buttons, not the shortcut). Not new: at 1703835 the JPEG's 16-bit plane came from a second getCurrentExportImageData after the first had returned.  
   _Suggested fix:_ Capture the processed plane, `state.dustRemoval.revision` and the adjustment settings once, in the SDR request's task, give the map those settings, and fail the export ("Photo changed while exporting") when the plane or the revision moved before the map's plane is copied; or ignore undo/redo shortcuts while a single export runs.
+
+- **low/bug** — Save Project and the recovery copy drop the window edits of a photo left inside a two-stage window without a recipe  
+  `negative2positive/src/app/main.js buildCurrentProject`  
+  Such a photo keeps what the user changed in `item.pendingEdits` (with `pendingUserEdited`) until its recipe is computed (switch-back, Export All, roll analysis). buildCurrentProject writes `settings: item.settings || null` and has no field for them, so a project saved or recovered in between opens the photo as a fresh one, without the edits. One decode had persisted that photo's recipe, edits included, when it was left (#255).  
+  _Suggested fix:_ Carry `pendingEdits` and `pendingUserEdited` in the project's file entry and put them back on the queue item when its settings are null, or give the photo the recipe Export All would compute before saving.
 
 - **low/bug** — Analyze roll, Auto Frame Selected and the flat field give a photo left inside a two-stage window a recipe without learned defaults  
   `negative2positive/src/app/main.js runRollAnalysis, applyAutoFrameToSelected, applyFlatFieldToItems`  

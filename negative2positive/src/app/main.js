@@ -14088,13 +14088,21 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       });
     });
 
-    document.getElementById('applyFilmTypeToRollBtn').addEventListener('click', () => {
-      if (state.currentStep < 3 || !state.originalImageData || document.body.dataset.studioBusy
-        || state.cropping || isDesktopBatchExportLocked() || !state.fileQueue.length) return;
+    // The open photo's film type for every photo of the roll. Its recipe is
+    // persisted and read back: a two-stage import's once its full decode is
+    // installed (#255), with the type shown when the button was pressed.
+    async function applyFilmTypeToRoll() {
+      const blocked = () => state.currentStep < 3 || !state.originalImageData || document.body.dataset.studioBusy
+        || state.cropping || isDesktopBatchExportLocked() || !state.fileQueue.length;
+      if (blocked()) return;
+      const choice = { filmType: state.filmType, positiveMode: state.positiveMode };
+      if (!currentPhotoExact()) {
+        const current = getCurrentQueueItem();
+        if (!await ensureFullDecodeWithNotice('film-type-roll') || getCurrentQueueItem() !== current || blocked()) return;
+      }
       persistCurrentFileSettings({ silent: true, force: true });
       pushUndo('rollFilmType');
       automaticRollRevision++;
-      const choice = { filmType: state.filmType, positiveMode: state.positiveMode };
       for (const item of state.fileQueue) {
         item.filmTypeOverride = { ...choice };
         if (item.settings) item.settings = applyFilmTypeOverride(item.settings, choice);
@@ -14109,7 +14117,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       scheduleSilverSourceRefresh({ immediate: true });
       scheduleProjectRecovery();
       showToast(getInterpolatedText('filmTypeAppliedRoll', { count: String(state.fileQueue.length) }, `Film type applied to ${state.fileQueue.length} photos`));
-    });
+    }
+    document.getElementById('applyFilmTypeToRollBtn').addEventListener('click', () => { void applyFilmTypeToRoll(); });
 
     document.getElementById('importFilmTypeAuto').addEventListener('change', event => {
       state.importFilmTypeAuto = event.target.checked;
@@ -15658,7 +15667,14 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     async function runStudioAutoFrame(selected) {
-      if (document.body.dataset.studioBusy || state.cropping || isDesktopBatchExportLocked() || !state.originalImageData) return;
+      const blocked = () => document.body.dataset.studioBusy || state.cropping || isDesktopBatchExportLocked() || !state.originalImageData;
+      if (blocked()) return;
+      // A two-stage import's frame is detected on its full decode, and Auto
+      // Frame Selected reads the open photo's recipe persisted below (#255).
+      if (!currentPhotoExact()) {
+        const item = getCurrentQueueItem();
+        if (!await ensureFullDecodeWithNotice('auto-frame') || getCurrentQueueItem() !== item || blocked()) return;
+      }
       // The frame detector reads the base (#249).
       if ((state.baseDescriptor || state.sourcePending) && !(await prepareOriginalForTool())) return;
       if (document.body.dataset.studioBusy) return;
@@ -25669,6 +25685,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (!state.fileQueue.length || isDesktopBatchExportLocked()) return;
       await settlePendingCropDetection();
       for (const item of state.fileQueue) await queueItemHash(item);
+      // The open photo's recipe is persisted into the project: a two-stage
+      // import's once its full decode is installed (#255).
+      if (!await ensureFullDecodeWithNotice('save-project')) return;
       const project = buildCurrentProject({ persist: true });
       const blob = new Blob([serializeRollProject(project)], { type: 'application/json' });
       const result = await saveBlob(blob, projectFileName(state.rollMetadata), 'application/json');
@@ -28474,7 +28493,14 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (state.rollFrame && usesSilverCoreConversion(state)) scheduleSilverSourceRefresh({ immediate: true });
     }
 
-    document.getElementById('analyzeRollBtn')?.addEventListener('click', () => { void runRollAnalysis(); });
+    // Analyze roll persists the open photo's recipe and reads it back: a
+    // two-stage import's once its full decode is installed (#255). The
+    // automatic analysis waits for studioBackgroundReady instead.
+    async function analyzeRollFromButton() {
+      if (!currentPhotoExact() && !await ensureFullDecodeWithNotice('roll-analysis')) return;
+      await runRollAnalysis();
+    }
+    document.getElementById('analyzeRollBtn')?.addEventListener('click', () => { void analyzeRollFromButton(); });
     document.getElementById('clearRollAnalysisBtn')?.addEventListener('click', clearRollAnalysis);
     const autoRollInput = document.getElementById('autoRollOnImport');
     if (autoRollInput) {

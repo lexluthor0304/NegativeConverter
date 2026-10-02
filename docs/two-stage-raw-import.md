@@ -165,8 +165,9 @@ the stand-in:
 |---|---|
 | single export (DNG included), `ensureFullResolutionReadyForExport` (dust detection, AI brush plane) | waits behind the export overlay |
 | Export All, ZIP export, contact sheet, settings sync, roll reference, Save settings | wait before reading the current photo's recipe |
+| Analyze roll, Auto Frame and Auto Frame Selected, Apply film type to roll, Save Project | wait with "Preparing full resolution…" before they persist the current photo's recipe (`persistCurrentFileSettings` refuses in the window) and read it back or detect its frame |
 | AI brush, dust brush, "Use as flat field" | wait with "Preparing full resolution…" |
-| roll analysis, lanes, prefetch | `studioBackgroundReady` / `foregroundBusyForBackground` wait |
+| automatic roll analysis, "These are positives", lanes, prefetch | `studioBackgroundReady` / `foregroundBusyForBackground` wait |
 | photo sessions, roll samples | refuse the stand-in (`rememberPhotoSession`, `rememberPhotoBase`, `canReuseLoadedRollSource`) |
 
 Once an exact consumer is waiting, the swap no longer waits for input to go
@@ -221,8 +222,11 @@ quiet.
   leaving early). The settle and a photo left with a window edit decide as
   their pass began (learned defaults, the roll's film type): one decode's
   recipe plus the edit; outside the window every roll decision and recipe
-  equals the old functions' (synthetic rolls). Each window case has a control
-  without the fix.
+  equals the old functions' (synthetic rolls). Analyze roll, Auto Frame
+  Selected, Apply film type to roll and Save Project clicked in the window
+  wait for the exact photo and end as on one decode (on one decode as
+  before); crop mode and the automatic roll import (fake timers) still
+  complete. Each window case has a control without the fix.
 - `restartRender.test.mjs`: the provisional pass holds its side effects back;
   switch-back to a photo left in the window decides as its pass began.
 - `processFileWithSettings.parity.test.mjs`: Export All of a photo left in
@@ -233,8 +237,9 @@ quiet.
   1600×1066 CFA DNGs with `?twoStageMinMp=1`. It checks the stand-in,
   installation without `studioBusy`, and recipe and PNG 8/16 hashes equal to
   a single decode. It also covers an export during stage 2, crop mode during
-  stage 2, a failed stage 2, and leaving before stage 2 followed by Export
-  All.
+  stage 2, a failed stage 2, leaving before stage 2 followed by Export All,
+  and Analyze roll clicked during stage 2 after an exposure edit (the roll
+  recipe and the export's decoded 16-bit samples equal one decode's).
 
 ## Verification on real files (not in the repository)
 
