@@ -546,8 +546,12 @@ hides come last. No job starts on a file another lane is working on.
   400 ms (passive capture listeners; hovering does not count). A job mid-way
   waits again, at most 2 s, before each main-thread-heavy step (frame
   detection, geometry, the tile encode), so a paused job does not hold a
-  decoded frame through a foreground decode. A hidden window is not busy here;
-  hidden admission is `hiddenJobGate.js` (#241), which every job also passes.
+  decoded frame through a foreground decode. A hidden window is not busy here,
+  and a full-resolution render that only waits for its first frame there does
+  not count (it runs once the window is shown). Hidden admission is
+  `hiddenJobGate.js` (#241), which every job also passes: it is asked after
+  the idle wait and given back, with the frame's memory, whenever the job
+  waits for the foreground again (`docs/hidden-window-jobs.md`).
   `idle({ foregroundOnly: true })` waits on input, a switch and foreground
   decodes and conversions only, not on the export locks: a desktop batch's
   decode-ahead uses it, capped at 2 s (#256, `docs/batch-export-pipeline.md`).
