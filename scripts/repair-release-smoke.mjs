@@ -172,7 +172,18 @@ export async function runRepairReleaseSmoke({ send, evaluate, waitFor, wait, fai
   // of being refused with "still loading".
   await evaluate(`document.getElementById('aiBrushEnabled').click()`);
   await waitFor('AI brush armed with its model', `${ready} && window.__ncAiRepair.state().status === 'ready'`, 120_000);
-  if (await evaluate(`window.__ncAiRepair.release()`) !== true) fail('the armed brush\'s model was not released: ' + JSON.stringify(await state()));
+  // Arming loads the model with a refresh, and dust removal is on: its pass
+  // runs again 300 ms after the load (scheduleDustDetection). The release is
+  // refused while a pass or run uses the session (releaseAiRepairSession), so
+  // it is retried until that pass is done; the refusals record what ran.
+  await evaluate(`window.__armedReleaseRefusals = []`);
+  const armedReleased = await waitFor('the armed brush\'s model released', `${ready} && window.__ncAiRepair.release().then((done) => {
+    if (!done) window.__armedReleaseRefusals.push(document.getElementById('dustStatus').textContent);
+    return done;
+  })`, 60_000, { soft: true });
+  const refusals = await evaluate(`window.__armedReleaseRefusals`);
+  if (!armedReleased) fail('the armed brush\'s model was not released: ' + JSON.stringify({ state: await state(), refusals }));
+  if (refusals.length) console.log('armed brush release waited for:', JSON.stringify(refusals));
   const armed = await evaluate(`({ cursor: getComputedStyle(document.getElementById('canvasContainer')).cursor,
     pending: document.getElementById('aiBrushSection').hasAttribute('data-model-pending'),
     status: document.getElementById('dustAiStatus').textContent })`);
