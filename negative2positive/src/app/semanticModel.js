@@ -31,12 +31,17 @@ export function createSemanticAnalyzer({
     }
     return model;
   };
-  function analyze(image, { timeoutMs = 30000, isCurrent = () => true, pollMs = 200 } = {}) {
+  // `isCurrent` is the caller's whole check, made when the task starts (the
+  // caller makes it again on the answer). `isWanted` holds only conditions
+  // that stay false once false (the photo left or edited): it is polled
+  // through the model load and the inference. A passing state such as crop
+  // mode opened and cancelled meanwhile must not cost the answer.
+  function analyze(image, { timeoutMs = 30000, isCurrent = () => true, isWanted = () => true, pollMs = 200 } = {}) {
     const task = pending.then(async () => {
       if (!isCurrent()) return null;
       // Without the page's copy the worker fetches the model itself, as before.
       const bytes = loadedModel ?? await loadModelOnce().catch(() => null);
-      if (!isCurrent()) return null;
+      if (!isWanted()) return null;
       return new Promise((resolve) => {
         let worker, timer, poll, finished = false;
         const finish = (result, error) => {
@@ -56,7 +61,7 @@ export function createSemanticAnalyzer({
           timer = setTimeout(() => finish(null, 'timeout'), timeoutMs);
           // A photo left (or edited) mid-inference needs no answer: terminate
           // the model heap then instead of when the inference ends.
-          poll = setInterval(() => { if (!isCurrent()) finish(null); }, pollMs);
+          poll = setInterval(() => { if (!isWanted()) finish(null); }, pollMs);
           worker.onerror = event => finish(null, event.message);
           worker.onmessageerror = () => finish(null, 'invalid worker message');
           worker.onmessage = ({ data }) => finish(data.error ? null : data, data.error);

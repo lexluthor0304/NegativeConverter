@@ -23624,14 +23624,19 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // the viewport (#248), whenever it belongs to this source.
       const sampleSource = autoWbSampleFor(autoWbSampleKey()) || source;
       const revision = manualEditRevision;
-      const valid = () => isCurrentLoad(generation) && item === getCurrentQueueItem() && revision === manualEditRevision && !state.cropping && !studioAutoFrameRunning && !automaticRollImportRunning && !state.rollFrame?.locked && !state.wbUserOverride && !state.grayPointSampled && !state.rollReference.applyLock && !item.savedSettings;
+      // What stays false once false (the photo left or edited, the user's own
+      // white balance, a saved recipe) ends the inference early; passing
+      // states (crop mode, Auto Frame, a roll import) count before and after
+      // it only, as they always did.
+      const wanted = () => isCurrentLoad(generation) && item === getCurrentQueueItem() && revision === manualEditRevision && !state.wbUserOverride && !state.grayPointSampled && !state.rollReference.applyLock && !item.savedSettings;
+      const valid = () => wanted() && !state.cropping && !studioAutoFrameRunning && !automaticRollImportRunning && !state.rollFrame?.locked;
       // Whole converted preview coordinates are used for both WB and rescue.
       const preview = downsampleImageDataForMaxDim(sampleSource, 512);
       semanticColourInFlight++;
       setTimeout(async () => {
         try {
           if (!valid()) return;
-          const map = sanitizeSemanticMap(await analyzeSemanticPreview(preview, { isCurrent: valid }));
+          const map = sanitizeSemanticMap(await analyzeSemanticPreview(preview, { isCurrent: valid, isWanted: wanted }));
           if (!map || !valid()) return;
           if (state.expiredEnabled) {
             const analysis = await measureExpiredAnalysisForExport(source, { ...state, semanticMap: map, autoFrameMeta: state.autoFrame.lastDiagnostics }, state.loadedBaseImageData || state.originalImageData);
