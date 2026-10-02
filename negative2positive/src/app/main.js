@@ -3437,8 +3437,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
     // Returns the entry it pushed: a geometry edit hands it to its build,
     // which takes it back if the build fails (rollBackFailedGeometry).
-    function pushUndo(label) {
-      noteManualEdit(label);
+    // `manualEdit: false`: a step that leaves the open photo's own recipe
+    // alone (a correction of other frames) is not an edit of that photo.
+    function pushUndo(label, { manualEdit = true } = {}) {
+      if (manualEdit) noteManualEdit(label);
       const entry = commitUndoSnapshot(captureSnapshot(label));
       if (['crop', 'rotation', 'mirror', 'autoFrame', 'restoreFullFrame'].includes(label)) {
         state.semanticMap = null;
@@ -29001,7 +29003,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
     // "These are positives": the existing roll override, on exactly the frames
     // the decision typed, as one undo step. A colour roll in the same import
-    // is left alone.
+    // is left alone: the import's other group analyses go on (only the
+    // typed frames' recipes change, and their own group is regrouped
+    // without them), and an open photo that is not one of the frames is not
+    // counted as edited (#229 review R1-014).
     function applyImportPositives(record) {
       if (record.corrected) return;
       if (!state.originalImageData || !studioBackgroundReady({ exact: true }) || state.cropping) {
@@ -29012,8 +29017,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const targets = record.items.filter(item => state.fileQueue.includes(item) && !sanitizeFilmTypeOverride(item.filmTypeOverride)
         && (item.settings ? item.settings.filmTypeSource === 'auto' && item.settings.filmTypeReason === ROLL_MONOCHROME.reason : record.typed.has(item)));
       if (!targets.length) return;
-      pushUndo('rollFilmType');
-      automaticRollRevision++;
+      const current = getCurrentQueueItem();
+      pushUndo('rollFilmType', { manualEdit: Boolean(current && targets.includes(current)) });
       record.corrected = true;
       clearTimeout(record.timer); record.timer = null;
       const choice = { filmType: 'positive', positiveMode: state.positiveMode };
@@ -29025,7 +29030,6 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         item.status = 'pending'; item.isDirty = false;
       }
       if (analysed) state.rollAnalysis = { equalize: Boolean(state.rollAnalysis.equalize) };
-      const current = getCurrentQueueItem();
       if (current && targets.includes(current)) {
         restoreSettings(current.settings, { refreshDisplay: state.currentStep < 3 });
         invalidateSilverCoreCache();
@@ -29444,8 +29448,14 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
             if (!valid()) return;
           }
           const groups = groupAutomaticRollFrames(pending.filter(eligible), { referenceLocked: state.rollReference.applyLock });
+          // Groups are formed by film type. A frame retyped before its group's
+          // turn (These are positives while an earlier group is analysed)
+          // leaves that group to the next attempt's grouping (#229 review
+          // R1-014); other recipe changes are runRollAnalysis's to key.
+          const groupedTypes = new Map(groups.flat().map(item => [item, item.settings?.filmType]));
           for (const group of groups) {
             if (!valid()) return;
+            if (group.some(item => item.settings?.filmType !== groupedTypes.get(item))) { retry = true; continue; }
             const result = await runRollAnalysis({ items: group, automatic: true, samples });
             if (result?.status === 'deferred' || result?.status === 'stale') retry = true;
           }

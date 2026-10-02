@@ -8,7 +8,7 @@ import { createJobMarker, readJobMarker, JOB_MARKER_KEYS } from './jobMarker.js'
 import { aggregateRollAnalysis, groupAutomaticRollFrames, sanitizeRollFrameForSettings } from './rollAnalysis.js';
 import { decideRollFilmType, mergeRollDecision, ownFilmTypeVerdict, rollDecisionFrame, rollFilmTypeTarget, ROLL_MONOCHROME } from './rollFilmType.js';
 import { applyAutomaticFilmType, applyFilmTypeOverride, sanitizeFilmTypeOverride } from './filmTypeOverride.js';
-import { applyLearnedDefaults, learnedDefaultsKey, withoutLearnedDefaults } from './learnedDefaults.js';
+import { applyLearnedDefaults, learnedDefaultsKey, withoutLearnedDefaults, LEARNED_NUMERIC_KEYS, LEARNED_CATEGORY_KEYS } from './learnedDefaults.js';
 import { canPublishThumbnail } from './thumbnailRank.js';
 import { createSharedDecodes } from './sharedDecodes.js';
 import { pickBackgroundJob, travelDirection, displayDistance } from './backgroundPhotoScheduler.js';
@@ -182,7 +182,11 @@ function fixture({ count = 4, prepared = false, realRoll = false, verdicts = nul
     buildAdjustmentSettings: settings => settings,
     thumbnailDataUrl: image => `thumbnail:${image.id}`,
     photoSettingsKey: item => JSON.stringify(item.settings),
-    pushUndo: label => undos.push({ label, file: state.loadedFile }),
+    // The real pushUndo and noteManualEdit (#229 review R1-014): which photo
+    // a step counts as edited.
+    captureSnapshot: label => ({ label, file: state.loadedFile }),
+    commitUndoSnapshot: entry => { undos.push(entry); return entry; },
+    cancelCropDetection: noop, LEARNED_NUMERIC_KEYS, LEARNED_CATEGORY_KEYS,
     invalidateSilverCoreCache: noop,
     restoreSettings: settings => {
       restored.push(settings.id);
@@ -229,7 +233,7 @@ function fixture({ count = 4, prepared = false, realRoll = false, verdicts = nul
     },
   });
   context.sharedDecodes = createSharedDecodes({ decode: (file, { signal }) => context.decodeForBackground(file, signal) });
-  vm.runInContext([...DISPLAY_SESSION_HELPERS, 'getCurrentQueueItem', 'automaticRollItemKey', 'scheduleAutomaticRollImport', 'createRollAnalysisWorkers', 'decodeRollFrame',
+  vm.runInContext([...DISPLAY_SESSION_HELPERS, 'getCurrentQueueItem', 'noteManualEdit', 'pushUndo', 'automaticRollItemKey', 'scheduleAutomaticRollImport', 'createRollAnalysisWorkers', 'decodeRollFrame',
     'rollAnalysisHalfSize', 'scaleHalfSizeCrop', ...FILM_TYPE_FUNCTIONS,
     'renderFrameAnalysisThumbnail', 'releaseFrameThumbnailWorkers', 'renderSampleTile', 'publishSampleTile', 'renderRollSampleTiles',
     ...(realRoll ? ['runRollAnalysis'] : []),
@@ -461,7 +465,9 @@ for (const change of ['recipe', 'edit', 'dirty', 'remove', 'cancel', 'off']) {
   assert.ok(f.items.every(item => item.filmTypeOverride?.filmType === 'positive' && item.settings.filmType === 'positive'
     && item.settings.filmTypeSource === 'manual'));
   assert.equal(f.state.filmType, 'positive', 'the open photo follows the correction');
-  assert.equal(f.context.automaticRollRevision, 1);
+  // Nothing else is cancelled: the roll revision is unchanged (R1-014).
+  assert.equal(f.context.automaticRollRevision, 0);
+  assert.equal(f.items[0].userEdited, true, 'the open leader is one of the frames: the correction is its edit');
 }
 
 // A colour roll after the B&W roll: a run of noMask frames and a warm scene.
@@ -543,6 +549,74 @@ for (const change of ['recipe', 'edit', 'dirty', 'remove', 'cancel', 'off']) {
   assert.equal(f.items[3].settings.filmType, 'bw');
   assert.equal(f.items[3].settings.learnedDefaults?.key, key, 'learned defaults follow the new key');
   assert.equal(f.items[3].automaticDefaults.filmType, 'bw', 'later learning compares against the B&W recipe');
+}
+
+// #229 review R1-014: These are positives while the import's group analyses
+// run (its toast is up from the end of pass 1). The B&W frames become
+// positives. The colour roll of the same import is still analysed, from its
+// pass-1 samples, and its tiles keyed; the open colour photo is not counted
+// as edited, so it keeps its roll group and its learned defaults. 5f23eb0
+// bumped the roll revision: no colour frame was analysed, the samples were
+// dropped, and the open colour photo was marked edited.
+async function positivesDuringGroups(verdicts, { open, click = true }) {
+  const f = fixture({ verdicts, realRoll: true });
+  f.navigate(open);
+  f.context.scheduleAutomaticRollImport(f.items);
+  f.prepareForeground(open);
+  const analyse = f.context.analyzeSilverCoreFrame;
+  let clicked = !click;
+  f.context.analyzeSilverCoreFrame = async (image, ...rest) => {
+    if (!clicked) {
+      clicked = true;
+      const toast = f.toasts.find(entry => entry.action?.id === 'rollPositives');
+      assert.ok(toast, 'the roll toast is up while the groups are analysed');
+      toast.action.onClick();
+    }
+    return analyse(image, ...rest);
+  };
+  await f.fire(1200);
+  while (f.timers.size) await f.fire();
+  return f;
+}
+// What an export of a frame reads: its recipe, override and studio colours
+// (each roll analysis has its own id).
+const exportRecipe = item => JSON.stringify([item.settings, item.filmTypeOverride || null, item.studioColors || null])
+  .replace(/"rollId":"[^"]*"/g, '"rollId":"*"');
+{
+  const verdicts = ['mono', 'mono', 'mono', 'orange', 'orange', 'orange'];
+  const f = await positivesDuringGroups(verdicts, { open: 3 });
+  const bw = f.items.slice(0, 3), colour = f.items.slice(3);
+  assert.ok(bw.every(item => item.filmTypeOverride?.filmType === 'positive' && item.settings.filmType === 'positive'
+    && item.settings.filmTypeSource === 'manual' && !item.settings.rollFrame), 'the B&W frames are positives, without a roll analysis');
+  assert.ok(colour.every(item => item.settings.filmType === 'color' && item.settings.rollFrame?.locked), 'the colour roll is still analysed');
+  assert.ok(colour.every(item => item.thumbnailKind === 'processed' && item.thumbnailKey === f.context.photoSettingsKey(item)), 'and keyed');
+  assert.deepEqual(f.analyzed, [0, 3, 4, 5], 'the B&W group stops at the click; the colour group runs');
+  assert.deepEqual([...f.decoded].sort((a, b) => a - b), [0, 1, 2, 4, 5], 'one decode per background frame: the colour roll used the pass-1 samples');
+  assert.deepEqual(f.samplesBuilt.filter(id => id !== 3).sort((a, b) => a - b), [0, 1, 2, 4, 5],
+    'each background frame\'s sample built once (the retry samples the open photo again from its loaded base)');
+  assert.ok(!f.items[3].userEdited, 'the open colour photo is not counted as edited');
+  assert.equal(f.context.manualEditRevision, 0);
+  assert.equal(f.context.automaticRollRevision, 0, 'nothing else is cancelled');
+  assert.deepEqual(f.undos.map(entry => entry.label), ['rollFilmType', 'rollAnalysis'], 'one correction step, then the colour roll');
+  assert.ok(f.stores.every(store => store.cleared) && f.context.automaticRollPendingItems.size === 0, 'the import finished');
+  // Export check: the colour frames export as from the same import without
+  // the click (the same recipes, roll analysis included, so the same pixels).
+  const reference = await positivesDuringGroups(verdicts, { open: 3, click: false });
+  assert.ok(reference.items.slice(0, 3).every(item => item.settings.filmType === 'bw' && item.settings.rollFrame?.locked), 'without the click both rolls are analysed');
+  assert.deepEqual(colour.map(exportRecipe), reference.items.slice(3).map(exportRecipe), 'the colour frames have the recipes of the import without the click');
+  assert.deepEqual(colour.map(item => item.thumbnail), reference.items.slice(3).map(item => item.thumbnail));
+  assert.equal(JSON.stringify({ ...f.state.rollAnalysis, id: '*' }), JSON.stringify({ ...reference.state.rollAnalysis, id: '*' }), 'the same shared colour analysis');
+}
+{
+  // The colour roll analysed first: the B&W group was formed before the
+  // click and is not analysed with the retyped (positive) recipes; the next
+  // attempt's grouping leaves them out.
+  const f = await positivesDuringGroups(['orange', 'orange', 'orange', 'mono', 'mono', 'mono'], { open: 0 });
+  assert.ok(f.items.slice(0, 3).every(item => item.settings.rollFrame?.locked), 'the colour roll is analysed');
+  assert.ok(f.items.slice(3).every(item => item.settings.filmType === 'positive' && !item.settings.rollFrame), 'the retyped frames are not analysed as a roll');
+  assert.deepEqual(f.analyzed, [0, 1, 2]);
+  assert.ok(!f.items[0].userEdited);
+  assert.deepEqual(f.undos.map(entry => entry.label), ['rollFilmType', 'rollAnalysis']);
 }
 
 // Per-frame analysis thumbnails: each measured frame gets a converted tile
