@@ -50,7 +50,15 @@ function installPreviewPathProbe() {
       track(this, message.id);
       // Light-table lanes convert tiles of at most 288 px of other photos.
       const tile = message.width * message.height <= 300 * 300;
-      note(message.cacheInput ? 'preview' : (tile ? 'lane' : 'full'), { width: message.width, height: message.height });
+      const kind = message.cacheInput ? 'preview' : (tile ? 'lane' : 'full');
+      note(kind, { width: message.width, height: message.height });
+      // A check that acts while a full-resolution conversion is in flight:
+      // it runs right after this post, before any reply can arrive.
+      if (kind === 'full' && probe.onFull) {
+        const run = probe.onFull;
+        probe.onFull = null;
+        queueMicrotask(run);
+      }
     } else if (['detect', 'inpaint', 'refine'].includes(message?.type) && typeof message.reuseSource === 'boolean') {
       track(this, message.id);
       note(`dust:${message.type}`);
@@ -73,7 +81,7 @@ function installPreviewPathProbe() {
   window.showSaveFilePicker = undefined;
   URL.revokeObjectURL = function(url) { if (!heldUrls.has(url)) original.revoke.call(URL, url); };
   HTMLAnchorElement.prototype.click = function(...args) {
-    if (!this.download?.endsWith('.png') || !this.href.startsWith('blob:')) return original.click.apply(this, args);
+    if (!/\.(png|tiff)$/.test(this.download || '') || !this.href.startsWith('blob:')) return original.click.apply(this, args);
     const href = this.href, capture = { name: this.download };
     heldUrls.add(href); probe.exports.push(capture);
     fetch(href).then(response => response.blob()).then(blob => new Promise((resolve, reject) => {
@@ -140,6 +148,18 @@ export async function runPreviewPathSmoke({ send, evaluate, waitFor, fail, insta
     })()`);
     await until(`${label}: ${depth}-bit PNG captured`, `!!window.__previewPathProbe.exports[${index}]?.data && !document.getElementById('exportBtn').disabled`, 120_000);
     return decodePng(await evaluate(`window.__previewPathProbe.exports[${index}].data`));
+  };
+  // A 16-bit TIFF, compared byte for byte (the encoder writes no timestamp).
+  const exportTiff16 = async label => {
+    const index = await evaluate('window.__previewPathProbe.exports.length');
+    await evaluate(`(() => {
+      document.querySelector('.format-btn[data-format="tiff"]').click();
+      document.querySelector('.bitdepth-btn[data-bitdepth="16"]').click();
+      document.getElementById('exportSingleBtn').click();
+    })()`);
+    await until(`${label}: 16-bit TIFF captured`, `!!window.__previewPathProbe.exports[${index}]?.data && !document.getElementById('exportBtn').disabled`, 120_000);
+    const bytes = Buffer.from((await evaluate(`window.__previewPathProbe.exports[${index}].data`)).split(',')[1], 'base64');
+    return { bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') };
   };
   const same = (a, b) => a.width === b.width && a.height === b.height && a.depth === b.depth && a.sha256 === b.sha256;
   // pointerdown takes the undo snapshot, as a real drag does.
@@ -354,6 +374,76 @@ export async function runPreviewPathSmoke({ send, evaluate, waitFor, fail, insta
       await quiet(`after the ${delay} ms export`, 3500);
     }
     console.log('ok: exports 0/500/3000 ms after a dust-on drag equal the settled, cleaned export');
+
+    // ---- Part 1c: Reset All and Clear mask in the idle repair window (#229 review R1-040, R1-041) ----
+    // Reset All while the idle repair pass converts the previous exposure:
+    // that pass is abandoned, so a 16-bit TIFF exported right after equals a
+    // fresh export of the reset settings (5f23eb0 exported the previous
+    // exposure under them).
+    await setSlider('coreExposure', 25);
+    const reset = await evaluate(`new Promise(resolve => {
+      const probe = window.__previewPathProbe;
+      const timeout = setTimeout(() => { probe.onFull = null; resolve({ timeout: true }); }, 30_000);
+      probe.onFull = () => {
+        clearTimeout(timeout);
+        const inFlight = probe.inFlight;
+        document.getElementById('studioTab-conversion')?.click();
+        document.getElementById('studioResetAll').click();
+        // Answered at once: the smoke's dialog auto-accept polls.
+        document.querySelector('[data-app-dialog-confirm]')?.click();
+        resolve({ inFlight });
+      };
+    })`);
+    expect(!reset.timeout && reset.inFlight >= 1, 'Reset All did not land while the idle repair pass converted: ' + JSON.stringify(reset));
+    await until('reset during the idle repair pass', `document.getElementById('coreExposure').value === '0'`, 10_000);
+    const afterReset = await exportTiff16('export right after Reset during the idle pass');
+    await quiet('after the reset export', 3500);
+    await setSlider('coreExposure', 4);
+    await quiet('core change after reset', 3500);
+    await setSlider('coreExposure', 0);
+    await quiet('back to the default exposure', 3500);
+    const freshDefault = await exportTiff16('fresh export at the reset settings');
+    expect(afterReset.sha256 === freshDefault.sha256,
+      'an export after Reset All during the idle repair pass differs from a fresh export of the reset settings: ' + JSON.stringify({ afterReset, freshDefault }));
+    console.log('ok: Reset All during the idle repair pass exports the reset settings (TIFF16 ' + afterReset.sha256.slice(0, 16) + ')');
+
+    // Clear mask after a nudge, then an export, inside the idle window: the
+    // clean source put back still lags the new exposure, so that export
+    // equals the one made after the idle pass (5f23eb0 exported the previous
+    // exposure).
+    const nudged = await evaluate(`(async () => {
+      const probe = window.__previewPathProbe, start = performance.now();
+      const input = document.getElementById('coreExposure');
+      input.dispatchEvent(new Event('pointerdown', { bubbles: true }));
+      input.value = '6';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      // The nudge's preview frame lands first, as it does before a human click.
+      while (!(probe.count(start).preview >= 1 && probe.inFlight === 0)) {
+        if (performance.now() - start > 1500) break;
+        await new Promise(resolve => setTimeout(resolve, 4));
+      }
+      await new Promise(resolve => setTimeout(resolve, 20));
+      document.getElementById('studioTab-repair').click();
+      document.getElementById('dustClearMaskBtn').click();
+      const cleared = performance.now();
+      const index = probe.exports.length;
+      document.querySelector('.format-btn[data-format="png"]').click();
+      document.querySelector('.bitdepth-btn[data-bitdepth="8"]').click();
+      document.getElementById('exportSingleBtn').click();
+      return { start, cleared, exported: performance.now(), index, counts: probe.count(start) };
+    })()`);
+    // The idle pass is armed when the nudge's frame lands: no full-resolution
+    // conversion yet means the export started inside its window.
+    expect(nudged.counts.preview >= 1 && nudged.counts.full === 0 && nudged.exported - nudged.start < 2500,
+      'Clear mask and the export did not fall inside the idle repair window: ' + JSON.stringify(nudged));
+    await until('export right after Clear mask: 8-bit PNG captured', `!!window.__previewPathProbe.exports[${nudged.index}]?.data && !document.getElementById('exportBtn').disabled`, 120_000);
+    const quick = decodePng(await evaluate(`window.__previewPathProbe.exports[${nudged.index}].data`));
+    await quiet('after the quick export', 3500);
+    const waited = await exportPng(8, 'export after the idle window');
+    expect(same(quick, waited), 'an export right after Clear mask differs from the export after the idle window: ' + JSON.stringify({ quick, waited, nudged }));
+    console.log('ok: Clear mask inside the idle repair window exports the new exposure ' + JSON.stringify({
+      cleared: Math.round(nudged.cleared - nudged.start), exported: Math.round(nudged.exported - nudged.start) }));
     await evaluate(`document.getElementById('studioTab-repair').click(); document.getElementById('dustRemovalEnabled').click()`);
     await quiet('dust off');
     await evaluate('window.__previewPathProbe.restore()');
