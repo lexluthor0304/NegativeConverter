@@ -397,10 +397,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         refreshHiddenJobStatus();
         if (hiddenJobs.paused) onHiddenJobPaused();
       },
-      onHiddenAdmit: () => shedHiddenJobMemory(),
+      onHiddenAdmit: () => onHiddenJobAdmitted(),
       onGraceExpired: () => shedHiddenJobMemory(),
       // A job that ends while hidden leaves nothing idle behind.
-      onIdle: () => shedHiddenJobMemory(),
+      onIdle: () => onHiddenJobsIdle(),
       // Nor does an item held back for its bytes, first (R1-053).
       onBudgetHold: () => shedHiddenJobMemory()
     });
@@ -431,10 +431,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // (sharedDecodes.js). Background decodes always use the options a
     // foreground load would: full size, defects repaired, with rawMetadata.
     const sharedDecodes = createSharedDecodes({ decode: (file, { signal, context }) => decodeForBackground(file, signal, context) });
-    // Running lane loops, the job of each frame in work, roll-analysis passes
-    // waiting for lanes, the direction of travel, visible tiles and the
-    // prefetched photo.
-    const backgroundLanes = { running: 0, active: new Map() };
+    // Running lane loops, the job of each frame in work and the hidden-job
+    // items those jobs hold or wait for (#241), roll-analysis passes waiting
+    // for lanes, the direction of travel, visible tiles and the prefetched
+    // photo.
+    const backgroundLanes = { running: 0, active: new Map(), gateItems: 0 };
     const rollPassRequests = new Set();
     const backgroundVisibleItems = new Set();
     let backgroundDirection = 1;
@@ -10813,8 +10814,15 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       return safeStorageGet('nc_hidden_job_limits_v1') === 'force';
     }
 
+    // A long job runs: an export, the contact sheet, a roll import or
+    // analysis, or any other caller's item the gate holds or keeps waiting.
+    // The background lanes count only while one of their jobs holds its
+    // admission for a frame's analysis or tile: a lane that rests, waits (for
+    // the foreground or for its admission) or only prefetches is no job, so a
+    // quick app switch keeps the warm caches (#229 review R1-059).
     function hiddenJobRunning() {
-      return activeLongJobs > 0 || hiddenJobs.busy || backgroundLanesRunning() || isDesktopBatchExportLocked()
+      return activeLongJobs > 0 || hiddenJobs.inFlight + hiddenJobs.waiting > backgroundLanes.gateItems
+        || backgroundLaneJobAdmitted() || isDesktopBatchExportLocked()
         || automaticRollImportRunning || automaticRollAnalysisRunning;
     }
 
@@ -10822,6 +10830,21 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // is shed, and nothing refills the photo caches (R1-053, R1-059).
     function hiddenWindowLimited() {
       return document.visibilityState === 'hidden' && hiddenJobs.status().limited;
+    }
+
+    // A job ran in this hidden period: one counted when the window hid, or an
+    // item admitted under the hidden limits since. Only then does the gate
+    // going idle shed: a lane that only prefetched when the window hid leaves
+    // the warm caches to the end of the grace period (R1-059).
+    let hiddenJobSeen = false;
+
+    function onHiddenJobAdmitted() {
+      hiddenJobSeen = true;
+      shedHiddenJobMemory();
+    }
+
+    function onHiddenJobsIdle() {
+      if (hiddenJobSeen) shedHiddenJobMemory();
     }
 
     // What the page retains: the memory ledger's total (#258), which counts
@@ -10893,15 +10916,21 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       getLoadingOverlay().updateProgress(percent, hiddenJobs.paused ? hiddenJobPausedText() : label);
     }
 
-    document.addEventListener('visibilitychange', () => {
+    document.addEventListener('visibilitychange', () => hiddenJobVisibilityChanged());
+
+    function hiddenJobVisibilityChanged() {
       hiddenJobs.visibilityChanged();
       // The hidden ceiling of the memory budget (#258).
       applyMemoryCeiling();
       if (document.visibilityState === 'hidden') {
         // While a job runs, shed now; an idle window keeps its warm caches
         // until the grace period ends, so a quick app switch stays warm.
-        if (hiddenJobRunning()) shedHiddenJobMemory();
+        if (hiddenJobRunning()) {
+          hiddenJobSeen = true;
+          shedHiddenJobMemory();
+        }
       } else {
+        hiddenJobSeen = false;
         // Waiting items were released above; the thumbnail lane restarts if
         // it stopped. Caches refill on use and workers respawn lazily.
         if (parkedPhoto) void unparkOpenPhoto().catch(error => console.warn('Rebuilding the parked photo failed:', error));
@@ -10909,7 +10938,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         reloadAiRepairForArmedBrush();
       }
       refreshHiddenJobStatus();
-    });
+    }
 
     // An item is held back because the hidden estimate does not fit. Log the
     // breakdown for the acceptance runs, which decide whether parking the
@@ -22882,8 +22911,34 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       }
     }
 
-    function backgroundLanesRunning() {
-      return backgroundLanes.running > 0;
+    // A lane job's hidden-job item (#241). The lanes count their items, held
+    // or waited for, so hiddenJobRunning() tells them from other jobs' items;
+    // the job itself counts while it holds its admission (job.admitted).
+    async function admitBackgroundJob(job, bytes) {
+      backgroundLanes.gateItems += 1;
+      let release;
+      try {
+        release = await hiddenJobs.admit({ bytes, signal: job.controller.signal });
+      } catch (error) {
+        backgroundLanes.gateItems -= 1;
+        throw error;
+      }
+      job.admitted = true;
+      return () => {
+        if (!job.admitted) return;
+        job.admitted = false;
+        backgroundLanes.gateItems -= 1;
+        release();
+      };
+    }
+
+    // A lane job that holds its admission for a frame's analysis or tile is
+    // a hidden job (hiddenJobRunning); a prefetch alone is not.
+    function backgroundLaneJobAdmitted() {
+      for (const job of backgroundLanes.active.values()) {
+        if (job.admitted && job.needs.some(need => need !== 'prefetch')) return true;
+      }
+      return false;
     }
 
     function kickBackgroundPhotoWork() {
@@ -23155,7 +23210,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           for (;;) {
             await backgroundGate.idle({ signal: controller.signal });
             if (!wanted()) return false;
-            release = await hiddenJobs.admit({ bytes: await hiddenJobBytesFor([item.file]), signal: controller.signal });
+            release = await admitBackgroundJob(job, await hiddenJobBytesFor([item.file]));
             if (!wanted()) return false;
             if (backgroundGate.isIdle()) return true;
             release();
