@@ -2708,7 +2708,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     const displaySessionDiagnostics = {
       tierA: 0, tierB: 0, demotions: 0, spills: 0, spillWrites: 0, spillFailures: 0, ramHits: 0, spillHits: 0, storeHits: 0,
       recipeChanged: 0, provisional: 0, baseDecodes: 0, sourceBuilds: 0, baseMismatches: 0, baseFailures: 0, selfChecks: 0,
-      selfCheckMismatches: 0, sampleMisses: 0, fills: 0, fillSkips: 0, force: null
+      selfCheckMismatches: 0, sampleMisses: 0, fills: 0, fillSkips: 0, unsettled: 0, force: null
     };
 
     function clearFullResolutionRenderState() {
@@ -11458,6 +11458,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         // Huge geometry/history must not prevent reuse of a base that fits.
         stored = photoSessions.put(item, { file: entry.file, base: entry.base, rawMetadata: entry.rawMetadata });
       }
+      if (!stored && !base && !settled) {
+        // A session without its base left before it settled (#249) has no
+        // base to fall back on: its display form is kept anyway (R2-002).
+        stored = rememberUnsettledDisplaySession(item, entry);
+      }
       if (settled) {
         // The 1200 px proxy only serves a cold revisit after eviction, so the
         // click does not build it. Sample now (a few ms, and the deferred task
@@ -11477,6 +11482,39 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           void persistPresentationPreview(item, key, image);
         });
       }
+      return stored;
+    }
+
+    // A session without its base left before it settled (#249, R2-002): a
+    // slider tick or Undo still converting, the original or the source being
+    // rebuilt ("Preparing original…"), a recipe-changed activation running.
+    // It is kept in its display form, taken from the live planes: Tier A (the
+    // source) or Tier B (the level), spilled when neither fits. The recipe is
+    // marked changed (no key), so the return converts the planes under the
+    // item's recipe behind the veil, as a cold open would, and never shows
+    // this frame as settled; the history goes with it as scalars. Not while a
+    // geometry build is pending (the planes are not the geometry the recipe
+    // names: the return decodes the base for it) or a repair is.
+    function rememberUnsettledDisplaySession(item, entry) {
+      if (!state.baseDescriptor || state.geometryPending || state.currentStep < 3 || state.dustRemoval.processing
+        || dustDetectionTimer || pendingBrushRepairs || dustDrawing || dustAiRefresh.rects.length) return false;
+      const force = displaySessionDiagnostics.force;
+      const unsettled = {
+        ...entry, key: null, snapshot: captureSnapshot('photoSession'),
+        undo: coldHistory(undoStack), redo: coldHistory(redoStack)
+      };
+      const display = captureDisplaySession(item, unsettled);
+      if (display) unsettled.display = display;
+      const tierA = !geometryDiagnostics.coldSessions && force !== 'B' && force !== 'spill' && !state.sourcePending
+        ? tierASession(unsettled) : null;
+      let stored = Boolean(tierA) && photoSessions.put(item, tierA);
+      if (stored) displaySessionDiagnostics.tierA++;
+      else if (display) {
+        stored = force !== 'spill' && photoSessions.put(item, display);
+        if (stored) displaySessionDiagnostics.tierB++;
+        else stored = spillDisplaySession(item, display);
+      }
+      if (stored) displaySessionDiagnostics.unsettled++;
       return stored;
     }
 
@@ -12225,7 +12263,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const descriptor = state.baseDescriptor;
       const file = state.loadedFile;
       if (!descriptor || !file) return Promise.resolve(null);
-      if (descriptor.decoding) return descriptor.decoding;
+      // A decode an earlier visit of the photo started resolves null for
+      // this one: it is not joined.
+      if (descriptor.decoding && descriptor.decodingGeneration === loadGeneration) return descriptor.decoding;
       const generation = loadGeneration;
       const signal = photoActivation?.signal || null;
       displaySessionDiagnostics.baseDecodes++;
@@ -12305,6 +12345,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         }
       })();
       descriptor.decoding = decoding;
+      descriptor.decodingGeneration = generation;
       return decoding;
     }
 

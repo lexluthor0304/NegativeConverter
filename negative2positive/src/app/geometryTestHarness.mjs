@@ -89,7 +89,7 @@ const FUNCTIONS = [
   'isCurrentLoad', 'applyZoomPanTransform', 'resetZoomPan', 'captureSnapshot', 'restoreSnapshot',
   'restoreColdSnapshotPixels', 'liveHistoryRoots', 'hotGeometrySnapshot', 'historyExclusiveBytes',
   'pruneHistoryForMemory', 'trimHistorySnapshot', 'commitUndoSnapshot', 'pushUndo', 'performUndo', 'performRedo',
-  'rememberPhotoSession', 'releaseOutgoingPhotoPlanes', 'photoSettingsKey', 'switchToFile',
+  'rememberPhotoSession', 'rememberUnsettledDisplaySession', 'releaseOutgoingPhotoPlanes', 'photoSettingsKey', 'switchToFile',
   'reactivateReleasedPhoto', 'reopenLivePhoto', 'invalidatePhotoActivation', 'getCropDraftTotalAngle', 'scaleCropRect',
   'interactiveGeometryBands',
   // Apply Crop's pending crop-area detection (#245).

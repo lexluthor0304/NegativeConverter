@@ -17,7 +17,10 @@
 //    from RAM (Tier A, Tier B), the spill and the store (where it has a
 //    budget) equals the same frame opened cold (GPU pixels, white balance,
 //    saved settings), and a Tier A Undo across Confirm image area exports
-//    (PNG16, TIFF16) what a cold reopen of the recipe exports.
+//    (PNG16, TIFF16) what a cold reopen of the recipe exports;
+//  - a frame left inside the reprocess debounce of a slider nudge (R2-002)
+//    comes back from its display form without a read or decode, with the
+//    nudge and its history, showing what a cold open of that recipe shows.
 // Tiers are forced through window.__ncDisplaySessions.force: the budget
 // logic itself is covered by the Node tests (displaySessions.test.mjs).
 import { createRequire } from 'node:module';
@@ -363,6 +366,61 @@ export async function runDisplaySessionSmoke({ send, evaluate, waitFor, fail, in
       `the Tier A ${format.toUpperCase()}16 export after the Undo differs from a cold reopen's: ` + JSON.stringify({ tierA: tierAExports[format], cold: coldExports[format] }));
     }
     console.log('ok: a Tier A Undo across Confirm image area keeps its colour-analysis sample; its PNG16 and TIFF16 exports equal a cold reopen\'s');
+
+    // ---- Left before it settled (R2-002): a slider nudge, and another photo
+    // in the same task (inside the reprocess debounce). The session without
+    // its base is kept in its display form; the way back reads and decodes
+    // nothing, shows the nudge, and shows what a cold open of the nudged
+    // recipe shows ----
+    for (const tier of ['A', 'B']) {
+      await evaluate(`window.__ncDisplaySessions.force(${JSON.stringify(tier)})`);
+      await open(1, Y);
+      await open(0, X);
+      expect(!(await live()).base, `the colour frame did not come back as Tier ${tier} before the nudge`);
+      // A step of history first (a committed drag), then a nudge that is
+      // left inside its debounce: an input event, and the click in its task.
+      await evaluate(`(() => {
+        const input = document.getElementById('coreExposure');
+        input.dispatchEvent(new Event('pointerdown', { bubbles: true }));
+        input.value = String(Number(input.value) + 3);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+      })()`);
+      await idle();
+      expect(!(await evaluate(`document.getElementById('undoBtn').disabled`)), 'the committed drag made no undo step');
+      const unsettled = (await diagnostics()).unsettled;
+      const nudged = await evaluate(`(() => {
+        const input = document.getElementById('coreExposure');
+        input.value = String(Number(input.value) + 7);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        // The value the slider took, before the other photo restores its own.
+        const value = Number(input.value);
+        document.querySelector('.file-list-name[data-index="1"]').click();
+        return value;
+      })()`);
+      await until(`photo ${Y} open after the nudge`, `${ready} && document.getElementById('studioFilename').textContent === ${JSON.stringify(Y)}`, 120000);
+      await idle();
+      expect(await evaluate(`window.__ncDisplaySessions.tier(0)`) === tier, `the nudged frame was not kept as Tier ${tier}: ` + JSON.stringify(await evaluate(`window.__ncDisplaySessions.tier(0)`)));
+      expect((await diagnostics()).unsettled === unsettled + 1, `the nudged Tier ${tier} frame was not left before it settled: ` + JSON.stringify(await diagnostics()));
+      const before = await counts(X);
+      await open(0, X);
+      const after = await counts(X);
+      expect(after.reads === before.reads && after.decodes === before.decodes, `the return of the nudged Tier ${tier} frame read or decoded: ` + JSON.stringify({ before, after }));
+      const back = await view();
+      expect(back.settings.coreExposure === nudged, `the return lost the nudge: ${back.settings.coreExposure} vs ${nudged}`);
+      expect(!(await evaluate(`document.getElementById('undoBtn').disabled`)), 'the return lost the undo history');
+      // The reference: the nudged recipe opened cold.
+      await evaluate(`window.__ncDisplaySessions.force(null)`);
+      await open(1, Y);
+      await open(0, X, { before: 'await window.__ncDisplaySessions.drop(0)' });
+      expect((await live()).base, 'the nudged reference was not opened cold');
+      const coldNudged = await view();
+      expect(back.gpu === coldNudged.gpu, `the nudged Tier ${tier} return shows other pixels than a cold open of its recipe (${back.gpu} vs ${coldNudged.gpu})`);
+      expect(JSON.stringify(back.wb) === JSON.stringify(coldNudged.wb), `the nudged Tier ${tier} return has another white balance than a cold open: ` + JSON.stringify({ back: back.wb, cold: coldNudged.wb }));
+      const diff = differences(coldNudged.settings, back.settings);
+      expect(!diff.length, `the nudged Tier ${tier} return saved other settings than a cold open:\n${diff.join('\n')}`);
+    }
+    console.log('ok: a frame left inside the reprocess debounce comes back (Tier A, Tier B) without a read or decode, with the nudge and its history, showing what a cold open of the nudged recipe shows');
     await evaluate(`window.__ncDisplaySessions.force(null)`);
   } catch (error) {
     failure = error;

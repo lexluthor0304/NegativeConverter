@@ -1322,4 +1322,139 @@ for (const tier of ['A', 'B']) {
   assert.equal(h.target.document.body.dataset.photoSwitching, undefined);
 }
 
-console.log('displaySessions: Tier A, Tier B, demotion, spill, ensureBase/ensureSource, invalidation, the proxy invariant, the colour-analysis sample across Undo, Redo and recipe changes (export parity), the settled-view parity of filled proxies, the sample check of stored proxies (export parity) and failed geometry builds and decodes passed');
+// Left before it settled (R2-002): a slider nudge still converting, or
+// "Preparing original…" (a tool waiting for the original). The session is
+// kept in its display form, with its history, under the recipe the item has
+// now: the return converts the kept planes behind the veil, without a decode,
+// and shows the nudge.
+for (const tier of ['A', 'B']) {
+  for (const pending of ['reprocess', 'original']) {
+    const { h, c, base, crop, proxy, item } = await returnedTierA({ tier });
+    const label = `Tier ${tier}, ${pending}`;
+    h.state.exposure = 0;
+    c.pushUndo('exposure');
+    h.state.exposure = 9;
+    if (pending === 'reprocess') h.target.coreReprocessTimer = 1;
+    else {
+      h.target.decodeBase = () => new Promise(() => {});
+      void c.ensureSource();
+      assert.ok(h.target.ensureSourcePromise && h.state.baseDescriptor.decoding, `${label}: the original is being decoded`);
+    }
+    const depth = h.target.undoStack.length;
+    const decodes = h.target.displaySessionDiagnostics.baseDecodes;
+    const remembered = [];
+    const remember = h.target.rememberPhotoSession;
+    h.target.rememberPhotoSession = left => { remembered.push(remember(left)); return remembered.at(-1); };
+    await c.switchToFile(1);
+    h.target.rememberPhotoSession = remember;
+    assert.deepEqual(remembered, [true], `${label}: remembered`);
+    const kept = h.target.photoSessions.get(item);
+    assert.equal(kept?.tier, tier, `${label}: kept in its display form`);
+    assert.equal(kept.key, null, `${label}: under a recipe marked changed`);
+    assert.equal(kept.undo.length, depth, `${label}: with its history`);
+    assert.equal(h.target.displaySessionDiagnostics.unsettled, 1);
+    assert.equal(item.settings.exposure, 9, `${label}: the recipe holds the nudge`);
+    // What was pending belonged to the photo left (the switch cancels the
+    // reprocess; the original's decode is aborted with the activation).
+    h.target.coreReprocessTimer = null;
+    h.target.ensureSourcePromise = null;
+    let feedback = null;
+    h.target.prepareStudioPhoto = async () => {
+      feedback = h.target.document.body.dataset.photoSwitching;
+      await c.processNegative({ quiet: true });
+    };
+    const conversions = h.conversions.length;
+    await c.switchToFile(0);
+    assert.equal(h.target.displaySessionDiagnostics.baseDecodes, decodes, `${label}: no decode on the way back`);
+    assert.equal(h.state.loadedBaseImageData, null);
+    assert.equal(feedback, 'true', `${label}: converted behind the veil, never shown as settled`);
+    assert.equal(h.target.displaySessionDiagnostics.recipeChanged, 1);
+    assert.equal(h.state.exposure, 9, `${label}: the nudge is shown`);
+    assert.equal(h.conversions.length, conversions + 1, `${label}: converted once`);
+    if (tier === 'A') assert.equal(h.conversions.at(-1).source, crop, `${label}: from the kept source`);
+    else assert.equal(h.state.displayLevelImageData, proxy, `${label}: from the kept level`);
+    assert.equal(h.target.undoStack.length, depth, `${label}: the history survives`);
+    await c.performUndo();
+    assert.equal(h.state.exposure, 0, `${label}: undo steps back over the nudge`);
+    if (pending === 'original') {
+      // A decode started on the earlier visit is not joined (it resolves
+      // nothing for this one); the next reader decodes the original again.
+      h.target.decodeBase = () => base;
+      const decoded = await Promise.race([c.ensureBase(), new Promise(resolve => setTimeout(() => resolve('stale'), 1000))]);
+      assert.equal(decoded, base, `${label}: the earlier visit's decode is not joined`);
+    }
+  }
+}
+
+// Not while a geometry build waits for the original: its planes (a Tier B
+// session's level) are not the geometry the recipe names, and the return
+// decodes for it anyway.
+for (const tier of ['A', 'B']) {
+  const { h, c, item } = await returnedTierA({ tier });
+  h.target.decodeBase = () => new Promise(() => {});
+  void c.applyRotation(90);
+  assert.equal(h.state.geometryPending, true);
+  await c.switchToFile(1);
+  assert.equal(h.target.photoSessions.get(item), null, `Tier ${tier}: no display form of other planes is kept`);
+  assert.equal(h.target.displaySessionDiagnostics.spills, 0, `Tier ${tier}: nor spilled`);
+  assert.equal(item.settings.rotationAngle, 91.3, `Tier ${tier}: the recipe holds the rotation the return builds`);
+}
+
+// Settled-view parity, old vs new: before, the return opened cold (a decode)
+// and converted the base's planes; now it converts the kept planes, which
+// must give the conversion a cold open of the same recipe gives: the same
+// display level and target, colour-analysis sample and auto-WB request.
+{
+  const geometry = { rotationAngle: 1.3, mirrored: false, cropRegion: { left: 9, top: 7, width: 96, height: 60 } };
+  const base = makeBase(120, 80, 23);
+  const settings = { ...geometry, autoFrameMeta: { imageArea: AREA }, filmEdge: { checked: true } };
+  const harness = () => {
+    const h = createHarness(base, { sessionBudget: 1 << 30, realProcessNegative: true, displayLevels: true, conversionRequests: true });
+    Object.assign(h.target, { largeImagePixels: 1000, displayLevelFactor: () => 2, getCanvasContainerSize: () => ({ width: 40, height: 32 }),
+      previewTierMaxPixels: () => 600, usesSilverCoreConversion: () => true,
+      restoreAutoFrameDiagnostics: meta => { h.state.autoFrame.lastDiagnostics = meta ? structuredClone(meta) : null; } });
+    return { h, c: h.context };
+  };
+  const nudged = { ...settings, exposure: 9 };
+  const cold = harness();
+  cold.c.restoreSettings(nudged);
+  await cold.h.state.geometryReady;
+  await cold.c.processNegative({ quiet: true });
+  const coldRequest = cold.h.requests.at(-1);
+  for (const tier of ['A', 'B']) {
+    const { h, c } = harness();
+    const item = { id: 1, file: { name: 'a.dng' }, settings: structuredClone(settings) };
+    h.state.loadedFile = item.file;
+    c.restoreSettings(settings);
+    await h.state.geometryReady;
+    await c.processNegative({ quiet: true });
+    wireSwitching(h, [item, { id: 2, file: { name: 'b.dng' }, settings: null }]);
+    h.target.persistCurrentFileSettings = () => {
+      const current = h.target.getCurrentQueueItem();
+      if (current) current.settings = { ...current.settings, ...settingsFor(h.state), exposure: h.state.exposure };
+    };
+    h.target.displaySessionDiagnostics.force = tier;
+    await c.switchToFile(1);
+    await c.switchToFile(0);
+    c.pushUndo('exposure');
+    h.state.exposure = 9;
+    h.target.coreReprocessTimer = 1;
+    await c.switchToFile(1);
+    assert.equal(h.target.photoSessions.get(item)?.tier, tier);
+    h.target.coreReprocessTimer = null;
+    h.target.prepareStudioPhoto = async () => { await c.processNegative({ quiet: true }); };
+    const requests = h.requests.length;
+    await c.switchToFile(0);
+    assert.equal(h.requests.length, requests + 1, `Tier ${tier}: converted once`);
+    assert.equal(h.target.baseDecodes, undefined, `Tier ${tier}: without a decode`);
+    const request = h.requests.at(-1);
+    sameLevel(request.imageData, coldRequest.imageData, `Tier ${tier}: the display level`);
+    assert.deepEqual({ ...request.display.target }, { ...coldRequest.display.target }, `Tier ${tier}: the display target`);
+    assert.deepEqual({ ...request.display.geometry }, { ...coldRequest.display.geometry }, `Tier ${tier}: the level geometry`);
+    sameSample(request.options.analysisImageData, coldRequest.options.analysisImageData, `Tier ${tier}: the colour-analysis sample`);
+    assert.deepEqual(JSON.parse(JSON.stringify(request.wbSample)), JSON.parse(JSON.stringify(coldRequest.wbSample)), `Tier ${tier}: the auto-WB sample request`);
+    assert.equal(h.state.exposure, 9);
+  }
+}
+
+console.log('displaySessions: Tier A, Tier B, demotion, spill, ensureBase/ensureSource, invalidation, the proxy invariant, the colour-analysis sample across Undo, Redo and recipe changes (export parity), the settled-view parity of filled proxies and the sample check of stored proxies (export parity), failed geometry builds and decodes, and sessions left before they settled (settled-view parity) passed');

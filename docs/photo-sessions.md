@@ -109,6 +109,16 @@ area; no viewport, since the level serves any window.
   whose settled frame was a full-resolution plane: under the veil, the kept
   planes are installed, the item's recipe restored over them and the photo
   prepared as a cold open would be (`prepareStudioPhoto`), without a decode.
+- **Left before it settled** (a slider tick or Undo still converting,
+  "Preparing original…", a recipe-changed activation running): a session
+  without its base has no base to fall back on, so its display form is taken
+  from the live planes anyway (Tier A, else Tier B, spilled when neither
+  fits), with its history as scalars and its recipe marked changed (no key).
+  The return then goes the recipe-changed way: the kept planes are converted
+  under the item's recipe behind the veil, and the frame left is never shown
+  as settled. Not while a geometry build is pending (the planes are not the
+  geometry the recipe names: the return decodes the original for it) or a
+  repair is.
 - **The preview half.** `processNegative` converts the level directly while
   its key matches the live geometry, lens and analysis area
   (`displayProxyMatches`), with the automatic measurements a cold open runs
@@ -133,7 +143,9 @@ area; no viewport, since the level serves any window.
   geometry edit waiting for it is rolled back (`docs/geometry-chain.md`), an
   export fails as below, and a recipe-changed activation that needs it opens
   the photo from its file with the item's recipe and the session's history.
-  The base then samples the area in use itself, as on a cold open, and
+  A decode an earlier visit of the photo started is not joined by the next
+  visit (it resolves nothing for it). The base then samples the area in use
+  itself, as on a cold open, and
   every sample the descriptor carried must be the one the base gives (a
   stored record's may come from another build's decode or sampler). A sample
   that differs counts as a self-check mismatch: the photo's stored copies are
@@ -650,9 +662,15 @@ against a cold open's conversion request. It also opens a stored frame whose
 record carries another build's colour-analysis sample: the record is purged,
 the photo converts and exports with the base's own sample (with real
 SilverCore, the export equals a cold open's), and an auto-WB estimate taken
-from the record is taken again.
+from the record is taken again. Last, it nudges the exposure of a Tier A and
+a Tier B return and clicks another photo in the same task (inside the
+reprocess debounce): the frame must come back without a read or decode, with
+the nudge and its history, showing what a cold open of the nudged recipe
+shows (GPU sample hash, white balance, saved settings).
 `displaySessions.test.mjs` covers the failure paths: a geometry edit whose
 original cannot be decoded again (rejected, or the `raw-fallback` embedded
 preview) keeps the session and rolls the edit back; an original that decodes
 differently reopens the photo with its recipe and history; a recipe-changed
-activation that cannot read its original opens the photo from its file.
+activation that cannot read its original opens the photo from its file; a
+session left with a reprocess or the original pending is kept (Tier A, Tier B)
+and comes back without a decode, converting what a cold open converts.
