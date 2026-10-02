@@ -29,7 +29,7 @@ export function functionSource(name) {
 export const SCHEDULER_FUNCTIONS = [
   'foregroundBusyForBackground', 'foregroundInteractionBusy', 'backgroundRest', 'decodeForBackground',
   'openAnalysisDecode', 'openTileDecode', 'openPrefetchDecode', 'openHalfSizeTileDecode', 'abortHalfSizeTileDecode',
-  'abortBackgroundDecodes', 'backgroundLanesRunning',
+  'abortBackgroundDecodes', 'backgroundLanesRunning', 'hiddenWindowLimited',
   'kickBackgroundPhotoWork', 'backgroundLaneTarget', 'backgroundWorkPending', 'runBackgroundLane',
   'backgroundDisplayOrder', 'pickNextBackgroundJob', 'backgroundNeeds', 'laneTileWanted', 'photoPrefetchEnabled',
   'currentPhotoSettled', 'canPrefetchPhoto', 'prefetchTargetItem', 'holdPrefetchedBase', 'dropDistantPrefetch',

@@ -10818,6 +10818,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         || automaticRollImportRunning || automaticRollAnalysisRunning;
     }
 
+    // Hidden where the hidden-job limits apply: what the window does not need
+    // is shed, and nothing refills the photo caches (R1-053, R1-059).
+    function hiddenWindowLimited() {
+      return document.visibilityState === 'hidden' && hiddenJobs.status().limited;
+    }
+
     // What the page retains: the memory ledger's total (#258), which counts
     // the open photo's planes, history, the photo caches, bounded stores and
     // worker residents, each buffer once.
@@ -10853,7 +10859,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // references go with the next GC, which WebKit's shrink-or-die pass runs
     // before it re-measures. Workers and caches come back lazily on use.
     function shedHiddenJobMemory() {
-      if (document.visibilityState !== 'hidden' || !hiddenJobs.status().limited) return;
+      if (!hiddenWindowLimited()) return;
       photoSessions.clear();
       photoPreviews.clear();
       photoPrefetch.clear();
@@ -22999,9 +23005,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     // The desktop session budget only; the prefetch decode itself waits for
-    // room in the memory budget (#258) like any background frame.
+    // room in the memory budget (#258) like any background frame. Never in a
+    // hidden macOS window (#241): every hidden admission and the end of a
+    // hidden job empty the slot again, and the lane would decode the same
+    // next photo after each of its other jobs (R1-059). The first switch
+    // after the window is shown again may be cold.
     function photoPrefetchEnabled() {
-      return !hiddenJobs.safeMode && !lowMemoryPhotoDevice();
+      return !hiddenJobs.safeMode && !lowMemoryPhotoDevice() && !hiddenWindowLimited();
     }
 
     function currentPhotoSettled() {
@@ -23067,9 +23077,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
     // A finished lane base: a prefetch goes to the slot; otherwise a
     // base-only session if it fits without evicting anything, else the slot
-    // when it is the next photo, else it is dropped.
+    // when it is the next photo, else it is dropped. A hidden macOS window
+    // keeps none: its sheds emptied those caches (R1-053).
     function handOverBackgroundBase(item, decoded, { prefetch = false } = {}) {
-      if (!decoded?.base || hiddenJobs.safeMode || !state.fileQueue.includes(item)) return;
+      if (!decoded?.base || hiddenJobs.safeMode || hiddenWindowLimited() || !state.fileQueue.includes(item)) return;
       // The open photo holds its own reference (it may have adopted this decode).
       if (item.file === state.loadedFile || item === state.fileQueue[state.currentFileIndex]) return;
       if (photoSessions.has(item) || photoPrefetch.has(item)) return;

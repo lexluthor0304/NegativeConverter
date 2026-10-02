@@ -305,8 +305,15 @@ function slowFirstHeaderRead(f, bytes) {
   delete f.context.document.body.dataset.studioBusy;
   f.context.studioAutoFrameRunning = false;
   f.context.backgroundGate.bump();
-  await flush();
-  assert.deepEqual(f.started(), ['1.dng'], 'the prefetch decodes once the analysis is done');
+  await f.clock.advance(1000);
+  // A hidden macOS window prefetches nothing (R1-059): the prefetch decodes
+  // once the window is shown, when the lanes are kicked again.
+  assert.equal(f.decodes.length, 0, 'no prefetch while the window is hidden');
+  assert.deepEqual(holds(), { inFlight: 0, waiting: 0, paused: false });
+  setHidden(false);
+  f.context.kickBackgroundPhotoWork();
+  await f.clock.advance(250);
+  assert.deepEqual(f.started(), ['1.dng'], 'the prefetch decodes once the window is shown');
   assert.equal(gate.inFlight, 1);
 }
 

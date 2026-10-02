@@ -218,7 +218,7 @@ for (const busy of ['aiRepairRunsInFlight', 'pendingBrushRepairs', 'activeLongJo
     analyzeFrameInWorker: { releaseHelpers() {} },
   });
   c.state.fileQueue = [{ settings: { repairStrokes: [] } }];
-  vm.runInContext(['shedHiddenJobMemory', 'hiddenJobUsesAiRepair'].map(functionSource).join('\n'), c);
+  vm.runInContext(['shedHiddenJobMemory', 'hiddenWindowLimited', 'hiddenJobUsesAiRepair'].map(functionSource).join('\n'), c);
   await c.performAiRepairModelLoad('/models/migan_pipeline_v2.onnx', { prefer: 'wasm' });
   const revision = c.aiRepair.revision;
   document.elements.aiBrushEnabled.checked = true;
