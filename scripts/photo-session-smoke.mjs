@@ -297,43 +297,46 @@ export async function runPhotoSessionSmoke({ send, evaluate, waitFor, fail, inst
     await until('CMY edit updates active thumbnail without switching', `document.querySelector('.file-list-name[data-index="0"]')?.dataset.previewState === 'ready' && document.querySelector('.file-list-name[data-index="0"] img')?.src !== ${JSON.stringify(thumbnailBefore.src)}`);
     const edited8 = await exportPixels(8), edited16 = await exportPixels(16);
     await idle();
-    // #234: a drag re-encodes no tile while it moves; the active tile settles
-    // once, about 250 ms after release. A zoom (and the display-preview
-    // refinement it starts) rebuilds nothing.
-    // The first drag input marks the photo dirty again (the exports above
-    // saved it), which rebuilds its row with the same tile: watch the whole
-    // list and count changes of the active tile's src, not of one element.
+    // #234: a drag re-encodes no tile and renders no list while it moves; the
+    // active tile settles once, about 250 ms after release. A zoom (and the
+    // display-preview refinement it starts) rebuilds nothing. The exports
+    // above saved the photo, so the first input marks it unsaved again: its
+    // row is marked in place, the very element observed here.
     await evaluate(`window.__tileProbe = (() => {
       const proto = HTMLCanvasElement.prototype, encode = proto.toDataURL;
-      const probe = { encodes: 0, tiles: [], restore: null };
+      const probe = { encodes: 0, tiles: [], lists: 0, restore: null };
       proto.toDataURL = function (...args) { probe.encodes++; return encode.apply(this, args); };
-      const tileSrc = () => document.querySelector('.file-list-name[data-index="0"] img.file-list-thumbnail')?.getAttribute('src') || null;
-      let lastSrc = tileSrc();
-      const observer = new MutationObserver(() => {
-        const src = tileSrc();
-        if (src !== lastSrc) { lastSrc = src; probe.tiles.push(performance.now()); }
+      const observer = new MutationObserver(records => {
+        for (const record of records) if (record.target.matches?.('img.file-list-thumbnail')) probe.tiles.push(performance.now());
       });
-      observer.observe(document.getElementById('fileListItems'), { subtree: true, childList: true, attributes: true, attributeFilter: ['src'] });
-      probe.restore = () => { proto.toDataURL = encode; observer.disconnect(); };
+      observer.observe(document.querySelector('.file-list-name[data-index="0"]'), { subtree: true, attributes: true, attributeFilter: ['src'] });
+      // Every list render writes the count line.
+      const lists = new MutationObserver(() => { probe.lists++; });
+      lists.observe(document.getElementById('fileListCount'), { subtree: true, childList: true, characterData: true });
+      probe.restore = () => { proto.toDataURL = encode; observer.disconnect(); lists.disconnect(); };
       return probe;
     })()`);
     const drag = await evaluate(`(async () => {
       const probe = window.__tileProbe, input = document.getElementById('cyan');
-      const before = document.querySelector('.file-list-name[data-index="0"] img').getAttribute('src');
+      const row = document.querySelector('.file-list-name[data-index="0"]');
+      const before = row.querySelector('img').getAttribute('src');
       for (let i = 0; i < 90; i++) {
         input.value = String(21 + i % 30);
         input.dispatchEvent(new Event('input', { bubbles: true }));
         await new Promise(resolve => setTimeout(resolve, 16));
       }
-      const during = { encodes: probe.encodes, tiles: probe.tiles.length };
+      const during = { encodes: probe.encodes, tiles: probe.tiles.length, lists: probe.lists,
+        unsaved: row.closest('.file-list-item').classList.contains('is-dirty') };
       const released = performance.now();
       input.dispatchEvent(new Event('change', { bubbles: true }));
       await new Promise(resolve => setTimeout(resolve, 600));
       return { during, encodes: probe.encodes, tiles: probe.tiles.map(time => Math.round(time - released)),
-        changed: document.querySelector('.file-list-name[data-index="0"] img').getAttribute('src') !== before };
+        sameRow: document.querySelector('.file-list-name[data-index="0"]') === row,
+        changed: row.querySelector('img').getAttribute('src') !== before };
     })()`);
-    expect(drag.during.encodes === 0 && drag.during.tiles === 0,
-      'active tile was re-encoded while the slider moved: ' + JSON.stringify(drag));
+    expect(drag.during.encodes === 0 && drag.during.tiles === 0 && drag.during.lists === 0,
+      'active tile was re-encoded, or the list rendered, while the slider moved: ' + JSON.stringify(drag));
+    expect(drag.during.unsaved && drag.sameRow, 'the first input did not mark the photo\'s own row unsaved in place: ' + JSON.stringify(drag));
     expect(drag.encodes === 1 && drag.tiles.length === 1 && drag.tiles[0] <= 500 && drag.changed,
       'active tile did not settle exactly once within 500 ms of release: ' + JSON.stringify(drag));
     await evaluate(`(() => {

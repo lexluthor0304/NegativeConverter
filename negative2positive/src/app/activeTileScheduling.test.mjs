@@ -396,10 +396,10 @@ function dustFixture() {
 }
 
 // A 116-photo roll in the geometry harness, photo A open and settled: the
-// real switchToFile, persist and tile. A's session is kept without planes
-// (#244's cold sessions), so after a switch nothing but a leak can keep its
-// converted frame.
-function rollHarness() {
+// real switchToFile, persist and tile, with the list functions in `extra`.
+// A's session is kept without planes (#244's cold sessions), so after a
+// switch nothing but a leak can keep its converted frame.
+function rollHarness(extra = []) {
   const h = createHarness(makeBase(48, 32, 5)), c = h.context, t = h.target;
   const items = Array.from({ length: 116 }, (_, i) => ({
     id: `f${i}`, file: { name: `f${String(i).padStart(3, '0')}.png` }, status: 'done',
@@ -408,15 +408,23 @@ function rollHarness() {
   Object.assign(h.state, { fileQueue: items, currentFileIndex: 0, loadedFile: items[0].file, currentStep: 3,
     batchSessionActive: true, processedImageData: makeBase(48, 32, 7), dustRemoval: { ...h.state.dustRemoval, ai: false } });
   t.geometryDiagnostics.coldSessions = true;
-  const counts = { encodes: 0, rows: 0 };
+  const counts = { encodes: 0, lists: 0, states: 0, rows: 0, dirtyRows: [] };
+  const elements = { fileListItems: { id: 'fileListItems' }, fileListCount: { id: 'fileListCount' } };
   Object.assign(t, {
     studioThumbnailInputs: new WeakMap(), rasterIdentities: new WeakMap(), nextRasterIdentity: 1, convertedPixelsRevision: 0,
-    STUDIO_THUMBNAIL_SETTLE_MS: 250, studioThumbnailUpdateTimer: 0, thumbnailCanvas: null, state: h.state,
+    STUDIO_THUMBNAIL_SETTLE_MS: 250, studioThumbnailUpdateTimer: 0, thumbnailCanvas: null, dirtyFileListTimer: 0,
+    fileListRefreshDeferrals: 0, fileListRefreshDeferred: false, uiDebugCounters: { fileListRenders: 0 },
+    tileVisibility: null, i18n: { en: {} }, currentLang: 'en', state: h.state,
+    thumbnailSources: { retainKeys() {} }, watchRollSamples: { retainKeys() {} },
+    studioWorkspace: { sync() {}, flush() {}, markRowsChanged() {} },
+    renderFileList: () => { counts.lists++; },
+    setFileListRowDirty: (container, item, label) => { counts.dirtyRows.push([container.id, items.indexOf(item), item.isDirty, label]); },
     updateFileThumbnail: () => { counts.rows++; },
     extractCurrentSettings: () => ({ ...h.state.fileQueue[h.state.currentFileIndex].settings }),
     buildAdjustmentSettings: settings => ({ cyan: settings.cyan || 0, curves: { r: new Uint8Array(256), g: new Uint8Array(256), b: new Uint8Array(256) } }),
     createAdjustedPhotoPreview: source => createStudioThumbnail(source, 144),
     document: Object.assign(t.document, {
+      getElementById: id => elements[id] || null, querySelectorAll: () => [], querySelector: () => null,
       createElement: () => ({ width: 0, height: 0, getContext: () => ({ putImageData() {} }),
         toDataURL: () => `data:image/jpeg;base64,${++counts.encodes}` })
     }),
@@ -427,7 +435,7 @@ function rollHarness() {
       return { status: 'loaded' };
     },
   });
-  vm.runInContext([...TILE_FUNCTIONS, 'persistCurrentFileSettings'].map(functionSource).join('\n'), c);
+  vm.runInContext([...TILE_FUNCTIONS, 'persistCurrentFileSettings', ...extra].map(functionSource).join('\n'), c);
   // A's settled tile.
   c.updateStudioThumbnail();
   assert.equal(counts.encodes, 1);
@@ -455,5 +463,51 @@ function rollHarness() {
   assertHoldsNoPixels(t.studioThumbnailInputs.get(items[5]), "B's tile inputs");
 }
 
+// R1-027: on B, opened through switchToFile (its recipe restored, so it is
+// clean), the first drag renders no list while the pointer moves: every input
+// marks B dirty and redraws, B's row is marked unsaved once, in place, and the
+// list render and the tile follow once, after release.
+{
+  const { h, c, t, items, counts, open } = rollHarness(['markCurrentFileDirty', 'deferDirtyFileListRender',
+    'deferFileListRefresh', 'updateFileListUI', 'renderFileListUI', 'refreshThumbnailStates']);
+  const refreshStates = c.refreshThumbnailStates;
+  t.refreshThumbnailStates = () => { counts.states++; return refreshStates(); };
+  await open(5);
+  const itemB = items[5];
+  assert.equal(itemB.isDirty, false, 'its recipe was restored, so it is clean');
+  c.updateStudioThumbnail();
+  // A fake clock from here on.
+  let now = 0;
+  const timers = [];
+  Object.assign(t, {
+    setTimeout: (fn, ms = 0) => { timers.push({ fn, due: now + ms }); return timers.length; },
+    clearTimeout: id => { if (timers[id - 1]) timers[id - 1].fn = null; },
+    requestAnimationFrame: fn => { timers.push({ fn, due: now + 16 }); return timers.length; },
+    cancelAnimationFrame: id => { if (timers[id - 1]) timers[id - 1].fn = null; },
+  });
+  const advance = ms => {
+    now += ms;
+    for (const timer of timers) {
+      if (!timer.fn || timer.due > now) continue;
+      const fn = timer.fn; timer.fn = null;
+      fn();
+    }
+  };
+  Object.assign(counts, { encodes: 0, lists: 0, states: 0, rows: 0 });
+  for (let frame = 0; frame < 40; frame++) {
+    h.state.cyan = 1 + frame % 30;
+    c.markCurrentFileDirty();
+    c.scheduleStudioThumbnailUpdate();
+    advance(16);
+    assert.deepEqual([counts.states, counts.lists, counts.encodes, counts.rows], [0, 0, 0, 0],
+      `frame ${frame}: no list render, row-state refresh or tile while the pointer moves`);
+  }
+  assert.equal(itemB.isDirty, true);
+  assert.deepEqual(counts.dirtyRows, [['fileListItems', 5, true, 'Unsaved']], 'its row is marked unsaved once, in place');
+  advance(300);
+  assert.deepEqual([counts.states, counts.lists, counts.encodes, counts.rows], [1, 1, 1, 1],
+    'after release: one list render and one tile update');
+}
+
 console.log('activeTileScheduling: trailing settle timer, next-frame full renders, exact skip/restamp, zoom carry, warm adoption, '
-  + 'tile inputs without pixels, in-place patches rebuild the tile');
+  + 'tile inputs without pixels, in-place patches rebuild the tile, no list render during the first drag');

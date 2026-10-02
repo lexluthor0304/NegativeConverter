@@ -149,7 +149,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       getSprocketFrameLayout,
       normalizeSprocketEdgeMarkings
     } from './sprocketFrame.js';
-    import { renderFileList } from './fileListView.js';
+    import { renderFileList, setFileListRowDirty } from './fileListView.js';
     import { normalizeFileListSort, orderedFileIndices, selectionRangeIndices } from './fileListOrder.js';
     import { createSprocketFrameCache } from './sprocketFrameCache.js';
     import { imagePixelsForBatch, imagePixelsWithSiblings, importPixelsForRoll, rememberImageDimensions, knownImageDimensions, rawDecodePlan } from './imageDimensions.js';
@@ -18273,17 +18273,30 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         if ([...LEARNED_NUMERIC_KEYS, ...LEARNED_CATEGORY_KEYS].includes(key)) (item.touchedKeys ||= new Set()).add(key);
       }
     }, true);
+    // The first edit of a clean photo marks its own row at once, in place.
+    // The list render for whatever else that edit changed (review and film
+    // badges) waits until edits pause, as the active tile does: every input
+    // of a drag lands here, so a drag renders no list while it moves (#234).
+    let dirtyFileListTimer = 0;
     function markCurrentFileDirty() {
       const item = getCurrentQueueItem();
       if (!item) return;
       scheduleProjectRecovery();
+      if (dirtyFileListTimer) deferDirtyFileListRender();
       if (item.isDirty) return;
       item.isDirty = true;
+      updateCurrentFileLabel();
       if (state.batchSessionActive) {
-        updateFileListUI();
-      } else {
-        updateCurrentFileLabel();
+        setFileListRowDirty(document.getElementById('fileListItems'), item, i18n[currentLang].unsaved || 'Unsaved');
+        deferDirtyFileListRender();
       }
+    }
+    function deferDirtyFileListRender() {
+      clearTimeout(dirtyFileListTimer);
+      dirtyFileListTimer = setTimeout(() => {
+        dirtyFileListTimer = 0;
+        updateFileListUI();
+      }, STUDIO_THUMBNAIL_SETTLE_MS);
     }
 
     function persistCurrentFileSettings(options = {}) {
