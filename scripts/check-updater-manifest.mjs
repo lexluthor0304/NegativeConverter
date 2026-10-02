@@ -5,8 +5,8 @@
 // installers only.
 //
 // Then the endpoints the clients use: the feedback POST reaches the function
-// without a redirect, and every URL the desktop app reads a manifest from is
-// one the release workflows publish it at.
+// without a redirect, and every URL the desktop app or download.html reads a
+// manifest from is one the release workflows publish it at.
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -14,6 +14,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { resolveCorsOrigin } from '../negative2positive/api/_lib/feedback-core.mjs';
+import { releaseManifestBases, releaseManifestUrl } from '../negative2positive/src/app/downloadCandidates.js';
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 const script = join(repoRoot, '.github', 'scripts', 'r2_sync_release.py');
@@ -181,4 +182,13 @@ for (const url of desktopManifestUrls) {
   assert.ok(connectSrc.includes(origin), `tauri.conf.json: connect-src must allow ${origin}`);
 }
 assertPublished(tauriConf?.plugins?.updater?.endpoints || [], 'updater.json', 'tauri.conf.json plugins.updater.endpoints');
+// download.html on the site, with or without a crafted ?r2_base= (R2-050:
+// only loopback and preview hosts honour it; src/app/downloadCandidates.test.mjs).
+for (const page of [
+  `${SITE_ORIGIN}/download.html?lang=en`,
+  `${SITE_ORIGIN}/download.html?r2_base=${encodeURIComponent('https://attacker.example')}`,
+  `${SITE_ORIGIN}/download.html?r2Base=${encodeURIComponent('https://attacker.example')}`,
+]) {
+  assertPublished(releaseManifestBases(page).map(releaseManifestUrl), 'latest.json', `download.html at ${page}`);
+}
 console.log(`release manifests: ok (${publishedAt('latest.json').join(', ')})`);

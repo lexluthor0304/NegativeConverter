@@ -479,7 +479,9 @@
   <aside class="product-guides" aria-label="Product guides"><p>Published by <a href="/about.html">NeoAnalogLab</a>. Explore <a href="/slide-film-correction.html">slide correction</a>, <a href="/ai-film-photo-repair.html">AI film repair</a> and <a href="/film-type-detection.html">film-type detection without borders</a>. <a href="/zh/" lang="zh-Hans">中文介绍</a> · <a href="/ja/" lang="ja">日本語ガイド</a></p></aside>
 </main>
 
-  <script>
+  <script type="module">
+    import { normalizeBaseUrl, releaseManifestBases, releaseManifestUrl } from './src/app/downloadCandidates.js';
+
     const SUPPORTED_LANGS = ['zh', 'en', 'ja'];
     // Storefront-less URL so Apple redirects each visitor to their own region's store.
     const MAC_APP_STORE_URL = 'https://apps.apple.com/app/id6797694070';
@@ -641,25 +643,13 @@
       return text;
     }
 
-    function normalizeBaseUrl(base) {
-      if (!base) return '';
-      return String(base).trim().replace(/\/+$/, '');
-    }
-
-    // Only the release bucket serves latest.json; the site has no copy.
-    function buildCandidateBases() {
-      const candidates = [];
-      const explicit = getParam('r2_base') || getParam('r2Base');
-      if (explicit) candidates.push(explicit);
-      candidates.push('https://download.neoanaloglab.com');
-      return Array.from(new Set(candidates.map(normalizeBaseUrl).filter(Boolean)));
-    }
-
     async function fetchLatestJson() {
-      const bases = buildCandidateBases();
+      // The release bucket, after a ?r2_base= override on loopback and preview
+      // hosts only (src/app/downloadCandidates.js).
+      const bases = releaseManifestBases(window.location.href);
       let lastErr = null;
       for (const base of bases) {
-        const url = `${base}/negative-converter/release/latest.json`;
+        const url = releaseManifestUrl(base);
         try {
           const resp = await fetch(url, { cache: 'no-store' });
           if (!resp.ok) throw new Error(`HTTP ${resp.status}`);

@@ -34,11 +34,20 @@ The release workflows upload `latest.json` and `updater.json` to
 bucket's public origin, which answers with `Access-Control-Allow-Origin: *`)
 and nowhere else. `main.js`'s daily check and `download.html` read
 `latest.json` there and `plugins.updater.endpoints` names `updater.json`
-there; `scripts/check-updater-manifest.mjs` fails when `main.js` or
-`tauri.conf.json` names another URL. The site has no copy, so there is no
-fallback: when the bucket cannot be reached, the daily check gives up
-quietly and runs again a day later, and the download page shows its Mac App
-Store and GitHub Releases links.
+there; `scripts/check-updater-manifest.mjs` fails when `main.js`,
+`tauri.conf.json` or the page (`src/app/downloadCandidates.js`) names
+another URL. The site has no copy, so there is no fallback: when the bucket
+cannot be reached, the daily check gives up quietly and runs again a day
+later, and the download page shows its Mac App Store and GitHub Releases
+links.
+
+`download.html` builds every download link on the base it read
+`latest.json` from and shows the SHA-256 values that manifest gives. To try
+the page against another bucket, open it on a loopback host (`localhost`,
+`127.0.0.1`, `[::1]`) or a Vercel preview (`*.vercel.app`) with
+`?r2_base=<base>` (or `?r2Base=`, http(s) only): it reads that base first,
+then the release bucket. The site ignores the parameter, so a crafted link
+cannot show another origin's installers and hashes on the official domain.
 
 ## Manifest keys
 
