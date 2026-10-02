@@ -20699,7 +20699,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     // What the batch stages did, for the acceptance runs and the smoke test
-    // (window.__ncBatchPipeline).
+    // (window.__ncBatchPipeline). `residentFrames` (frames whose Step 3 ran
+    // on their resident bands), `bands` (the band pool's counters) and
+    // `last` are the last batch's; the other counters add up.
     const batchPipelineDiagnostics = {
       batches: 0, lastMode: null, lastLanes: 0, droppedPlanes16: 0, rebuilds: 0, residentFrames: 0,
       bandBridge: {}, bands: null, singleExport: null,
@@ -20883,6 +20885,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       batchPipelineDiagnostics.batches += 1;
       batchPipelineDiagnostics.lastMode = mode;
       batchPipelineDiagnostics.lastLanes = lanes;
+      batchPipelineDiagnostics.residentFrames = 0;
+      batchPipelineDiagnostics.bands = null;
       activeLongJobs += 1;
       try {
         return await runBatchPipeline(jobs, {

@@ -6,14 +6,15 @@
 // stages on (early lane release, decode-ahead, the conversion band pool and
 // Step 3 on the bands). Every file must be byte-identical between the two
 // runs, for PNG8 and TIFF16. The run also reads what the stages did
-// (window.__ncBatchPipeline), counts the band workers (never more than
-// min(6, cores - 2), all gone after the batch), and a single export of the
-// open photo (Step 3 on the band pool) must match its serial export. Last, a
-// staged ZIP whose writes take real time (a save picker whose writable writes
-// at 20 MB/s): frames 1 and 2 must start while frames 0 and 1 are still being
-// written, and the pipeline must count exactly those two overlaps
-// (earlyReleases). The downloads above end in the same task as their sink,
-// so whether the next frame starts first is not checked there.
+// (window.__ncBatchPipeline, per batch): a staged batch must keep a frame's
+// bands resident and run its Step 3 there; it counts the band workers (never
+// more than min(6, cores - 2), all gone after the batch), and a single
+// export of the open photo (Step 3 on the band pool) must match its serial
+// export. Last, a staged ZIP whose writes take real time (a save picker whose
+// writable writes at 20 MB/s): frames 1 and 2 must start while frames 0 and
+// 1 are still being written, and the pipeline must count exactly those two
+// overlaps (earlyReleases). The downloads above end in the same task as
+// their sink, so whether the next frame starts first is not checked there.
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -202,7 +203,12 @@ export async function runBatchPipelineSmoke({ send, evaluate, waitFor, wait, fai
       const maxWorkers = Math.min(6, Math.max(0, (staged.stages.cores || 4) - 2));
       if (staged.stages.bandWorkers > maxWorkers) fail(`${format}${depth}: ${staged.stages.bandWorkers} band workers for ${staged.stages.cores} cores`);
       if (staged.stages.bandWorkersAlive !== 0) fail(`${format}${depth}: band workers outlived the batch`);
-      if (!(staged.stages.residentFrames >= 1)) console.log(`WARN: ${format}${depth}: no frame kept its bands (auto WB needed pixels?)`);
+      // This batch's figures (main.js resets them per batch). A frame that
+      // reads no pixels after its conversion keeps its bands in the pool and
+      // runs Step 3 there; one of the three does here (every run since #256).
+      if (!(bands.resident >= 1) || !(staged.stages.residentFrames >= 1)) {
+        fail(`${format}${depth}: no frame kept its bands for Step 3: ` + JSON.stringify({ bands, residentFrames: staged.stages.residentFrames }));
+      }
       if (staged.stages.longestTask > 200) console.log(`WARN: ${format}${depth}: a ${staged.stages.longestTask} ms long task during the staged batch`);
       const serialStages = serial.stages.last;
       if (!serialStages || serialStages.mode !== 'serial' || serialStages.earlyReleases !== 0 || serialStages.prepare) {

@@ -362,7 +362,9 @@ or the batch drops it, so the budget's other requests see it.
   with the same pixels and is not used again; a released geometry output
   is rebuilt from the base; lost resident bands re-render the frame. The
   pool is released at batch end and after each single export.
-  `window.__ncBatchPipeline.diagnostics` reports what the stages did.
+  `window.__ncBatchPipeline.diagnostics` reports what the stages did: `last`
+  (the scheduler's counters), `bands` (the pool's) and `residentFrames` are
+  the last batch's; the other counters add up.
 
 Parity: `pipeline/silverBands.parity.test.mjs` (band counts 1-7 against the
 whole frame by SHA-256, every mode, references, flat field, strokes,
@@ -535,7 +537,7 @@ npm run test:smoke  # batch export scenario (ZIP fallback to individual download
 npm run test:smoke -- --gain-map-only  # real-worker 16-bit result and gain map, gain-map requests per export intent
 npm run test:smoke -- --png16-only     # PNG16 band pool in real workers: same bytes for 1/2/6 workers, one worker and the main thread
 npm run test:smoke -- --export-ownership-only  # worker PNG8/JPEG parity, per-export workers, plane hand-off
-npm run test:smoke -- --batch-pipeline-only    # Export All serial vs staged (byte cap, decode-ahead, band pool), banded single export, overlap count of a slow-write ZIP
+npm run test:smoke -- --batch-pipeline-only    # Export All serial vs staged (byte cap, decode-ahead, band pool, resident Step 3), banded single export, overlap count of a slow-write ZIP
 node scripts/performance-io-benchmark.mjs /path/to/baseline
 ```
 
