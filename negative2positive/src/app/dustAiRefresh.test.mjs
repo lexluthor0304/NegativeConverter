@@ -56,7 +56,7 @@ function setup() {
       for (let i = 0; i < tileMask.length; i++) if (tileMask[i]) for (let c = 0; c < 3; c++) out[c * size * size + i] = 30 / 255;
       return out;
     }, tiles: 0, ms: 0 },
-    aiRepairReady: () => true, updateAiRepairUI: () => {}, showToast: () => {}, console,
+    updateAiRepairUI: () => {}, showToast: () => {}, console, DOMException, DEFAULT_MODEL_URL: '/m.onnx',
     inpaintWithModel, copyImageRect, pasteImageRect, amendDustDelta, ImageData, performance,
     AI_TILE: TILE, AI_CONTEXT: CONTEXT, repairMask: () => assert.fail('no repair strokes here'),
     localExposureGeometryFor: () => ({}),
@@ -66,7 +66,8 @@ function setup() {
     clearTimeout: () => {},
   });
   vm.runInContext(['queueDustAiRefresh', 'mergeDustRefreshRects', 'dustAiWindow', 'cropDustImage',
-    'cropDustMask', 'repairStrokeMaskFor', 'runDustAiRefresh', 'noteBrushRepairSettled'].map(functionSource).join('\n')
+    'cropDustMask', 'repairStrokeMaskFor', 'runDustAiRefresh', 'noteBrushRepairSettled', 'aiRepairReady',
+    'dustPassUsesAi', 'settleAiRepairModel', 'aiRepairLoadArgs', 'assertRepairCurrent'].map(functionSource).join('\n')
     + '\nlet dustRefreshRepairMask = { strokes: null, source: null, mask: null };', context);
   return { context, state, timers, displayed, runs: () => runs };
 }
@@ -124,14 +125,44 @@ disc(1050, 550, 6);
   assert.equal(context.pendingBrushRepairs, 0);
 }
 
-// With no model on, TELEA is the repair: the queue simply empties.
-{
-  const { context, runs } = setup();
-  context.aiRepairReady = () => false;
+// TELEA is the repair when AI repair is off, or when its model failed: the
+// queue simply empties.
+for (const [label, off] of [
+  ['AI repair off', ({ state }) => { state.dustRemoval.ai = false; }],
+  ['model failed', ({ context }) => { Object.assign(context.aiRepair, { status: 'error', run: null }); }],
+]) {
+  const { context, state, runs } = setup();
+  off({ context, state });
   context.queueDustAiRefresh([rect]);
   await context.runDustAiRefresh();
-  assert.equal(runs(), 0);
-  assert.equal(context.dustAiRefresh.rects.length, 0);
+  assert.equal(runs(), 0, label);
+  assert.equal(context.dustAiRefresh.rects.length, 0, `${label}: the queue empties`);
 }
 
-console.log(`Dust AI refresh: 1 tile instead of ${wholeMaskTiles} after a stroke; amended history, dropped when overtaken`);
+// With AI repair on, a model that #236's idle rule or #241's hidden window
+// released is not TELEA's turn: the rect stays queued, the released model is
+// loaded again on its provider, and the refresh runs once it is back.
+{
+  const { context, timers, displayed, runs } = setup();
+  const run = context.aiRepair.run;
+  Object.assign(context.aiRepair, { status: 'idle', released: true, run: null, sourceRef: '/m.onnx', prefer: 'wasm' });
+  const loads = [];
+  context.loadAiRepairModel = async (...args) => {
+    loads.push(args);
+    Object.assign(context.aiRepair, { status: 'ready', run, released: false });
+  };
+  context.queueDustAiRefresh([rect]);
+  timers.length = 0;
+  await context.runDustAiRefresh();
+  assert.equal(runs(), 0, 'nothing is inferred without the model');
+  assert.equal(JSON.stringify(context.dustAiRefresh.rects), JSON.stringify([rect]), 'the rect stays queued');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(JSON.stringify(loads), JSON.stringify([['/m.onnx', { refresh: false, prefer: 'wasm' }]]), 'the released model');
+  assert.equal(timers.length, 1, 'the refresh is armed again once the model is back');
+  await context.runDustAiRefresh();
+  assert.equal(runs(), 1, 'MI-GAN refreshes the rect');
+  assert.equal(context.dustAiRefresh.rects.length, 0);
+  assert.equal(JSON.stringify(displayed), JSON.stringify([[rect]]));
+}
+
+console.log(`Dust AI refresh: 1 tile instead of ${wholeMaskTiles} after a stroke; amended history, dropped when overtaken; TELEA only with AI repair off or failed, a released model is loaded and refreshes`);

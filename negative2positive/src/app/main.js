@@ -24974,7 +24974,16 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const strokes = state.repairStrokes;
       const useDust = Boolean(aiRepairReady() && dust.enabled && dust.mask);
       if (!useDust && !strokes.length) {
-        // TELEA is the repair when no model is on.
+        if (dustPassUsesAi() !== false && dust.enabled && dust.mask) {
+          // AI repair is on and its model is not loaded (#236 or #241
+          // released it) or still loading: MI-GAN, not TELEA, is the repair.
+          // The rects stay queued and are refreshed once the load ends; a
+          // failed load leaves TELEA, and that refresh empties the queue.
+          const rearm = () => { if (dustAiRefresh.rects.length) queueDustAiRefresh([]); };
+          void settleAiRepairModel().then(rearm, rearm);
+          return;
+        }
+        // TELEA is the repair when AI repair is off or its model failed.
         dustAiRefresh.rects.length = 0;
         return;
       }

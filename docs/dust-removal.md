@@ -136,11 +136,14 @@ the count, all transferred. `DustBrush.test.mjs` checks 200+ random strokes
   rects stay queued. This is preview only: export still runs the from-scratch
   MI-GAN pass over the whole mask.
 - **A released model (#236, #241).** With AI repair on, a model that the idle
-  rule or the hidden window released is still the repair's inpainter. An export
-  after a stroke loads it again, with the load on its overlay, and repairs from
-  scratch; when the model cannot be loaded (offline without a cached copy) the
-  export fails with a message instead of shipping TELEA in its place. A settled
-  repair keeps its stamp across the release and is exported without a load.
+  rule or the hidden window released is still the repair's inpainter, never a
+  reason to take TELEA as the repair: the refresh keeps its rects queued, loads
+  the model again and runs once it is back (a failed load leaves TELEA, as an
+  error state does). An export after a stroke loads it too, with the load on
+  its overlay, and repairs from scratch; when the model cannot be loaded
+  (offline without a cached copy) the export fails with a message instead of
+  shipping TELEA in its place. A settled repair keeps its stamp across the
+  release and is exported without a load.
 
 ## Known limits
 
