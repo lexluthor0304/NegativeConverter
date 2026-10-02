@@ -117,7 +117,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     import { buildSelfTestCases, buildDisplayModesCases, displayParity } from '../render/gpuPreviewSelfTest.js';
     import { createBorderUnderlay, photoViewport } from '../render/borderUnderlay.js';
     import { computeAdjustmentParams } from '../workers/pixelAdjustments.js';
-    import { createGpuPreviewScheduler } from './gpuPreviewScheduler.js';
+    import { createGpuPreviewScheduler, GPU_INPUT_RETRY_MS } from './gpuPreviewScheduler.js';
     import { canUseBrowserZipStreaming, ZipStoreWriter, createZipNameDeduper } from './zipStoreWriter.js';
     import {
       createAdjustmentLutScratch,
@@ -7607,8 +7607,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       analysis: null,
       analyzeFlight: false,
       analysisWanted: false,
-      analysisFailedKey: null,
-      profile: { name: 'none', lut: null, loading: null, failed: new Set() },
+      // The key of the last `analyze` that failed and when: asked again after
+      // GPU_INPUT_RETRY_MS, or at once for another key.
+      analysisFailed: null,
+      // `failed`: profile name → when its load failed (retried after GPU_INPUT_RETRY_MS).
+      profile: { name: 'none', lut: null, loading: null, failed: new Map() },
       warmupQueued: false,
       lastDraw: null,
       lastFrame: null
@@ -7646,9 +7649,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         && isWebGLActive() && !state.beforeAfterActive && !hasFrameRepairs() && usesSilverCoreConversion(state);
     }
 
-    // scheduleCoreReprocess's test: the prepared frame and an analysis of it are in
-    // place. The draw checks the rest (film base, strokes, mode, profile) and settles
-    // with the exact frame when it cannot draw.
+    // scheduleCoreReprocess's test: the GPU can draw the current settings. A
+    // tick it could not draw would leave the exact frame on screen while the
+    // display counts as ahead of it, so the worker converts such a tick and the
+    // missing input is asked for meanwhile: a texture prepared for another film
+    // base, flat field, mode or strokes, an analysis of another mode, a 3D
+    // profile not loaded (#229 review R1-046). A draw that still fails settles
+    // with the exact frame.
     function gpuPreviewCanTake() {
       if (GPU_PREVIEW_MODE === 'off' || !gpuApplyUsable()) return false;
       const preview = state.conversionPreviewImageData;
@@ -7664,8 +7671,22 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           return false;
         }
       }
-      return Boolean(preview && prepared && prepared.previewId === gpuObjectId(preview) && prepared.generation === coreReprocessGeneration
-        && analysis && analysis.previewId === prepared.previewId && analysis.generation === coreReprocessGeneration);
+      if (!(preview && prepared && prepared.previewId === gpuObjectId(preview) && prepared.generation === coreReprocessGeneration
+        && analysis && analysis.previewId === prepared.previewId && analysis.generation === coreReprocessGeneration)) return false;
+      const settings = buildRouterSettings(state);
+      const mode = resolveConversionMode(settings);
+      if (mode === 'positive' && settings.positiveEngine === 'legacy') return false;
+      const params = trySilverCoreParams(mode, settings);
+      if (!params) return false;
+      if (prepared.tag !== gpuPreparedTag(settings, mode)) {
+        requestGpuPrepare();
+        return false;
+      }
+      if (analysis.mode !== mode) {
+        requestGpuAnalyze();
+        return false;
+      }
+      return gpuProfileLoaded(params.enhancedProfile);
     }
 
     // The prepared texture's identity: the display preview, the generation, what the
@@ -7747,18 +7768,22 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     function gpuProfileReady(name) {
-      const engine = gpuPreview.engine;
-      if (!name || name === 'none') {
-        engine.enhancedLut = null;
-        return true;
-      }
+      if (!gpuProfileLoaded(name)) return false;
+      gpuPreview.engine.enhancedLut = !name || name === 'none' ? null : gpuPreview.profile.lut;
+      return true;
+    }
+
+    // Whether the GPU has the 3D profile `name`; when not, its load starts, or
+    // starts again GPU_INPUT_RETRY_MS after a failure (the worker's own load
+    // tries again on every conversion).
+    function gpuProfileLoaded(name) {
+      if (!name || name === 'none') return true;
       const profile = gpuPreview.profile;
-      if (profile.name === name && profile.lut) {
-        engine.enhancedLut = profile.lut;
-        return true;
-      }
-      if (profile.loading !== name && !profile.failed.has(name)) {
+      if (profile.name === name && profile.lut) return true;
+      const failedAt = profile.failed.get(name);
+      if (profile.loading !== name && (failedAt === undefined || performance.now() - failedAt >= GPU_INPUT_RETRY_MS)) {
         // Fetch and bake off the input event; the next draw uses it.
+        profile.failed.delete(name);
         profile.loading = name;
         loadProfile(name).then((lut) => {
           if (profile.loading === name) profile.loading = null;
@@ -7767,8 +7792,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           gpuPreviewScheduler.redraw();
         }, (err) => {
           if (profile.loading === name) profile.loading = null;
-          // The worker then converts with no profile; the GPU stays out of it.
-          profile.failed.add(name);
+          // The worker then converts with no profile; the GPU stays out of it
+          // until a retry loads it.
+          profile.failed.set(name, performance.now());
           console.warn('GPU preview profile failed to load:', err?.message || err);
         });
       }
@@ -7839,7 +7865,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (!params) return;
       const reference = getColorAnalysisSample(state);
       const key = silverCoreAnalysisKey(mode, params, settings, preview, reference);
-      if (gpuPreview.analysis?.key === key || gpuPreview.analysisFailedKey === key) return;
+      if (gpuPreview.analysis?.key === key) return;
+      const failed = gpuPreview.analysisFailed;
+      if (failed?.key === key && performance.now() - failed.at < GPU_INPUT_RETRY_MS) return;
       const generation = coreReprocessGeneration;
       gpuPreview.analyzeFlight = true;
       gpuPreview.analysisWanted = false;
@@ -7852,7 +7880,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         gpuPreview.analysis = { key, mode, previewId: gpuObjectId(preview), generation, data: reply };
         gpuPreviewScheduler.redraw();
       }, (err) => {
-        gpuPreview.analysisFailedKey = key;
+        gpuPreview.analysisFailed = { key, at: performance.now() };
         console.warn('GPU preview analysis failed:', err?.message || err);
       }).finally(() => {
         gpuPreview.analyzeFlight = false;
@@ -8522,9 +8550,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           // 古い設定のフレームを「書き出し可能な原寸」としては扱わない。
           const superseded = token !== coreReprocessToken;
           const nextPreview = coreReprocessScheduled || _coreReprocessPending;
-          // A GPU frame of newer settings is on screen: never step back to older ones.
-          if (superseded && (gpuPreviewScheduler.isAhead() || !nextPreview || routeCoreRequest(nextPreview).full
-            || nextPreview.token !== coreReprocessToken)) return false;
+          // A GPU frame of newer settings is on screen: never step back to
+          // older ones. A GPU tick that could not draw left an older exact
+          // frame up, and the settle it owes brings the newest settings: this
+          // frame still moves the display on (#229 review R1-046).
+          if (superseded && (gpuPreviewScheduler.isAhead() ? gpuPreview.lastDraw === 'apply'
+            : !nextPreview || routeCoreRequest(nextPreview).full || nextPreview.token !== coreReprocessToken)) return false;
           // Start the worker on the next frame before this one is applied and
           // drawn, so it does not sit idle through the result handling.
           postPendingPreviewEarly(previewFlight);
@@ -14990,6 +15021,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
     function handleFilmPresetChange(presetId) {
       state.frontierGuideStep2ChoiceTouched = true;
+      // A profile that failed to load gets another try with the new preset.
+      gpuPreview.profile.failed.clear();
       void applyFilmPresetSettingsToState(presetId).then(() => {
         scheduleSilverSourceRefresh();
       });

@@ -17,6 +17,10 @@
 //   onAbandon()     the display fell back to the exact frame on screen (redraw it)
 
 export const GPU_SETTLE_IDLE_MS = 150;
+// A 3D profile or an analysis whose request failed is asked for again after
+// this long (main.js gpuProfileLoaded, requestGpuAnalyze); meanwhile the ticks
+// it is missing for convert in the worker.
+export const GPU_INPUT_RETRY_MS = 5000;
 
 export function createGpuPreviewScheduler(env) {
   const settleMs = Number.isFinite(env.settleMs) ? env.settleMs : GPU_SETTLE_IDLE_MS;

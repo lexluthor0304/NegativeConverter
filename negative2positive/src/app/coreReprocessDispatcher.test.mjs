@@ -216,13 +216,18 @@ function schedulerFixture({ repairs = false, large = false, gpu = null } = {}) {
     'abortSupersededFullResolutionConversion',
   ].map(functionSource).join('\n'), context);
   if (gpu) {
-    // #239: the real GPU scheduler; its draw is recorded instead of drawn.
+    // #239: the real GPU scheduler; its draw is recorded instead of drawn. As
+    // renderWebGL2 does, a draw that cannot apply draws the exact frame (step3).
     context.gpuPreviewCanTake = () => gpu.enabled;
     context.gpuPreviewScheduler = createGpuPreviewScheduler({
       armFrame: fire => context.coreReprocessGates.armFrame(fire),
       cancelFrame: handle => context.coreReprocessGates.cancel(handle),
       setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout,
-      draw: () => { log.push(`gpu:${state.coreExposure}`); return gpu.drawable; },
+      draw: () => {
+        log.push(`gpu:${state.coreExposure}`);
+        context.gpuPreview.lastDraw = gpu.drawable ? 'apply' : 'step3';
+        return gpu.drawable;
+      },
       postExact: token => context.postGpuSettleFrame(token),
       onIdle: () => context.noteCoreReprocessSettled(),
       onAbandon: () => log.push('abandon'),
