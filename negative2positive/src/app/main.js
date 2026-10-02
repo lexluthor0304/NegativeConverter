@@ -21,7 +21,7 @@ import { createMemoryBudget, createRetainedLedger, createMemoryClaim, createIdle
 import { createBackgroundGate, BACKGROUND_STEP_WAIT_CAP_MS, BACKGROUND_INPUT_QUIET_MS, BACKGROUND_BUSY_POLL_MS } from './backgroundGate.js';
 import { createSharedDecodes } from './sharedDecodes.js';
 import { pickBackgroundJob, travelDirection, displayDistance } from './backgroundPhotoScheduler.js';
-import { createJobMarker, readJobMarkers, clearJobMarker, matchJobFiles, planResumedExport, resumedJobMarker, jobNeedsSafeMode, interruptedJobMessage } from './jobMarker.js';
+import { createJobMarker, readJobMarkers, clearJobMarker, matchJobFiles, planResumedExport, resumedJobMarker, jobNeedsSafeMode, jobMarkerRecordsOptions, interruptedJobMessage } from './jobMarker.js';
 import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
 import { createEmbeddedPreviewPool } from './scanDecodeClient.js';
 import { isTiffContainerRawName } from './rawEmbeddedPreview.js';
@@ -4092,9 +4092,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     // Edge text and frame number default to the roll's stock and this frame's
-    // number while the user has not typed their own values.
-    function getSprocketFrameComposeOptions(settings = state, position = state.currentFileIndex) {
-      const edge = { ...state.sprocketEdge, fontLocale: currentLang };
+    // number while the user has not typed their own values. A batch export
+    // passes the edge markings its job started with (#241).
+    function getSprocketFrameComposeOptions(settings = state, position = state.currentFileIndex, sprocketEdge = state.sprocketEdge) {
+      const edge = { ...sprocketEdge, fontLocale: currentLang };
       const roll = state.rollMetadata || {};
       const frame = settings === state || !settings ? state.frameMetadata : settings.frameMetadata;
       if (roll.stock && (!edge.text || edge.text === DEFAULT_SPROCKET_EDGE_MARKINGS.text)) edge.text = roll.stock.toUpperCase();
@@ -17790,9 +17791,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       });
     }
 
-    async function applySprocketFrameForExport(imageData, exportInfo, settings = state, position = state.currentFileIndex) {
-      if (!state.exportSprocketHolesEnabled) return imageData;
-      const options = getSprocketFrameComposeOptions(settings, position);
+    // `job`: a batch job's options (captureExportJobOptions), whose sprocket
+    // switch and edge markings win over the live controls.
+    async function applySprocketFrameForExport(imageData, exportInfo, settings = state, position = state.currentFileIndex, job = null) {
+      if (!(job?.sprocket ?? state.exportSprocketHolesEnabled)) return imageData;
+      const options = getSprocketFrameComposeOptions(settings, position, job?.sprocketEdge);
       await ensureSprocketFrameFonts(options);
       // A fresh frame this export owns (#250).
       return markOwnedPlanes(composeSprocketFrame(imageData, options));
@@ -19068,11 +19071,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (scaleFrom && processedShortSide > 0 && processedShortSide < scaleFrom) {
         maxParticleSize = Math.max(3, Math.round(maxParticleSize * processedShortSide / scaleFrom));
       }
+      // A batch job's snapshot carries its AI flag (#241); others read the live one.
+      const ai = typeof dustRemoval.ai === 'boolean' ? dustRemoval.ai : state.dustRemoval.ai;
       const { mask, particleCount } = await detectDustOffMainThread(processed, { strength, maxParticleSize }, null, isCurrent, dustWorker);
       let result = processed;
       // Batch lanes and thumbnails reuse the open photo's tiles but never
       // evict them (lookups only).
-      if (particleCount > 0) result = own(await withAiRepairTurn(() => inpaintForCommit(processed, mask, isCurrent, dustWorker, { memoInsert: false })), processed);
+      if (particleCount > 0) result = own(await withAiRepairTurn(() => inpaintForCommit(processed, mask, isCurrent, dustWorker, { memoInsert: false, ai })), processed);
       trace?.mark('dustRemoval', {
         pixels: getImageDataPixelCount(result)
       });
@@ -19814,7 +19819,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // converted (`releaseEarly`), and an 8-bit output drops the unadjusted
     // 16-bit plane before the adjustment stage.
     async function renderBatchExportFile(job, position, context, { transferPlanes = true } = {}) {
-      const { exportInfo, workers, dustRemoval } = context;
+      // `options`: the job's export options, fixed when it started (#241); a
+      // caller without them gets the live controls.
+      const { exportInfo, workers, options = null } = context;
+      const dustRemoval = options?.dustRemoval || null;
+      const jpegQuality = options?.jpegQuality ?? state.jpegQuality;
       const { file, settings } = job;
       const stages = {
         onBaseReady: context.onBaseReady || null,
@@ -19835,7 +19844,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         const { source, settings: usedSettings } = await processFileWithSettings(file, settings, handOver({ stage: 'source', convert: workers.convert, geometryBands: workers.geometryBands, silent: true, memoryClaim: coveredMemoryClaim(), ...stages }));
         return renderLinearDngBlobInSlices(source, usedSettings, position);
       }
-      const sprocket = state.exportSprocketHolesEnabled;
+      const sprocket = options?.sprocket ?? state.exportSprocketHolesEnabled;
       const metadata = exportMetadataFor(settings, position);
       const ownedPlanes = [];
       try {
@@ -19862,7 +19871,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         const adjustmentSettings = buildAdjustmentSettings(used);
         const wants16 = exportInfo.bitDepth === 16;
         if (processed.__bands) {
-          return await encodeResidentFrame(processed, adjustmentSettings, { exportInfo, workers, metadata, sprocket, settings, position, ownedPlanes });
+          return await encodeResidentFrame(processed, adjustmentSettings, { exportInfo, workers, metadata, sprocket, settings, position, ownedPlanes, options, jpegQuality });
         }
 
         // 16-bit TIFF/PNG without the sprocket frame: adjust and encode in one
@@ -19906,12 +19915,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           if (adjusted.__image16 === processed.__image16) adjusted.__image16 = null;
           adjusted.__gainMapSource = { processed, adjustmentSettings, transferPlane: transferPlanes };
         }
-        const outputImageData = await applySprocketFrameForExport(adjusted, exportInfo, settings, position);
+        const outputImageData = await applySprocketFrameForExport(adjusted, exportInfo, settings, position, options);
         if (outputImageData !== adjusted) ownedPlanes.push(outputImageData);
         return await imageDataToBlob(
           outputImageData,
           exportInfo.format,
-          state.jpegQuality,
+          jpegQuality,
           exportInfo.bitDepth,
           null,
           metadata,
@@ -20037,7 +20046,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // planes, sprocket frame and encoder as the other path, so the same bytes.
     // The bands are released whatever happens; if a band worker died, the
     // frame is rendered again (INPUT_LOST).
-    async function encodeResidentFrame(frame, adjustmentSettings, { exportInfo, workers, metadata, sprocket, settings, position, ownedPlanes }) {
+    async function encodeResidentFrame(frame, adjustmentSettings, { exportInfo, workers, metadata, sprocket, settings, position, ownedPlanes, options = null, jpegQuality = state.jpegQuality }) {
       const { width, height } = frame;
       const bands = frame.__bands;
       batchPipelineDiagnostics.residentFrames += 1;
@@ -20053,9 +20062,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           adjusted = new ImageData(markOwnedPlanes(data8), width, height);
         }
         ownedPlanes.push(adjusted);
-        const output = await applySprocketFrameForExport(adjusted, exportInfo, settings, position);
+        const output = await applySprocketFrameForExport(adjusted, exportInfo, settings, position, options);
         if (output !== adjusted) ownedPlanes.push(output);
-        return await imageDataToBlob(output, exportInfo.format, state.jpegQuality, exportInfo.bitDepth, null, metadata,
+        return await imageDataToBlob(output, exportInfo.format, jpegQuality, exportInfo.bitDepth, null, metadata,
           { bridge: workers.bridge, png16Pool: workers.png16Pool, transferPlane: true });
       } finally {
         bands.release();
@@ -20067,13 +20076,16 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // throws to fail that frame; it may return `{ learned }`, the promise of
     // its learnFromExport write (`learnsInSink`), which later never-analysed
     // frames wait for. `signal` stops further frames from starting.
+    // `options` (captureExportJobOptions) are the job's quality, sprocket
+    // border, edge markings and dust removal: every frame, and a resumed
+    // job's, writes with them, never with the controls of the moment.
     //
     // Stages (#256): a lane goes on to the next frame as soon as its encoded
     // payload fits the unwritten-bytes cap (the payload waits for its turn at
     // the in-order sink), and the next frame is decoded ahead while a lane
     // processes the current one. `nc_batch_pipeline_v1 = serial` turns both
     // off.
-    async function runBatchExport(jobs, { exportInfo, sink, onProgress = null, signal = null, dustRemoval = null, learnsInSink = false }) {
+    async function runBatchExport(jobs, { exportInfo, sink, onProgress = null, signal = null, options = null, learnsInSink = false }) {
       const { lanes: plannedLanes, pixelsPerFile } = await planBatchExportLanes(jobs);
       // The crash-loop guard runs a resumed batch in one lane.
       const lanes = hiddenJobs.safeMode ? 1 : plannedLanes;
@@ -20108,7 +20120,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
             hiddenBytes: bytes, memoryBytes: laneBytes, priority: 'user', label: 'export lane', signal: stop
           }),
           process: (job, index, prepared, context) => renderBatchExportFile(job, job.markerIndex ?? index, {
-            exportInfo, workers, dustRemoval, prepared: prepared || null,
+            exportInfo, workers, options, prepared: prepared || null,
             onBaseReady: context?.decoded || null,
             learningBarrier: () => learning.before(index)
           }),
@@ -20169,7 +20181,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       );
     }
 
-    async function exportBatchAsZipBrowser(selectedFiles, zipFileName, { markerAttempt = 0 } = {}) {
+    // `resume`: an interrupted ZIP job ({ marker, jobs, options }) written
+    // again whole, with its format, options, names and positions (#241).
+    async function exportBatchAsZipBrowser(selectedFiles, zipFileName, { resume = null } = {}) {
+      const exportInfo = resume?.marker.exportInfo || getExportInfo();
+      const options = resume?.options || captureExportJobOptions();
       if (!canUseBrowserZipStreaming(window)) {
         showToast(
           getLocalizedText(
@@ -20178,7 +20194,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           ),
           5000
         );
-        await exportBatchIndividuallyBrowser();
+        await exportBatchIndividuallyBrowser({ selectedFiles, exportInfo, options });
         return;
       }
 
@@ -20207,12 +20223,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           ),
           5000
         );
-        await exportBatchIndividuallyBrowser();
+        await exportBatchIndividuallyBrowser({ selectedFiles, exportInfo, options });
         return;
       }
 
-      const exportInfo = getExportInfo();
-      const jobs = createBatchExportJobs(selectedFiles, exportInfo);
+      const jobs = resume?.jobs || createBatchExportJobs(selectedFiles, exportInfo, options);
       const total = jobs.length;
       const lang = i18n[currentLang];
       const overlay = getLoadingOverlay();
@@ -20220,7 +20235,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       let zipWriter = null;
       // A partial archive has no central directory: after a kill the marker
       // only names the job and offers to start it again.
-      const marker = beginExportJobMarker('export-zip', jobs, { destination: streamTarget.fileName || zipFileName, exportInfo, attempt: markerAttempt });
+      const destination = streamTarget.fileName || zipFileName;
+      const marker = resume
+        ? beginResumedJobMarker(resume.marker, { keep: [], options, destination })
+        : beginExportJobMarker('export-zip', jobs, { destination, exportInfo, options });
 
       resetBatchExportStatuses(jobs);
       await showBatchExportOverlay(() => cancel.abort());
@@ -20229,6 +20247,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         zipWriter = new ZipStoreWriter(streamTarget.writable);
         const result = await runBatchExport(jobs, {
           exportInfo,
+          options,
           signal: cancel.signal,
           sink: async (job, blob) => {
             await zipWriter.addBlob(job.outputName, blob);
@@ -20280,7 +20299,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       await exportBatchAsZipBrowser(selectedFiles, 'converted_negatives.zip');
     }
 
-    function createBatchExportJobs(selectedFiles, exportInfo) {
+    function createBatchExportJobs(selectedFiles, exportInfo, options) {
       // Two source files can map to one output name (a RAW + JPEG pair, or the
       // same frame number in two folders); without this the second write
       // silently replaces the first.
@@ -20292,11 +20311,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         // sprocket border and metadata, and its index in the job marker.
         markerIndex: position,
         file: item.file,
-        outputName: claimName(buildActiveExportFileName(
-          item.file.name,
-          exportInfo,
-          getSettingsForExport(index, item)
-        )),
+        outputName: claimName(buildExportFileName(item.file.name, exportInfo, {
+          sprocket: options.sprocket,
+          settings: getSettingsForExport(index, item)
+        })),
         settings: cloneSettings(getSettingsForExport(index, item))
       }));
     }
@@ -20354,20 +20372,18 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       }
 
       const exportInfo = getExportInfo();
-      const jobs = createBatchExportJobs(selectedFiles, exportInfo);
-      // Snapshot: toggling dust removal mid-batch must not change later frames.
-      const dustRemoval = {
-        enabled: Boolean(state.dustRemoval.enabled),
-        strength: state.dustRemoval.strength,
-        maxParticleSize: state.dustRemoval.maxParticleSize
-      };
-      const marker = beginExportJobMarker('export-folder', jobs, { destination: targetDirectory, exportInfo, dustRemoval });
-      await runDesktopFolderExport(jobs, { targetDirectory, exportInfo, dustRemoval, marker });
+      // The editor stays live during a desktop batch: edits made meanwhile
+      // never reach later frames.
+      const options = captureExportJobOptions();
+      const jobs = createBatchExportJobs(selectedFiles, exportInfo, options);
+      const marker = beginExportJobMarker('export-folder', jobs, { destination: targetDirectory, exportInfo, options });
+      await runDesktopFolderExport(jobs, { targetDirectory, exportInfo, options, marker });
     }
 
     // `jobs` may be the unwritten rest of an interrupted export (#241): each
-    // job keeps its original position, name and marker index.
-    async function runDesktopFolderExport(jobs, { targetDirectory, exportInfo, dustRemoval, marker }) {
+    // job keeps its original position, name and marker index, and `options`
+    // are the ones the job started with.
+    async function runDesktopFolderExport(jobs, { targetDirectory, exportInfo, options, marker }) {
       const total = jobs.length;
       const cancel = new AbortController();
       desktopBatchCancelController = cancel;
@@ -20387,7 +20403,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       try {
         result = await runBatchExport(jobs, {
           exportInfo,
-          dustRemoval,
+          options,
           signal: cancel.signal,
           learnsInSink: true,
           sink: async (job, blob) => {
@@ -20420,17 +20436,15 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     // Browser: each frame becomes its own download as soon as it is written.
-    async function exportBatchIndividuallyBrowser() {
-      const selectedFiles = getSelectedFiles();
+    async function exportBatchIndividuallyBrowser({ selectedFiles = getSelectedFiles(), exportInfo = getExportInfo(), options = captureExportJobOptions() } = {}) {
       if (selectedFiles.length < 1) return;
 
-      const exportInfo = getExportInfo();
-      const jobs = createBatchExportJobs(selectedFiles, exportInfo);
-      const marker = beginExportJobMarker('export-downloads', jobs, { exportInfo });
-      await runBrowserDownloadsExport(jobs, { exportInfo, marker });
+      const jobs = createBatchExportJobs(selectedFiles, exportInfo, options);
+      const marker = beginExportJobMarker('export-downloads', jobs, { exportInfo, options });
+      await runBrowserDownloadsExport(jobs, { exportInfo, options, marker });
     }
 
-    async function runBrowserDownloadsExport(jobs, { exportInfo, marker }) {
+    async function runBrowserDownloadsExport(jobs, { exportInfo, options, marker }) {
       const total = jobs.length;
       const overlay = getLoadingOverlay();
       const cancel = new AbortController();
@@ -20442,6 +20456,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       try {
         result = await runBatchExport(jobs, {
           exportInfo,
+          options,
           signal: cancel.signal,
           learnsInSink: true,
           sink: async (job, blob) => {
@@ -24968,8 +24983,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       updatePreview();
     });
 
-    function aiRepairReady() {
-      return Boolean(state.dustRemoval.ai && aiRepair.status === 'ready' && typeof aiRepair.run === 'function');
+    function aiRepairReady(ai = state.dustRemoval.ai) {
+      return Boolean(ai && aiRepair.status === 'ready' && typeof aiRepair.run === 'function');
     }
 
     // The dust inpainter in a repair recipe's terms (#246): MI-GAN (true)
@@ -25083,17 +25098,18 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // The commit-path inpaint: the learned model when it is on and ready,
     // TELEA otherwise (and always for brush strokes, which stay interactive).
     // `report`, when given, learns which inpainter ran (`usedAi`), the model
-    // revision it ran with and, for MI-GAN, the blocks it wrote.
-    async function inpaintForCommit(source, mask, isCurrent = () => true, worker = null, { memoInsert = true, report = null } = {}) {
+    // revision it ran with and, for MI-GAN, the blocks it wrote. `ai` is the
+    // AI switch: a batch job passes the one it started with (#241).
+    async function inpaintForCommit(source, mask, isCurrent = () => true, worker = null, { memoInsert = true, report = null, ai = state.dustRemoval.ai } = {}) {
       assertRepairCurrent(isCurrent);
-      if (state.dustRemoval.ai && aiRepair.status === 'idle') await loadAiRepairModel(...aiRepairLoadArgs({ refresh: false }));
-      while (state.dustRemoval.ai && aiRepair.status === 'loading') {
+      if (ai && aiRepair.status === 'idle') await loadAiRepairModel(...aiRepairLoadArgs({ refresh: false }));
+      while (ai && aiRepair.status === 'loading') {
         await new Promise(resolve => setTimeout(resolve, 50));
         assertRepairCurrent(isCurrent);
       }
       assertRepairCurrent(isCurrent);
-      if (report) Object.assign(report, { usedAi: aiRepairReady(), revision: aiRepair.revision, blocks: null });
-      if (!aiRepairReady()) return inpaintDustOffMainThread(source, mask, isCurrent, worker);
+      if (report) Object.assign(report, { usedAi: aiRepairReady(ai), revision: aiRepair.revision, blocks: null });
+      if (!aiRepairReady(ai)) return inpaintDustOffMainThread(source, mask, isCurrent, worker);
       const started = performance.now();
       try {
         const { imageData, tiles, blocks } = await countAiRepairRun(() => inpaintWithModel(source, mask, aiRepair.run, {
@@ -25113,7 +25129,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         // when that fails too does TELEA take over.
         if (aiRepair.provider === 'webgpu' && aiRepair.sourceRef) {
           await loadAiRepairModel(aiRepair.sourceRef, { prefer: 'wasm', refresh: false });
-          if (aiRepairReady()) return inpaintForCommit(source, mask, isCurrent, worker, { memoInsert, report });
+          if (aiRepairReady(ai)) return inpaintForCommit(source, mask, isCurrent, worker, { memoInsert, report, ai });
         }
         aiRepair.status = 'error';
         aiRepair.revision += 1;
@@ -25808,17 +25824,64 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // Markers found at boot, until their job is resumed or dismissed.
     let interruptedJobs = [];
 
-    function beginExportJobMarker(kind, jobs, { destination = '', exportInfo = null, dustRemoval = null, attempt = 0 } = {}) {
+    // What a batch export writes with besides each frame's recipe, fixed when
+    // the job starts and kept in its marker: the JPEG quality, the sprocket
+    // border with its edge markings, and dust removal with its AI switch.
+    // Later changes to the controls (the editor stays live during a desktop
+    // batch) and a reload's defaults never reach the job's frames.
+    function captureExportJobOptions() {
+      return {
+        jpegQuality: state.jpegQuality,
+        sprocket: Boolean(state.exportSprocketHolesEnabled),
+        sprocketEdge: createSprocketEdgeSettings(state.sprocketEdge),
+        dustRemoval: {
+          enabled: Boolean(state.dustRemoval.enabled),
+          strength: state.dustRemoval.strength,
+          maxParticleSize: state.dustRemoval.maxParticleSize,
+          ai: Boolean(state.dustRemoval.ai)
+        }
+      };
+    }
+
+    // The options an interrupted job resumes with: its marker's. A version-1
+    // marker kept only the quality, the sprocket switch and, for a desktop
+    // folder, dust removal without its AI switch; the current controls fill
+    // the rest, and the resume question says so (legacyResumeNote). The
+    // controls themselves are never changed.
+    function exportJobOptionsFor(marker) {
+      const recorded = marker.options || {};
+      const current = captureExportJobOptions();
+      return {
+        jpegQuality: recorded.jpegQuality ?? current.jpegQuality,
+        sprocket: recorded.sprocket ?? current.sprocket,
+        sprocketEdge: recorded.sprocketEdge ? createSprocketEdgeSettings(recorded.sprocketEdge) : current.sprocketEdge,
+        dustRemoval: recorded.dustRemoval ? { ...current.dustRemoval, ...recorded.dustRemoval } : current.dustRemoval
+      };
+    }
+
+    function legacyResumeNote(marker) {
+      if (jobMarkerRecordsOptions(marker)) return '';
+      return ' ' + getLocalizedText('resumeLegacyOptions', 'It was started by an earlier version of the app, which did not record all of its settings: dust removal and the edge markings use the current ones.');
+    }
+
+    function beginExportJobMarker(kind, jobs, { destination = '', exportInfo = null, options = null, attempt = 0 } = {}) {
       const marker = createJobMarker(jobMarkerStorage);
       marker.begin({
-        kind, destination, exportInfo, attempt,
-        options: { jpegQuality: state.jpegQuality, sprocket: Boolean(state.exportSprocketHolesEnabled), dustRemoval },
+        kind, destination, exportInfo, attempt, options,
         // `auto`: the frame's recipe came from automatic analysis, so its
         // export bakes the automatic gray point (processFileWithSettings).
         files: jobs.map(job => ({ name: job.file.name, size: job.file.size, lastModified: job.file.lastModified || 0,
           output: job.outputName, auto: Boolean(job.item.automaticSettings) }))
       });
       return marker;
+    }
+
+    // The next run of an interrupted job: its files, names and format, one
+    // attempt later, keeping the records of the frames it skips.
+    function beginResumedJobMarker(marker, { keep, options, destination = marker.destination }) {
+      const resumed = createJobMarker(jobMarkerStorage);
+      resumed.begin({ ...resumedJobMarker(marker, { keep, options }), destination });
+      return resumed;
     }
 
     function describeInterruptedJob(marker) {
@@ -25903,32 +25966,43 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         const missingNote = missing ? ' ' + getInterpolatedText('resumeExportMissing', { count: String(missing) }, `${missing} of its originals are missing and are left out.`) : '';
         if (marker.kind === 'export-zip') {
           const question = getInterpolatedText('resumeZipConfirm', { total: String(marker.files.length) }, `The ZIP export of ${marker.files.length} photos was interrupted and cannot be resumed. Export the ZIP again?`);
-          if (!await appConfirm(question + missingNote)) { clearJobMarker(jobMarkerStorage, marker); continue; }
+          if (!await appConfirm(question + missingNote + legacyResumeNote(marker))) { clearJobMarker(jobMarkerStorage, marker); continue; }
           clearJobMarker(jobMarkerStorage, marker);
-          const selected = matched.filter(Boolean).map(item => ({ item, index: state.fileQueue.indexOf(item) }));
-          restoreInterruptedExportOptions(marker);
-          await runResumedJob(marker, () => exportBatchAsZipBrowser(selected, marker.destination || 'converted_negatives.zip', { markerAttempt: marker.attempt + 1 }));
+          // The partial archive is lost: every frame again, in the job's
+          // order, names and positions, with its format and options.
+          const options = exportJobOptionsFor(marker);
+          const exportInfo = marker.exportInfo || getExportInfo();
+          const plan = await planResumedExport({ ...marker, written: [] }, state.fileQueue);
+          const jobs = resumedExportJobs(marker, plan, exportInfo, options);
+          const selected = jobs.map(({ item, index }) => ({ item, index }));
+          await runResumedJob(marker, () => exportBatchAsZipBrowser(selected, marker.destination || 'converted_negatives.zip', { resume: { marker, jobs, options } }));
           continue;
         }
         await resumeInterruptedExport(marker, { missingNote });
       }
     }
 
-    // The export options the interrupted job used; they are not persisted.
-    function restoreInterruptedExportOptions(marker) {
-      const quality = Number(marker.options?.jpegQuality);
-      if (Number.isFinite(quality) && quality >= 1 && quality <= 100) {
-        state.jpegQuality = quality;
-        const slider = document.getElementById('exportQualitySlider');
-        if (slider) slider.value = String(quality);
-        const value = document.getElementById('exportQualityValue');
-        if (value) value.textContent = quality + '%';
-      }
-      if (typeof marker.options?.sprocket === 'boolean') setExportSprocketMode(marker.options.sprocket);
+    // The jobs of a resumed export, from its plan: each keeps its place in
+    // the original list (frame position for the sprocket border and metadata,
+    // index in the marker), its name and how its recipe was made.
+    function resumedExportJobs(marker, plan, exportInfo, options) {
+      return plan.jobs.map(({ markerIndex, item, outputName }) => {
+        const index = state.fileQueue.indexOf(item);
+        // The recovery copy keeps recipes, not how they were made: an
+        // automatic recipe exports with the automatic gray point, as before.
+        if (marker.files[markerIndex].auto) item.automaticSettings = true;
+        const settings = getSettingsForExport(index, item);
+        return {
+          item, index, markerIndex, file: item.file,
+          outputName: outputName || buildExportFileName(item.file.name, exportInfo, { sprocket: options.sprocket, settings }),
+          settings: cloneSettings(settings)
+        };
+      });
     }
 
     // Per-file exports: the full original job list (same order, names and
-    // positions), minus the frames recorded as written whose file exists.
+    // positions), minus the frames recorded as written whose file exists,
+    // with the options the job started with.
     async function resumeInterruptedExport(marker, { missingNote = '' } = {}) {
       const desktop = marker.kind === 'export-folder';
       if (desktop && !isTauriDesktop()) { clearJobMarker(jobMarkerStorage, marker); return; }
@@ -25956,28 +26030,15 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const question = desktop
         ? getInterpolatedText('resumeExportConfirm', { total: String(marker.files.length), folder, skipped: String(plan.skipped.length) }, `Resume the export of ${marker.files.length} photos to ${folder}? ${plan.skipped.length} already written are skipped, and the rest keep their names.`)
         : getInterpolatedText('resumeExportDownloadsConfirm', { total: String(marker.files.length), skipped: String(plan.skipped.length) }, `Resume the export of ${marker.files.length} photos? ${plan.skipped.length} already downloaded are skipped.`);
-      if (!await appConfirm(question + missingNote)) { clearJobMarker(jobMarkerStorage, marker); return; }
-      restoreInterruptedExportOptions(marker);
+      if (!await appConfirm(question + missingNote + legacyResumeNote(marker))) { clearJobMarker(jobMarkerStorage, marker); return; }
+      const options = exportJobOptionsFor(marker);
       const exportInfo = marker.exportInfo || getExportInfo();
-      const jobs = plan.jobs.map(({ markerIndex, item, outputName }) => {
-        const index = state.fileQueue.indexOf(item);
-        // The recovery copy keeps recipes, not how they were made: an
-        // automatic recipe exports with the automatic gray point, as before.
-        if (marker.files[markerIndex].auto) item.automaticSettings = true;
-        const settings = getSettingsForExport(index, item);
-        return {
-          item, index, markerIndex, file: item.file,
-          outputName: outputName || buildActiveExportFileName(item.file.name, exportInfo, settings),
-          settings: cloneSettings(settings)
-        };
-      });
+      const jobs = resumedExportJobs(marker, plan, exportInfo, options);
       // The resumed run keeps the records of what it skips, one attempt later.
-      const resumed = createJobMarker(jobMarkerStorage);
-      resumed.begin({ ...resumedJobMarker(marker, { keep: plan.skipped }), destination: desktop ? targetDirectory : marker.destination });
-      const dustRemoval = marker.options?.dustRemoval || null;
+      const resumed = beginResumedJobMarker(marker, { keep: plan.skipped, options, destination: desktop ? targetDirectory : marker.destination });
       await runResumedJob(marker, () => (desktop
-        ? runDesktopFolderExport(jobs, { targetDirectory, exportInfo, dustRemoval, marker: resumed })
-        : runBrowserDownloadsExport(jobs, { exportInfo, marker: resumed })));
+        ? runDesktopFolderExport(jobs, { targetDirectory, exportInfo, options, marker: resumed })
+        : runBrowserDownloadsExport(jobs, { exportInfo, options, marker: resumed })));
     }
 
     document.getElementById('projectInput')?.addEventListener('change', (e) => {

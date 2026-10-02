@@ -211,8 +211,12 @@ Now one driver (`runBatchExport` in `main.js`) runs the per-file pipeline
   arrivals, #247).
 - Batch frames run frame detection silently (`processFileWithSettings`
   `silent: true`): a never-analysed frame gets no blocking overlay and no
-  frame wait, so a hidden window keeps exporting. Each job writes a marker so
-  a killed export can be named at boot and resumed under the same names; see
+  frame wait, so a hidden window keeps exporting. A job fixes its export
+  options when it starts (`captureExportJobOptions`: JPEG quality, sprocket
+  border and edge markings, dust removal with its AI switch) and every frame
+  reads them from `runBatchExport`'s `options`, not from the controls. Each
+  job writes them with a marker, so a killed export can be named at boot and
+  resumed under the same names, format and options; see
   `docs/hidden-window-jobs.md`.
 
 ## Stages of a frame (#256)

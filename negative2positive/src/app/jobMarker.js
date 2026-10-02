@@ -16,7 +16,12 @@
 // One key per job family: a batch export and a roll analysis can run together.
 export const JOB_MARKER_KEYS = Object.freeze({ export: 'nc_job_marker_export_v1', roll: 'nc_job_marker_roll_v1' });
 export const JOB_MARKER_KEY = JOB_MARKER_KEYS.export;
-export const JOB_MARKER_VERSION = 1;
+// 2 records every export option the job writes with (`options`). A
+// version-1 marker is still read: it lacks the edge markings, the AI switch
+// and, for browser jobs, dust removal, so its resume asks before it uses the
+// current ones.
+export const JOB_MARKER_VERSION = 2;
+const READABLE_VERSIONS = Object.freeze([1, 2]);
 export const JOB_KINDS = Object.freeze(['export-folder', 'export-downloads', 'export-zip', 'roll-analysis']);
 export const jobMarkerKeyFor = kind => (kind === 'roll-analysis' ? JOB_MARKER_KEYS.roll : JOB_MARKER_KEYS.export);
 // Like the project recovery copy: older markers are not offered.
@@ -34,6 +39,27 @@ function sanitizeFile(entry) {
   };
 }
 
+// What a batch export writes with besides each frame's recipe, fixed when
+// the job starts: JPEG quality, the sprocket border and its edge markings,
+// dust removal with its AI flag. A field a version-1 marker lacks stays out.
+function sanitizeJobOptions(options) {
+  const out = {};
+  if (!options || typeof options !== 'object') return out;
+  const quality = Number(options.jpegQuality);
+  if (Number.isFinite(quality) && quality >= 1 && quality <= 100) out.jpegQuality = quality;
+  if (typeof options.sprocket === 'boolean') out.sprocket = options.sprocket;
+  if (options.sprocketEdge && typeof options.sprocketEdge === 'object') out.sprocketEdge = structuredClone(options.sprocketEdge);
+  const dust = options.dustRemoval;
+  if (dust && typeof dust === 'object') {
+    out.dustRemoval = { enabled: Boolean(dust.enabled) };
+    for (const field of ['strength', 'maxParticleSize']) {
+      if (Number.isFinite(dust[field])) out.dustRemoval[field] = dust[field];
+    }
+    if (typeof dust.ai === 'boolean') out.dustRemoval.ai = dust.ai;
+  }
+  return out;
+}
+
 function sanitizeExportInfo(info) {
   if (!info || typeof info !== 'object') return null;
   return {
@@ -46,7 +72,7 @@ function sanitizeExportInfo(info) {
 
 /** A marker as stored, or null when it is not one this version can resume. */
 export function sanitizeJobMarker(value, { now = Date.now() } = {}) {
-  if (!value || typeof value !== 'object' || value.v !== JOB_MARKER_VERSION) return null;
+  if (!value || typeof value !== 'object' || !READABLE_VERSIONS.includes(value.v)) return null;
   if (!JOB_KINDS.includes(value.kind)) return null;
   const files = Array.isArray(value.files) ? value.files.map(sanitizeFile) : [];
   const total = files.length;
@@ -63,18 +89,23 @@ export function sanitizeJobMarker(value, { now = Date.now() } = {}) {
   }
   const indices = (list) => [...new Set((Array.isArray(list) ? list : []).filter(index => isIndex(index, total)))];
   return {
-    v: JOB_MARKER_VERSION,
+    v: value.v,
     id: value.id ? String(value.id) : '',
     kind: value.kind,
     startedAt,
     attempt: Math.max(0, Math.floor(Number(value.attempt) || 0)),
     destination: value.destination ? String(value.destination) : '',
     exportInfo: sanitizeExportInfo(value.exportInfo),
-    options: value.options && typeof value.options === 'object' ? structuredClone(value.options) : {},
+    options: sanitizeJobOptions(value.options),
     files,
     written,
     edited: indices(value.edited)
   };
+}
+
+/** Whether the marker holds every option its job wrote with (version 2). */
+export function jobMarkerRecordsOptions(marker) {
+  return Boolean(marker && marker.v >= 2);
 }
 
 export function readJobMarker(storage, { key = JOB_MARKER_KEY, now = Date.now() } = {}) {
@@ -204,14 +235,14 @@ export async function planResumedExport(marker, items, { exists = null } = {}) {
  * The next run of an interrupted job: one attempt later, keeping the records
  * of the frames it skips (by default all of them).
  */
-export function resumedJobMarker(marker, { keep = null } = {}) {
+export function resumedJobMarker(marker, { keep = null, options = marker.options } = {}) {
   const kept = keep ? new Set(keep) : null;
   return {
     kind: marker.kind,
     files: marker.files,
     destination: marker.destination,
     exportInfo: marker.exportInfo,
-    options: marker.options,
+    options,
     attempt: marker.attempt + 1,
     written: kept ? marker.written.filter(([index]) => kept.has(index)) : marker.written
   };

@@ -924,6 +924,58 @@ for (const [format, bitDepth] of [['jpeg', 8], ['png', 8], ['tiff', 16], ['png',
   }
 }
 
+// ============================================== batch job options (#241)
+// A batch job writes with the options it started with (R1-125): quality,
+// sprocket switch, edge markings and dust removal with its AI switch come
+// from runBatchExport's `options`, never from the controls. Parity, old vs
+// new: options captured from the controls write the bytes a batch wrote
+// before (a call without options reads the controls, as every batch did);
+// with the controls back at a reload's defaults, the same options still
+// write those bytes, where the old live read wrote the defaults' frame.
+{
+  const edgeOf = (text) => ({ textEnabled: true, text, frameNumberEnabled: true, frameNumber: 3 });
+  const jobDust = { enabled: true, strength: 6, maxParticleSize: 28, ai: false };
+  const jobControls = { jpegQuality: 61, exportSprocketHolesEnabled: true, sprocketEdge: edgeOf('SMOKE 400'), dustRemoval: { ...jobDust } };
+  const reloaded = { jpegQuality: 92, exportSprocketHolesEnabled: false, sprocketEdge: edgeOf('DEFAULT'), dustRemoval: { enabled: false, ai: true } };
+  const options = { jpegQuality: 61, sprocket: true, sprocketEdge: edgeOf('SMOKE 400'), dustRemoval: { ...jobDust } };
+  const run = async ({ format, bitDepth, controls, jobOptions = null }) => {
+    const { f, exportInfo, jobs } = batchContext({ format, bitDepth });
+    Object.assign(f.state, structuredClone(controls));
+    // As main.js: the edge markings default to the live ones.
+    f.context.getSprocketFrameComposeOptions = (settings, position, edge = f.state.sprocketEdge) => ({ edgeMarkings: { ...edge } });
+    // The edge markings land in the frame's pixels.
+    f.context.composeSprocketFrame = (image, compose) => {
+      const out = new TestImageData(new Uint8ClampedArray(image.data), image.width, image.height);
+      const text = JSON.stringify(compose.edgeMarkings);
+      for (let i = 0; i < text.length; i++) out.data[i * 4] = text.charCodeAt(i);
+      return out;
+    };
+    const process = f.context.processFileWithSettings;
+    let dust = 'unset';
+    f.context.processFileWithSettings = async (file, settings, processOptions) => {
+      dust = processOptions.dustRemoval;
+      return process(file, settings, processOptions);
+    };
+    const written = [];
+    const result = await f.context.runBatchExport(jobs, { exportInfo, options: jobOptions, sink: async (job, blob) => { written.push(blob); } });
+    assert.equal(result.successCount, 1);
+    return { bytes: await stubBlobText(written[0]), dust };
+  };
+  for (const [format, bitDepth] of [['jpeg', 8], ['png', 8], ['tiff', 16]]) {
+    const label = `job options ${format}${bitDepth}`;
+    const before = await run({ format, bitDepth, controls: jobControls });
+    const captured = await run({ format, bitDepth, controls: jobControls, jobOptions: structuredClone(options) });
+    const resumed = await run({ format, bitDepth, controls: reloaded, jobOptions: structuredClone(options) });
+    const liveAfterReload = await run({ format, bitDepth, controls: reloaded });
+    assert.ok(same(captured.bytes, before.bytes), `${label}: a job's captured options write the bytes the live controls wrote`);
+    assert.ok(same(resumed.bytes, before.bytes), `${label}: after a reload the job's options still write those bytes`);
+    assert.ok(!same(liveAfterReload.bytes, before.bytes), `${label}: the old live read after a reload wrote another frame`);
+    assert.equal(before.dust, null, `${label}: without options the conversion reads the live dust removal`);
+    assert.deepEqual({ ...captured.dust }, jobDust, `${label}: with options it gets the job's, AI switch included`);
+    assert.deepEqual({ ...resumed.dust }, jobDust);
+  }
+}
+
 setLiveReferenceProbe(null);
 configurePlaneRelease();
 console.log('exportPlaneLifecycle.test.mjs passed');

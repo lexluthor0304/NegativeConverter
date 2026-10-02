@@ -16,7 +16,11 @@
 //    the page reloaded) names the job at boot; after the originals are added
 //    again and the recovery copy restored, Resume writes only the missing
 //    frames, under the original names, with the pixels of the uninterrupted run.
+// 4. The browser ZIP and 'Download individually', killed the same way, resume
+//    with the job's own format, dust removal and edge markings although the
+//    reload reset every control (hidden-job-resume-smoke.mjs).
 import { join } from 'node:path';
+import { runHiddenJobResumeSmoke } from './hidden-job-resume-smoke.mjs';
 
 const ready = `document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy`;
 const FIXTURES = ['negative-textured.png', 'negative-vignetted.png', 'negative-plain.png'];
@@ -272,4 +276,7 @@ export async function runHiddenJobSmoke({ send, evaluate, waitFor, wait, fail, i
     localStorage.removeItem('nc_batch_lanes_v1');
   })()`);
   console.log('ok: a killed desktop batch is named at boot and resumes only its missing frames, same names, same pixels');
+
+  // ---- 4. Browser ZIP and downloads resumed with the job's options ----
+  await runHiddenJobResumeSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port, root });
 }

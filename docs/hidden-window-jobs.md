@@ -113,10 +113,15 @@ state, cache bytes, live workers, the MI-GAN session and `aiRepair.revision`.
 - **Job marker.** `jobMarker.js` keeps one marker per job family in
   localStorage (`nc_job_marker_export_v1`, `nc_job_marker_roll_v1`): files in
   order with output names and whether their recipe was automatic, destination,
-  export info and options, and each frame once its sink returned (a desktop
-  frame is recorded after the native rename or copy and sync). The marker is
-  deleted when the job ends or is cancelled. Each export sink and each analysed
-  roll frame schedules the recovery copy.
+  export info, and each frame once its sink returned (a desktop frame is
+  recorded after the native rename or copy and sync). An export also records
+  every option it writes with besides each frame's recipe
+  (`captureExportJobOptions` in `main.js`): JPEG quality, the sprocket border
+  and its edge markings, and dust removal with its AI switch. The job reads
+  these, not the controls, for every frame, so edits made during a desktop
+  batch never reach its later frames. The marker is deleted when the job ends
+  or is cancelled. Each export sink and each analysed roll frame schedules the
+  recovery copy.
 - **Boot.** A marker left over names the job ("Export of 116 photos to Scans
   stopped after 47", "…stopped before any was written" when none finished;
   the count is of finished frames, which lanes finish out of order), adds that
@@ -128,7 +133,14 @@ state, cache bytes, live workers, the MI-GAN session and `aiRepair.revision`.
     skipping frames recorded as written whose file still exists
     (`exported_files_exist` checks inside the granted folder). No `_1`
     duplicates, same pixels;
-  - a ZIP cannot be resumed (no central directory) and offers a restart;
+  - a ZIP cannot be resumed (no central directory) and offers a restart: every
+    frame again, with the names, positions and automatic-recipe flags of the
+    original list;
+  - both write with the marker's format, bit depth and options, never with
+    the controls a reload reset, and leave the controls as they are. A
+    version-1 marker (before these options were recorded) lacks the edge
+    markings, the AI switch and, for browser jobs, dust removal: its resume
+    question says that the current ones are used;
   - roll analysis resumes with its frames back in automatic analysis unless the
     user had edited them: frame detection runs only for frames without a
     recovered recipe, and the roll-level pass re-runs over the whole group,
@@ -138,17 +150,25 @@ state, cache bytes, live workers, the MI-GAN session and `aiRepair.revision`.
 
 ## Checks
 
-- Unit: `yieldToPaint`, `hiddenJobGate`, `jobMarker`, `hiddenPhotoPark`,
-  `batchExportScheduler` (admission before claiming, deadlock), worker and
-  cache helpers, the MI-GAN release in `photoSessionLifecycle`, the roll marker
-  in `automaticRollImport`; Rust: `ExportStreams::clear`, the termination
-  record, the existence check.
+- Unit: `yieldToPaint`, `hiddenJobGate`, `jobMarker` (options round trip,
+  version-1 markers, the boot sentence in zh/en/ja), `interruptedJobResume`
+  (main.js's export, boot and resume functions: a desktop folder job killed
+  after frame 1 resumes with its options while the controls keep their
+  defaults; ZIP restart; version-1 question), the job-options parity in
+  `exportPlaneLifecycle`, `hiddenPhotoPark`, `batchExportScheduler` (admission
+  before claiming, deadlock), worker and cache helpers, the MI-GAN release in
+  `photoSessionLifecycle`, the roll marker in `automaticRollImport`; Rust:
+  `ExportStreams::clear`, the termination record, the existence check.
 - Smoke (`scripts/hidden-job-smoke.mjs`, `--hidden-job-only`): a desktop batch
   with a never-analysed frame completes hidden with rAF never firing and no
   overlay; hiding sheds caches and idle workers and keeps the revision; a
   hidden contact sheet completes; a batch killed after frame 1 is named at boot
   and resumes only the missing frames under the same names and bytes; the
-  opt-in park rebuilds an identical export (WARN line otherwise).
+  opt-in park rebuilds an identical export (WARN line otherwise). A TIFF 16-bit
+  browser ZIP and a 'Download individually' run, with dust removal (AI off),
+  the sprocket border and custom edge markings, killed after frame 1 and
+  resumed after a reload: same names, format, bit depth and decoded pixels as
+  the uninterrupted run, controls untouched (`hidden-job-resume-smoke.mjs`).
 - The macOS acceptance runs in #241 (suspension log, footprint after 8 min,
   `kill -9` of the WebContent pid, throughput) need the release app and 60 MP
   files.

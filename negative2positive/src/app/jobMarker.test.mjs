@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import {
   createJobMarker, readJobMarker, readJobMarkers, clearJobMarker, sanitizeJobMarker, matchJobFiles, planResumedExport,
-  resumedJobMarker, jobNeedsSafeMode, interruptedJobMessage, JOB_MARKER_KEY, JOB_MARKER_KEYS, JOB_MARKER_MAX_AGE_MS, JOB_KINDS
+  resumedJobMarker, jobNeedsSafeMode, jobMarkerRecordsOptions, interruptedJobMessage, JOB_MARKER_KEY, JOB_MARKER_KEYS,
+  JOB_MARKER_MAX_AGE_MS, JOB_MARKER_VERSION, JOB_KINDS
 } from './jobMarker.js';
 import { i18n } from './i18n.js';
 import { interpolateText } from './textUtils.js';
@@ -190,6 +191,55 @@ const now = () => clock;
   const next = resumedJobMarker(interrupted, { keep: [0, 1, 3] });
   assert.deepEqual(next.written, [[0, '/out/0'], [1, '/out/1'], [3, '/out/3']]);
   assert.equal(next.attempt, 1);
+}
+
+// The job's export options round-trip (R1-125): format and bit depth, the
+// quality, the sprocket border with its edge markings, and dust removal with
+// its AI switch, for every job kind.
+const jobOptions = () => ({
+  jpegQuality: 77, sprocket: true,
+  sprocketEdge: { textEnabled: true, text: 'SMOKE 400', frameNumberEnabled: true, frameNumber: 12, dxEnabled: true, dx1: 17, dx2: 4,
+    fontStyle: 'dot', fontFamily: 'Fusion Pixel', holeColor: '#101010', letteringColor: '#ffaa00', overexposureColor: '#ff5500' },
+  dustRemoval: { enabled: true, strength: 6, maxParticleSize: 28, ai: false }
+});
+for (const kind of ['export-folder', 'export-downloads', 'export-zip']) {
+  const storage = memoryStorage();
+  const marker = createJobMarker(storage, { now });
+  marker.begin({ kind, files: roll.slice(0, 4), destination: kind === 'export-folder' ? '/out' : 'roll.zip',
+    exportInfo: { format: 'tiff', bitDepth: 16, extension: '.tiff', mimeType: 'image/tiff' }, options: jobOptions() });
+  const read = readJobMarker(storage, { now: clock });
+  assert.equal(read.v, JOB_MARKER_VERSION);
+  assert.equal(jobMarkerRecordsOptions(read), true, `${kind}: a version-2 marker records its options`);
+  assert.deepEqual(read.exportInfo, { format: 'tiff', bitDepth: 16, extension: '.tiff', mimeType: 'image/tiff' });
+  assert.deepEqual(read.options, jobOptions(), `${kind}: quality, sprocket, edge markings and dust (with ai) survive`);
+  // The resumed job carries them on, one attempt later.
+  const next = resumedJobMarker(read, { keep: [] });
+  assert.deepEqual(next.options, jobOptions());
+  assert.deepEqual(next.exportInfo, read.exportInfo);
+  assert.deepEqual(next.written, [], 'a ZIP restart keeps no record');
+  const merged = resumedJobMarker(read, { options: { ...jobOptions(), jpegQuality: 50 } });
+  assert.equal(merged.options.jpegQuality, 50, 'the options a resume runs with are the ones it records');
+  marker.finish();
+}
+
+// A version-1 marker (before R1-125) is read, not dropped: its resume asks
+// before it uses the current options for what it lacks.
+{
+  const storage = memoryStorage();
+  storage.set(JOB_MARKER_KEY, JSON.stringify({
+    v: 1, id: 'old', kind: 'export-downloads', startedAt: clock, files: roll.slice(0, 3), written: [[0, '']],
+    exportInfo: { format: 'png', bitDepth: 16, extension: '.png', mimeType: 'image/png' },
+    options: { jpegQuality: 88, sprocket: true, dustRemoval: null }
+  }));
+  const legacy = readJobMarker(storage, { now: clock });
+  assert.ok(legacy, 'a version-1 marker is still read');
+  assert.equal(legacy.v, 1);
+  assert.equal(jobMarkerRecordsOptions(legacy), false, 'its resume asks for confirmation');
+  assert.deepEqual(legacy.options, { jpegQuality: 88, sprocket: true }, 'the fields it has; nothing invented');
+  assert.equal(legacy.exportInfo.bitDepth, 16);
+  const desktop = sanitizeJobMarker({ v: 1, kind: 'export-folder', startedAt: clock, files: roll.slice(0, 2),
+    options: { jpegQuality: 92, sprocket: false, dustRemoval: { enabled: true, strength: 3, maxParticleSize: 40 } } }, { now: clock });
+  assert.deepEqual(desktop.options.dustRemoval, { enabled: true, strength: 3, maxParticleSize: 40 }, 'no AI switch was recorded');
 }
 
 // The boot sentence counts finished frames (R1-150): never a frame position,
