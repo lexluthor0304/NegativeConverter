@@ -726,9 +726,13 @@ export async function runPhotoSessionRawSmoke({ send, evaluate, waitFor, fail, i
       exports: window.__photoSessionProbe.exports.length })`);
     expect(evidence.exports === 0, 'the warm checks above ran before any export/full-resolution render');
     // Export parity across a switch (#249): a 16-bit export of A, then B, then
-    // A again (a Tier A or display session at 60 MP), exports the same bytes.
+    // A again, exports the same bytes. A is kept without its base (Tier A, or
+    // Tier B), as a 60 MP frame is: the tier is forced so a smaller RAW
+    // exercises it too, and A must have been auto-framed (rotated or
+    // cropped), or Tier A would have nothing to drop.
     const geometry = await evaluate('window.__ncGeometry.inspect()');
-    if (!geometry.cropRegion && !geometry.rotationAngle) console.warn('actual RAW A was not auto-framed; the export check covers an unrotated, uncropped frame');
+    expect(geometry.cropRegion || geometry.rotationAngle,
+      'actual RAW A was not auto-framed (no crop, no rotation): the export check would not exercise a display session: ' + JSON.stringify(geometry));
     const exportPixels = async depth => {
       const index = await evaluate('window.__photoSessionProbe.exports.length');
       await evaluate(`(() => {
@@ -740,10 +744,15 @@ export async function runPhotoSessionRawSmoke({ send, evaluate, waitFor, fail, i
       return decodePng(await evaluate(`window.__photoSessionProbe.exports[${index}].data`));
     };
     const exportBefore = await exportPixels(16);
+    await evaluate(`window.__ncDisplaySessions.force('A')`);
     await open(1, files[1].name);
     const leftAs = await evaluate('window.__ncDisplaySessions.tier(0)');
+    expect(leftAs === 'A' || leftAs === 'B', 'actual RAW A was not kept as a display session (Tier A or B): ' + JSON.stringify(leftAs));
     await open(0, files[0].name);
+    const returned = await evaluate('window.__ncDisplaySessions.live()');
+    expect(!returned.base && returned.baseDescriptor, 'actual RAW A came back with its base: ' + JSON.stringify(returned));
     const exportAfter = await exportPixels(16);
+    await evaluate(`window.__ncDisplaySessions.force(null)`);
     expect(exportAfter.sha256 === exportBefore.sha256 && exportAfter.width === exportBefore.width,
       'actual RAW export after A/B/A differs: ' + JSON.stringify({ leftAs, exportBefore, exportAfter }));
     console.log('actual RAW warm photo sessions:', JSON.stringify({ files, coldBActivationMs,
@@ -762,7 +771,7 @@ export async function runPhotoSessionRawSmoke({ send, evaluate, waitFor, fail, i
       })()`)));
     } catch { /* Keep the original failure if Chrome is no longer available. */ }
   } finally {
-    await evaluate('window.__restorePhotoSessionProbe?.()');
+    await evaluate('window.__restorePhotoSessionProbe?.(); window.__ncDisplaySessions?.force(null)');
   }
   if (failure) fail(failure.message);
 }
