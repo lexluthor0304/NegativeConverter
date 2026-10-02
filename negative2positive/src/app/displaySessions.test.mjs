@@ -3,6 +3,7 @@
 // only), demotion on eviction, the spill, ensureBase/ensureSource and the
 // rule that a display proxy never becomes a base, a plane or a source.
 import assert from 'node:assert/strict';
+import vm from 'node:vm';
 
 // ImageData in both constructor forms (the harness's stand-in has only one).
 globalThis.ImageData = class ImageData {
@@ -14,7 +15,7 @@ globalThis.ImageData = class ImageData {
     }
   }
 };
-const { createHarness, makeBase, samePixels, exportChain, settle, createPhotoSessionCache, backingBuffers } = await import('./geometryTestHarness.mjs');
+const { createHarness, makeBase, samePixels, exportChain, settle, createPhotoSessionCache, backingBuffers, functionSource } = await import('./geometryTestHarness.mjs');
 const { buildDisplayLevel, displayLevelGeometry, isDisplayTarget, displayPreviewSize } = await import('./displayPreview.js');
 const { createDisplayProxySpill, createDisplayProxyPort, createDisplayProxyWorkerCore, createDisplayProxyStore, displayProxyFileKey, sha256Hex } = await import('./displayProxyStore.js');
 const { decodeDisplayProxyRecord } = await import('./displayProxy.js');
@@ -37,8 +38,8 @@ function sameLevel(actual, expected, label) {
 // A photo converted as a large frame: its crop is the conversion source, a
 // 30x20 display level (k = 2) the proxy, a display target on it the
 // conversion preview, and the preview conversion on screen.
-async function convertedPhoto({ sessionBudget, base = makeBase(96, 64, 5), largeImagePixels = 1000, name = 'a.dng', id = 1, filmEdge = true } = {}) {
-  const h = createHarness(base, { sessionBudget, realProcessNegative: true, displayLevels: true }), c = h.context;
+async function convertedPhoto({ sessionBudget, base = makeBase(96, 64, 5), largeImagePixels = 1000, name = 'a.dng', id = 1, filmEdge = true, conversionRequests = false } = {}) {
+  const h = createHarness(base, { sessionBudget, realProcessNegative: true, displayLevels: true, conversionRequests }), c = h.context;
   h.target.largeImagePixels = largeImagePixels;
   h.target.usesSilverCoreConversion = () => true;
   h.target.photoSessions = createPhotoSessionCache({ maxBytes: sessionBudget, onEvict: (item, value) => c.demoteDisplaySession(item, value) });
@@ -690,4 +691,207 @@ for (const tier of ['A', 'B']) {
   }
 }
 
-console.log('displaySessions: Tier A, Tier B, demotion, spill, ensureBase/ensureSource, invalidation and the proxy invariant passed');
+// ---- The colour-analysis sample of a session without its base (R2-001,
+// R2-051): conversions and exports read the sample a decoded base gives for
+// the area in use, whatever Undo, Redo or a recipe changed ----
+const { sampleAnalysisArea } = await import('./analysisRegion.js');
+const AREA2 = [{ x: 0.25, y: 0.3 }, { x: 0.75, y: 0.3 }, { x: 0.75, y: 0.7 }, { x: 0.25, y: 0.7 }];
+const AREA3 = [{ x: 0.3, y: 0.25 }, { x: 0.7, y: 0.25 }, { x: 0.7, y: 0.75 }, { x: 0.3, y: 0.75 }];
+const sampleBytes = sample => Buffer.from(sample.data.buffer, sample.data.byteOffset, sample.data.byteLength);
+function sameSample(actual, expected, label) {
+  assert.ok(actual?.data && expected?.data, `${label}: samples exist`);
+  assert.deepEqual([actual.width, actual.height], [expected.width, expected.height], `${label}: size`);
+  assert.ok(sampleBytes(actual).equals(sampleBytes(expected)), `${label}: bit for bit`);
+}
+// Confirm image area on the live photo: the 'crop' entry keeps the recipe's
+// area, the recipe takes `area`, and the conversion samples it from the base.
+function confirmImageArea(h, c, item, area, { cold = false } = {}) {
+  c.pushUndo('crop');
+  // An entry the history budget stripped (#244).
+  if (cold) h.target.undoStack.at(-1).refs = { cold: true };
+  h.state.autoFrame.lastDiagnostics = { imageArea: area, appliedMode: 'crop', method: 'manual-analysis-area' };
+  item.settings = { ...item.settings, autoFrameMeta: { imageArea: area } };
+  sameSample(c.getColorAnalysisSample(h.state), sampleAnalysisArea(h.state.loadedBaseImageData, area), 'the live base samples the area');
+  const processed = makeBase(30, 20, 19);
+  Object.assign(h.state, { processedImageData: processed, previewSourceImageData: processed, histogramSourceImageData: processed, webglSourceImageData: processed });
+}
+const leftAs = h => ({ base: Boolean(h.state.loadedBaseImageData), descriptor: Boolean(h.state.baseDescriptor) });
+
+// ---- Tier A across Confirm image area: the descriptor carries the sample
+// of every area the recipe and the history name, so Undo and Redo of a hot
+// or a cold entry convert with the sample of the restored area, without a
+// decode and without a miss ----
+for (const cold of [false, true]) {
+  const label = cold ? 'cold entry' : 'hot entry';
+  const { h, c, base, item } = await convertedPhoto({ sessionBudget: 1 << 30, conversionRequests: true });
+  h.target.displaySessionDiagnostics.force = 'A';
+  confirmImageArea(h, c, item, AREA2, { cold });
+  wireSwitching(h, [item, { id: 2, file: { name: 'b.dng' }, settings: null }]);
+  await c.switchToFile(1);
+  const entry = h.target.photoSessions.get(item);
+  assert.equal(entry.tier, 'A', `${label}: left as Tier A`);
+  assert.deepEqual([...entry.baseDescriptor.samples.keys()].sort(), [JSON.stringify(AREA), JSON.stringify(AREA2)].sort(),
+    `${label}: the descriptor keeps the samples of both areas`);
+  assert.equal(entry.display.baseDescriptor.samples.size, 1, `${label}: its Tier B form keeps the one in use`);
+  await c.switchToFile(0);
+  assert.deepEqual(leftAs(h), { base: false, descriptor: true }, `${label}: back as Tier A`);
+  // A hot entry settles as rerenderWithCoreControls does above 16 MP: a
+  // display-preview conversion. A cold one converts through processNegative.
+  h.target.runCoreReprocess = async () => c.convertFromCurrentSource(h.state, { preview: true, interactive: true, includeAnalysisPreview: false });
+  for (const [step, area] of [['undo', AREA], ['redo', AREA2]]) {
+    const before = h.requests.length;
+    await (step === 'undo' ? c.performUndo() : c.performRedo());
+    await settle();
+    const expected = sampleAnalysisArea(base, area);
+    sameSample(c.getColorAnalysisSample(h.state), expected, `${label}, ${step}: the sample of the restored area`);
+    assert.ok(h.requests.length > before, `${label}, ${step}: converted`);
+    sameSample(h.requests.at(-1).options.analysisImageData, expected, `${label}, ${step}: the conversion request carries it`);
+  }
+  assert.equal(h.target.displaySessionDiagnostics.sampleMisses, 0, `${label}: no conversion missed its sample`);
+  assert.equal(h.target.baseDecodes, undefined, `${label}: no decode`);
+  assert.deepEqual(leftAs(h), { base: false, descriptor: true }, `${label}: still without its base`);
+}
+
+// ---- A recipe that moved only the area while the photo was away (a roll
+// commit, Sync): a Tier A photo converts with the kept sample of an area its
+// history names; any other area, and a Tier B photo, waits for the base
+// under the veil. The conversion carries the sample a decoded base gives ----
+for (const [tier, area, decodes] of [['A', AREA, 0], ['A', AREA3, 1], ['B', AREA3, 1]]) {
+  const label = `Tier ${tier}, ${area === AREA ? 'an area of its history' : 'a new area'}`;
+  const { h, c, base, item } = await convertedPhoto({ sessionBudget: 1 << 30, conversionRequests: true });
+  h.target.displaySessionDiagnostics.force = tier;
+  confirmImageArea(h, c, item, AREA2);
+  wireSwitching(h, [item, { id: 2, file: { name: 'b.dng' }, settings: null }]);
+  await c.switchToFile(1);
+  assert.equal(h.target.photoSessions.get(item).tier, tier, `${label}: left as Tier ${tier}`);
+  item.settings = { ...item.settings, autoFrameMeta: { imageArea: area } };
+  h.target.restoreAutoFrameDiagnostics = meta => { h.state.autoFrame.lastDiagnostics = meta ? structuredClone(meta) : null; };
+  let veiled = null;
+  h.target.prepareStudioPhoto = async () => {
+    veiled = h.target.document.body.dataset.photoSwitching;
+    await c.processNegative({ quiet: true });
+  };
+  h.target.decodeBase = () => base;
+  const before = h.requests.length;
+  await c.switchToFile(0);
+  await settle();
+  assert.equal(h.target.displaySessionDiagnostics.recipeChanged, 1, `${label}: recipe changed`);
+  assert.equal(veiled, 'true', `${label}: converted behind the veil`);
+  const expected = sampleAnalysisArea(base, area);
+  sameSample(c.getColorAnalysisSample(h.state), expected, `${label}: the sample of the new area`);
+  assert.ok(h.requests.length > before, `${label}: converted`);
+  sameSample(h.requests.at(-1).options.analysisImageData, expected, `${label}: the conversion request carries it`);
+  assert.equal(h.target.displaySessionDiagnostics.sampleMisses, 0, `${label}: no conversion missed its sample`);
+  assert.equal(h.target.baseDecodes || 0, decodes, `${label}: ${decodes} decode(s)`);
+}
+
+// ---- The safety net: a settings refresh that moved the area of a Tier A
+// photo (no sample kept for it). processNegative and the export barrier wait
+// for the base first; a preview converted without the sample meanwhile is
+// converted again once the base is back; a base that cannot be read fails
+// the export instead of exporting other pixels ----
+{
+  const tierAWithNewArea = async () => {
+    const photo = await convertedPhoto({ sessionBudget: 1 << 30, conversionRequests: true });
+    const { h, c, item } = photo;
+    vm.runInContext(functionSource('ensureFullResolutionReadyForExport'), c);
+    h.target.displaySessionDiagnostics.force = 'A';
+    wireSwitching(h, [item, { id: 2, file: { name: 'b.dng' }, settings: null }]);
+    await c.switchToFile(1);
+    await c.switchToFile(0);
+    assert.deepEqual(leftAs(h), { base: false, descriptor: true });
+    h.state.autoFrame.lastDiagnostics = { imageArea: AREA3, appliedMode: 'crop' };
+    assert.equal(c.colorAnalysisSampleMissing(), true, 'no sample kept for the new area');
+    return photo;
+  };
+  // processNegative: the conversion waits for the base.
+  {
+    const { h, c, base } = await tierAWithNewArea();
+    h.target.decodeBase = () => base;
+    const before = h.requests.length;
+    await c.processNegative({ quiet: true });
+    assert.equal(h.target.baseDecodes, 1, 'processNegative decoded the base first');
+    assert.equal(h.requests.length, before + 1);
+    sameSample(h.requests.at(-1).options.analysisImageData, sampleAnalysisArea(base, AREA3), 'and converted with the sample');
+    assert.equal(h.target.displaySessionDiagnostics.sampleMisses, 0);
+  }
+  // A slider preview converts without it; the export waits for the base and
+  // has the photo converted again.
+  {
+    const { h, c, base } = await tierAWithNewArea();
+    await c.convertFromCurrentSource(h.state, { preview: true, interactive: true, includeAnalysisPreview: false });
+    assert.equal(h.requests.at(-1).options.analysisImageData, null, 'a slider preview does not wait');
+    assert.equal(h.target.displaySessionDiagnostics.sampleMisses, 1);
+    const reruns = [];
+    h.target.scheduleCoreReprocess = options => reruns.push(options);
+    h.target.decodeBase = () => base;
+    await c.ensureFullResolutionReadyForExport();
+    assert.equal(h.target.baseDecodes, 1, 'the export waited for the base');
+    assert.deepEqual(leftAs(h), { base: true, descriptor: false });
+    assert.deepEqual(reruns.map(options => ({ ...options })), [{ full: true }], 'the photo is converted again, with the sample');
+    sameSample(c.getColorAnalysisSample(h.state), sampleAnalysisArea(base, AREA3), 'the sample of the new area');
+  }
+  // A base that cannot be read: no export of other pixels.
+  {
+    const { h, c } = await tierAWithNewArea();
+    h.target.decodeBase = () => Promise.reject(new Error('read failed'));
+    await assert.rejects(c.ensureFullResolutionReadyForExport(), /Error loading file/);
+    assert.equal(c.colorAnalysisSampleMissing(), true);
+  }
+  // With the sample kept, the export reads no base (2f4a88d).
+  {
+    const { h, c } = await tierAWithNewArea();
+    h.state.autoFrame.lastDiagnostics = { imageArea: AREA, appliedMode: 'crop' };
+    await c.ensureFullResolutionReadyForExport();
+    assert.equal(h.target.baseDecodes, undefined, 'a Tier A export with its sample decodes nothing');
+  }
+}
+
+// ---- Export parity, old vs new, on synthetic data: the full-resolution
+// request a Tier A photo builds after an Undo across Confirm image area
+// converts (real SilverCore) to the pixels a photo with its base, a cold
+// reopen and 1703835 give. Before the fix it carried no sample, and the
+// engine analysed the working frame instead (other pixels) ----
+{
+  const { convertColorWithSilverCore, invalidateSilverCoreCache } = await import('../pipeline/silverAdapter.js');
+  // A negative inside the image area, a bright rebate around it: the frame
+  // the crop converts holds some rebate, the sample of the area none.
+  const width = 96, height = 64;
+  const data16 = new Uint16Array(width * height * 4);
+  for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+    const inside = x >= width * 0.2 && x < width * 0.8 && y >= height * 0.2 && y < height * 0.8;
+    const v = 4000 + (x * 173 + y * 719) % 24000;
+    data16.set(inside ? [Math.min(65535, v * 1.8), v, v * 0.6, 65535] : [65535, x % 5 ? 0 : 65535, 0, 65535], (y * width + x) * 4);
+  }
+  const structured = new ImageData(Uint8ClampedArray.from(data16, v => v >>> 8), width, height);
+  structured.__image16 = { width, height, data: data16 };
+  const { h, c, base, item } = await convertedPhoto({ sessionBudget: 1 << 30, base: structured, conversionRequests: true });
+  h.target.displaySessionDiagnostics.force = 'A';
+  confirmImageArea(h, c, item, AREA2);
+  wireSwitching(h, [item, { id: 2, file: { name: 'b.dng' }, settings: null }]);
+  await c.switchToFile(1);
+  await c.switchToFile(0);
+  assert.deepEqual(leftAs(h), { base: false, descriptor: true });
+  await c.performUndo();
+  await settle();
+  // The export's exact render.
+  await c.convertFromCurrentSource(h.state, { preview: false });
+  const request = h.requests.at(-1);
+  assert.equal(request.options.forceFullProcess, true);
+  assert.equal(request.imageData, h.state.conversionSourceImageData, 'the kept source');
+  const settings = { colorModel: 'standard', preSaturation: 115, borderBuffer: 10, filmBase: { r: 210, g: 120, b: 70 } };
+  const convert = async analysisImageData => {
+    invalidateSilverCoreCache();
+    return convertColorWithSilverCore(request.imageData, settings, { preview: false, forceFullProcess: true, includeAnalysisPreview: true, analysisImageData });
+  };
+  const tierA = await convert(request.options.analysisImageData);
+  const withBase = await convert(sampleAnalysisArea(base, AREA));
+  const before = await convert(null);
+  samePixels(tierA, withBase, 'Tier A after Undo == the photo with its base (cold reopen, 1703835)');
+  assert.ok(tierA.__analysisPreview && withBase.__analysisPreview, 'auto WB reads the analysis preview of the sample');
+  assert.ok(Buffer.from(tierA.__analysisPreview.data).equals(Buffer.from(withBase.__analysisPreview.data)), 'the same analysis preview');
+  assert.ok(!Buffer.from(before.__image16.data.buffer).equals(Buffer.from(withBase.__image16.data.buffer)),
+    'without the sample (before the fix) the engine converted other pixels');
+}
+
+console.log('displaySessions: Tier A, Tier B, demotion, spill, ensureBase/ensureSource, invalidation, the proxy invariant and the colour-analysis sample across Undo, Redo and recipe changes (export parity) passed');

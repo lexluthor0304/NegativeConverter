@@ -39,6 +39,9 @@ export function displaySessionStubs(overrides = {}) {
     captureDisplaySession: () => null, tierASession: () => null, spillDisplaySession: () => false,
     coldHistory: entries => entries.filter(entry => !entry.dustDelta).map(entry => ({ ...entry, refs: { cold: true } })),
     requestSourceForDisplay: () => {}, ensureSource: async () => true, ensureBase: async () => null,
+    // Every photo has its base: no colour-analysis sample is ever missing.
+    colorAnalysisSampleMissing: () => false, ensureColorAnalysisSample: async () => true,
+    colorAnalysisSampleMissedBy: null, analysisSamplesFor: () => new Map(),
     forgetDisplayProxies: () => {}, readSpilledDisplaySession: async () => null,
     fillDisplayProxy: async () => false, displayProxyFillPlan: () => null,
     // Part 3: no persistent store.

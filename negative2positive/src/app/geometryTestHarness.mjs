@@ -102,6 +102,7 @@ const FUNCTIONS = [
   'ensureSource', 'prepareOriginalForTool', 'displayProxyMatches', 'requestSourceForDisplay',
   'selfCheckDisplayProxy', 'spillDisplaySession', 'displaySessionMeta', 'forgetDisplayProxies',
   'readSpilledDisplaySession', 'spilledDisplayEntry', 'activateDisplaySession', 'getColorAnalysisSample',
+  'colorAnalysisSampleMissing', 'ensureColorAnalysisSample', 'analysisSamplesFor',
   'hasSeparateConversionPreview', 'displayProxyShape', 'displayProxyFillPlan', 'fillDisplayProxy', 'readStoredDisplaySession',
   'expectedStoredProxyKey', 'persistDisplayProxy', 'displayProxyFileKeyFor', 'persistPresentationPreview',
   'presentStoredPreview', 'encodePresentationJpeg'
@@ -116,7 +117,7 @@ export function applyCropHandlerSource() {
   return 'var applyCropHandler = ' + source.slice(start + marker.length - 'async () => {'.length, end) + '\n    };';
 }
 
-export function createHarness(base, { historyBudget = 768 * 1024 * 1024, sessionBudget = 768 * 1024 * 1024, workers = null, realProcessNegative = false, displayLevels = false } = {}) {
+export function createHarness(base, { historyBudget = 768 * 1024 * 1024, sessionBudget = 768 * 1024 * 1024, workers = null, realProcessNegative = false, displayLevels = false, conversionRequests = false } = {}) {
   const displayed = [];
   const conversions = [];
   const state = {
@@ -296,8 +297,27 @@ export function createHarness(base, { historyBudget = 768 * 1024 * 1024, session
       releaseBeforeAfterCanvas: () => {}, refreshCanvasContainerSize: () => {}
     });
   }
-  vm.runInContext([...FUNCTIONS, ...(realProcessNegative ? ['processNegative'] : [])].map(functionSource).join('\n'), context);
+  // `conversionRequests`: the real request convertFromCurrentSource builds
+  // (#249: the colour-analysis sample it carries), recorded in `requests` by
+  // the worker clients, which answer with a copy of the image they were sent.
+  const requests = [];
+  if (conversionRequests) {
+    delete target.convertFromCurrentSource;
+    const answer = request => {
+      requests.push(request);
+      const size = request.display ? request.display.target : request.imageData;
+      return makeBase(size.width, size.height, 7);
+    };
+    Object.assign(target, {
+      buildRouterSettings: settings => ({ autoFrameMeta: settings === state ? state.autoFrame.lastDiagnostics : settings.autoFrameMeta }),
+      HISTOGRAM_MAX_SAMPLES: 1,
+      convertPreviewFrameInWorker: async request => answer(request),
+      convertFrameOffMainThread: async request => answer(request)
+    });
+  }
+  vm.runInContext([...FUNCTIONS, ...(realProcessNegative ? ['processNegative'] : []),
+    ...(conversionRequests ? ['convertFromCurrentSource', 'previewRequestImage'] : [])].map(functionSource).join('\n'), context);
   if (levelStubs) Object.assign(target, levelStubs);
   const jobs = () => pool.counters.jobs;
-  return { context, state, pool, displayed, conversions, target, jobs };
+  return { context, state, pool, displayed, conversions, target, jobs, requests };
 }

@@ -90,9 +90,14 @@ size, 16-bit plane and decode route, registered under the base's geometry id)
 and stand-ins `{ width, height, released }` for the planes it dropped; a Tier B
 session keeps `state.sourcePending` (the source's size and the proxy's key)
 too. Readers of the base's size use `baseSizeSource()`, readers of the
-source's size `conversionSourceSize()`; the colour-analysis sample stays
-cached on the descriptor, and the auto-WB sample is keyed by the level until
-the source is back (`autoWbSampleKey()`). The proxy's key is the base
+source's size `conversionSourceSize()`; the auto-WB sample is keyed by the
+level until the source is back (`autoWbSampleKey()`). The descriptor carries
+the colour-analysis samples (`samples`, one per area key, counted by the
+session budget): a Tier B session that of its area, a Tier A session those of
+every area its recipe and its kept undo/redo entries name, taken from the
+base when the photo is left (`analysisSamplesFor`, a few ms per area besides
+the one in use), so Undo and Redo across Confirm image area convert with the
+sample a decoded base gives. The proxy's key is the base
 (size, depth, decode route), the geometry, lens correction and the analysis
 area; no viewport, since the level serves any window.
 
@@ -128,11 +133,21 @@ area; no viewport, since the level serves any window.
   a cold geometry entry) runs as a geometry job that first awaits the base;
   crop mode, Auto Frame, film-base sampling and detection, the flat field,
   Reprocess from original, Compare, every export and full-resolution render
-  (dust, the AI brush) and native-pixel detail regions at zoom (#248's detail
-  layer; regions drawn from the level need nothing) await `ensureSource()`.
+  of a Tier B session (dust, the AI brush; a Tier A one keeps its source) and
+  native-pixel detail regions at zoom (#248's detail layer; regions drawn from
+  the level need nothing) await `ensureSource()`.
   Meanwhile the editor is locked and the frame notice reads
   "Preparing original…" (`body[data-studio-preparing]`). A settings-only
-  refresh with the same geometry keeps the crop.
+  refresh with the same geometry keeps the crop. A conversion whose area has
+  no sample on the descriptor (a recipe that moved the area while the photo
+  was away, a settings refresh) never settles without it
+  (`ensureColorAnalysisSample()`): the recipe-changed activation,
+  `processNegative`, every settle of `rerenderWithCoreControls` (a full
+  request, also one routed to the display preview: Undo and Redo convert
+  through these) and the export barrier wait for the base first, with the
+  same notice; slider ticks meanwhile convert without it, and `ensureBase()`
+  has the photo converted again. A base that cannot be read fails the export
+  ("Error loading file") instead of exporting other pixels.
 - **Invariant.** A proxy is display-only: it is never assigned to
   `loadedBaseImageData`, `originalImageData`, `croppedImageData` or
   `conversionSourceImageData`, and exports always wait for the real source

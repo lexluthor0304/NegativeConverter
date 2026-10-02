@@ -3208,6 +3208,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           // The restored frame is on screen in the next frame. Its pixels can
           // still lag its settings (captured while a reprocess was pending),
           // so convert once; above 16 MP that is a display-preview conversion.
+          // On a session without its base (#249) it converts with the
+          // restored area's colour-analysis sample, waiting for the base when
+          // the descriptor has none (rerenderWithCoreControls); a cold entry
+          // converts through processNegative, which does the same.
           updatePreview();
           void runCoreReprocess({ full: true, token: coreReprocessToken, sourceRef: state.conversionSourceImageData });
         } else {
@@ -4748,24 +4752,52 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       };
     }
 
+    // A decoded base caches the sample of the area last asked for; a base
+    // descriptor (#249) carries `samples`, one per area key.
     const colorAnalysisSamples = new WeakMap();
+    // The descriptor a conversion of the live photo missed its sample on:
+    // ensureBase() converts that photo again once its base is back.
+    let colorAnalysisSampleMissedBy = null;
     function getColorAnalysisSample(settings = state, source = baseSizeSource()) {
       if (!source) return null;
       const meta = settings === state ? state.autoFrame.lastDiagnostics : settings.autoFrameMeta;
       const area = meta?.imageArea || meta?.analysisArea;
       if (!area) return null;
       const key = JSON.stringify(area);
-      const cached = colorAnalysisSamples.get(source);
-      if (cached?.key === key) return cached.sample;
-      // A base descriptor (#249) carries the sample its session was left
-      // with; another area reads the base, which the tools changing it await.
+      // A base descriptor (#249) carries the samples of the areas its
+      // session's recipe and history named when it was left (Tier A takes
+      // them all); another area reads the base, which every exact conversion
+      // awaits first (ensureColorAnalysisSample).
       if (source.released) {
+        if (source.samples?.has(key)) return source.samples.get(key);
         displaySessionDiagnostics.sampleMisses++;
+        if (source === state.baseDescriptor) colorAnalysisSampleMissedBy = source;
         return null;
       }
+      const cached = colorAnalysisSamples.get(source);
+      if (cached?.key === key) return cached.sample;
       const sample = sampleAnalysisArea(source, area);
       colorAnalysisSamples.set(source, { key, sample });
       return sample;
+    }
+
+    // Whether a conversion of `settings` would miss its colour-analysis
+    // sample: a session without its base (#249) whose descriptor has none
+    // for the area.
+    function colorAnalysisSampleMissing(settings = state, source = baseSizeSource()) {
+      if (!source?.released) return false;
+      const key = analysisAreaOf(settings === state ? state.autoFrame.lastDiagnostics : settings.autoFrameMeta);
+      return Boolean(key) && !source.samples?.has(key);
+    }
+
+    // The settled view and every export convert with the colour-analysis
+    // sample a decoded base gives: an area the descriptor has no sample for
+    // waits for the base, as the crop tools do ("Preparing original…").
+    // Resolves whether the sample is there.
+    async function ensureColorAnalysisSample(settings = state) {
+      if (!colorAnalysisSampleMissing(settings)) return true;
+      await ensureBase();
+      return !colorAnalysisSampleMissing(settings);
     }
 
     function buildAdjustmentSettings(settings) {
@@ -8314,6 +8346,15 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       else _coreReprocessPreviewInFlight = previewFlight;
 
       try {
+        // A settle (a full request, routed here or to the display preview)
+        // of a session without its base (#249) converts with the
+        // colour-analysis sample a decoded base gives: an area its descriptor
+        // has none for waits for the base. Slider ticks meanwhile convert
+        // without it; ensureBase() converts the photo again.
+        if (options.full && colorAnalysisSampleMissing()) {
+          if (!(await ensureColorAnalysisSample())) return false;
+          if (generation !== coreReprocessGeneration || (sourceRef && state.conversionSourceImageData !== sourceRef)) return false;
+        }
         if (full) {
           // Full-resolution path
           if (options.exact === true && token !== coreReprocessToken) return false;
@@ -8728,8 +8769,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // white balance (a hit converts again).
       await settlePendingCropDetection();
       // A Tier B session rebuilds its source first (#249); a Tier A one exports
-      // from the source it kept, without its base.
+      // from the source it kept, without its base, unless its descriptor has
+      // no colour-analysis sample for the area: then it waits for the base
+      // (and a frame converted without the sample is converted again).
       if (state.sourcePending) await ensureSource();
+      else if (colorAnalysisSampleMissing() && !(await ensureColorAnalysisSample())) {
+        throw new Error(getLocalizedText('loadError', 'Error loading file'));
+      }
       // Export reads the planes of the current geometry.
       await whenGeometrySettled();
       // Crop/analysis confirmation also runs processNegative directly. Its
@@ -8950,6 +8996,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         // Convert the planes of the current geometry, never the previous one;
         // a build superseded while this waited is converted by its successor.
         if (!(await whenGeometrySettled()) || !isCurrentLoad(generation)) return;
+        // A session without its base (#249) converts with the colour-analysis
+        // sample a decoded base gives, waiting for the base when its
+        // descriptor has none for the area.
+        if (colorAnalysisSampleMissing() && (!(await ensureColorAnalysisSample()) || !isCurrentLoad(generation))) return;
         let sourceData = workingPlanes();
         // A display-resolution session (#249) converts the display level it
         // restored (#248), exactly as the source's own level would convert,
@@ -11336,10 +11386,18 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (!stored && !coldOnly && force !== 'B' && force !== 'spill' && !state.sourcePending && entry.snapshot) {
         // Tier A: the conversion source and display planes, without the base
         // and the rotated frame. History that pins its own display planes
-        // goes cold only when that is what keeps it in the budget.
+        // goes cold only when that is what keeps it in the budget. Its base
+        // descriptor carries the colour-analysis sample of every area the
+        // recipe and the history name, taken from the base now (a session
+        // left without its base carries them already).
+        let sampled = null;
         for (const stripPinned of [false, true]) {
           const tierA = tierASession(entry, { stripPinned });
           if (!tierA) break;
+          if (base) {
+            sampled ||= describeBase(base, item.file, analysisSamplesFor(base, [entry.snapshot, ...entry.undo, ...entry.redo]));
+            tierA.baseDescriptor = sampled;
+          }
           if (photoSessions.put(item, tierA)) {
             stored = true;
             displaySessionDiagnostics.tierA++;
@@ -11496,17 +11554,37 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     // A size-only stand-in for the base: registered under the base's geometry
-    // id, with the base's colour-analysis sample, so the kept planes still
-    // match the memo and conversions read the same sample.
-    function describeBase(base, file = state.loadedFile) {
+    // id, with the base's colour-analysis sample (or `samples`, see
+    // analysisSamplesFor), so the kept planes still match the memo and
+    // conversions read the same sample. The samples are an own property:
+    // the session budget counts them.
+    function describeBase(base, file = state.loadedFile, samples = null) {
       if (!base) return state.baseDescriptor;
       if (base.released) return base;
       const descriptor = { width: base.width, height: base.height, has16: Boolean(base.__image16?.data),
         route: decodeRouteOf(file, base), released: true };
       geometryBaseIds.set(descriptor, geometryBaseId(base));
-      const sample = colorAnalysisSamples.get(base);
-      if (sample) colorAnalysisSamples.set(descriptor, sample);
+      const cached = colorAnalysisSamples.get(base);
+      descriptor.samples = samples || new Map(cached ? [[cached.key, cached.sample]] : []);
       return descriptor;
+    }
+
+    // The colour-analysis samples of every area the snapshots' recipes name,
+    // taken from the base as getColorAnalysisSample takes them (the cached
+    // one for the area in use). A Tier A session carries those of its recipe
+    // and its kept history, so Undo, Redo and a settings refresh across
+    // Confirm image area convert as they did with the base: a few ms per
+    // other area when the photo is left.
+    function analysisSamplesFor(base, snapshots) {
+      const samples = new Map();
+      const cached = colorAnalysisSamples.get(base);
+      for (const snapshot of snapshots) {
+        const meta = snapshot?.settings?.autoFrameMeta;
+        const key = analysisAreaOf(meta);
+        if (!key || samples.has(key)) continue;
+        samples.set(key, cached?.key === key ? cached.sample : sampleAnalysisArea(base, meta.imageArea || meta.analysisArea));
+      }
+      return samples;
     }
 
     // The lens remap applyLensCorrectionWithSettings runs, or null.
@@ -11860,11 +11938,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     function spilledDisplayEntry(item, { image, sample, meta }, { proxyKey = displayProxySpill.proxyKey(item.id), stored = false } = {}) {
-      const base = { width: meta.base.width, height: meta.base.height, has16: meta.base.has16, route: meta.base.route, released: true };
+      const base = { width: meta.base.width, height: meta.base.height, has16: meta.base.has16, route: meta.base.route, released: true,
+        samples: new Map(sample && meta.area ? [[meta.area, sample]] : []) };
       geometryBaseIds.set(base, nextGeometryBaseId++);
       const key = geometryKeyFor(base, { rotationAngle: meta.geometry.angle, mirrored: meta.geometry.mirrored, cropRegion: meta.geometry.crop });
       const { frame, crop } = displayStandIns(key, { width: key.frameWidth, height: key.frameHeight }, meta.cropSize || { width: 0, height: 0 });
-      if (sample && meta.area) colorAnalysisSamples.set(base, { key: meta.area, sample });
       // The level again, with its source geometry (#248). A frame that is
       // its own level (k = 1, only below the large-image size unless a debug
       // threshold lowers it) comes back as the plane itself.
@@ -12002,8 +12080,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         restoreSettings(fileItem.settings, { refreshDisplay: false });
         fileItem.isDirty = false;
       }
-      // Detections a recipe still owes (the frame, the film edge) read the base.
-      if (!fileItem.settings?.autoFrameMeta || !fileItem.settings?.filmEdge?.checked) {
+      // Detections a recipe still owes (the frame, the film edge) read the
+      // base, and so does the colour-analysis sample of an area the session
+      // was not left with (a recipe that moved the area while it was away).
+      if (!fileItem.settings?.autoFrameMeta || !fileItem.settings?.filmEdge?.checked || colorAnalysisSampleMissing()) {
         if (!(await ensureBase()) || !isCurrentLoad(generation)) return;
       }
       await prepareStudioPhoto(generation, fileItem, { quiet: true });
@@ -12063,12 +12143,19 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
             return null;
           }
           geometryBaseIds.set(base, geometryBaseId(descriptor));
-          const sample = colorAnalysisSamples.get(descriptor);
-          if (sample) colorAnalysisSamples.set(base, sample);
+          // The sample of the area in use comes along; the base gives any other.
+          const area = analysisAreaOf(state.autoFrame.lastDiagnostics);
+          if (area && descriptor.samples?.has(area)) colorAnalysisSamples.set(base, { key: area, sample: descriptor.samples.get(area) });
           state.loadedBaseImageData = base;
           if (!state.rawMetadata && decoded.rawMetadata) state.rawMetadata = decoded.rawMetadata;
           state.baseDescriptor = null;
           reviveFrameDescriptor();
+          // A frame converted without its colour-analysis sample meanwhile (a
+          // slider preview) is converted again with it.
+          if (colorAnalysisSampleMissedBy === descriptor) {
+            colorAnalysisSampleMissedBy = null;
+            scheduleCoreReprocess({ full: true });
+          }
           return base;
         } catch (error) {
           if (error?.name !== 'AbortError') console.warn('Decoding the original of a restored photo failed:', error);

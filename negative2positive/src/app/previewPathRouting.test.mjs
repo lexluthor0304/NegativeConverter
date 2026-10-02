@@ -894,4 +894,38 @@ for (const large of [false, true]) {
   assert.equal(rebuilt, 0, 'no decode of the base for an export');
 }
 
-console.log('previewPathRouting: downgraded undo/reset routing, kept planes, idle repair pass, restore flags and paint, viewport branches, Step-3 gate, export repair waits, aborted exact renders and the repaired preview source passed');
+// ---- #249 (R2-001): on a session without its base whose descriptor has no
+// colour-analysis sample for the area, a settle (a full request, converted
+// in full or routed to the display preview) waits for the base before it
+// converts; a slider tick converts at once (ensureBase() has it converted
+// again); the export barrier waits too ----
+for (const large of [true, false]) {
+  const f = fixture({ large });
+  let missing = true, waits = 0, release;
+  const back = new Promise(resolve => { release = resolve; });
+  f.context.colorAnalysisSampleMissing = () => missing;
+  f.context.ensureColorAnalysisSample = async () => { waits++; await back; missing = false; return true; };
+  const tick = f.context.rerenderWithCoreControls({ full: false });
+  await settle();
+  assert.equal(f.clients.preview.length, 1, 'a tick converts at once');
+  assert.equal(waits, 0, 'without waiting for the base');
+  f.reply('preview');
+  await tick;
+  const settling = f.context.rerenderWithCoreControls({ full: true });
+  await settle();
+  assert.equal(waits, 1, 'the settle waits for the base');
+  assert.equal(f.clients.preview.length + f.clients.shared.length + f.clients.exact.length, 1, 'and converts nothing before it is back');
+  release();
+  await settle();
+  const kind = large ? 'preview' : 'shared';
+  assert.equal(f.clients[kind].length, large ? 2 : 1, `then converts (${kind})`);
+  f.reply(kind);
+  assert.equal(await settling, true);
+  // The export barrier: a base that cannot be read fails the export.
+  missing = true;
+  f.context.ensureColorAnalysisSample = async () => false;
+  f.context.getLocalizedText = (key, fallback) => fallback;
+  await assert.rejects(f.context.ensureFullResolutionReadyForExport(), /Error loading file/);
+}
+
+console.log('previewPathRouting: downgraded undo/reset routing, kept planes, idle repair pass, restore flags and paint, viewport branches, Step-3 gate, export repair waits, aborted exact renders, the repaired preview source and the colour-analysis sample barrier passed');
