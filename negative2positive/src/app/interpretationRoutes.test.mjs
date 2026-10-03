@@ -15,7 +15,7 @@ import { convertFrameWithRouter } from '../pipeline/conversionRouter.js';
 import { applyPreparedAdjustmentsToBuffer, applyPreparedAdjustmentsToBuffer16 } from './adjustmentPipeline.js';
 import { resolveAnalysisRegion, analysisPixelBounds } from './analysisRegion.js';
 import { planeBuffersOf, sharesPlaneBuffers, markOwnedPlanes } from './planeRelease.js';
-import { downsampleImageDataForMaxPixels } from './imageDataOps.js';
+import { downsampleImageDataForMaxPixels, downsampleImageDataForMaxDim } from './imageDataOps.js';
 import { analyzeExpiredFilm, defaultExpiredRescueParams, sanitizeExpiredAnalysis, sanitizeExpiredRescueParams,
   EXPIRED_RESCUE_DEFAULTS, EXPIRED_RESCUE_KEYS } from '../pipeline/expiredRescue.js';
 
@@ -75,7 +75,7 @@ async function fixture({ type = 'positive', mode = 'correct', manual = false } =
   };
   Object.assign(target, filmType, { RECIPE_KEYS, EXPIRED_RESCUE_DEFAULTS, EXPIRED_RESCUE_KEYS,
     sanitizeSemanticMap, sanitizeExpiredAnalysis, sanitizeExpiredRescueParams, analyzeExpiredFilm, defaultExpiredRescueParams,
-    resolveAnalysisRegion, analysisPixelBounds, downsampleImageDataForMaxPixels,
+    resolveAnalysisRegion, analysisPixelBounds, downsampleImageDataForMaxPixels, downsampleImageDataForMaxDim,
     hasWindowEdits, overlayWindowEdits, mergeStudioColors, planeBuffersOf, sharesPlaneBuffers, markOwnedPlanes,
     deepCopySanitizedSettings, buildRollProject,
     decodedRecipe: null, expiredAnalysisKey: null, expiredTabPending: false,
@@ -444,5 +444,18 @@ if (selection === 'all' || selection === 'copy-adoption') {
     assert.deepEqual(canon(state.expiredAnalysis), canon(old.expiredAnalysis), 'batch adoption never mutates live history measurement');
     f.pool.dispose(); cases++;
   }
+  const f = await fixture(), { context: c, state, old } = f;
+  const item = state.fileQueue[0];
+  item.settings = c.cloneSettings({ ...old, semanticMap: null, expiredAnalysis: null });
+  const reduced = await c.processFileWithSettings(f.file, c.cloneSettings(item.settings), {
+    sourceImageData: base, tileMaxDimension: 32, bitDepth: 16 });
+  assert.equal(reduced.width, 32, 'actual contact-sheet route measures a reduced source');
+  assert.equal(item.settings.expiredAnalysis, null, 'reduced contact-sheet measurement cannot enter full-resolution saved recipe');
+  const count = f.measurements.length;
+  const full = await c.processFileWithSettings(f.file, item.settings, { sourceImageData: base, bitDepth: 16 });
+  assert.equal(full.width, width);
+  assert.equal(f.measurements.length, count + 1, 'subsequent full export must measure its full source');
+  assert.ok(item.settings.expiredAnalysis, 'full-source result adopted by saved recipient');
+  f.pool.dispose(); cases++;
 }
 console.log(`interpretationRoutes: ${cases} tiny real-caller/conversion/rescue/batch cases; explicit WB/strengths, saved same-type analysis and history preserved; exact 8/16 samples`);
