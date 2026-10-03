@@ -4,7 +4,7 @@ import vm from 'node:vm';
 import { createCoreReprocessGates } from './coreReprocessDispatcher.js';
 import { routeCoreConversion, keepsFullPlaneOnDowngrade, fullResolutionIsStale } from './fullResolutionRouting.js';
 import { DISABLED_GPU_PREVIEW_SCHEDULER } from './gpuPreviewScheduler.js';
-import { hasWindowEdits, geometryEdits, overlayWindowEdits } from './provisionalPhoto.js';
+import { hasWindowEdits, geometryEdits, overlayWindowEdits, createExactGeometry, analysisAreaEdited, confirmedImageArea } from './provisionalPhoto.js';
 import { displaySessionStubs, DISPLAY_SESSION_HELPERS } from './displaySessionHarness.mjs';
 import { applyLearnedDefaults, learnedDefaultsKey } from './learnedDefaults.js';
 import { decideRollFilmType, mergeRollDecision, ownFilmTypeVerdict, rollDecisionFrame, rollFilmTypeTarget, ROLL_MONOCHROME } from './rollFilmType.js';
@@ -624,7 +624,8 @@ function prepareFixture({ itemSettings = null, detectFrame = true, learned = 0 }
     // Outside a roll import (#231), with the geometry already built (#244).
     settleImportFilmType: (target, settings) => settings, deferImportFilmTypeToast: () => false,
     // Not a two-stage stand-in and no window edits (#255).
-    hasWindowEdits, geometryEdits, overlayWindowEdits, defaultSettingsInputs: () => ({}), startProvisionalSettle: noop,
+    hasWindowEdits, geometryEdits, overlayWindowEdits, analysisAreaEdited, confirmedImageArea,
+    defaultSettingsInputs: () => ({}), startProvisionalSettle: noop,
     reviewForItem: () => ({ reasons: [] }), whenGeometrySettled: async () => true, pendingImportRotation: null,
     // Apply Crop's crop-area detection counter and crop view proxy (#245).
     noteConversionStarted: noop, scheduleCropViewProxy: noop,
@@ -659,7 +660,7 @@ function prepareFixture({ itemSettings = null, detectFrame = true, learned = 0 }
   vm.runInContext([
     ...DISPLAY_SESSION_HELPERS,
     'prepareStudioPhoto', 'startImportDetection', 'autoFrameDetectionFilmType', 'buildFinalImportSettings', 'importUserEdited', 'revealProvisionalPhoto',
-    'whiteBalanceMeasurementSettings', 'provisionalWhiteBalanceMeasurement', 'provisionalUnits', 'liveGeometry',
+    'whiteBalanceMeasurementSettings', 'provisionalWhiteBalanceMeasurement', 'provisionalUnits', 'liveGeometry', 'windowFrameIntent',
     'armSettledConversion', 'processNegative', 'scheduleFullResolutionRender', 'withPendingEditsOf',
   ].map(functionSource).join('\n'), context);
   const answer = async (index = conversions.length - 1) => {
@@ -810,7 +811,9 @@ for (const timing of ['during', 'after']) {
   const record = { id: 'full decode' };
   const settles = [], typed = [], edgeOptions = [];
   const toExact = settings => ({ cropRegion: settings.cropRegion ? { ...settings.cropRegion, exact: true } : null, rotationAngle: settings.rotationAngle, mirrored: settings.mirrored });
-  f.state.provisional = { generation: 1, swapped: false, item: f.item, record, geometry: { toExact }, start: null, settledSnapshot: null, passDone: null };
+  const geometry = createExactGeometry({ size: { width: 40, height: 30 }, fullSize: { width: 80, height: 60 } });
+  geometry.toExact = toExact;
+  f.state.provisional = { generation: 1, swapped: false, item: f.item, record, geometry, start: null, settledSnapshot: null, passDone: null };
   f.context.startProvisionalSettle = target => settles.push(target);
   f.context.settleImportFilmType = (target, settings, options) => { typed.push(options); return settings; };
   const mergeEdge = f.context.mergeImportFilmEdge;
