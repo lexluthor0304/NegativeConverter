@@ -168,9 +168,12 @@ instead (step 4 runs it on the full base). It then swaps in one task:
    and Redo stacks overlay each entry's own window edits on the full import's
    recipe, including its automatic film base and geometry. Each entry's
    Apply/Confirm intent is replayed on the full diagnostics. Stand-in hit
-   tokens are discarded. Restoring a
-   promoted entry redetects its crop on the full base before conversion;
-   automatic WB follows that analysis, while manual WB remains the entry's.
+   tokens are discarded. Restoring a promoted entry redetects its crop on
+   the full base before conversion. Automatic WB carries its measurement
+   recipe, geometry and frame intent: a late hit measured after an exposure
+   edit and a completed hit measured before it remain distinct, as with one
+   decode. The swap and cold restores remeasure that event on the full base
+   without installing its older controls; manual WB remains the entry's.
    Pending restoration joins the crop-analysis barrier, so exports and saved
    recipes cannot sample the intermediate diagnostics (#229 R2-052).
 3. The full base is installed (`rawDecodePending` false). The stand-in's

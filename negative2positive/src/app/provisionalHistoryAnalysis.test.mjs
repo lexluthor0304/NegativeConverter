@@ -13,9 +13,12 @@ import { convertColorWithSilverCore } from '../pipeline/silverAdapter.js';
 // Silver conversion, automatic WB and 8/16 adjustment samples. Detection is a leaf.
 const source = readFileSync(process.env.NC229_CALLER_SOURCE || new URL('./main.js', import.meta.url), 'utf8');
 const fn = name => {
-  const start = new RegExp(`^    (?:async )?function ${name}\\(`, 'm').exec(source)?.index;
+  const pattern = new RegExp(`^    (?:async )?function ${name}\\(`, 'm');
+  // A frozen earlier caller never invokes the new provenance helpers.
+  const body = pattern.test(source) ? source : readFileSync(new URL('./main.js', import.meta.url), 'utf8');
+  const start = pattern.exec(body)?.index;
   assert.notEqual(start, undefined, name);
-  return source.slice(start, source.indexOf('\n    }', start) + 6);
+  return body.slice(start, body.indexOf('\n    }', start) + 6);
 };
 const canon = value => JSON.parse(JSON.stringify(value));
 const full = makeBase(64, 48, 39), standIn = makeBase(32, 24, 79);
@@ -43,8 +46,9 @@ function fixture(staged, manualWb = false) {
     estimateAutoWhiteBalance, cropHitHold: false,
     usesSilverCoreConversion: () => true,
     // Use real geometry pixels and WB sampling; no display-sized stand-in.
-    convertFromCurrentSource: async () => convertColorWithSilverCore(state.conversionSourceImageData,
-      { filmBase: state.filmBase, colorModel: 'standard', filmPreset: 'none', borderBuffer: 0, exposure: 0 }),
+    convertFromCurrentSource: async (settings = state) => convertColorWithSilverCore(state.conversionSourceImageData,
+      { filmBase: settings.filmBase, colorModel: 'standard', filmPreset: 'none', borderBuffer: 0, exposure: settings.coreExposure },
+      { analysisImageData: c.getColorAnalysisSample(settings === state ? { ...settings, autoFrameMeta: state.autoFrame.lastDiagnostics } : settings) }),
     runOpenCvTask: async (_kind, options) => {
       await options.build();
       detections.push({ base: state.loadedBaseImageData, crop: { ...state.cropRegion } });
@@ -58,6 +62,7 @@ function fixture(staged, manualWb = false) {
     getUndoLabel: label => label, inferConfidenceLevel: () => 'high', MAX_UNDO: 30 });
   vm.runInContext(['liveGeometry', 'rebaseProvisionalHistory', 'windowFrameMetaOnFull', 'windowFrameIntent', 'frameMetaWithWindowIntent',
     'installFullDecode', 'restoreAutoFrameDiagnostics', 'automaticWhiteBalanceResult', 'maybeAutoWhiteBalance', 'analysisRegionSample',
+    'provisionalWhiteBalanceMeasurement', 'promoteWhiteBalanceMeasurement', 'restorePromotedWhiteBalance',
     'restoreColdSnapshotPixels', 'hasPendingCropDetection', 'settlePendingCropDetection'].map(fn).join('\n'), c);
   c.restoreAutoFrameDiagnostics(staged ? standInMeta : fullMeta);
   return { ...h, detections, held };
@@ -104,9 +109,12 @@ for (const timing of ['pending-hit', 'completed-hit', 'confirmation']) for (cons
   state.provisional = provisional;
   const confirmation = timing === 'confirmation' ? area(.2, .25, .8, .75) : null;
   await apply(h, rect, { held: timing === 'pending-hit', analysisOnly: Boolean(confirmation), selectedArea: confirmation });
+  if (timing !== 'pending-hit') await c.settlePendingCropDetection();
   if (manualBase) state.filmBase = { ...manualFilmBase };
   c.pushUndo('exposure');
   state.exposure = 27;
+  state.coreExposure = 15;
+  await c.processNegative({ automatic: false });
   if (timing === 'pending-hit') await land(h);
   if (stack === 'redo') await c.performUndo();
   const settled = { ...baseline, autoFrameMeta: structuredClone(fullMeta), filmBase: { ...fullFilmBase }, cropRegion: null };
@@ -114,20 +122,28 @@ for (const timing of ['pending-hit', 'completed-hit', 'confirmation']) for (cons
   await c.whenGeometrySettled();
   await c.processNegative();
   await c.settlePendingCropDetection();
+  if (provisional.fullBaseWhiteBalance) await c.restorePromotedWhiteBalance(provisional.fullBaseWhiteBalance, () => true);
   state.provisional = null;
   record.status = 'installed';
   const promoted = [...h.target.undoStack, ...h.target.redoStack].filter(s => s.label === 'exposure');
   assert.ok(promoted.length, 'real exposure history survived source promotion');
   const reference = fixture(false, manualWb);
+  await apply(reference, fullRect, { held: timing === 'pending-hit', analysisOnly: Boolean(confirmation), selectedArea: confirmation });
+  if (timing !== 'pending-hit') await reference.context.settlePendingCropDetection();
   if (manualBase) reference.state.filmBase = { ...manualFilmBase };
-  await apply(reference, fullRect, { analysisOnly: Boolean(confirmation), selectedArea: confirmation });
-  await reference.context.settlePendingCropDetection();
+  reference.context.pushUndo('exposure');
+  Object.assign(reference.state, { exposure: 27, coreExposure: 15 });
+  await reference.context.processNegative({ automatic: false });
+  if (timing === 'pending-hit') await land(reference);
+  if (stack === 'redo') await reference.context.performUndo();
+  await reference.context.processNegative({ automatic: false });
   const restored = stack === 'undo' ? c.performUndo() : c.performRedo();
   // Exact consumers must wait for history's full-base analysis, not see the
   // entry's stand-in hit while an asynchronous restore runs.
   await c.settlePendingCropDetection();
   await restored;
-  reference.state.exposure = stack === 'undo' ? 0 : 27;
+  await (stack === 'undo' ? reference.context.performUndo() : reference.context.performRedo());
+  await reference.context.processNegative({ automatic: false });
   assert.deepEqual(canon(state.filmBase), canon(reference.state.filmBase), 'automatic film base promotes; manual film base stays');
   assert.deepEqual(canon(state.autoFrame.lastDiagnostics), canon(reference.state.autoFrame.lastDiagnostics), `${timing}/${stack}: restored full-base diagnostics`);
   assert.deepEqual([state.wbR, state.wbG, state.wbB], [reference.state.wbR, reference.state.wbG, reference.state.wbB], 'full-base automatic WB');
@@ -135,10 +151,48 @@ for (const timing of ['pending-hit', 'completed-hit', 'confirmation']) for (cons
   for (const depth of [8, 16]) assert.deepEqual(samples(h, depth), samples(reference, depth), `${depth}-bit adjustment samples match one stage`);
   await (stack === 'undo' ? c.performRedo() : c.performUndo());
   await c.settlePendingCropDetection();
-  reference.state.exposure = stack === 'undo' ? 27 : 0;
-  for (const depth of [8, 16]) assert.deepEqual(samples(h, depth), samples(reference, depth), `${depth}-bit samples after opposite history action`);
+  await (stack === 'undo' ? reference.context.performRedo() : reference.context.performUndo());
+  await reference.context.processNegative({ automatic: false });
+  await c.processNegative({ automatic: false });
+  assert.deepEqual([state.wbR, state.wbG, state.wbB], [reference.state.wbR, reference.state.wbG, reference.state.wbB],
+    `${timing}/${stack}/manual WB ${manualWb}/manual base ${manualBase}: opposite history WB`);
+  for (const depth of [8, 16]) assert.ok(Buffer.from(new Uint16Array(samples(h, depth)).buffer).equals(Buffer.from(new Uint16Array(samples(reference, depth)).buffer)),
+    `${timing}/${stack}/manual WB ${manualWb}/manual base ${manualBase}: exact ${depth}-bit samples after opposite history action`);
   assert.ok(h.detections.every(d => d.base === standIn || d.base === full));
   h.pool.dispose(); reference.pool.dispose();
   cases++;
 }
-console.log(`provisionalHistoryAnalysis: ${cases} pending/completed hits and confirmations on undo/redo stacks promote full-base recipe/diagnostics/WB; manual WB/base and exact Silver/8/16 samples preserved`);
+if (selected === 'all') for (const timing of ['pending-hit', 'completed-hit']) {
+  const h = fixture(true), reference = fixture(false), { context: c, state } = h;
+  const baseline = h.target.extractCurrentSettings();
+  const record = { decodedImage: full, status: 'decoded' };
+  const provisional = { size: { width: 32, height: 24 }, fullSize: { width: 64, height: 48 },
+    geometry: createExactGeometry({ size: { width: 32, height: 24 }, fullSize: { width: 64, height: 48 } }), settledSnapshot: baseline, record };
+  state.provisional = provisional;
+  for (const item of [h, reference]) {
+    await item.context.processNegative();
+    await apply(item, null, { analysisOnly: true, selectedArea: area(.2, .25, .8, .75) });
+    await apply(item, item === h ? rect : fullRect, { held: timing === 'pending-hit' });
+    if (timing === 'completed-hit') await item.context.settlePendingCropDetection();
+    item.context.pushUndo('exposure');
+    item.state.coreExposure = 15;
+    await item.context.processNegative({ automatic: false });
+    if (timing === 'pending-hit') await land(item);
+  }
+  const settled = { ...baseline, autoFrameMeta: structuredClone(fullMeta), filmBase: { ...fullFilmBase }, cropRegion: null };
+  c.installFullDecode(record, provisional, full, settled);
+  await c.whenGeometrySettled(); await c.processNegative(); await c.settlePendingCropDetection();
+  await c.restorePromotedWhiteBalance(provisional.fullBaseWhiteBalance, () => true);
+  state.provisional = null; record.status = 'installed';
+  for (const action of ['Undo', 'Undo', 'Undo', 'Redo', 'Redo', 'Redo']) {
+    await c[`perform${action}`](); await c.settlePendingCropDetection();
+    await reference.context[`perform${action}`]();
+    await reference.context.processNegative({ automatic: false });
+    await c.processNegative({ automatic: false });
+    assert.deepEqual(canon(state.autoFrame.lastDiagnostics), canon(reference.state.autoFrame.lastDiagnostics), `${timing}/${action}: entire Confirm/Crop/Exposure history diagnostics`);
+    assert.deepEqual([state.wbR, state.wbG, state.wbB], [reference.state.wbR, reference.state.wbG, reference.state.wbB], `${timing}/${action}: measurement event's WB`);
+    for (const depth of [8, 16]) assert.deepEqual(samples(h, depth), samples(reference, depth), `${timing}/${action}: entire history ${depth}-bit samples`);
+  }
+  h.pool.dispose(); reference.pool.dispose(); cases++;
+}
+console.log(`provisionalHistoryAnalysis: ${cases} pending/completed hits and confirmations on undo/redo stacks promote full-base recipe/diagnostics/WB at the original measurement event; manual WB/base and exact Silver/8/16 samples preserved`);
