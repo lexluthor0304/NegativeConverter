@@ -249,6 +249,7 @@ for (const failConversion of [false, true]) {
     // #248: a small frame is its own level and conversion preview.
     buildDisplayLevelInBands: async image => image, displayLevelFactor: () => 1, conversionTargetFor: image => image,
     maybeAutoWhiteBalance: noop, maybeAnalyzeExpiredRescue: noop,
+    extractCurrentSettings: () => ({ ...state }),
     syncBatchUIState: noop, revealBatchFileList: noop,
     updateStudioThumbnail: noop, scheduleFullUpdate: noop,
     setTimeout: callback => { queueMicrotask(callback); return 1; },
@@ -257,7 +258,8 @@ for (const failConversion of [false, true]) {
       conversions.push({ resolve, exposure: state.coreExposure });
     }),
   });
-  vm.runInContext(functionSource('processNegative'), context);
+  vm.runInContext(['whiteBalanceMeasurementSettings', 'provisionalWhiteBalanceMeasurement', 'provisionalUnits',
+    'liveGeometry', 'processNegative'].map(functionSource).join('\n'), context);
   const oldConversion = context.processNegative();
   await new Promise(setImmediate);
   assert.equal(conversions.length, 1);
