@@ -3094,7 +3094,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // display proxy again, or rebuilds from the base when the geometry
       // differs. Full-base history's pixels and WB remain unfinished after
       // geometry/detection settle; its shared event above must replay too.
-      if (state.geometryPending || state.sourcePending || state.fullBaseHistoryPending || pendingWb) return { label, settings, refs: { cold: true } };
+      // A superseding recipe may still be awaiting its first positive after
+      // the old owner's cancellation; it cannot keep that empty hot frame.
+      if (state.geometryPending || state.sourcePending || state.fullBaseHistoryPending || pendingWb
+        || state.currentStep >= 3 && !state.processedImageData) return { label, settings, refs: { cold: true } };
       const refs = {};
       for (const key of SNAPSHOT_REF_KEYS) {
         refs[key] = state[key];
@@ -18916,7 +18919,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // Reset & Start Over
     // ===========================================
     function resetAllAdjustments() {
+      const rebuildingGeometry = state.geometryPending;
       if (state.originalImageData) pushUndo('resetAllAdjustments');
+      // Unity WB replaces the old measurement intent even if its numeric
+      // baseline was already unity. The saved entry still owns that event.
+      cancelCropDetection();
+      cancelGeometryJob();
+      const ready = rebuildingGeometry ? applyGeometryFromBase() : null;
       // Reset adjustments only
       state.coreFilmPreset = 'none';
       state.coreColorModel = 'standard';
@@ -18969,7 +18978,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       initCurves(true);
       renderCurve();
       markCurrentFileDirty();
-      if (usesSilverCoreConversion(state) && state.conversionSourceImageData) {
+      if (ready && state.currentStep >= 3) {
+        void afterGeometry(ready, isCurrent => convertAfterGeometryEdit(isCurrent, { automatic: false }));
+      } else if (usesSilverCoreConversion(state) && state.conversionSourceImageData) {
         // New conversion settings, as a slider's (scheduleCoreReprocess). An
         // exact render of the old ones in flight (the idle repair pass, the
         // dust-detection or AI-brush barrier) is abandoned: above 16 MP this

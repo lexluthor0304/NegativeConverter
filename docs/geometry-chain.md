@@ -82,6 +82,11 @@ In `main.js` the scalars change synchronously and the planes follow:
   cancels an owned restore even when its geometry key matches a pending job.
   A geometry/analysis edit captures its outgoing history entry first, then
   cancels that owner, including Confirm when the planes do not change.
+  Reset all adjustments likewise captures before cancellation. If geometry
+  is still pending, it rebuilds the requested frame and converts the reset
+  recipe after that build; it never adopts the superseded planes.
+  A positive recipe captured before its first positive exists is cold too,
+  even after an obsolete restoration owner has been detached.
 - Rotate 90° and mirror turn or flip the current display with CSS at once
   (UI only; composed when edits follow each other); the first paint of the
   new planes removes it, on the GL display or on `#canvas`, with the film

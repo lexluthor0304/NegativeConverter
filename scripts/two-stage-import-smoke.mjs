@@ -600,11 +600,14 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
     // then creates history by editing exposure while those pixels are pending.
     if (runs('crop-history')) {
       const historyTimings = ['pending-hit', 'completed-hit', 'pending-at-swap', 'conversion-in-flight', 'cold-undo-edit', 'cold-redo-edit',
-        'ownership-wb', 'ownership-conversion'];
+        'ownership-wb', 'ownership-conversion', 'ownership-reset-wb', 'ownership-reset-conversion', 'ownership-confirm-wb'];
       for (const timing of historyTimings.filter(t => !process.env.TWO_STAGE_HISTORY_TIMINGS
         || process.env.TWO_STAGE_HISTORY_TIMINGS.split(',').includes(t))) {
         const historyRestore = timing.startsWith('cold-');
         const ownershipRestore = timing.startsWith('ownership-');
+        const resetRestore = timing.startsWith('ownership-reset-');
+        const confirmRestore = timing === 'ownership-confirm-wb';
+        const wbReplayOnly = timing.endsWith('-wb');
         const heldConversion = timing === 'conversion-in-flight' || historyRestore || ownershipRestore;
         const unansweredPreview = timing === 'pending-at-swap' || heldConversion;
         const flow = async (staged, recipe = null) => {
@@ -840,12 +843,21 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
               await waitFor(scene + ': ' + action + ' settled', `${ready} && !window.__ncAnalysis.converting()`, 120_000);
             };
             await restore('undo'); // Hot entry before the later Confirm.
+            if (resetRestore && !wbReplayOnly) {
+              // Reset is available before cold restoration clears the
+              // positive. Its real confirmation can complete afterward.
+              await evaluate(`window.__historyResetConfirmHold = event => {
+                if (event.target.closest?.('[data-app-dialog-confirm]')) event.stopImmediatePropagation();
+              }; document.addEventListener('click', window.__historyResetConfirmHold, true);
+              document.getElementById('studioTab-conversion').click(); document.getElementById('studioResetAll').click()`);
+              await waitFor(scene + ': reset confirmation held before cold restore', `!!document.querySelector('[data-app-dialog-confirm]')`, 10_000);
+            }
             if (staged) {
               const before = await evaluate('window.__ncGeometry.diagnostics.coldRestores');
               await evaluate(`window.__historyCropProbe.historyOn = true; window.__historyCropProbe.conversionOn = true;
-                window.__historyCropProbe.wbReplayOnly = ${timing === 'ownership-wb'}; document.getElementById('undoBtn').click()`);
+                window.__historyCropProbe.wbReplayOnly = ${wbReplayOnly}; document.getElementById('undoBtn').click()`);
               await waitFor(scene + ': obsolete ' + timing + ' reply held', `window.__historyCropProbe.conversionHeld.length === 1
-                && ${timing === 'ownership-wb' ? '!' : ''}window.__ncAnalysis.converting() && !window.__ncGeometry.pending()
+                && ${wbReplayOnly ? '!' : ''}window.__ncAnalysis.converting() && !window.__ncGeometry.pending()
                 && !window.__ncAnalysis.pendingDetection() && !${status}.provisional && !${status}.pending`, 60_000);
               await evaluate(`window.__historyCropProbe.oldSettled = false;
                 void window.__ncAnalysis.settle().then(() => { window.__historyCropProbe.oldSettled = true; })`);
@@ -853,26 +865,51 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
               const proof = await evaluate(`({ ...window.__historyCropProbe.dispatched, settled: window.__historyCropProbe.oldSettled,
                 converting: window.__ncAnalysis.converting(), replies: window.__historyCropProbe.conversionHeld.length })`);
               if (proof.coldRestores <= before || proof.settled || proof.replies !== 1 || proof.geometryPending || proof.detecting
-                || proof.exposure !== 15 || proof.converting !== (timing === 'ownership-conversion')
-                || (timing === 'ownership-wb' && !proof.preview)) fail(scene + ': held leaf/old ownership proof: ' + JSON.stringify(proof));
+                || proof.exposure !== 15 || proof.converting !== !wbReplayOnly
+                || (wbReplayOnly && !proof.preview)) fail(scene + ': held leaf/old ownership proof: ' + JSON.stringify(proof));
               console.log(scene + ' held superseded restore proof:', JSON.stringify(proof));
+              // Hold only the obsolete reply; successor renders are real.
+              await evaluate('window.__historyCropProbe.conversionOn = false');
               // The old barrier stays withheld while actual hot Redos replace
               // it. A real slider below captures the superseding history state.
-              await evaluate(`document.getElementById('redoBtn').click(); document.getElementById('redoBtn').click()`);
-              await waitFor(scene + ': hot confirmed recipe restored', `${ready} && document.getElementById('coreExposure').value === '0'`, 60_000);
-              same(scene + ': hot Redo diagnostics', await evaluate('window.__ncAnalysis.diagnostics()'), confirmed.diagnostics);
-              same(scene + ': hot Redo WB', await evaluate('window.__ncAnalysis.whiteBalance()'), confirmed.wb);
+              if (!resetRestore && !confirmRestore) {
+                await evaluate(`document.getElementById('redoBtn').click(); document.getElementById('redoBtn').click()`);
+                await waitFor(scene + ': hot confirmed recipe restored', `${ready} && document.getElementById('coreExposure').value === '0'`, 60_000);
+                same(scene + ': hot Redo diagnostics', await evaluate('window.__ncAnalysis.diagnostics()'), confirmed.diagnostics);
+                same(scene + ': hot Redo WB', await evaluate('window.__ncAnalysis.whiteBalance()'), confirmed.wb);
+              }
             } else {
-              await restore('undo'); await restore('redo'); await restore('redo');
+              await restore('undo');
+              if (!resetRestore && !confirmRestore) { await restore('redo'); await restore('redo'); }
             }
+            let expectedWb = confirmed.wb;
+            if (resetRestore) {
+              if (wbReplayOnly) await evaluate(`document.getElementById('studioTab-conversion').click(); document.getElementById('studioResetAll').click()`);
+              else await evaluate(`document.removeEventListener('click', window.__historyResetConfirmHold, true);
+                delete window.__historyResetConfirmHold; document.querySelector('[data-app-dialog-confirm]').click()`);
+              await waitFor(scene + ': actual reset unity WB', `document.getElementById('coreExposure').value === '0'
+                && ['wbR', 'wbG', 'wbB'].every(key => ${status}.settings[key] === 1)`, 30_000);
+              expectedWb = await evaluate('window.__ncAnalysis.whiteBalance()');
+            } else if (confirmRestore) {
+              recipe.ownershipReplacement ||= { left: Math.floor(frame.width * .25), top: Math.floor(frame.height * .15),
+                width: Math.floor(frame.width * .5), height: Math.floor(frame.height * .7) };
+              await evaluate(`document.getElementById('studioTab-composition').click(); document.getElementById('studioConfirmAnalysis').click()`);
+              await waitFor(scene + ': replacement Confirm opened', `document.getElementById('canvasContainer').classList.contains('crop-mode')`, 30_000);
+              await wait(300);
+              await evaluate(`window.__ncAnalysis.setDraftRect(${JSON.stringify(recipe.ownershipReplacement)}); document.getElementById('applyCropBtn').click()`);
+              await waitFor(scene + ': Confirm alone settled', `${ready} && !window.__ncAnalysis.converting()
+                && !document.getElementById('canvasContainer').classList.contains('crop-mode')`, 120_000);
+              expectedWb = await evaluate('window.__ncAnalysis.whiteBalance()');
+            }
+            const finalExposure = confirmRestore ? 0 : 15;
             await evaluate(`(() => { const el = document.getElementById('coreExposure'); el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
-              el.value = '15'; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); })()`);
-            await noteWb('new edit after hot Redo superseded cold ' + timing);
+              el.value = '${finalExposure}'; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+            await noteWb('new edit after superseding cold ' + timing);
             if (staged) await evaluate('window.__historyCropProbe.releaseConversion()');
             await evaluate('window.__ncAnalysis.settle()');
             await waitFor(scene + ': superseding edit settled', `${ready} && !window.__ncAnalysis.converting()
-              && document.getElementById('coreExposure').value === '15'`, 120_000);
-            same(scene + ': obsolete completion retains confirmed WB', await evaluate('window.__ncAnalysis.whiteBalance()'), confirmed.wb);
+              && document.getElementById('coreExposure').value === '${finalExposure}'`, 120_000);
+            same(scene + ': obsolete completion retains current WB', await evaluate('window.__ncAnalysis.whiteBalance()'), expectedWb);
             result.live = { settings: await evaluate(`${status}.settings`), diagnostics: await evaluate('window.__ncAnalysis.diagnostics()'),
               wb: await evaluate('window.__ncAnalysis.whiteBalance()'), exports: await exportFormats(scene + ' superseding live', [FORMATS[0], FORMATS[2]]) };
           }
@@ -881,7 +918,7 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
             await evaluate(`document.getElementById('${action}Btn').click()`);
             // The exact consumer also waits for promoted history's analysis.
             await evaluate('window.__ncAnalysis.settle()');
-            const exposure = heldConversion && !ownershipRestore ? (action === 'undo' ? '15' : '0') : (action === 'undo' ? '0' : '15');
+            const exposure = heldConversion && !ownershipRestore || confirmRestore ? (action === 'undo' ? '15' : '0') : (action === 'undo' ? '0' : '15');
             await waitFor(scene + ': ' + phase, `${ready} && !window.__ncAnalysis.converting() && document.getElementById('coreExposure').value === '${exposure}'`, 120_000);
             result[phase] = { settings: await evaluate(`${status}.settings`),
               diagnostics: await evaluate('window.__ncAnalysis.diagnostics()'), wb: await evaluate('window.__ncAnalysis.whiteBalance()'),

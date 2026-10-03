@@ -86,7 +86,7 @@ function fixture(staged, manualWb = false) {
     'installFullDecode', 'restoreAutoFrameDiagnostics', 'automaticWhiteBalanceResult', 'maybeAutoWhiteBalance', 'analysisRegionSample',
     'whiteBalanceMeasurementSettings', 'provisionalWhiteBalanceMeasurement', 'promoteWhiteBalanceMeasurement', 'restorePromotedWhiteBalance',
     'restoreColdSnapshotPixels', 'hasPendingCropDetection', 'settlePendingCropDetection',
-    'cancelGeometryJob', 'restoreSettings', 'pushUndo',
+    'cancelGeometryJob', 'restoreSettings', 'pushUndo', 'resetAllAdjustments',
     'waitForProvisionalSwap', 'startCropDetection', 'applyCropDetectionOutcome', 'resolvePendingFrameEdits', 'cloneSettings', 'renderGeometryChain',
     'buildAdjustmentSettings', 'processNegative', 'captureSnapshot', 'restoreSnapshot'].map(fn).join('\n'), c);
   c.restoreAutoFrameDiagnostics(staged ? standInMeta : fullMeta);
@@ -817,8 +817,8 @@ if (selected === 'all' || selected === 'ownership-geometry-settings') {
   assert.equal(event.measurement.settings.coreExposure, 15, 'the saved old dispatch remains valid for its entries');
   h.pool.dispose(); reference.pool.dispose(); cases++;
 }
-for (const history of [false, true]) {
-  if (selected !== 'all' && selected !== 'ownership-swap-completion') continue;
+for (const replacement of ['confirm', 'confirm-history', 'reset']) {
+  if (selected !== 'all' && selected !== (replacement === 'reset' ? 'ownership-swap-reset' : 'ownership-swap-completion')) continue;
   const h = fixture(true), reference = fixture(false), { context: c, state, target } = h;
   const baseline = target.extractCurrentSettings();
   const record = { file: { name: 'ownership.dng' }, decodedImage: full, status: 'decoded', urgent: true, decoded: async () => full };
@@ -855,26 +855,32 @@ for (const history of [false, true]) {
   const event = provisional.fullBaseWhiteBalance, measurement = event.measurement;
   for (const item of [h, reference]) {
     await item.context.processNegative({ automatic: false });
-    await apply(item, null, { analysisOnly: true, selectedArea: area(.2, .25, .8, .75) });
-    if (history) { await item.context.performUndo(); await item.context.performRedo(); }
+    if (replacement === 'reset') resetAdjustments(item);
+    else {
+      await apply(item, null, { analysisOnly: true, selectedArea: area(.2, .25, .8, .75) });
+      if (replacement === 'confirm-history') { await item.context.performUndo(); await item.context.performRedo(); }
+    }
   }
   const wb = [state.wbR, state.wbG, state.wbB];
   c.pushUndo('after-swap-history'); reference.context.pushUndo('after-swap-history');
   for (const item of [h, reference]) item.state.coreExposure = 15;
   target.holdConversion = null;
   h.conversionReplies.splice(0).forEach(resolve => resolve()); await settling;
-  assert.deepEqual([state.wbR, state.wbG, state.wbB], wb, 'superseded full-settle WB cannot overwrite hot restored history');
+  const completedWb = [state.wbR, state.wbG, state.wbB];
+  if (replacement !== 'reset') assert.deepEqual(completedWb, wb, 'superseded full-settle WB cannot overwrite hot restored history');
   assert.equal(state.provisional, null, 'superseded measurement still finishes full-decode admission');
   assert.equal(record.status, 'installed', 'full decode does not remain permanently provisional');
   assert.equal(event.measurement, measurement, 'saved entries retain their immutable completed event');
   h.held.splice(0).forEach(resolve => resolve()); await oldDetector.done;
-  for (const action of ['live', 'Undo', 'Redo', 'Undo', 'Redo']) {
+  if (replacement === 'reset') await compareResetHistory(h, reference, 'full-swap reset');
+  else for (const action of ['live', 'Undo', 'Redo', 'Undo', 'Redo']) {
     if (action !== 'live') {
       await c[`perform${action}`](); await c.settlePendingCropDetection(); await reference.context[`perform${action}`]();
     }
     await c.processNegative({ automatic: false }); await reference.context.processNegative({ automatic: false });
     for (const depth of [8, 16]) assert.deepEqual(samples(h, depth), samples(reference, depth), `swap completion/${action}: strict ${depth}-bit samples`);
   }
+  if (replacement === 'reset') assert.deepEqual(completedWb, wb, 'superseded full-settle WB cannot overwrite reset');
   h.pool.dispose(); reference.pool.dispose(); cases++;
 }
 if (selected === 'all' || selected === 'ownership-cold-confirm') {
@@ -900,6 +906,145 @@ if (selected === 'all' || selected === 'ownership-cold-confirm') {
     await c.processNegative({ automatic: false }); await reference.context.processNegative({ automatic: false });
     for (const depth of [8, 16]) assert.deepEqual(samples(h, depth), samples(reference, depth), `cold Confirm/${action}: strict ${depth}-bit samples`);
   }
+  h.pool.dispose(); reference.pool.dispose(); cases++;
+}
+function resetAdjustments(h) {
+  // The reset caller is real. Its render dependency uses the same real
+  // processNegative/Silver caller; only UI scheduling is replaced.
+  h.target.rerenderWithCoreControls = () => h.context.processNegative({ automatic: false });
+  h.context.resetAllAdjustments();
+}
+async function compareResetHistory(h, reference, label) {
+  const failures = [];
+  for (const action of ['live', 'Undo', 'Redo', 'Undo', 'Redo']) {
+    if (action !== 'live') {
+      await h.context[`perform${action}`](); await h.context.settlePendingCropDetection();
+      await reference.context[`perform${action}`]();
+    }
+    await h.context.processNegative({ automatic: false }); await reference.context.processNegative({ automatic: false });
+    for (const depth of [8, 16]) {
+      try { assert.deepEqual(samples(h, depth), samples(reference, depth)); }
+      catch { failures.push(`${action}: strict ${depth}-bit samples differ`); }
+    }
+  }
+  console.log('ownership reset proof:', JSON.stringify({ label, failures }));
+  assert.deepEqual(failures, [], label + ': reset live/repeated Undo/Redo samples');
+}
+for (const phase of ['wb', 'conversion']) {
+  for (const repeated of [false, true]) {
+    if (selected !== 'all' && selected !== 'ownership-reset' && selected !== `ownership-reset-${phase}`) continue;
+    const { h, reference, event } = await ownershipFixture(), { context: c, state, target } = h;
+    for (const item of [h, reference]) await item.context.performUndo();
+    target.holdConversion = ({ live }) => live === (phase === 'conversion');
+    const obsolete = c.performUndo(), reply = await waitReply(h, phase === 'conversion', 'reset/' + phase);
+    await reference.context.performUndo();
+    const measurement = event.measurement, recipe = canon(measurement.settings);
+    for (const item of [h, reference]) {
+      resetAdjustments(item);
+      if (repeated) resetAdjustments(item);
+      assert.deepEqual([item.state.wbR, item.state.wbG, item.state.wbB], [1, 1, 1], 'the actual reset installs unity WB');
+    }
+    target.holdConversion = null; releaseReply(h, reply); await obsolete; await c.settlePendingCropDetection();
+    const after = [state.wbR, state.wbG, state.wbB];
+    console.log('ownership reset completion:', JSON.stringify({ phase, repeated, heldLivePixels: phase === 'conversion', after,
+      pending: Boolean(state.fullBaseHistoryPending), savedMeasurement: event.measurement === measurement }));
+    await compareResetHistory(h, reference, `reset/${phase}/${repeated ? 'repeated' : 'once'}`);
+    assert.deepEqual(after, [1, 1, 1], 'obsolete history WB cannot overwrite reset unity gains');
+    assert.equal(event.measurement, measurement, 'reset leaves the saved completed event intact');
+    assert.deepEqual(canon(measurement.settings), recipe, 'reset does not rewrite the saved measurement recipe');
+    h.pool.dispose(); reference.pool.dispose(); cases++;
+  }
+}
+for (const phase of ['wb', 'conversion']) {
+  for (const order of phase === 'wb' ? ['old-first', 'new-first'] : ['old-first']) {
+    if (selected !== 'all' && selected !== 'ownership-reset-overlap') continue;
+    const { h, reference, event } = await ownershipFixture(), { context: c, state, target } = h;
+    for (const item of [h, reference]) await item.context.performUndo();
+    target.holdConversion = ({ live }) => live === (phase === 'conversion');
+    const obsolete = c.performUndo(), reply = await waitReply(h, phase === 'conversion', 'reset overlap/' + phase);
+    await reference.context.performUndo();
+    for (const item of [h, reference]) resetAdjustments(item);
+    const newer = c.performUndo(); await reference.context.performUndo();
+    const pending = state.fullBaseHistoryPending, binding = state.fullBaseFrameEdit;
+    assert.ok(pending && binding, 'Undo of reset creates a new actual pending owner');
+    assert.equal(binding.whiteBalance, event, 'Undo still owns the saved immutable event');
+    if (phase === 'wb') {
+      const next = await waitReply(h, false, 'Undo reset WB', [reply]);
+      if (order === 'new-first') {
+        releaseReply(h, next); await newer;
+        assert.equal(state.fullBaseHistoryPending, null, 'new owner completed normally');
+        releaseReply(h, reply); await obsolete;
+      } else {
+        releaseReply(h, reply); await obsolete;
+        assert.equal(state.fullBaseHistoryPending, pending, 'obsolete reset predecessor cannot clear new pending operation');
+        assert.equal(state.fullBaseFrameEdit, binding, 'obsolete reset predecessor cannot clear new live event');
+        releaseReply(h, next); await newer;
+      }
+    } else {
+      releaseReply(h, reply); await obsolete;
+      assert.equal(state.fullBaseHistoryPending, pending, 'serialized obsolete conversion cannot clear new owner');
+      assert.equal(state.fullBaseFrameEdit, binding, 'serialized obsolete conversion cannot clear new event');
+      const next = await waitReply(h, true, 'Undo reset conversion', [reply]);
+      target.holdConversion = null; releaseReply(h, next); await newer;
+    }
+    target.holdConversion = null;
+    await c.settlePendingCropDetection();
+    await compareResetHistory(h, reference, `reset overlap/${phase}/${order}`);
+    assert.equal(event.measurement.settings.coreExposure, 15, 'nested reset/history preserves the immutable dispatch');
+    h.pool.dispose(); reference.pool.dispose(); cases++;
+  }
+}
+if (selected === 'all' || selected === 'ownership-reset-snapshot') {
+  const { h, reference, event } = await ownershipFixture(), { context: c, state, target } = h;
+  for (const item of [h, reference]) await item.context.performUndo();
+  target.holdConversion = ({ live }) => live;
+  const obsolete = c.performUndo(), reply = await waitReply(h, true, 'reset awaiting pixels');
+  await reference.context.performUndo();
+  for (const item of [h, reference]) resetAdjustments(item);
+  assert.equal(state.processedImageData, null, 'the replaced cold conversion has not installed positive pixels');
+  const snapshot = c.captureSnapshot('reset awaiting pixels');
+  assert.equal(snapshot.refs.cold, true, 'the current reset recipe stays cold until positive pixels exist');
+  assert.equal(Boolean(snapshot.settings.fullBaseFrameEdit), false, 'the reset snapshot does not adopt the obsolete WB event');
+  for (const item of [h, reference]) { item.context.pushUndo('coreExposure'); item.state.coreExposure = 15; }
+  target.holdConversion = null; releaseReply(h, reply); await obsolete;
+  await c.processNegative({ automatic: false }); await reference.context.processNegative({ automatic: false });
+  await c.performUndo(); await reference.context.performUndo();
+  assert.ok(state.processedImageData, 'actual Undo rebuilds the reset positive without a compensating render in the test');
+  assert.equal(state.coreExposure, 0, 'actual Undo restores the reset exposure');
+  // The one-stage hot restore schedules a UI reprocess, a leaf in this
+  // harness. Render only that oracle's settled recipe for the comparison.
+  await reference.context.processNegative({ automatic: false });
+  for (const depth of [8, 16]) assert.deepEqual(samples(h, depth), samples(reference, depth), `reset snapshot Undo: strict ${depth}-bit samples`);
+  await compareResetHistory(h, reference, 'reset awaiting pixels');
+  assert.equal(event.measurement.settings.coreExposure, 15, 'the original saved measurement remains intact');
+  h.pool.dispose(); reference.pool.dispose(); cases++;
+}
+if (selected === 'all' || selected === 'ownership-geometry-reset') {
+  const { h, reference, event } = await ownershipFixture(), { context: c, state, target } = h;
+  for (const item of [h, reference]) await item.context.performUndo();
+  target.holdConversion = ({ live }) => !live;
+  const preparing = [];
+  for (let i = 0; i < 3; i++) {
+    const previous = h.conversionReplies.slice();
+    preparing.push(c.performUndo());
+    await waitReply(h, false, 'geometry reset/prepare', previous);
+    await reference.context.performUndo();
+  }
+  target.holdConversion = null;
+  h.conversionReplies.splice(0).forEach(resolve => resolve());
+  await Promise.all(preparing); await c.settlePendingCropDetection();
+  const obsolete = c.performRedo(), obsoleteReference = reference.context.performRedo();
+  assert.equal(state.geometryPending, true, 'actual cold Redo is rebuilding geometry when reset starts');
+  const geometry = canon({ rotationAngle: state.rotationAngle, mirrored: state.mirrored, cropRegion: state.cropRegion });
+  for (const item of [h, reference]) resetAdjustments(item);
+  assert.equal(state.fullBaseHistoryPending, null, 'reset detaches the old geometry-phase history owner');
+  assert.equal(state.fullBaseFrameEdit, null, 'reset owns no old WB binding');
+  assert.equal(state.geometryPending, true, 'reset starts a real replacement geometry build');
+  await obsolete; await obsoleteReference; await c.whenGeometrySettled(); await reference.context.whenGeometrySettled();
+  assert.deepEqual(canon({ rotationAngle: state.rotationAngle, mirrored: state.mirrored, cropRegion: state.cropRegion }), geometry,
+    'reset keeps the requested geometry rather than the superseded planes');
+  await compareResetHistory(h, reference, 'reset during geometry');
+  assert.equal(event.measurement.settings.coreExposure, 15, 'geometry reset preserves the saved measurement');
   h.pool.dispose(); reference.pool.dispose(); cases++;
 }
 if (selected === 'parking-barrier') console.log('provisionalHistoryAnalysis: real promoted history keeps the cached worker until full-base detection settles, then parking releases ownership');

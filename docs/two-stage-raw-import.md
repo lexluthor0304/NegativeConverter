@@ -198,6 +198,11 @@ instead (step 4 runs it on the full base). It then swaps in one task:
    invalidates the superseded live binding through geometry cancellation.
    Apply/Confirm captures the outgoing entry before cancellation, including
    analysis-only Confirm with unchanged geometry planes.
+   Reset all adjustments also replaces the operation after saving Undo:
+   unity gains are a new WB intent even when the old baseline was unity.
+   Any still-requested geometry rebuilds before the reset conversion.
+   Snapshots without the required positive remain cold after the old owner
+   is detached, so Undo rebuilds that new recipe instead of a missing frame.
    Saved entries retain their completed measurements and intent. The old
    finalizer compares its promise identity and cannot clear a newer restore.
    Conversion replies also compare the operation token after geometry/source
@@ -412,8 +417,15 @@ previously configured photos, hits, misses and manual confirmations.
   held, and create a new exposure edit. The WB-only scene proves that live
   conversion, geometry and detection finished before the held reply. Both
   scenes compare live and repeated Undo/Redo PNG8/TIFF16 decoded samples and
-  file bytes with one stage. `TWO_STAGE_HISTORY_TIMINGS` can select individual
-  timings during development; the default crop-history gate runs all eight.
+  file bytes with one stage. Two reset scenes replace cold WB/conversion with
+  the actual Reset all adjustments action; a Confirm-only scene replaces
+  cold WB with a new analysis area, without intervening Undo/Redo. Each then
+  edits exposure and compares live and repeated Undo/Redo PNG8/TIFF16 samples
+  and bytes. The conversion reset opens its real confirmation on the hot
+  photo, holds that UI reply, and accepts it during cold conversion, when a
+  newly opened Reset action would be disabled. `TWO_STAGE_HISTORY_TIMINGS`
+  can select individual timings during development; the default crop-history
+  gate runs all eleven.
 
 ## Verification on real files (not in the repository)
 
