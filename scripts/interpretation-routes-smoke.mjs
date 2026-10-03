@@ -342,7 +342,7 @@ export async function runInterpretationRoutesSmoke({ send, evaluate, waitFor, wa
     await evaluate(`(() => {
       for (const [key, value] of Object.entries(${JSON.stringify(values)})) {
         const input = document.getElementById(key + 'Value'); input.value = String(value);
-        input.dispatchEvent(new Event('input', { bubbles: true })); input.dispatchEvent(new Event('change', { bubbles: true }));
+        input.dispatchEvent(new Event('input', { bubbles: true })); input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
       }
     })()`);
     await evaluate('window.__ncAnalysis.settle()');
