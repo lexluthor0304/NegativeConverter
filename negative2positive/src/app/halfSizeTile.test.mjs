@@ -9,7 +9,7 @@ import { reducedTileGeometry, renderReducedGeometry, reducedGeometryExact, tileG
 import { planGeometry, renderGeometry, sanitizeCropRect } from './imageGeometry.js';
 import { markOwnedPlanes, planeBuffersOf, sharesPlaneBuffers } from './planeRelease.js';
 import { buildRollSample } from './rollSample.js';
-import { createExactGeometry } from './provisionalPhoto.js';
+import { createExactGeometry, hasWindowEdits, overlayWindowEdits } from './provisionalPhoto.js';
 
 globalThis.ImageData = class ImageData {
   constructor(data, width, height) { Object.assign(this, { data, width, height }); }
@@ -69,7 +69,8 @@ function harness(scene, { held = false } = {}) {
     console, DOMException, state: { fileQueue: [{ file: { name: 'other.nef' } }, item], currentFileIndex: 0,
       autoFrame: { enabled: true }, dustRemoval: { enabled: false } },
     defaultFilmBaseBuffer: () => 10,
-    createExactGeometry, twoStageDiagnostics: { stage1: [] }, noteTwoStageEvent() {}, reportFullDecodeFailure() {},
+    createExactGeometry, hasWindowEdits, overlayWindowEdits,
+    twoStageDiagnostics: { stage1: [] }, noteTwoStageEvent() {}, reportFullDecodeFailure() {},
     knownImageDimensions, rememberImageDimensions, resolveHalfDecodeFullSize,
     createFrameClaim: () => ({ release() { claimReleases++; } }), memoryRuntime: {},
     sharedPlanesAvailable: () => false, isRawLikeFileName: name => /\.nef$/i.test(name),
@@ -98,7 +99,7 @@ function harness(scene, { held = false } = {}) {
   });
   vm.runInContext(['reconcileHalfSizeImage', 'loadFileToImageData', 'openHalfSizeTileDecode', 'decodeRollFrame',
     'decodeRollFrameOnPage', 'processFileWithSettings', 'tileRecipeSettled', 'tileSourceFor', 'renderTileFromSource',
-    'canDecodeTileHalfSize', 'beginLaneTile', 'beginProvisionalPhoto'].map(functionSource).join('\n'), context);
+    'canDecodeTileHalfSize', 'beginLaneTile', 'beginProvisionalPhoto', 'withPendingEdits'].map(functionSource).join('\n'), context);
   return { context, item, file, calls, cache, rendered, samples, adapter, make,
     adapterDone: () => adapterDone, claimReleases: () => claimReleases };
 }
