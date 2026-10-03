@@ -190,6 +190,11 @@ surface at 2.2–4 MP, in Node). They now stay on the GPU.
   `webglState.modesReady` is false until then, for good if they fail, on WebGL1,
   and on software rasterisers. `?gpuPreview=force` explicitly allows software GL;
   while it is false only a look or a rescue keeps the CPU display.
+  Identity WB with nonzero vibrance and a look or rescue also keeps the exact
+  CPU display: this recipe misses the stricter original rounding fixture. Both
+  `drawStep3` and `drawApply` reject it even after the mode programs link, and
+  the app resumes GL when the recipe becomes supported. The force switch does
+  not bypass this pixel-correctness gate.
   `?gpuPreview=modes-fail` (or `?gpuPreview=force&displayModesFail=1` on software renderers)
   fails the self-test.
 - **Border.** With the border preview the drawing buffer is the framed display size
@@ -267,6 +272,15 @@ buffers. When native rows would exceed 16 MP, the retained level covers the full
 view at its available density. This is a display approximation below native zoom;
 100% and export-triggered exact frames use exact frame crops.
 
+An export's exact frame uses its own pixels and box-filter grid, even when the
+source plan says `fromLevel`. Above the 16 MP native-copy limit it builds that
+exact crop's level in bands of at most 1 MP, then transfers the bounded level
+to the preview worker with the original crop geometry. The resulting filter
+is byte-identical to cropping the whole rectangle and filtering it at once;
+the rectangle, placement and whole-frame fog coordinates stay the same. It
+never substitutes the retained source-conversion level for the exact frame.
+Cancellation stops before the next band or transfer.
+
 The worker owns the private padded RGBA16 plane, converts it in place, releases
 received rows before conversion, and uses its result's RGBA8 bytes directly when
 slot and output sizes match. The former unconditional 128 MB claim is replaced
@@ -283,7 +297,19 @@ tests allocate at most 12 MP. `estimateDetailRoiBytes` checks the plane/texture
 accounting against these bounds. `?detailProbe=1` retains a test-only region for CPU
 parity checks; its retained plane and transient reference/readback copies are additional.
 
-The curves-only look with vibrance 35 and C/M/Y 6/-4/3 has fp32-model
-p99.9 = 0 with the parity fixture's WB gains. With identity WB, exact HSL
-half-level ties leave p99.9 = 2 (within the display budget); the CPU export
-path is unchanged.
+The limits bind allocation callers: native/level copies are at most 16 MP,
+exact-frame native bands at most 1 MP, and output/padded-slot/GL surfaces at
+most 8,388,608 pixels with dimensions at most 8192. Planning and warm-up skip
+unsupported viewport sizes; the base display continues. The page client and
+worker check dimensions before copying, posting, resampling or padding, and
+the detail upload checks again. `estimateDetailRoiBytes(..., { exactFrame: true })`
+accounts for the exact crop's own reduction and band scratch rather than
+assuming the source plan's retained level. Tiny actual-caller tests and
+descriptor allocator traps verify these limits; they do not measure 60 MP RSS.
+
+The original 211x137 aged, curves-only look with identity WB, vibrance 35 and
+C/M/Y 6/-4/3 retains its strict p99.9 = 0 target. Its affected GL mode is gated
+to the exact CPU display, where mean/p99.9/max are 0/0/0. The ungated fp32
+model's p99.9 = 2 remains a diagnostic failure, not accepted parity. The
+nonidentity-WB case remains an additional shader regression. Exports continue
+through the original CPU/16-bit paths.

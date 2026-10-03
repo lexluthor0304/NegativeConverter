@@ -4,6 +4,7 @@ import vm from 'node:vm';
 import { getSprocketFrameLayout } from './sprocketFrame.js';
 import { photoRectPercent, step3FrameReference } from './displayCanvas.js';
 import { photoViewport } from '../render/borderUnderlay.js';
+import { displayModesSupported } from '../render/previewTables.js';
 
 // #253 in main.js (extracted with vm): the GL gate keeps only cropping, WebGL
 // off, a missing or failed context and a look or rescue before the mode
@@ -29,7 +30,7 @@ class TestImageData {
   const state = { cropping: false, coreUseWebGL: true, currentStep: 3, processedImageData: {}, look: null, expiredEnabled: false,
     expiredAnalysis: null, sprocketPreviewEnabled: false, dodgeBurn: { active: false }, dustRemoval: { enabled: false, showMask: false } };
   const webglState = { gl: {}, disabledByError: false, modesReady: false };
-  const context = vm.createContext({ state, webglState });
+  const context = vm.createContext({ state, webglState, displayModesSupported });
   vm.runInContext(['displayModesNeeded', 'isWebGLActive'].map(functionSource).join('\n'), context);
   const active = () => context.isWebGLActive();
   assert.equal(active(), true);
@@ -41,6 +42,12 @@ class TestImageData {
   assert.equal(active(), false, 'a look waits for the mode programs');
   webglState.modesReady = true;
   assert.equal(active(), true, 'and draws on the GPU once they are ready');
+  Object.assign(state, { vibrance: 35, wbR: 1, wbG: 1, wbB: 1 });
+  assert.equal(active(), false, 'identity WB plus vibrance uses the exact CPU display even with linked modes');
+  state.wbR = 1.06;
+  assert.equal(active(), true, 'supported modes keep their GL path');
+  state.vibrance = 0;
+  state.wbR = 1;
   state.look = null;
   webglState.modesReady = false;
   state.expiredEnabled = true;

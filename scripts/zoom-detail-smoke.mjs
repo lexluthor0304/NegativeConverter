@@ -97,6 +97,40 @@ function decodePng(dataUrl) {
   return { width: png.width, height: png.height, depth: png.depth, sha256: createHash('sha256').update(pixels).digest('hex') };
 }
 
+// Small pixels, actual browser worker and GPU: the bounded exact-crop level
+// uses the original filter, independent of source-conversion provenance.
+async function boundedExactCropProbe() {
+  const { buildDetailFrameLevel, copyRegionRows } = await import('/src/app/detailLayer.js');
+  const { filterDisplayImage } = await import('/src/app/displayPreview.js');
+  const { createConversionWorkerClient } = await import('/src/app/conversionWorkerClient.js');
+  const { createGpuPreviewRenderer } = await import('/src/render/gpuPreviewRenderer.js');
+  const { displayParity } = await import('/src/render/gpuPreviewSelfTest.js');
+  const frame = new ImageData(191, 137);
+  for (let y = 0; y < frame.height; y++) for (let x = 0; x < frame.width; x++) {
+    frame.data.set([(x * 17 + y * 13) % 256, (x * 5 + y * 7) % 256, (x * 23 + y * 19) % 256, 255], (y * frame.width + x) * 4);
+  }
+  const rect = { x: 11, y: 7, width: 173, height: 121 }, target = { width: 83, height: 57 };
+  const crop = new ImageData(copyRegionRows(frame.data, frame.width, rect), rect.width, rect.height);
+  const expected = filterDisplayImage(crop, target, { k: 2 });
+  const level = await buildDetailFrameLevel(frame, rect, { k: 2, tilePixels: rect.width * 4 });
+  const client = createConversionWorkerClient({ cacheInput: true });
+  try {
+    const image = await client.resample(level, target, { geometry: level.geometry, detail: true, transfer: true });
+    const canvas = document.createElement('canvas'); Object.assign(canvas, target);
+    const gl = canvas.getContext('webgl2', { alpha: false, antialias: false, preserveDrawingBuffer: true });
+    if (!gl) return { error: 'no WebGL2 for exact-crop probe' };
+    const renderer = createGpuPreviewRenderer(gl);
+    const ramp = Uint8Array.from({ length: 256 }, (_, v) => v);
+    renderer.uploadExact(image, true); renderer.uploadCurves({ r: ramp, g: ramp, b: ramp });
+    renderer.drawStep3({ wb: [1, 1, 1], vib: 0, cmy: [0, 0, 0] }, target.width, target.height);
+    const pixels = new Uint8Array(image.data.length), rows = new Uint8ClampedArray(image.data.length);
+    gl.readPixels(0, 0, target.width, target.height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+    for (let y = 0; y < target.height; y++) rows.set(pixels.subarray((target.height - 1 - y) * target.width * 4,
+      (target.height - y) * target.width * 4), y * target.width * 4);
+    return { worker: displayParity(expected.data, image.data), gpu: displayParity(expected.data, rows), transferred: level.data.byteLength === 0 };
+  } finally { client.dispose(); }
+}
+
 export async function runZoomDetailSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port }) {
   const expect = (condition, message) => { if (!condition) throw new Error(message); };
   const until = async (description, expression, timeout = 90_000) => {
@@ -184,6 +218,10 @@ export async function runZoomDetailSmoke({ send, evaluate, waitFor, fail, instal
     expect(previews.length >= 1 && previews[0].target && previews.slice(1).every(event => !event.pixels && event.target),
       'preview requests did not send the level once and then only the display target: ' + JSON.stringify(previews));
     console.log('ok: the display level is kept in the preview worker; preview requests carry only the target ' + JSON.stringify(settled.target));
+    const bounded = await evaluate(`(${boundedExactCropProbe.toString()})()`);
+    expect(!bounded.error && bounded.transferred && bounded.worker.p999 === 0 && bounded.worker.max === 0 && bounded.gpu.p999 === 0 && bounded.gpu.max === 0,
+      'bounded exact-crop worker/GPU parity: ' + JSON.stringify(bounded));
+    console.log('ok: bounded exact crop through the actual browser worker and GPU ' + JSON.stringify(bounded));
 
     // ---- Part 1: a true 1:1 ----
     expect(await zoomIndicator() === null, 'the indicator shows at fit');

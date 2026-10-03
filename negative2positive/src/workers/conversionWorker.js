@@ -17,6 +17,7 @@ import { createAdjustmentLutScratch } from '../app/adjustmentPipeline.js';
 import { fromImageData8 } from '../silvercore/util/image16.js';
 import { downsampleImageDataForMaxPixels } from '../app/imageDataOps.js';
 import { resampleDisplayLevel, filterDisplayImage, buildDisplayLevel, displayLevelFactor } from '../app/displayPreview.js';
+import { assertDetailAllocation, assertDetailRoiAllocation, assertDetailGeometry, DETAIL_MAX_OUTPUT_PIXELS, DETAIL_MAX_DIMENSION } from '../app/detailLayer.js';
 
 let cachedSource = null;
 let cachedAnalysis = null;
@@ -335,9 +336,20 @@ function displayNegative(msg) {
 function resample(msg) {
   const { id, width, height, rgba, image16, target } = msg;
   try {
+    if (msg.detail) {
+      assertDetailAllocation(width, height);
+      assertDetailAllocation(target.width, target.height, DETAIL_MAX_OUTPUT_PIXELS, DETAIL_MAX_DIMENSION);
+    }
+    if (msg.geometry) assertDetailGeometry(msg.geometry, width, height);
     const image = { width, height, data: rgba ? new Uint8ClampedArray(rgba) : null };
     if (image16) image.__image16 = { width, height, data: new Uint16Array(image16) };
-    const preview = filterDisplayImage(image, target);
+    let preview;
+    if (msg.geometry) {
+      const plane = resampleDisplayLevel(planeOf(image), msg.geometry, target);
+      const data = plane.data instanceof Uint16Array ? new Uint8ClampedArray(plane.data.length) : plane.data;
+      if (data !== plane.data) for (let i = 0; i < data.length; i++) data[i] = Math.round(plane.data[i] / 257);
+      preview = { ...target, data };
+    } else preview = filterDisplayImage(image, target);
     const payload = { type: 'resampled', id, width: preview.width, height: preview.height, rgba: preview.data.buffer };
     const transfers = [preview.data.buffer];
     if (preview.__image16 && image16) {
@@ -352,6 +364,9 @@ function resample(msg) {
 
 // Rows [y, y + height) and columns [x, x + width) of an RGBA16 plane.
 function cropPlane(plane, rect) {
+  assertDetailAllocation(rect.width, rect.height);
+  if (!Number.isSafeInteger(rect.x) || !Number.isSafeInteger(rect.y) || rect.x < 0 || rect.y < 0
+    || rect.x + rect.width > plane.width || rect.y + rect.height > plane.height) throw new RangeError('Invalid detail level crop');
   const data = new Uint16Array(rect.width * rect.height * 4);
   for (let row = 0; row < rect.height; row++) {
     const from = ((rect.y + row) * plane.width + rect.x) * 4;
@@ -363,6 +378,7 @@ function cropPlane(plane, rect) {
 // `plane` at the top-left of a width x height plane, its last column and row
 // repeated into the rest.
 function padPlane(plane, width, height) {
+  assertDetailAllocation(width, height, DETAIL_MAX_OUTPUT_PIXELS, DETAIL_MAX_DIMENSION);
   if (plane.width === width && plane.height === height) return plane;
   const data = new Uint16Array(width * height * 4);
   for (let y = 0; y < height; y++) {
@@ -383,6 +399,7 @@ function padPlane(plane, width, height) {
 async function roi(msg) {
   const { id, settings, region, base } = msg;
   try {
+    assertDetailRoiAllocation(region, msg.warm);
     const mode = resolveConversionMode(settings);
     if (msg.warm) {
       // A first conversion costs engine set-up and compilation: done at idle.

@@ -112,8 +112,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     import { toImageData8 } from '../silvercore/util/image16.js';
     import { VERTEX_SHADER_100, STEP3_FRAGMENT_SHADER_100 } from '../render/previewShader.js';
     import { createGpuPreviewRenderer, webgl2PrecisionOk } from '../render/gpuPreviewRenderer.js';
-    import { planDetailRegion, detailRegionServes, detailSlotSize, snapPanToDevicePixels, copyRegionRows, DETAIL_SETTLE_MS } from './detailLayer.js';
-    import { applyPreviewChain, displayStageUniforms, regionFrame } from '../render/previewTables.js';
+    import { planDetailRegion, detailRegionServes, detailSlotSize, snapPanToDevicePixels, copyRegionRows, buildDetailFrameLevel,
+      assertDetailAllocation, assertDetailRoiAllocation, detailSizeAllowed, DETAIL_MAX_NATIVE_PIXELS, DETAIL_MAX_OUTPUT_PIXELS, DETAIL_MAX_DIMENSION, DETAIL_SETTLE_MS } from './detailLayer.js';
+    import { applyPreviewChain, displayStageUniforms, displayModesSupported, regionFrame } from '../render/previewTables.js';
     import { buildSelfTestCases, buildDisplayModesCases, displayParity } from '../render/gpuPreviewSelfTest.js';
     import { createBorderUnderlay, photoViewport } from '../render/borderUnderlay.js';
     import { computeAdjustmentParams } from '../workers/pixelAdjustments.js';
@@ -6160,11 +6161,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // The film border, the dodge-and-burn tool and a shown dust mask are drawn
     // around or over the GL canvas (#253, #254), so only these keep the CPU
     // display: cropping, WebGL off, no or a failed context, and a look or a
-    // rescue before the mode programs are ready.
+    // rescue before the mode programs are ready or outside their pixel support.
     function isWebGLActive() {
       if (state.cropping) return false;
       if (state.coreUseWebGL === false) return false;
       if (!webglState.modesReady && displayModesNeeded()) return false;
+      if (displayModesNeeded() && !displayModesSupported({ vib: Number(state.vibrance || 0) / 100,
+        wb: [Number(state.wbR ?? 1), Number(state.wbG ?? 1), Number(state.wbB ?? 1)] })) return false;
       return !!webglState.gl && !webglState.disabledByError && state.currentStep >= 3 && !!state.processedImageData;
     }
 
@@ -6814,6 +6817,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     function scheduleDetailWarmUp() {
       const container = getCanvasContainerSize();
       const slot = detailSlotSize(container.width, container.height, window.devicePixelRatio || 1);
+      if (!slot) return;
       const key = `${slot.width}x${slot.height}`;
       if (detailLayer.warmed === key) return;
       detailLayer.warmed = key;
@@ -6913,14 +6917,22 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       }
     }
 
-    // A region of a current full-resolution frame: its 8-bit pixels, reduced
-    // in the preview worker below full density.
+    // A region of the exact frame. Large rectangles build their own bounded
+    // box level first; the preview worker finishes the identical reduction.
     async function detailFromFrame(frame, plan, signal) {
+      if (signal?.aborted) return null;
+      assertDetailAllocation(plan.outWidth, plan.outHeight, DETAIL_MAX_OUTPUT_PIXELS, DETAIL_MAX_DIMENSION);
       detailLayer.counters.crops += 1;
+      if (plan.width * plan.height > DETAIL_MAX_NATIVE_PIXELS) {
+        const level = await buildDetailFrameLevel(frame, plan, { signal });
+        if (!level || signal?.aborted) return null;
+        return convertPreviewFrameInWorker.resample(level, { width: plan.outWidth, height: plan.outHeight },
+          { transfer: true, signal, detail: true, geometry: level.geometry });
+      }
       const rows = copyRegionRows(frame.data, frame.width, plan);
       const region = new ImageData(new Uint8ClampedArray(rows.buffer), plan.width, plan.height);
       if (plan.outWidth === plan.width && plan.outHeight === plan.height) return region;
-      return convertPreviewFrameInWorker.resample(region, { width: plan.outWidth, height: plan.outHeight }, { transfer: true, signal });
+      return convertPreviewFrameInWorker.resample(region, { width: plan.outWidth, height: plan.outHeight }, { transfer: true, signal, detail: true });
     }
 
     // A region converted by the preview worker from native rows of the
@@ -6936,11 +6948,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const base = previewRequestImage(state.conversionPreviewImageData);
       const container = getCanvasContainerSize();
       const slot = detailSlotSize(container.width, container.height, window.devicePixelRatio || 1);
+      if (!slot) return null;
       const region = {
         x: plan.x, y: plan.y, width: plan.width, height: plan.height, frameWidth: source.width, frameHeight: source.height,
         outWidth: plan.outWidth, outHeight: plan.outHeight, fromLevel: plan.fromLevel, levelFactor: plan.levelFactor,
         slotWidth: slot.width, slotHeight: slot.height
       };
+      assertDetailRoiAllocation(region);
       const settings = buildRouterSettings(state);
       const analysisImageData = getColorAnalysisSample(state);
       // The worker may keep another photo's level (a warm photo switch converts
@@ -6958,6 +6972,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     function showDetailRegion(image, plan, tag) {
+      if (!detailSizeAllowed(image.width, image.height, DETAIL_MAX_OUTPUT_PIXELS, DETAIL_MAX_DIMENSION)) return;
       const renderer = detailRenderer();
       if (!renderer) return;
       const maxTexture = renderer.gl.getParameter(renderer.gl.MAX_TEXTURE_SIZE) || 8192;

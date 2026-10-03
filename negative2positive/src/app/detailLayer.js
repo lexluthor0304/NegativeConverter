@@ -3,6 +3,7 @@
 // device pixel. The base (fit x DPR, capped at 4 MP) never follows zoom; this
 // module plans the region, its density and the fixed conversion slot. main.js
 // owns the canvas, the requests and when the layer is drawn.
+import { displayLevelFactor, displayLevelRows } from './displayPreview.js';
 
 // One base texel spans more than this many device pixels: the layer is worth it.
 export const DETAIL_TRIGGER_TEXEL = 1.25;
@@ -11,6 +12,9 @@ export const DETAIL_MARGIN_PX = 128;
 // Prefer the retained level above this native-row budget. It covers the whole
 // view; a source without a level falls back to a bounded centred cut.
 export const DETAIL_MAX_NATIVE_PIXELS = 16_000_000;
+export const DETAIL_MAX_OUTPUT_PIXELS = 8_388_608;
+export const DETAIL_MAX_DIMENSION = 8192;
+export const DETAIL_MAX_TILE_PIXELS = 1_000_000;
 // The conversion slot is the container's device size rounded up to this, plus
 // the margin, so panning never rebuilds the engine.
 export const DETAIL_SLOT_ROUND = 256;
@@ -37,6 +41,7 @@ export const DETAIL_LEVEL_DENSITY_SHARE = 0.9;
 export function planDetailRegion(view, { margin = DETAIL_MARGIN_PX, withMargin = true, maxNativePixels = DETAIL_MAX_NATIVE_PIXELS } = {}) {
   const { sourceWidth: W, sourceHeight: H, baseWidth, fit, zoom, dpr, panX, panY, baseX, baseY, containerWidth, containerHeight } = view;
   if (!(W > 0) || !(H > 0) || !(baseWidth > 0) || !(fit > 0) || !(zoom > 0)) return null;
+  if (!detailSlotSize(containerWidth, containerHeight, dpr, margin)) return null;
   const needed = fit * zoom * Math.max(1, dpr || 1);
   const baseDensity = baseWidth / W;
   if (needed / baseDensity <= DETAIL_TRIGGER_TEXEL) return null;
@@ -65,12 +70,15 @@ export function planDetailRegion(view, { margin = DETAIL_MARGIN_PX, withMargin =
     if (rect.width * rect.height > maxNativePixels) {
       const scale = Math.sqrt(maxNativePixels / (rect.width * rect.height));
       const cx = (vx0 + vx1) / 2, cy = (vy0 + vy1) / 2;
-      const hw = rect.width * scale / 2, hh = rect.height * scale / 2;
-      rect = snapRect(cx - hw, cy - hh, cx + hw, cy + hh, W, H, 1);
+      const width = Math.max(1, Math.floor(rect.width * scale));
+      const height = Math.max(1, Math.floor(rect.height * scale));
+      rect = { x: Math.max(0, Math.min(W - width, Math.round(cx - width / 2))),
+        y: Math.max(0, Math.min(H - height, Math.round(cy - height / 2))), width, height };
     }
   }
   const outWidth = Math.max(1, Math.round(rect.width * density));
   const outHeight = Math.max(1, Math.round(rect.height * density));
+  if (!detailSizeAllowed(outWidth, outHeight, DETAIL_MAX_OUTPUT_PIXELS, DETAIL_MAX_DIMENSION)) return null;
   return { ...rect, density, outWidth, outHeight, fromLevel, levelFactor: k, visible, needed };
 }
 
@@ -104,22 +112,79 @@ export function detailRegionServes(shown, plan) {
 export function detailSlotSize(containerWidth, containerHeight, dpr, margin = DETAIL_MARGIN_PX) {
   const round = value => Math.ceil(Math.max(1, value) / DETAIL_SLOT_ROUND) * DETAIL_SLOT_ROUND;
   const scale = Math.max(1, dpr || 1);
-  return { width: round(containerWidth * scale + 2 * margin), height: round(containerHeight * scale + 2 * margin) };
+  const slot = { width: round(containerWidth * scale + 2 * margin), height: round(containerHeight * scale + 2 * margin) };
+  return detailSizeAllowed(slot.width, slot.height, DETAIL_MAX_OUTPUT_PIXELS, DETAIL_MAX_DIMENSION) ? slot : null;
+}
+
+export function detailSizeAllowed(width, height, maxPixels, maxDimension = Infinity) {
+  return Number.isSafeInteger(width) && Number.isSafeInteger(height) && width > 0 && height > 0
+    && width <= maxDimension && height <= maxDimension && width * height <= maxPixels;
+}
+
+export function assertDetailAllocation(width, height, maxPixels = DETAIL_MAX_NATIVE_PIXELS, maxDimension = Infinity) {
+  if (!detailSizeAllowed(width, height, maxPixels, maxDimension)) throw new RangeError('Detail allocation exceeds its pixel limit');
+}
+
+// Check the sizes the worker actually allocates, including a padded slot larger
+// than either its requested slot or output alone. Run before copying/posting too.
+export function assertDetailRoiAllocation(region, warm = false) {
+  assertDetailAllocation(region.slotWidth, region.slotHeight, DETAIL_MAX_OUTPUT_PIXELS, DETAIL_MAX_DIMENSION);
+  if (warm) return;
+  assertDetailAllocation(region.outWidth, region.outHeight, DETAIL_MAX_OUTPUT_PIXELS, DETAIL_MAX_DIMENSION);
+  assertDetailAllocation(Math.max(region.slotWidth, region.outWidth), Math.max(region.slotHeight, region.outHeight),
+    DETAIL_MAX_OUTPUT_PIXELS, DETAIL_MAX_DIMENSION);
+  const k = region.fromLevel ? region.levelFactor : 1;
+  if (!Number.isSafeInteger(k) || k < 1) throw new RangeError('Invalid detail level factor');
+  assertDetailAllocation(region.width / k, region.height / k);
+}
+
+export function assertDetailGeometry(geometry, width, height) {
+  const { sourceWidth, sourceHeight, k } = geometry;
+  if (!Number.isSafeInteger(k) || k < 1 || !Number.isSafeInteger(sourceWidth) || !Number.isSafeInteger(sourceHeight)
+    || Math.floor(sourceWidth / k) !== width || Math.floor(sourceHeight / k) !== height) throw new RangeError('Invalid detail level geometry');
+}
+
+// The exact crop's own box filter, not the source's retained level. Copy native
+// bands on the same k grid as filterDisplayImage, preserving its arithmetic and
+// discarded edge cells, then transfer only the bounded RGBA16 level.
+export async function buildDetailFrameLevel(frame, rect, { signal = null, tilePixels = DETAIL_MAX_TILE_PIXELS, k = displayLevelFactor(rect.width, rect.height),
+  pause = () => new Promise(resolve => setTimeout(resolve, 0)) } = {}) {
+  if (signal?.aborted) return null;
+  if (!Number.isSafeInteger(k) || k < 1) throw new RangeError('Invalid detail level factor');
+  const width = Math.floor(rect.width / k), height = Math.floor(rect.height / k);
+  assertDetailAllocation(width, height);
+  assertDetailAllocation(rect.width, k, Math.min(tilePixels, DETAIL_MAX_TILE_PIXELS));
+  const rows = Math.floor(Math.min(tilePixels, DETAIL_MAX_TILE_PIXELS) / (rect.width * k));
+  const data = new Uint16Array(width * height * 4);
+  for (let y = 0; y < height; y += rows) {
+    if (signal?.aborted) return null;
+    const count = Math.min(rows, height - y);
+    const band = { x: rect.x, y: rect.y + y * k, width: rect.width, height: count * k };
+    const pixels = copyRegionRows(frame.data, frame.width, band);
+    const level = displayLevelRows({ width: band.width, height: band.height, data: pixels }, k, width);
+    data.set(level, y * width * 4);
+    if (y + count < height) await pause();
+  }
+  return { width, height, data, geometry: { sourceWidth: rect.width, sourceHeight: rect.height, k } };
 }
 
 // Conservative live plane/texture accounting, not process RSS. Row resampling
 // may hold native rows, a decimated plane and the output; conversion later
 // holds the owned pad, sparse stops, RGBA8 output/crop and old/new GL surfaces.
 // The base/analysis are retained independently and driver scratch is unknown.
-export function estimateDetailRoiBytes(plan, slot) {
-  const inputPixels = plan.fromLevel
+export function estimateDetailRoiBytes(plan, slot, { exactFrame = false } = {}) {
+  const exactLevel = exactFrame && plan.width * plan.height > DETAIL_MAX_NATIVE_PIXELS
+    ? displayLevelFactor(plan.width, plan.height) : 1;
+  const inputPixels = exactFrame
+    ? Math.floor(plan.width / exactLevel) * Math.floor(plan.height / exactLevel) : plan.fromLevel
     ? Math.floor(plan.width / plan.levelFactor) * Math.floor(plan.height / plan.levelFactor)
     : plan.width * plan.height;
   const slotPixels = Math.max(slot.width, plan.outWidth) * Math.max(slot.height, plan.outHeight);
   // A superseded active conversion can finish its synchronous pass while one
   // newer row payload waits. Older queued payloads are removed on cancellation.
-  const pendingRows = plan.fromLevel ? 0 : 8 * inputPixels;
-  return Math.max(10 * inputPixels + 16 * slotPixels, 32 * slotPixels) + pendingRows + 1024 * 1024;
+  const pendingRows = !exactFrame && plan.fromLevel ? 0 : 8 * inputPixels;
+  const bands = exactLevel > 1 ? 12 * DETAIL_MAX_TILE_PIXELS : 0;
+  return Math.max(10 * inputPixels + 16 * slotPixels, 32 * slotPixels) + pendingRows + bands + 1024 * 1024;
 }
 
 /**
@@ -135,6 +200,9 @@ export function snapPanToDevicePixels(pan, base, zoom, offsetCss, dpr) {
 
 /** Rows [y, y + height) and columns [x, x + width) of an RGBA plane, as a new plane. */
 export function copyRegionRows(data, width, rect) {
+  assertDetailAllocation(rect.width, rect.height);
+  if (!Number.isSafeInteger(rect.x) || !Number.isSafeInteger(rect.y) || rect.x < 0 || rect.y < 0
+    || rect.x + rect.width > width) throw new RangeError('Invalid detail crop');
   const Plane = data.constructor;
   const out = new Plane(rect.width * rect.height * 4);
   for (let row = 0; row < rect.height; row++) {

@@ -184,6 +184,13 @@ export function displayStageUniforms(params, { previous = null, sameAnalysis = f
   };
 }
 
+// Identity WB plus vibrance can put HSL channels on exact half-level ties.
+// The fp32 mode shader misses the original zero-error fixture; keep that
+// recipe on the exact CPU display until the shader meets its strict target.
+export function displayModesSupported({ wb, vib }) {
+  return !vib || !wb.every(gain => gain === 1);
+}
+
 // u_frame for a draw of a width × height texture that is the whole frame.
 export function wholeFrame(width, height) {
   return [0, 0, 1 / Math.max(1, width), 1 / Math.max(1, height)];
@@ -196,4 +203,3 @@ export function regionFrame(region, width, height, frameWidth, frameHeight) {
   return [region.x / frameWidth, region.y / frameHeight,
     region.width / (Math.max(1, width) * frameWidth), region.height / (Math.max(1, height) * frameHeight)];
 }
-

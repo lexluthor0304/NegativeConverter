@@ -35,9 +35,10 @@ async function offscreenModes() {
   const { createGpuPreviewRenderer } = await import('/src/render/gpuPreviewRenderer.js');
   const {
     buildDisplayModesCases, buildDisplayModesCase, displayModesSpecs, agedPositiveFixture, expiredAnalysisOf,
-    displayParity, buildPreviewCase, parityFrame,
+    displayParity, buildPreviewCase, parityFrame, syntheticLook,
   } = await import('/src/render/gpuPreviewSelfTest.js');
   const { filmPresets } = await import('/src/silvercore/engine/FilmPresets.js');
+  const { applyPreparedAdjustmentsToBuffer } = await import('/src/app/adjustmentPipeline.js');
   const renderer = createGpuPreviewRenderer(gl);
   renderer.startModesCompile();
   renderer.startApplyCompile();
@@ -66,6 +67,7 @@ async function offscreenModes() {
     report.cases.push({ name: testCase.name, program: testCase.stages.active ? 'modes' : 'plain', ...result });
   }
   // The apply mode program: a SilverCore frame, then the rescue and the look.
+  let applyFrame = null;
   if (renderer.applyStatus() === 'linked') {
     const image = agedPositiveFixture(96, 64);
     const spec = displayModesSpecs(expiredAnalysisOf(image)).find(item => item.name === 'rescue + look + vibrance');
@@ -79,9 +81,25 @@ async function offscreenModes() {
     renderer.uploadPrepared({ width: 96, height: 64, data16: preview.prepared.data });
     renderer.uploadCurves(testCase.step3.curves);
     const frame = { mode: preview.mode, params: preview.params, plan: preview.plan, engine: preview.engine };
+    applyFrame = frame;
     const drawn = renderer.drawApply(frame, { ...testCase.step3, stages: testCase.stages }, 96, 64);
     report.cases.push({ name: 'apply + modes', program: 'apply-modes', ...(drawn ? displayParity(testCase.expected, read(96, 64)) : { ok: false, error: 'not drawn' }) });
   }
+  // R2-020: the unchanged original 211x137 identity-WB fixture. Both public
+  // GPU callers reject this recipe; the actual CPU display keeps every pixel.
+  const original = buildDisplayModesCase({ name: 'original identity WB + vibrance', image: agedPositiveFixture(W, H),
+    settings: { look: syntheticLook({ matrix: false }), wbR: 1, wbG: 1, wbB: 1, vibrance: 35, cyan: 6, magenta: -4, yellow: 3 } });
+  canvas.width = W; canvas.height = H;
+  renderer.uploadExact(original.image, true);
+  renderer.uploadCurves(original.step3.curves);
+  const values = { ...original.step3, stages: original.stages };
+  const step3Gated = !renderer.drawStep3(values, W, H);
+  const applyGated = applyFrame ? !renderer.drawApply(applyFrame, values, W, H) : false;
+  const cpu = new ImageData(W, H);
+  applyPreparedAdjustmentsToBuffer(original.image, original.recipe, cpu, { quality: 'full' });
+  const fallback = document.createElement('canvas'); fallback.width = W; fallback.height = H;
+  const ctx = fallback.getContext('2d'); ctx.putImageData(cpu, 0, 0);
+  report.identityWb = { step3Gated, applyGated, ...displayParity(original.expected, ctx.getImageData(0, 0, W, H).data) };
   report.failedCases = report.cases.filter(item => !item.ok);
   return report;
 }
@@ -181,6 +199,8 @@ export async function runDisplayModesSmoke({ send, evaluate, waitFor, fail, inst
     return;
   }
   expect(!offscreen.corruptApply.ok, 'corrupted apply-modes shader was accepted');
+  expect(offscreen.identityWb.step3Gated && offscreen.identityWb.applyGated && offscreen.identityWb.p999 === 0 && offscreen.identityWb.max === 0,
+    'original identity-WB fixture missed its strict CPU display target: ' + JSON.stringify(offscreen.identityWb));
   expect(!offscreen.failed && !offscreen.failedCases.length && offscreen.cases.length >= 9,
     'display-mode parity failed offscreen: ' + JSON.stringify(offscreen).slice(0, 4000));
   console.log('ok: mode programs self-test and ' + offscreen.cases.length + ' parity recipes within the budget '
@@ -227,6 +247,26 @@ export async function runDisplayModesSmoke({ send, evaluate, waitFor, fail, inst
   expect(drag.apply >= 3 && drag.converts === 0, 'a core-slider drag with a look left applyProgram: ' + JSON.stringify(drag));
   await settle('look drag settled', 2000);
   console.log('ok: a look draws on #glCanvas within the budget and core drags stay on applyProgram ' + JSON.stringify({ parity: [lookParity.mean, lookParity.p999], drag }));
+
+  await evaluate(`(async () => {
+    const { encodeRecipe } = await import('/src/app/recipes.js');
+    const box = document.getElementById('recipeCode');
+    box.value = encodeRecipe({ vibrance: 35, wbR: 1, wbG: 1, wbB: 1, cyan: 6, magenta: -4, yellow: 3 });
+    box.dispatchEvent(new Event('input', { bubbles: true })); document.getElementById('recipeDecodeBtn').click();
+    await new Promise(resolve => setTimeout(resolve, 100)); document.getElementById('recipeApplyBtn').click();
+  })()`);
+  await settle('identity WB + vibrance on CPU', 2000);
+  const fallbackFrame = await frame();
+  expect(fallbackFrame.surface === 'cpu', 'the unsupported recipe escaped the app CPU gate: ' + JSON.stringify(fallbackFrame));
+  console.log('ok: original identity-WB fixture strict parity and app CPU fallback ' + JSON.stringify({ fixture: offscreen.identityWb, surface: fallbackFrame.surface }));
+  await evaluate(`(async () => {
+    const { encodeRecipe } = await import('/src/app/recipes.js');
+    const box = document.getElementById('recipeCode'); box.value = encodeRecipe({ vibrance: 0, cyan: 0, magenta: 0, yellow: 0 });
+    box.dispatchEvent(new Event('input', { bubbles: true })); document.getElementById('recipeDecodeBtn').click();
+    await new Promise(resolve => setTimeout(resolve, 100)); document.getElementById('recipeApplyBtn').click();
+  })()`);
+  await settle('supported look back on GL', 2000);
+  expect((await frame()).surface === 'gl', 'the supported recipe did not return to GL');
 
   // ---- 3. The border as a GL underlay ----
   const borderCheck = async (label) => {

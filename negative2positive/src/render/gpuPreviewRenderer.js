@@ -7,7 +7,7 @@ import {
   VERTEX_SHADER_300, STEP3_FRAGMENT_SHADER, APPLY_FRAGMENT_SHADER, STEP3_MODES_FRAGMENT_SHADER, APPLY_MODES_FRAGMENT_SHADER,
   UNITS, TABLE_TEXTURE_SIZE, STEP3_CURVE_SIZE, STEP3_CURVE_ROWS, RESCUE_TONE_SIZE, RESCUE_OFFSET_BINS,
 } from './previewShader.js';
-import { packTableTexture, packHueWeights, packLinearLut, applyUniforms, packCurveRow, wholeFrame, TABLE_ENTRIES } from './previewTables.js';
+import { packTableTexture, packHueWeights, packLinearLut, applyUniforms, packCurveRow, wholeFrame, displayModesSupported, TABLE_ENTRIES } from './previewTables.js';
 import { SELF_TEST_SIZE, compareSelfTest, compareDisplayModes } from './gpuPreviewSelfTest.js';
 
 const QUAD = new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]);
@@ -480,6 +480,7 @@ export function createGpuPreviewRenderer(gl) {
     // region of a larger frame. False when `step3Values.stages` needs the mode
     // programs and they are not linked: nothing was drawn.
     drawStep3(step3Values, width, height, options = {}) {
+      if (wantsModes(step3Values.stages) && !displayModesSupported(step3Values)) return false;
       if (wantsModes(step3Values.stages) && !modesLinked()) return false;
       drawStep3With(exact.handle, curve.handle, step3Values, options.viewport || [0, 0, width, height],
         exact, curve, options.frame || null);
@@ -541,6 +542,7 @@ export function createGpuPreviewRenderer(gl) {
     // Draws one tick: `frame` is { mode, params, plan, engine } (Engine.previewPlan on
     // the engine seeded with the worker's analysis).
     drawApply(frame, step3Values, width, height, options = {}) {
+      if (wantsModes(step3Values.stages) && !displayModesSupported(step3Values)) return false;
       if (!live?.prepared || apply?.status !== 'linked') return false;
       if (wantsModes(step3Values.stages) && !(modesLinked() && modes.apply)) return false;
       uploadFrameTables(live, frame);

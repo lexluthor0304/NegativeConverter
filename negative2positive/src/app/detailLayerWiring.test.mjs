@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
-import { planDetailRegion, detailRegionServes, detailSlotSize, estimateDetailRoiBytes, snapPanToDevicePixels, copyRegionRows, DETAIL_SETTLE_MS } from './detailLayer.js';
+import { planDetailRegion, detailRegionServes, detailSlotSize, estimateDetailRoiBytes, snapPanToDevicePixels, copyRegionRows,
+  buildDetailFrameLevel, assertDetailAllocation, assertDetailRoiAllocation, detailSizeAllowed,
+  DETAIL_MAX_NATIVE_PIXELS, DETAIL_MAX_OUTPUT_PIXELS, DETAIL_MAX_DIMENSION, DETAIL_SETTLE_MS } from './detailLayer.js';
 import { displayTargetFor, displayLevelGeometry } from './displayPreview.js';
 import { computeZoomGeometry } from './zoomGeometry.js';
 import { displaySessionStubs, DISPLAY_SESSION_HELPERS } from './displaySessionHarness.mjs';
@@ -80,7 +82,9 @@ function fixture({ dpr = 2, container = { width: 600, height: 420 }, size = { wi
     DETAIL_LAYER_ENABLED: true, DETAIL_SETTLE_MS, WORKER_ABORTED: 'WORKER_ABORTED',
     detailLayer: { renderer, failed: false, timer: null, request: null, shown: null, visible: false, warmed: 'warm',
       counters: { requests: 0, conversions: 0, crops: 0, shown: 0, dropped: 0, failures: 0, lastReadyMs: null } },
-    planDetailRegion, detailRegionServes, detailSlotSize, snapPanToDevicePixels, copyRegionRows, displayLevelGeometry: levelGeometry,
+    planDetailRegion, detailRegionServes, detailSlotSize, snapPanToDevicePixels, copyRegionRows, buildDetailFrameLevel,
+    assertDetailAllocation, assertDetailRoiAllocation, detailSizeAllowed, DETAIL_MAX_NATIVE_PIXELS, DETAIL_MAX_OUTPUT_PIXELS, DETAIL_MAX_DIMENSION,
+    displayLevelGeometry: levelGeometry,
     webglState: { webgl2: true, sourceSize: { w: base.width, h: base.height } },
     canvasDisplayFit: { scale: fit }, previewTier: 'normal',
     isWebGLActive: () => true, canPaintAiBrush: () => false, usesSilverCoreConversion: () => true,

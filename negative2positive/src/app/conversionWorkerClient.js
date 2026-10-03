@@ -3,6 +3,7 @@ import { markOwnedPlanes, mayTransferBuffer, releaseOwnedPlanes } from './planeR
 import { isSharedPlane, guardSharedPlanes, sharedPlanesAvailable } from './crossOriginIsolation.js';
 import { planConversionBands, haloFor } from '../pipeline/silverBands.js';
 import { unsharpMaskHaloRows } from '../silvercore/engine/Sharpening.js';
+import { assertDetailAllocation, assertDetailRoiAllocation, assertDetailGeometry, DETAIL_MAX_OUTPUT_PIXELS, DETAIL_MAX_DIMENSION } from './detailLayer.js';
 
 /**
  * Promise bridge to the conversion worker. Callers should fall back to the
@@ -453,12 +454,20 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
   // the 16-bit plane crosses when there is one (a clone, never a transfer: the
   // frame stays the caller's). Resolves to an ImageData (with __image16).
   // `transfer` moves the pixels instead (the caller's own copy of a region).
-  convert.resample = async (image, target, { signal = null, transfer = false } = {}) => {
-    const plane = image.__image16?.data instanceof Uint16Array ? image.__image16.data : null;
+  convert.resample = async (image, target, { signal = null, transfer = false, detail = false, geometry = null } = {}) => {
+    if (detail) {
+      assertDetailAllocation(image.width, image.height);
+      assertDetailAllocation(target.width, target.height, DETAIL_MAX_OUTPUT_PIXELS, DETAIL_MAX_DIMENSION);
+    }
+    if (geometry) assertDetailGeometry(geometry, image.width, image.height);
+    const plane = image.__image16?.data instanceof Uint16Array ? image.__image16.data : image.data instanceof Uint16Array ? image.data : null;
     const body = { width: image.width, height: image.height, target: { width: target.width, height: target.height } };
+    if (detail) body.detail = true;
+    if (geometry) body.geometry = geometry;
     if (plane) body.image16 = plane.byteOffset === 0 && plane.buffer.byteLength === plane.byteLength ? plane.buffer : plane.slice().buffer;
     else body.rgba = image.data.byteOffset === 0 && image.data.buffer.byteLength === image.data.byteLength ? image.data.buffer : image.data.slice().buffer;
     const reply = await postUncached('resample', body, transfer ? [body.image16 || body.rgba] : [], image.width * image.height, signal);
+    if (detail) assertDetailAllocation(reply.width, reply.height, DETAIL_MAX_OUTPUT_PIXELS, DETAIL_MAX_DIMENSION);
     const out = new ImageData(new Uint8ClampedArray(reply.rgba), reply.width, reply.height);
     if (reply.image16) out.__image16 = { width: reply.width, height: reply.height, data: new Uint16Array(reply.image16) };
     return out;
@@ -469,6 +478,7 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
   // analysis. `warm` only sets up the roi slot. Resolves to the region's 8-bit
   // ImageData (null for `warm`).
   convert.roi = async ({ settings, base = null, region, rows = null, warm = false, signal = null }) => {
+    assertDetailRoiAllocation(region, warm);
     const body = { settings, base, region, warm };
     const transfers = [];
     if (rows) {
@@ -478,6 +488,7 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
     }
     const reply = await postUncached('roi', body, transfers, region.slotWidth * region.slotHeight, signal);
     if (reply.warm) return null;
+    assertDetailAllocation(reply.width, reply.height, DETAIL_MAX_OUTPUT_PIXELS, DETAIL_MAX_DIMENSION);
     return new ImageData(new Uint8ClampedArray(reply.rgba), reply.width, reply.height);
   };
 

@@ -20,7 +20,7 @@ const {
   buildDisplayModesCases, buildDisplayModesCase, agedPositiveFixture, expiredAnalysisOf, displayModesSpecs, displayParity,
   compareDisplayModes, syntheticLook, buildPreviewCase, parityFrame, DISPLAY_PARITY_MEAN, DISPLAY_PARITY_P999,
 } = await import('./gpuPreviewSelfTest.js');
-const { displayStageUniforms, wholeFrame, regionFrame, packRescueOffsets, packCurveRow, applyUniforms } = await import('./previewTables.js');
+const { displayStageUniforms, displayModesSupported, wholeFrame, regionFrame, packRescueOffsets, packCurveRow, applyUniforms } = await import('./previewTables.js');
 const { photoViewport } = await import('./borderUnderlay.js');
 const { modelDisplayStep3 } = await import('../../test-fixtures/displayStagesModel.mjs');
 const { modelApplyProgram } = await import('../../test-fixtures/previewShaderModel.mjs');
@@ -230,14 +230,24 @@ for (const [width, height] of [[64, 48], [96, 64], [211, 137]]) {
   const missingRound = displayParity(c.expected, modelDisplayStep3({ image: aged, step3: c.step3,
     stages: { ...vibrance, roundBeforeCmy: 0 } }));
   assert.equal(missingRound.p999, 2, 'the live recipe catches the missing rounding flag');
-  // Identity WB leaves exact half-level HSL ties, whose fp32 rounding can
-  // differ from the CPU's double intermediates. Keep that case within the
-  // existing display budget; exports continue to use the exact CPU path.
+  // R2-020: keep the original identity-WB fixture and strict pixel target.
+  // An unsupported mode must take the actual CPU display path rather than
+  // accepting the shader's half-level rounding differences.
   const identityWb = buildDisplayModesCase({ name: 'identity WB + vibrance', image: aged,
     settings: { ...c.recipe, wbR: 1, wbG: 1, wbB: 1 } });
-  const identityParity = displayParity(identityWb.expected, modelDisplayStep3({ image: aged,
+  const gate = vm.createContext({ state: { ...identityWb.recipe, processedImageData: aged, currentStep: 3 },
+    webglState: { gl: {}, modesReady: true, disabledByError: false }, displayModesSupported });
+  vm.runInContext(['displayModesNeeded', 'isWebGLActive'].map(fn).join('\n'), gate);
+  const shaderParity = displayParity(identityWb.expected, modelDisplayStep3({ image: aged,
     step3: identityWb.step3, stages: vibrance }));
-  assert.ok(identityParity.ok, JSON.stringify(identityParity));
+  const cpuDisplay = { width: aged.width, height: aged.height, data: new Uint8ClampedArray(aged.data.length) };
+  applyPreparedAdjustmentsToBuffer(aged, identityWb.recipe, cpuDisplay, { quality: 'full' });
+  const identityParity = displayParity(identityWb.expected, gate.isWebGLActive()
+    ? modelDisplayStep3({ image: aged, step3: identityWb.step3, stages: vibrance }) : cpuDisplay.data);
+  assert.equal(identityParity.p999, 0, `original identity-WB recipe: ${JSON.stringify(identityParity)}`);
+  assert.equal(identityParity.max, 0, 'the CPU fallback preserves every original fixture pixel');
+  assert.equal(gate.isWebGLActive(), false, 'the affected mode stays on CPU until its strict shader target passes');
+  assert.equal(shaderParity.p999, 2, 'the unchanged fixture still diagnoses the unsupported fp32 shader');
   console.log('live vibrance rounding:', { parity, identityParity, missingRound });
 }
 
