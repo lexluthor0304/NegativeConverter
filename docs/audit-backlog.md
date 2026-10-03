@@ -28,8 +28,11 @@ The #229/#230 supplemental harness review and its remaining large/native
 measurement limits are documented in [performance-benchmark.md](performance-benchmark.md).
 Caller regressions cover retained WebKit metrics, per-photo metadata, safe
 process attribution, saved full-probe/subset-control comparisons and fixture disk policy.
-The developer Tauri harness now has a native view/XPC association provider and
-revalidates PID identity before cleanup. Safari's exclusive GPU association
+The developer Tauri harness now has a native view/XPC association provider,
+isolates its startup cache with an opt-in native feature, and revalidates PID
+identity before cleanup. A separate tiny actual-app caller proof is available;
+its page and guard inputs are synthetic and its app uses the debug cache.
+Safari's exclusive GPU association
 remains unavailable and is refused before navigation; tiny native attribution
 proof does not establish the unmeasured performance targets.
 

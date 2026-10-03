@@ -16,9 +16,10 @@
 // reports main-thread silences; the harness then samples WebContent.
 
 import { spawn, execFile } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { loadavg, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { WebDriverSession, startSafariDriver, KEY } from './webdriver.mjs';
 import { FootprintReader, MemorySampler, listProcesses, webkitProcessScope } from './memory.mjs';
 import { buildWebKitObserver, WebKitOwnership } from './webkit-ownership.mjs';
@@ -413,14 +414,24 @@ export async function safariScenario(id, { wd, origin, fixture, roll, record, no
 
 // ---- Tauri ----
 
-export function tauriDevArgs({ port, scenario, fixtures, sliders = S2_SLIDERS, exports = [] }) {
+export function tauriDevArgs({ port, scenario, fixtures, sliders = S2_SLIDERS, exports = [], windows, release = true }) {
+  if (windows?.length !== 1) throw new Error('Tauri performance harness requires one configured window');
   const url = `http://127.0.0.1:${port}/?lang=en&perf=1&scenario=${scenario}&fixtures=${encodeURIComponent(fixtures.join(','))}&sliders=${sliders.join(',')}&exports=${encodeURIComponent(JSON.stringify(exports))}`;
-  return ['dev', '--release', '--no-watch', '--config', JSON.stringify({ build: { beforeDevCommand: '', devUrl: url } })];
+  return ['dev', ...(release ? ['--release'] : []), '--no-watch', '--features', 'perf-harness', '--config', JSON.stringify({
+    build: { beforeDevCommand: '', devUrl: url }, app: { windows: windows.map(window => ({ ...window, incognito: true })) }
+  })];
 }
 
-export function launchWebKitProcess(bin, argv, { memory, cwd, spawnProcess = spawn } = {}) {
+export function createTauriCache(outDir) {
+  const root = mkdtempSync(join(resolve(outDir), 'tauri-cache-'));
+  const token = randomBytes(16).toString('hex');
+  writeFileSync(join(root, '.nc-perf-harness'), `${token}\n`, { flag: 'wx', mode: 0o600 });
+  return { NC_PERF_TAURI_CACHE_ROOT: root, NC_PERF_TAURI_CACHE_TOKEN: token };
+}
+
+export function launchWebKitProcess(bin, argv, { memory, cwd, env = {}, spawnProcess = spawn } = {}) {
   const child = spawnProcess(bin, argv, {
-    cwd, stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32', env: { ...process.env, ...memory.processEnv() }
+    cwd, stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32', env: { ...process.env, ...env, ...memory.processEnv() }
   });
   memory.bindProcess(child);
   const unregister = registerProcess(child, { cleanup: () => memory.stopOwnedProcess('SIGKILL') });
@@ -433,17 +444,20 @@ export function launchWebKitScript(script, argv, options) {
   return launchWebKitProcess(process.execPath, [script, ...argv], options);
 }
 
-async function tauriScenario(id, { ref, fixtureNames, record, note, log, outDir, label, memory }) {
+export async function tauriScenario(id, { ref, fixtureNames, record, note, log, outDir, label, memory,
+  release = true, timeoutMs = 90 * 60 * 1000, launchLog = () => {} }) {
   const script = join(ref.worktree.path, 'node_modules', '@tauri-apps', 'cli', 'tauri.js');
   const before = new Set(existsSync(ref.resultsDir) ? readdirSync(ref.resultsDir) : []);
   const exports = id === 's9-parallel' ? PARALLEL_EXPORTS.map(spec => ({ ...spec, id: `zip.${spec.id}`, zip: true }))
     : id === 's9' ? [...SINGLE_EXPORTS.map(spec => ({ ...spec, id: `single.${spec.id}.imported` })),
       ...ZIP_EXPORTS.map(spec => ({ ...spec, id: `zip.${spec.id}`, zip: true }))] : [];
-  const { child, unregister } = launchWebKitScript(script, tauriDevArgs({ port: ref.port, scenario: id, fixtures: fixtureNames, exports }),
-    { cwd: ref.worktree.path, memory });
+  const config = JSON.parse(readFileSync(join(ref.worktree.path, 'src-tauri', 'tauri.conf.json'), 'utf8'));
+  const { child, unregister } = launchWebKitScript(script, tauriDevArgs({ port: ref.port, scenario: id, fixtures: fixtureNames, exports,
+    windows: config.app.windows, release }), { cwd: ref.worktree.path, env: createTauriCache(outDir), memory });
   let output = '';
-  child.stdout.on('data', chunk => { output = (output + chunk).slice(-8000); });
-  child.stderr.on('data', chunk => { output = (output + chunk).slice(-8000); });
+  const collect = chunk => { output = (output + chunk).slice(-8000); launchLog(String(chunk)); };
+  child.stdout.on('data', collect);
+  child.stderr.on('data', collect);
   let exited = null;
   child.once('exit', code => { exited = code; });
   const stopHeartbeats = watchHeartbeats(ref.resultsDir, async beat => {
@@ -452,7 +466,7 @@ async function tauriScenario(id, { ref, fixtureNames, record, note, log, outDir,
     note(`samples: ${samples.map(sample => sample.file || sample.error).join(', ')}`);
   });
   try {
-    const deadline = Date.now() + 90 * 60 * 1000; // includes the first cargo build
+    const deadline = Date.now() + timeoutMs; // includes the first cargo build
     while (Date.now() < deadline && exited === null) {
       if (memory.verdict) throw new Error(memory.verdict.detail);
       const fresh = (existsSync(ref.resultsDir) ? readdirSync(ref.resultsDir) : []).filter(file => file.startsWith('result-') && !before.has(file));

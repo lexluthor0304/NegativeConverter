@@ -17,6 +17,7 @@ use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
+#[cfg(not(feature = "perf-harness"))]
 use tauri::Manager;
 
 // Must equal DISPLAY_PROXY_CHUNK_BYTES in displayProxyDesktop.js: the IPC
@@ -276,7 +277,96 @@ pub fn space(_root: &Path) -> Space {
 }
 
 pub fn root_for<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<PathBuf, String> {
+    #[cfg(feature = "perf-harness")]
+    {
+        let _ = app;
+        return perf_cache_root(std::env::var_os("NC_PERF_TAURI_CACHE_ROOT").map(PathBuf::from),
+            std::env::var("NC_PERF_TAURI_CACHE_TOKEN").ok());
+    }
+    #[cfg(not(feature = "perf-harness"))]
     Ok(app.path().app_cache_dir().map_err(|e| e.to_string())?.join("display-proxies"))
+}
+
+// The harness launches the real app, whose startup clears prior spill files.
+// Never fall back to the user's cache when the harness claim is unavailable.
+#[cfg(feature = "perf-harness")]
+fn perf_cache_root(root: Option<PathBuf>, token: Option<String>) -> Result<PathBuf, String> {
+    let root = root.ok_or("performance harness cache root missing")?;
+    let token = token.ok_or("performance harness cache token missing")?;
+    if !root.is_absolute() || token.len() != 32 || !token.bytes().all(|c| c.is_ascii_hexdigit()) {
+        return Err("invalid performance harness cache claim".into());
+    }
+    let metadata = fs::symlink_metadata(&root).map_err(|e| e.to_string())?;
+    if !metadata.file_type().is_dir() || root.canonicalize().map_err(|e| e.to_string())? != root {
+        return Err("performance harness cache root is not a canonical directory".into());
+    }
+    let marker = root.join(".nc-perf-harness");
+    let claim = fs::symlink_metadata(&marker).map_err(|e| e.to_string())?;
+    if !claim.file_type().is_file() {
+        return Err("performance harness cache claim is not a regular file".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let uid = unsafe { libc::geteuid() };
+        if metadata.uid() != uid || claim.uid() != uid || metadata.mode() & 0o077 != 0 || claim.mode() & 0o077 != 0 {
+            return Err("performance harness cache claim is not private to this user".into());
+        }
+    }
+    if fs::read_to_string(marker).map_err(|e| e.to_string())? != format!("{token}\n") {
+        return Err("performance harness cache claim does not match".into());
+    }
+    Ok(root.join("display-proxies"))
+}
+
+#[cfg(all(test, feature = "perf-harness", unix))]
+mod perf_cache_tests {
+    use super::*;
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    const TOKEN: &str = "0123456789abcdef0123456789abcdef";
+
+    fn fixture(marker: bool) -> PathBuf {
+        let base = std::env::var_os("NC_PERF_TEST_ROOT").map(PathBuf::from).unwrap_or(std::env::temp_dir());
+        let nonce = std::time::SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let root = base.join(format!("perf-cache-{}-{nonce}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        if marker {
+            fs::write(root.join(".nc-perf-harness"), format!("{TOKEN}\n")).unwrap();
+            fs::set_permissions(root.join(".nc-perf-harness"), fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        root
+    }
+
+    #[test]
+    fn isolated_claim_has_no_user_cache_fallback() {
+        let root = fixture(true);
+        let resolve = |root, token| perf_cache_root(root, token);
+        assert_eq!(resolve(Some(root.clone()), Some(TOKEN.into())).unwrap(), root.join("display-proxies"));
+        assert!(resolve(None, Some(TOKEN.into())).is_err());
+        assert!(resolve(Some(root.clone()), None).is_err());
+        assert!(resolve(Some(PathBuf::from("relative")), Some(TOKEN.into())).is_err());
+        assert!(resolve(Some(root.clone()), Some("wrong".into())).is_err());
+        fs::write(root.join(".nc-perf-harness"), "different\n").unwrap();
+        assert!(resolve(Some(root.clone()), Some(TOKEN.into())).is_err());
+    }
+
+    #[test]
+    fn shared_permissions_and_symlink_claims_are_refused() {
+        let root = fixture(true);
+        fs::set_permissions(root.join(".nc-perf-harness"), fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(perf_cache_root(Some(root.clone()), Some(TOKEN.into())).is_err());
+        fs::set_permissions(root.join(".nc-perf-harness"), fs::Permissions::from_mode(0o600)).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(perf_cache_root(Some(root.clone()), Some(TOKEN.into())).is_err());
+        let links = fixture(false);
+        symlink(&root, links.join("root-link")).unwrap();
+        symlink(root.join(".nc-perf-harness"), links.join(".nc-perf-harness")).unwrap();
+        assert!(perf_cache_root(Some(links.join("root-link")), Some(TOKEN.into())).is_err());
+        assert!(perf_cache_root(Some(links), Some(TOKEN.into())).is_err());
+    }
 }
 
 fn header<'a>(request: &'a tauri::ipc::Request<'_>, name: &str) -> Result<&'a str, String> {

@@ -22,6 +22,8 @@ cc = "1"
 
 [features]
 default = ["updater"]
+# Only the local performance launcher enables this isolated cache path.
+perf-harness = []
 # In-app updates via tauri-plugin-updater. The Mac App Store build turns this
 # off (`scripts/build-mas.sh`): App Store apps must not update themselves.
 updater = ["dep:tauri-plugin-updater", "dep:tauri-plugin-process"]
