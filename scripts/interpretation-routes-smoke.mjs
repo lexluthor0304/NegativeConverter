@@ -77,6 +77,8 @@ export async function runInterpretationRoutesSmoke({ send, evaluate, waitFor, wa
   })()`);
   await evaluate(`(async () => {
     const { encodePng16Blob } = await import('/src/app/exportImageEncoders.js');
+    const { loadPngImageData } = await import('/src/app/imageFileLoaders.js');
+    const { hashFileForProject } = await import('/src/app/rollProject.js');
     const width = 128, height = 96, data16 = new Uint16Array(width * height * 4);
     for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
       const at = (y * width + x) * 4, value = 9000 + ((x * 71 + y * 157) % 35000);
@@ -85,17 +87,32 @@ export async function runInterpretationRoutesSmoke({ send, evaluate, waitFor, wa
     }
     const image = new ImageData(Uint8ClampedArray.from(data16, v => v >>> 8), width, height);
     image.__image16 = { width, height, data: data16 };
-    const blob = encodePng16Blob(image);
-    window.__routeFiles = ['current', 'selected', 'unopened'].map(name => new File([blob], 'route-' + name + '.png', { type: 'image/png', lastModified: 1 }));
+    // Distinct lossless encodings keep the pixel reference identical while
+    // giving the project's real content matcher an unambiguous source.
+    window.__routeFiles = ['current', 'selected', 'unopened'].map((name, i) => new File(
+      [encodePng16Blob(image, { level: [0, 6, 9][i] })], 'route-' + name + '.png', { type: 'image/png', lastModified: 1 }));
     window.__routeOriginalFiles = window.__routeFiles.slice();
     const donor = new ImageData(Uint8ClampedArray.from(image.data, (v, i) => i % 4 === 3 ? v : Math.round(v * .7)), width, height);
     donor.__image16 = { width, height, data: Uint16Array.from(data16, (v, i) => i % 4 === 3 ? v : Math.round(v * .7)) };
     window.__routeDonorFile = new File([encodePng16Blob(donor)], 'route-current.png', { type: 'image/png', lastModified: 1 });
     window.__routeRollFiles = [window.__routeDonorFile, window.__routeOriginalFiles[1],
-      new File([encodePng16Blob(donor)], 'route-unopened.png', { type: 'image/png', lastModified: 1 })];
+      new File([encodePng16Blob(donor, { level: 9 })], 'route-unopened.png', { type: 'image/png', lastModified: 1 })];
+    window.__routeFixtureIdentities = {};
+    for (const [label, files] of [['original', window.__routeOriginalFiles], ['roll', window.__routeRollFiles]]) {
+      const hashes = await Promise.all(files.map(hashFileForProject));
+      if (hashes.some(hash => !hash) || new Set(hashes).size !== files.length) throw new Error(label + ': ambiguous fixture content identities');
+      for (let i = 0; i < files.length; i++) {
+        const decoded = await loadPngImageData(await files[i].arrayBuffer());
+        const expected = label === 'roll' && i !== 1 ? donor.__image16.data : data16;
+        if (!decoded.__image16 || decoded.__image16.data.length !== expected.length
+          || decoded.__image16.data.some((value, at) => value !== expected[at])) throw new Error(label + ': lossless fixture samples changed');
+      }
+      window.__routeFixtureIdentities[label] = files.map((file, i) => ({ name: file.name, hash: hashes[i] }));
+    }
     const dt = new DataTransfer(); dt.items.add(window.__routeFiles[0]);
     const input = document.getElementById('fileInput'); input.files = dt.files; input.dispatchEvent(new Event('change', { bubbles: true }));
   })()`);
+  console.log('interpretation fixture source identities:', JSON.stringify(await evaluate('window.__routeFixtureIdentities')));
   await waitFor('completed original anchors and rescue', `${ready} && ${settings}?.semanticMap && ${settings}.expiredAnalysis?.spatial
     && !window.__ncTwoStage.status().semanticPending`, 120000);
   const old = await evaluate(settings);
@@ -104,11 +121,21 @@ export async function runInterpretationRoutesSmoke({ send, evaluate, waitFor, wa
   await evaluate(`window.__routeOld = ${JSON.stringify(old)}`);
   // A saved project restores valid completed analysis while offering a B&W
   // edge detection; the Apply detected film button is the production writer.
+  const assertProjectIdentity = async label => {
+    const identity = await evaluate(`({ expected: window.__routeExpectedProjectNames,
+      actual: window.__ncTwoStage.queuedRecipes().map(item => item.name),
+      active: document.getElementById('studioFilename').textContent })`);
+    if (JSON.stringify(identity.actual) !== JSON.stringify(identity.expected) || identity.active !== identity.expected[0]) {
+      fail(label + ': project source identity/order changed: ' + JSON.stringify(identity));
+    }
+    console.log(label + ' source identity:', JSON.stringify(identity));
+  };
   const openProject = async (values, all = true, reference = null) => {
     await evaluate(`(async () => {
       const { buildRollProject, serializeRollProject } = await import('/src/app/rollProject.js');
       window.__routeProjectOpened = false;
       const files = window.__routeFiles.slice(0, ${all ? 3 : 1});
+      window.__routeExpectedProjectNames = files.map(file => file.name);
       const values = ${JSON.stringify(values)};
       const entries = files.map((file, i) => ({ name: file.name, size: file.size, selected: true,
         settings: values[i] || null, lastModified: file.lastModified }));
@@ -119,6 +146,7 @@ export async function runInterpretationRoutesSmoke({ send, evaluate, waitFor, wa
     await waitFor('saved project source restored', `window.__routeProjectOpened && ${ready}
       && document.getElementById('studioFilename').textContent === window.__routeFiles[0].name
       && ${settings}?.expiredAnalysis?.spatial`, 120000);
+    await assertProjectIdentity('opened project');
     await evaluate('window.__ncAnalysis.settle()');
     await wait(600);
   };
@@ -261,12 +289,14 @@ export async function runInterpretationRoutesSmoke({ send, evaluate, waitFor, wa
     const before = await evaluate('window.__ncTwoStage.status().settings');
     await evaluate(`(() => {
       window.__routeProjectOpened = false;
+      window.__routeExpectedProjectNames = JSON.parse(window.__routeSavedProjectText).files.map(file => file.name);
       const project = new File([window.__routeSavedProjectText], 'saved.ncroll.json', { type: 'application/json' });
       const dt = new DataTransfer(); for (const file of window.__routeFiles) dt.items.add(file); dt.items.add(project);
       const input = document.getElementById('projectInput'); input.files = dt.files; input.dispatchEvent(new Event('change', { bubbles: true }));
     })()`);
     await waitFor(label + ' reopened', `window.__routeProjectOpened && ${ready} && ${settings}.filmType === '${before.filmType}' && ${settings}.positiveMode === '${before.positiveMode}'
       && ${settings}.expiredAnalysis?.spatial`, 120000);
+    await assertProjectIdentity(label + ' reopened');
     await evaluate('window.__ncAnalysis.settle()');
   };
   const equalRecipient = (batchResult, singleResult, label) => {
