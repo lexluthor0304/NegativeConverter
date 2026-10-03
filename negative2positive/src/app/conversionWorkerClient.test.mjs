@@ -408,6 +408,17 @@ console.log('conversionWorkerClient: 入力再利用・参照解除・再起動�
   assert.deepEqual([...(await pending).data], [2, 2, 2, 2, 2, 2, 2, 2]);
   assert.equal(preview.holds(level), true, 'the worker keeps the level');
   assert.equal(preview.holds(full), false);
+  const controller = new AbortController();
+  pending = preview.roi({ settings: {}, rows: new Uint16Array(8), signal: controller.signal,
+    region: { x: 0, y: 0, width: 2, height: 1, outWidth: 2, outHeight: 1, slotWidth: 256, slotHeight: 256 } });
+  const cancelled = worker().messages.at(-1);
+  const rejected = assert.rejects(pending, { code: WORKER_ABORTED });
+  controller.abort();
+  await rejected;
+  assert.deepEqual(worker().messages.at(-1), { type: 'cancel', id: cancelled.id }, 'ROI cancellation reaches the worker');
+  worker().onmessage({ data: { id: cancelled.id, type: 'roi', width: 2, height: 1, rgba: new Uint8ClampedArray(8).buffer } });
+  assert.equal(preview.holds(level), true, 'a late cancelled ROI keeps the cached level');
+  assert.ok(!worker().terminated, 'ROI cancellation preserves the preview worker');
   pending = preview(frame(3));
   assert.equal(worker().messages.at(-1).reuseSource, true, 'the cached level survives the uncached requests');
   worker().complete(); await pending;

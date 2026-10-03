@@ -175,7 +175,7 @@ surface at 2.2–4 MP, in Node). They now stay on the GPU.
   layer (#248) passes its region of the whole frame (`regionFrame`), so the fog and the
   mean grid stay normalised to the frame the CPU normalises them to.
 - **Values.** `currentDisplayStages()` builds them with `computeAdjustmentParams` from
-  the display recipe (the look, the rescue strengths and analysis, hold-to-compare),
+  the display recipe (the look, the rescue strengths and analysis, vibrance, hold-to-compare),
   only when one of those changed. A strength tick is one `buildExpiredRescueStages`
   and 2 KB of uploads; the grid uploads once per analysis and the look's curves once
   per look. The textures stay under 70 KB.
@@ -183,8 +183,14 @@ surface at 2.2–4 MP, in Node). They now stay on the GPU.
   their fixtures (rescue with offsets, fog and local contrast; the look with a
   non-symmetric matrix and curves; rescue + look + vibrance; hold-to-compare) against
   `pixelAdjustments.js` ('full') in one readback: mean ≤ 1 level and p99.9 ≤ 3.
-  `webglState.modesReady` is false until then, for good if they fail, and on WebGL1;
-  while it is false only a look or a rescue keeps the CPU display. `?gpuPreview=modes-fail`
+  The readback includes a SilverCore conversion drawn through the combined
+  apply-mode shader, with rescue, look and vibrance, against the CPU chain.
+  Earlier claims that both variants were tested were premature: the combined
+  program joined the runtime self-test in the #229 review fix (R2-019).
+  `webglState.modesReady` is false until then, for good if they fail, on WebGL1,
+  and on software rasterisers. `?gpuPreview=force` explicitly allows software GL;
+  while it is false only a look or a rescue keeps the CPU display.
+  `?gpuPreview=modes-fail` (or `?gpuPreview=force&displayModesFail=1` on software renderers)
   fails the self-test.
 - **Border.** With the border preview the drawing buffer is the framed display size
   (`getSprocketFrameLayout`, portrait included): pass 1 draws
@@ -192,7 +198,10 @@ surface at 2.2–4 MP, in Node). They now stay on the GPU.
   and fonts), pass 2 the photo into its rectangle. With overexposed sprockets the smear
   keeps the last background during a drag and is recomposed after each settle from an
   exact display-size frame adjusted in the export worker (a UI-only approximation that
-  lags by one settle). The WebGL1 fallback draws the same underlay.
+  lags by one settle). The smear belongs to its display source: a same-size
+  photo switch releases it, invalidates the underlay, and waits for that photo's
+  own adjusted pixels. The memory ledger counts the held smear. The WebGL1
+  fallback draws the same underlay.
 - **Overlays.** The dust tint and the saved dodge strokes are drawn on
   `#displayOverlay`, a transparent canvas in the transform wrapper above the photo,
   backed at the display photo's size and placed over the photo's rectangle with the
@@ -242,3 +251,39 @@ fallback keeps one worker; #256 splits export conversions).
   GL vs CPU pointer mapping, the failed self-test) and `--expired-only` (the rescue on
   `#glCanvas` within the budget, drags, hold-to-compare).
 - Frame rates, latency, heap growth and WebKit behaviour need the #230 harness.
+
+## Native detail at zoom (#248 review)
+
+A current exact frame supplies the region's pixels directly. A source-derived
+region becomes stale as soon as that frame arrives; the next base draw recrops
+it without a pan. Tier B uses its pending whole-frame size for fog and mean-grid
+coordinates. Conversion completion wakes a waiting request directly; retaining
+or committing a preview plane does not block an ROI. The 250 ms release budget
+is exercised with fake timers; real driver/worker latency remains device-dependent.
+
+Only one current region is requested. Matching cuts deduplicate even when they
+cannot cover the entire view, and superseded requests abort and drop queued row
+buffers. When native rows would exceed 16 MP, the retained level covers the full
+view at its available density. This is a display approximation below native zoom;
+100% and export-triggered exact frames use exact frame crops.
+
+The worker owns the private padded RGBA16 plane, converts it in place, releases
+received rows before conversion, and uses its result's RGBA8 bytes directly when
+slot and output sizes match. The former unconditional 128 MB claim is replaced
+by conservative allocation accounting: at DPR 2, a 1110x700 CSS view has a
+2560x1792 slot and a <=2478x1658 native-density region. At lower densities native
+rows may approach the 16 MP cap. Including that resampling peak, a worst-case sparse
+stops map and old/new detail textures plus the drawing buffer, allow **384 MiB**
+for that slot, and **512 MiB** for a 1600x1000 view (3584x2304 slot). The bound
+also allows one superseding row payload while an active synchronous
+pass finishes; older queued payloads are discarded. These bounds
+exclude the already retained base/analysis and driver-internal overhead; they
+are estimates, not measured process RSS. Planning uses a 60 MP descriptor while
+tests allocate at most 12 MP. `estimateDetailRoiBytes` checks the plane/texture
+accounting against these bounds. `?detailProbe=1` retains a test-only region for CPU
+parity checks; its retained plane and transient reference/readback copies are additional.
+
+The curves-only look with vibrance 35 and C/M/Y 6/-4/3 has fp32-model
+p99.9 = 0 with the parity fixture's WB gains. With identity WB, exact HSL
+half-level ties leave p99.9 = 2 (within the display budget); the CPU export
+path is unchanged.

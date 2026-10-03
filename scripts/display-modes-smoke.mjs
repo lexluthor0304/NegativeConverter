@@ -45,7 +45,8 @@ async function offscreenModes() {
     await new Promise(resolve => requestAnimationFrame(resolve));
   }
   if (renderer.modesStatus() !== 'linked') return { failed: 'mode programs did not link: ' + renderer.modesError() };
-  const report = { selfTest: renderer.modesSelfTest(buildDisplayModesCases()), cases: [] };
+  const selfTestCases = buildDisplayModesCases();
+  const report = { selfTest: renderer.modesSelfTest(selfTestCases), corruptApply: renderer.modesSelfTest(selfTestCases, { corruptApply: true }), cases: [] };
   if (!report.selfTest.ok) return { ...report, failed: 'self-test' };
   const read = (width, height) => {
     const pixels = new Uint8Array(width * height * 4);
@@ -154,7 +155,7 @@ export async function runDisplayModesSmoke({ send, evaluate, waitFor, fail, inst
     const origin = await evaluate('performance.timeOrigin');
     // The normal tier (the GL frame is the display source's size) and no detail
     // layer (a region landing between two screenshots would read as overlay).
-    await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en&previewTier=normal&detailLayer=0${query}` });
+    await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en&previewTier=normal&detailLayer=0${query || '&gpuPreview=force'}` });
     await until('fresh display-modes workspace', `performance.timeOrigin !== ${origin} && document.readyState === 'complete' && !!document.getElementById('studioImportAutoCrop')`);
     await installDialogAutoAccept();
     await evaluate(`(${installModesProbe.toString()})()`);
@@ -179,6 +180,7 @@ export async function runDisplayModesSmoke({ send, evaluate, waitFor, fail, inst
     console.log(`SKIP display-modes: ${offscreen.skipped}`);
     return;
   }
+  expect(!offscreen.corruptApply.ok, 'corrupted apply-modes shader was accepted');
   expect(!offscreen.failed && !offscreen.failedCases.length && offscreen.cases.length >= 9,
     'display-mode parity failed offscreen: ' + JSON.stringify(offscreen).slice(0, 4000));
   console.log('ok: mode programs self-test and ' + offscreen.cases.length + ' parity recipes within the budget '
@@ -411,7 +413,7 @@ export async function runDisplayModesSmoke({ send, evaluate, waitFor, fail, inst
   console.log('ok: portrait border is a GL underlay equal to composeSprocketFrame ' + JSON.stringify({ layout: portrait.layout, photo: [portrait.mean, portrait.p999] }));
 
   // ---- 2b. Mode programs failing their self-test: a look keeps the CPU display ----
-  await open('&gpuPreview=modes-fail', [['display-modes-fail.png', 1500, 1000]]);
+  await open('&gpuPreview=force&displayModesFail=1', [['display-modes-fail.png', 1500, 1000]]);
   await until('mode self-test failed', `window.__ncDisplay.modes().status === 'failed'`, 60_000);
   await applyLook();
   const failed = await frame();

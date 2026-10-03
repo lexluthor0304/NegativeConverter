@@ -124,6 +124,12 @@ size change. The tool keeps the GPU display; the detail layer (#248) stays off
 while it is active, since the live rectangles go into the base frame's
 texture. Escape cancels the stroke being painted.
 
+Layout and DPR changes refit the canvases before remapping active dodge, dust
+and AI strokes, including at fit zoom. The DPR watcher uses both the standard
+resolution query and the older WebKit pixel-ratio query. The worker releases
+live coverage tiles and committed strokes after the final flush or on cancel;
+stroke IDs keep a late release from clearing the next stroke.
+
 ## Paper emulation (#152)
 
 **Paper** in the Looks drawer (`PaperProfiles.js`): RA-4 papers (Fujicolor
@@ -162,6 +168,7 @@ colorimetric match.
 ```sh
 npm test
 node scripts/smoke-test.mjs --darkroom-only
+NC_DARKROOM_CPU=1 node scripts/smoke-test.mjs --darkroom-only
 ```
 
 ## Limits
@@ -171,8 +178,10 @@ node scripts/smoke-test.mjs --darkroom-only
 - A stroke of more than 400 points is stored resampled to 400. With a mouse
   the settled frame stays within 1/255 of the live one; pen pressure that
   changes within a few hundred samples cannot be carried by 400 points, so the
-  feather edge can change by a few levels at pen-up
-  (`silverAdapter.live.test.mjs` logs the measured difference).
+  feather edge can jump by 19–31/255 at pen-up. The fast-pressure fixture
+  reports about 93% of stroke pixels within 2/255 (about 7% beyond it), below
+  the 99.9% acceptance target. `silverAdapter.live.test.mjs` logs the current
+  measurement; see the brush-relative decimation entry in `FOLLOWUPS.md`.
 - Test strip patches analyse the 360 px copy themselves; the auto white
   balance can differ slightly from the main preview.
 - Paper curves are parametric approximations; no split-grade printing; the

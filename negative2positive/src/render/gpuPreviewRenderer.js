@@ -591,12 +591,13 @@ export function createGpuPreviewRenderer(gl) {
     /**
      * The display modes' self-test: the cases of buildDisplayModesCases (rescue with
      * fog and local contrast, the look, both with vibrance) drawn with the Step-3
-     * mode program side by side into an offscreen framebuffer, read back once and
+     * and apply mode programs side by side into an offscreen framebuffer, read back once and
      * compared with pixelAdjustments.js by the display budget. Scratch textures
      * only; the stage textures are uploaded again by the next live draw.
      */
-    modesSelfTest(cases, { corrupt = false } = {}) {
+    modesSelfTest(cases, { corrupt = false, corruptApply = false } = {}) {
       if (!modesLinked()) return { ok: false, reason: 'not linked' };
+      ensureStatics();
       const n = cases[0].width, m = cases[0].height;
       const width = n * cases.length;
       const target = texture();
@@ -607,6 +608,7 @@ export function createGpuPreviewRenderer(gl) {
       const image = texture();
       const curveScratch = texture();
       const curveState = { look: null };
+      const scratch = createInputs();
       try {
         if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) return { ok: false, reason: 'framebuffer' };
         uploadCurveInto(curveScratch, cases[0].step3.curves, false);
@@ -616,7 +618,18 @@ export function createGpuPreviewRenderer(gl) {
           gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, n, m, 0, gl.RGBA, gl.UNSIGNED_BYTE,
             new Uint8Array(testCase.image.data.buffer, testCase.image.data.byteOffset, testCase.image.data.length));
           const values = { ...testCase.step3, stages: testCase.stages.active ? testCase.stages : { ...testCase.stages, active: true } };
-          drawStep3With(image, curveScratch, values, [k * n, 0, n, m], { width: n, height: m }, curveState);
+          if (testCase.preview) {
+            const preview = testCase.preview;
+            uploadPreparedInto(scratch, { width: n, height: m, data16: preview.prepared.data });
+            uploadStopsInto(scratch, preview.stops, n, m);
+            const frame = { mode: preview.mode, params: preview.params, plan: preview.plan, engine: preview.engine };
+            uploadFrameTables(scratch, frame);
+            // Test hook: simulate a miscompiled apply variant independently.
+            drawApplyWith(scratch, frame, corruptApply ? { ...values, cmy: [0.9, 0.9, 0.9] } : values,
+              curveScratch, [k * n, 0, n, m], curveState);
+          } else {
+            drawStep3With(image, curveScratch, values, [k * n, 0, n, m], { width: n, height: m }, curveState);
+          }
         });
         const pixels = new Uint8Array(width * m * 4);
         gl.readPixels(0, 0, width, m, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
@@ -628,6 +641,7 @@ export function createGpuPreviewRenderer(gl) {
         gl.deleteTexture(target);
         gl.deleteTexture(image);
         gl.deleteTexture(curveScratch);
+        deleteInputs(scratch);
         // The live curve texture's look row is untouched; the stage textures are
         // keyed by identity and upload again on the next live draw.
         stageTextures.meanKey = stageTextures.offsetsKey = stageTextures.toneKey = null;

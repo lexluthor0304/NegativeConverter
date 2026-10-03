@@ -32,6 +32,8 @@ export function displaySessionStubs(overrides = {}) {
   return {
     displayViewportPending: false, prepareBeforeAfterReference: () => {},
     captureSnapshotWithPendingDisplay: () => null,
+    coreReprocessSettledListeners: new Set(),
+    noteCoreReprocessSettled: () => {},
     ensureSourcePromise: null, preparingOriginal: 0, displaySourceRequest: null,
     displaySessionDiagnostics: displaySessionDiagnosticsStub(),
     displayProxySpill: emptyDisplayProxySpill(),

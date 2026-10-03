@@ -156,3 +156,52 @@ assert.equal(typeof ISOLATION_PROBE, 'string');
 }
 
 console.log('crossOriginIsolation tests passed');
+
+// Lens resampling writes a private shared output fully before publishing it;
+// subsequent full conversions post that same buffer without a 16-bit clone.
+{
+  const { readFileSync } = await import('node:fs');
+  const vm = await import('node:vm');
+  const { createConversionWorkerClient } = await import('./conversionWorkerClient.js');
+  const source = readFileSync(new URL('./main.js', import.meta.url), 'utf8');
+  const fn = name => { const match = new RegExp(`^    function ${name}\\(`, 'm').exec(source);
+    assert.ok(match, name); return source.slice(match.index, source.indexOf('\n    }', match.index) + 6); };
+  class TestImageData {
+    constructor(data, width, height) { Object.assign(this, { data, width, height }); }
+  }
+  const beforeIsolation = globalThis.crossOriginIsolated, beforeLocation = globalThis.location, beforeImage = globalThis.ImageData;
+  globalThis.crossOriginIsolated = true;
+  globalThis.location = { search: '' };
+  globalThis.ImageData = TestImageData;
+  const context = vm.createContext({ ImageData: TestImageData, Uint16Array, Uint8ClampedArray, Math,
+    allocPlane16, isSharedPlane, sharedPlanesAvailable, clampBetween: (value, min, max) => Math.max(min, Math.min(max, value)) });
+  vm.runInContext(['bilerp', 'sampleImageChannelBilinear', 'sampleGridPair', 'sampleGridTriple', 'sampleGridTca', 'applyLensMapsToImage'].map(fn).join('\n'), context);
+  const width = 9, height = 7, length = width * height * 4;
+  const plane = allocPlane16(length, { shared: true });
+  for (let i = 0; i < length; i++) plane[i] = i % 4 === 3 ? 65535 : (i * 7919) & 65535;
+  const image = new TestImageData(Uint8ClampedArray.from(plane, value => value >>> 8), width, height);
+  image.__image16 = { width, height, data: plane };
+  const geometry = new Float32Array(width * height * 2);
+  for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) geometry.set([x + 0.2, y + 0.35], (y * width + x) * 2);
+  const maps = { gridWidth: width, gridHeight: height, step: 1, geometry };
+  let client;
+  try {
+    const corrected = context.applyLensMapsToImage(image, maps, {});
+    assert.ok(isSharedPlane(corrected.__image16.data), 'lens output remains shared');
+    const plainInput = { ...image, __image16: { width, height, data: new Uint16Array(plane) } };
+    const copied = context.applyLensMapsToImage(plainInput, maps, {});
+    assert.deepEqual(corrected.__image16.data, copied.__image16.data, 'allocation changes no lens pixels');
+    let posted;
+    const worker = { postMessage(message) { posted = message;
+      queueMicrotask(() => worker.onmessage({ data: { type: 'result', id: message.id, width, height,
+        rgba: corrected.data.slice().buffer, image16: corrected.__image16.data.buffer } })); }, terminate() {} };
+    client = createConversionWorkerClient({ workerFactory: () => worker });
+    await client({ imageData: corrected, settings: { filmType: 'color' }, options: { forceFullProcess: true } });
+    assert.equal(posted.image16, corrected.__image16.data.buffer, 'fake worker receives the original shared lens buffer');
+    globalThis.location.search = '?sharedPlanes=0';
+    assert.ok(context.applyLensMapsToImage(image, maps, {}).__image16.data.buffer instanceof ArrayBuffer, 'lens also honors the page kill switch');
+  } finally {
+    client?.dispose(); globalThis.crossOriginIsolated = beforeIsolation;
+    globalThis.location = beforeLocation; globalThis.ImageData = beforeImage;
+  }
+}

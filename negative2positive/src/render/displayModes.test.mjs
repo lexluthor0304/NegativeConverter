@@ -183,7 +183,7 @@ for (const [width, height] of [[64, 48], [96, 64], [211, 137]]) {
   };
   let builds = 0;
   const context = vm.createContext({
-    state, expiredCompareHeld: false, EXPIRED_RESCUE_KEYS, sanitizeLookForSettings, sanitizeExpiredRescueParams, sanitizeExpiredAnalysis,
+    state, sanitizeNumeric: (value, fallback, min, max) => Math.min(max, Math.max(min, Number(value ?? fallback))), expiredCompareHeld: false, EXPIRED_RESCUE_KEYS, sanitizeLookForSettings, sanitizeExpiredRescueParams, sanitizeExpiredAnalysis,
     computeAdjustmentParams: (...args) => { builds++; return computeAdjustmentParams(...args); },
     displayStageUniforms, displayStageCache: { key: null, look: undefined, analysis: undefined, stages: null },
   });
@@ -212,6 +212,33 @@ for (const [width, height] of [[64, 48], [96, 64], [211, 137]]) {
   const noLook = context.currentDisplayStages();
   assert.equal(noLook.lookMatrixOn + noLook.lookCurvesOn, 0);
   assert.equal(noLook.rescueOn, 1);
+  // The live cache recipe formerly omitted vibrance even though the CPU's
+  // per-pixel HSL path rounds before C/M/Y.
+  state.expiredEnabled = false;
+  state.look = syntheticLook({ matrix: false });
+  state.vibrance = 0;
+  const plain = context.currentDisplayStages();
+  Object.assign(state, { vibrance: 35, cyan: 6, magenta: -4, yellow: 3, wbR: 1.06, wbG: 0.97, wbB: 0.92 });
+  const vibrance = context.currentDisplayStages();
+  assert.notEqual(vibrance, plain, 'vibrance invalidates the stage cache');
+  assert.equal(vibrance.roundBeforeCmy, 1);
+  const aged = agedPositiveFixture(211, 137);
+  const c = buildDisplayModesCase({ name: 'live curves + vibrance', image: aged, settings: { ...state, look: sanitizeLookForSettings(state.look) } });
+  assert.deepEqual(vibrance, c.stages, 'live stages equal the full recipe stages');
+  const parity = displayParity(c.expected, modelDisplayStep3({ image: aged, step3: c.step3, stages: vibrance }));
+  assert.equal(parity.p999, 0, JSON.stringify(parity));
+  const missingRound = displayParity(c.expected, modelDisplayStep3({ image: aged, step3: c.step3,
+    stages: { ...vibrance, roundBeforeCmy: 0 } }));
+  assert.equal(missingRound.p999, 2, 'the live recipe catches the missing rounding flag');
+  // Identity WB leaves exact half-level HSL ties, whose fp32 rounding can
+  // differ from the CPU's double intermediates. Keep that case within the
+  // existing display budget; exports continue to use the exact CPU path.
+  const identityWb = buildDisplayModesCase({ name: 'identity WB + vibrance', image: aged,
+    settings: { ...c.recipe, wbR: 1, wbG: 1, wbB: 1 } });
+  const identityParity = displayParity(identityWb.expected, modelDisplayStep3({ image: aged,
+    step3: identityWb.step3, stages: vibrance }));
+  assert.ok(identityParity.ok, JSON.stringify(identityParity));
+  console.log('live vibrance rounding:', { parity, identityParity, missingRound });
 }
 
 // ---- 4. The self-test's comparison, the underlay viewport, u_frame ----

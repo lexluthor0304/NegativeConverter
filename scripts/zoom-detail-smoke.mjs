@@ -131,7 +131,7 @@ export async function runZoomDetailSmoke({ send, evaluate, waitFor, fail, instal
     await until(`${label}: PNG captured`, `!!window.__zoomDetailProbe.exports[${index}]?.data && !document.getElementById('exportBtn').disabled`, 120_000);
     return decodePng(await evaluate(`window.__zoomDetailProbe.exports[${index}].data`));
   };
-  const boot = async (query, fileName) => {
+  const boot = async (query, fileName, { size = SOURCE, second = false, filmType = 'color', keepAutoCrop = false } = {}) => {
     await setViewport(1440);
     const origin = await evaluate('performance.timeOrigin');
     await send('Page.navigate', { url: `http://127.0.0.1:${port}/${query}` });
@@ -139,14 +139,16 @@ export async function runZoomDetailSmoke({ send, evaluate, waitFor, fail, instal
     await installDialogAutoAccept();
     await evaluate(`(${installZoomDetailProbe.toString()})()`);
     await evaluate(`(async () => {
-      for (const id of ['studioImportAutoCrop', 'importFilmTypeAuto', 'autoRollOnImport']) {
+      const autoCrop = document.getElementById('studioImportAutoCrop');
+      if (autoCrop.checked !== ${keepAutoCrop}) autoCrop.click();
+      for (const id of ['importFilmTypeAuto', 'autoRollOnImport']) {
         const input = document.getElementById(id); if (input?.checked) input.click();
       }
-      document.querySelector('.film-type-btn[data-type="color"]').click();
+      document.querySelector('.film-type-btn[data-type="${filmType}"]').click();
       // Rebate, a gradient image area and fine detail (1-px lines) that only
       // native pixels resolve.
       const surface = document.createElement('canvas');
-      surface.width = ${SOURCE.width}; surface.height = ${SOURCE.height};
+      surface.width = ${size.width}; surface.height = ${size.height};
       const context = surface.getContext('2d');
       context.fillStyle = 'rgb(215,150,100)'; context.fillRect(0, 0, surface.width, surface.height);
       const gradient = context.createLinearGradient(120, 120, surface.width - 120, surface.height - 120);
@@ -157,6 +159,7 @@ export async function runZoomDetailSmoke({ send, evaluate, waitFor, fail, instal
       const blob = await new Promise(resolve => surface.toBlob(resolve, 'image/png'));
       const transfer = new DataTransfer();
       transfer.items.add(new File([blob], ${JSON.stringify(fileName)}, { type: 'image/png' }));
+      if (${second}) transfer.items.add(new File([blob], ${JSON.stringify(fileName + '-next.png')}, { type: 'image/png' }));
       const input = document.getElementById('fileInput'); input.files = transfer.files;
       input.dispatchEvent(new Event('change', { bubbles: true }));
     })()`);
@@ -171,7 +174,7 @@ export async function runZoomDetailSmoke({ send, evaluate, waitFor, fail, instal
 
   let failure;
   try {
-    await boot('?lang=en', 'zoom-detail.png');
+    await boot('?lang=en&gpuPreview=force&detailProbe=1', 'zoom-detail.png');
 
     // ---- Part 3: the level and the display target ----
     const settled = await display();
@@ -316,10 +319,62 @@ export async function runZoomDetailSmoke({ send, evaluate, waitFor, fail, instal
     expect((await counts(mark)).roi === 0 && cropped.counters.crops >= 1,
       'the detail layer converted although a current full-resolution frame exists: ' + JSON.stringify({ counts: await counts(mark), cropped }));
     console.log('ok: a current full-resolution frame is cropped for the detail layer');
+    const exactParity = await evaluate('window.__ncDetailLayer.parity()');
+    expect(exactParity.exact && exactParity.cropEqual && exactParity.ok,
+      'settled detail is not a crop of the exact frame: ' + JSON.stringify(exactParity));
     await evaluate('window.__zoomDetailProbe.restore()');
 
+    // Drive the large-image/export route with the same 6 MP fixture. A 60 MP
+    // input is never allocated. The export render must bring its own display
+    // preview, and replace the source ROI while the view remains zoomed.
+    await boot('?lang=en&gpuPreview=force&detailProbe=1&largeImagePixels=2000000', 'zoom-detail-large.png');
+    expect(!(await display()).full, 'the large fixture unexpectedly settled a whole frame before export');
+    await evaluate(`document.getElementById('zoomResetBtn').click(); document.getElementById('zoomInBtn').click()`);
+    await until('large source ROI', 'window.__ncDetailLayer.state().current && window.__ncDetailLayer.state().visible');
+    const beforeExport = await display();
+    await exportPng('large zoomed export');
+    await until('export exact region replaces source ROI', 'window.__ncDetailLayer.state().current && window.__ncDetailLayer.state().exact');
+    const afterExport = await display();
+    const largeParity = await evaluate('window.__ncDetailLayer.parity()');
+    expect(afterExport.counters.prebuilt > beforeExport.counters.prebuilt
+      && afterExport.counters.mainFullResamples === beforeExport.counters.mainFullResamples
+      && largeParity.exact && largeParity.cropEqual && largeParity.ok,
+      'large export did not supply its display preview and exact crop: ' + JSON.stringify({ beforeExport, afterExport, largeParity }));
+    console.log('ok: export-triggered large render supplies a prebuilt display preview and exact zoom crop ' + JSON.stringify(largeParity));
+    await evaluate('window.__zoomDetailProbe.restore()');
+
+    // A wide 10.8 MP fixture forces k=2 through the dimension cap, so a Tier B
+    // session can exercise fromLevel with a pending source on a small input.
+    // Complete normal frame detection before enabling rescue: expired imports
+    // deliberately keep the whole frame and do not decide autoFrameMeta.
+    await boot('?lang=en&gpuPreview=force&detailProbe=1&largeImagePixels=2000000', 'zoom-detail-tier-b.png',
+      { size: { width: 18000, height: 600 }, second: true, keepAutoCrop: true, filmType: 'positive' });
+    const tierBSource = (await display()).source;
+    expect((await display()).level?.k === 2 && await evaluate(`(() => {
+      const settings = window.__ncDisplaySessions.recipe().settings;
+      return !!settings.autoFrameMeta && settings.filmEdge?.checked;
+    })()`), 'the Tier B fixture did not complete its frame and film-edge detections');
+    await evaluate(`document.getElementById('uploadExpiredBtn').click()`);
+    await until('Tier B fixture fog analysis', `[...document.querySelectorAll('#expiredDiagnosis li')].some(li => /^Uneven fog:/.test(li.textContent))`, 120_000);
+    await setSlider('expiredUnevenFog', 100);
+    await quiet('Tier B fog recipe settled');
+    await evaluate(`window.__ncDisplaySessions.force('B'); document.querySelector('.file-list-name[data-index="1"]').click()`);
+    await until('second Tier B fixture open', `${ready} && document.getElementById('studioFilename').textContent === 'zoom-detail-tier-b.png-next.png'`);
+    await quiet('second fixture settled');
+    expect(await evaluate("window.__ncDisplaySessions.tier(0)") === 'B', 'the framed positive did not enter Tier B');
+    await evaluate(`document.querySelector('.file-list-name[data-index="0"]').click()`);
+    await until('Tier B original restored', `${ready} && document.getElementById('studioFilename').textContent === 'zoom-detail-tier-b.png' && window.__ncDisplaySessions.live().sourcePending`);
+    await evaluate(`document.getElementById('zoomInBtn').click(); document.getElementById('zoomInBtn').click()`);
+    await until('Tier B rescued detail at about 150 percent fit zoom', 'window.__ncDetailLayer.state().current && window.__ncDetailLayer.state().visible && window.__ncDetailLayer.state().region.fromLevel');
+    const tierBParity = await evaluate('window.__ncDetailLayer.parity()');
+    expect(tierBParity.fromLevel && tierBParity.fog && tierBParity.ok && tierBParity.source[0] === tierBSource.width
+      && await evaluate('window.__ncDisplaySessions.live().sourcePending'),
+      'Tier B region fog was normalised to the crop or rebuilt the source: ' + JSON.stringify(tierBParity));
+    console.log('ok: Tier B fog detail uses whole-frame coordinates without a seam ' + JSON.stringify(tierBParity));
+    await evaluate('window.__ncDisplaySessions.force(null); window.__zoomDetailProbe.restore()');
+
     // ---- The kill switch ----
-    await boot('?lang=en&detailLayer=0', 'zoom-detail-off.png');
+    await boot('?lang=en&gpuPreview=force&detailLayer=0', 'zoom-detail-off.png');
     await evaluate(`document.getElementById('zoomResetBtn').click()`);
     await quiet('1:1 with the layer off');
     const off = await detail();
@@ -330,6 +385,7 @@ export async function runZoomDetailSmoke({ send, evaluate, waitFor, fail, instal
     const diagnostics = await evaluate(`(() => {
       const probe = window.__zoomDetailProbe;
       return { display: window.__ncDisplay?.state(), detail: window.__ncDetailLayer?.state(),
+        session: window.__ncDisplaySessions?.live(), tier: window.__ncDisplaySessions?.tier(0),
         counts: probe?.count(0), inFlight: probe?.inFlight, tail: probe?.events.slice(-30) };
     })()`).catch(() => null);
     console.error('zoom-detail diagnostics:', JSON.stringify(diagnostics));

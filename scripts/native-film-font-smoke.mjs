@@ -50,7 +50,12 @@ export async function runNativeFilmFontSmoke({ send, evaluate, waitFor, wait, fa
   await evaluate(`document.getElementById('exportSprocketBtn').click(); document.getElementById('exportSingleBtn').click()`);
   await wait(200);
   if (await evaluate(`window.__nativeDownloads.length !== 0`)) fail('CJK export completed before its native font loaded');
+  const borderComposes = await evaluate('window.__ncDisplay.counters().glBorderComposes');
+  const glDisplay = await evaluate('window.__ncDisplay.frame().surface === "gl"');
   await evaluate(`window.__restoreNativeLoad(); window.__releaseNativeFont()`);
+  // Observe an app draw before any readback: shownFrame repaints the GL frame.
+  if (glDisplay) await waitFor('native font triggers its own border repaint',
+    `window.__ncDisplay.counters().glBorderComposes > ${borderComposes}`);
   await waitFor('native CJK PNG', `window.__nativeDownloads.length === 1 && !document.body.dataset.studioBusy`, 120000);
   await waitFor('native preview repainted', `${shownHash} !== window.__pendingNativePreview`);
   // Independently read from the bundled font's 100-unit outlines at 12px.

@@ -14,6 +14,7 @@ import {
   strokeBrush, createLiveStrokeCoverage, addLiveStrokePoints, unionRect,
 } from './localExposure.js';
 import { buildDustTint, buildDustTintRect } from './dustTint.js';
+import { applyPreparedAdjustmentsToBuffer, createAdjustmentLutScratch } from './adjustmentPipeline.js';
 
 const source = readFileSync(new URL('./main.js', import.meta.url), 'utf8');
 function functionSource(name) {
@@ -172,9 +173,10 @@ const geometry = { baseWidth: W, baseHeight: H, rotatedWidth: W, rotatedHeight: 
 const committed = sanitizeLocalExposureForSettings({ strokes: [{ stops: 0.7, size: 0.3, feather: 0.5, points: [{ x: 0.2, y: 0.3 }, { x: 0.5, y: 0.6 }] }] });
 const settingsFor = (localExposure) => ({ colorModel: 'standard', filmBase: { r: 210, g: 140, b: 90 }, localExposure, localExposureGeometry: geometry });
 
-function liveFixture({ delta = false } = {}) {
+function liveFixture({ delta = false, cpu = false, border = false } = {}) {
   const worker = { store: null, committed: null, requests: 0 };
   const client = {
+    exposureLiveEnd: async () => { worker.ends = (worker.ends || 0) + 1; worker.store = null; worker.committed = null; },
     liveFrameOf: (image) => (image.__liveSeq ? { seq: image.__liveSeq, slot: 'preview' } : null),
     exposureLive: async (request) => {
       await settle();
@@ -190,16 +192,22 @@ function liveFixture({ delta = false } = {}) {
       return { rect, rgba: reply.rgba, committedRgba: reply.committedRgba };
     }
   };
-  const texture = { data: null, uploads: [] };
+  const texture = { data: null, uploads: [], puts: [] };
+  class TestImageData { constructor(a, b, c) { if (typeof a === 'number') Object.assign(this, { width: a, height: b, data: new Uint8ClampedArray(a * b * 4) }); else Object.assign(this, { data: a, width: b, height: c }); } }
+  const adjustment = { curves: { r: [], g: [], b: [] }, wbR: 1.08, wbG: 0.96, wbB: 1.04, vibrance: 35, cyan: 6, magenta: -4, yellow: 3 };
+  const photo = border ? { x: 11, y: 7 } : null;
   const state = { currentStep: 3, cropping: false, beforeAfterActive: false, localExposure: committed, previewSourceImageData: null,
-    processedImageData: null, webglSourceImageData: null, displayImageData: null };
+    processedImageData: null, webglSourceImageData: null, displayImageData: null, sprocketPreviewEnabled: border };
   const webglState = { sourceDirty: false, sourceSize: { w: W, h: H } };
   const context = vm.createContext({
-    state, webglState, glCanvas: { style: { display: 'block' } }, console, Math, Uint8ClampedArray,
+    state, webglState, glCanvas: { style: { display: cpu ? 'none' : 'block' } }, console, Math, Uint8ClampedArray,
+    ImageData: TestImageData, mainCanvasPhoto: photo,
+    applyPreparedAdjustmentsToBuffer, buildDisplayAdjustmentSettings: () => adjustment, adjustmentLutScratch: createAdjustmentLutScratch(),
+    ctx: { putImageData: (image, x, y) => texture.puts.push({ image, x, y }) },
     convertPreviewFrameInWorker: client, LIVE_DODGE_ENABLED: true, lastLiveFrame: null, liveDodge: null, liveDisplaySerial: 0,
     staleLiveFrames: new Set(),
     liveDodgeCounters: { strokes: 0, requests: 0, rects: 0, deltaRects: 0, stale: 0, warmups: 0, uploads: 0, puts: 0, maxRectPixels: 0, restored: 0, lastRect: null },
-    isWebGLActive: () => true, usesSilverCoreConversion: () => true,
+    isWebGLActive: () => !cpu, usesSilverCoreConversion: () => true,
     displaySourceImageData: () => state.previewSourceImageData || state.processedImageData,
     coreReprocessScheduled: null, _coreReprocessPending: null, _coreReprocessPreviewInFlight: false,
     gpuPreviewScheduler: { isAhead: () => false }, displayedFrameToken: 1, coreReprocessToken: 1, coreReprocessGeneration: 1,
@@ -213,8 +221,8 @@ function liveFixture({ delta = false } = {}) {
     warmLiveDodge: () => assert.fail('the frame on screen is live'),
   });
   vm.runInContext(['noteLiveFrame', 'liveDodgeDisplay', 'liveDodgeTarget', 'beginLiveDodge', 'addLiveDodgePoints', 'liveDodgeStillShown',
-    'retargetLiveDodge', 'flushLiveDodge', 'liveDeltaRows', 'applyLiveDodgeReply', 'endLiveDodge'].map(functionSource).join('\n'), context);
-  return { context, state, texture, worker, webglState, delta };
+    'retargetLiveDodge', 'flushLiveDodge', 'liveDeltaRows', 'applyLiveDodgeReply', 'releaseLiveDodge', 'endLiveDodge'].map(functionSource).join('\n'), context);
+  return { context, state, texture, worker, webglState, delta, adjustment, photo, TestImageData };
 }
 
 for (const mode of ['exact', 'delta']) {
@@ -307,3 +315,92 @@ for (const mode of ['exact', 'delta']) {
 }
 
 console.log('brushWiring: border-aware mapping on both canvases (+-1 px of the old one), worker-pooled tint with dirty-rect patches and strokes drawn once on the display overlay, live dodge texture == stored stroke (exact) and displayed + (live - committed) (delta)');
+
+// The CPU display puts only Step-3-adjusted live rows at the photo's offset,
+// including a sprocket border. The whole-frame settled pass is the reference.
+for (const border of [false, true]) {
+  adapter.invalidateSilverCoreCache();
+  const f = liveFixture({ cpu: true, border });
+  const frame = await adapter.convertColorWithSilverCore(negative(), structuredClone(settingsFor(committed)), { preview: true, includeAnalysisPreview: false });
+  frame.__liveSeq = frame.__liveFrame;
+  Object.assign(f.state, { previewSourceImageData: frame, processedImageData: frame, displayImageData: frame });
+  const parameters = { stops: 1.5, size: 0.2, feather: 0.3 };
+  const working = { ...geometry, width: W, height: H };
+  const points = [{ x: 45, y: 30, p: 1 }, { x: 47, y: 31, p: 1 }];
+  f.context.beginLiveDodge(parameters, working, points[0]);
+  await drain();
+  f.context.addLiveDodgePoints(points.slice(1));
+  await drain();
+  const rect = f.context.liveDodgeCounters.lastRect;
+  f.context.endLiveDodge(true);
+  await drain();
+  const stored = { ...parameters, points: points.map(point => ({ ...workingPointToBase(point, working), p: 1 })) };
+  const after = await adapter.convertColorWithSilverCore(negative(), settingsFor(sanitizeLocalExposureForSettings({ strokes: [...committed.strokes, stored] })),
+    { scratch: true, includeAnalysisPreview: false });
+  const adjusted = new f.TestImageData(W, H);
+  applyPreparedAdjustmentsToBuffer(after, f.adjustment, adjusted, { quality: 'full' });
+  const put = f.texture.puts.at(-1);
+  const expected = new Uint8ClampedArray(rect.width * rect.height * 4);
+  for (let y = 0; y < rect.height; y++) expected.set(adjusted.data.subarray(((rect.y + y) * W + rect.x) * 4,
+    ((rect.y + y) * W + rect.x + rect.width) * 4), y * rect.width * 4);
+  assert.deepEqual(put.image.data, expected, 'CPU live rows equal settled rows after Step 3');
+  assert.deepEqual([put.x, put.y], [rect.x + (f.photo?.x || 0), rect.y + (f.photo?.y || 0)]);
+  const diameter = parameters.size * Math.min(W, H);
+  assert.ok(put.image.width * put.image.height <= (2 * diameter) ** 2, 'put stays within twice the brush diameter');
+  assert.equal(f.worker.ends, 1, 'final flush releases the worker exactly once');
+}
+
+// A layout resize refits first at fit zoom, then remaps each active brush to
+// the actual new photo rectangle; later points remain under the pointer.
+{
+  const container = {};
+  let rect = { left: 100, top: 50, width: 500, height: 400 };
+  const state = { processedImageData: { width: 4000, height: 3000 }, zoomLevel: 1 };
+  const context = vm.createContext({ state, canvasContainer: container, histogramContainer: {}, curveCanvas: {},
+    brushFeedback: { drawing: true, remap: () => {} }, dustDrawing: true, dodgeBurnDrawing: true, aiBrushDrawing: {},
+    brushSurfaceRect: () => rect, dustBrushRect: rect, dodgeBurnRect: rect,
+    refreshCanvasContainerSize() {}, refitCanvasToContainer: () => { rect = { left: 150, top: 75, width: 800, height: 600 }; },
+    syncBrushTools: () => context.remapBrushStroke(), Math });
+  vm.runInContext(['remapBrushStroke', 'clientToImageCoords', 'onLayoutResize'].map(functionSource).join('\n'), context);
+  context.onLayoutResize([{ target: container }]);
+  assert.equal(context.dodgeBurnRect, rect);
+  assert.equal(context.dustBrushRect, rect);
+  assert.equal(context.aiBrushDrawing.rect, rect);
+  assert.deepEqual({ ...context.clientToImageCoords(550, 375, context.dodgeBurnRect) }, { x: 2000, y: 1500 });
+}
+
+// The standard and old WebKit DPR features are watched together, and the
+// change handler refits before remapping the brush on the new display.
+{
+  let query, change;
+  const order = [];
+  const context = vm.createContext({ window: { devicePixelRatio: 2, matchMedia: value => {
+    query = value; return { addEventListener: (type, callback) => { change = callback; }, removeEventListener() {} }; } },
+    invalidateCanvasDisplayFit: () => order.push('invalidate'), refitCanvasToContainer: () => order.push('refit'),
+    syncBrushTools: () => order.push('remap') });
+  vm.runInContext(functionSource('watchDevicePixelRatio'), context);
+  context.watchDevicePixelRatio();
+  assert.equal(query, '(resolution: 2dppx), (-webkit-device-pixel-ratio: 2)');
+  context.window.devicePixelRatio = 1;
+  change();
+  assert.equal(query, '(resolution: 1dppx), (-webkit-device-pixel-ratio: 1)');
+  assert.deepEqual(order, ['invalidate', 'refit', 'remap']);
+}
+
+// A final reply for stroke A may arrive after B starts. A cannot send more
+// points or reset B's worker store; its release is sent once with A's ID.
+{
+  const old = { id: 11, ended: 'commit', base: [{ x: 0.4, y: 0.3 }], sent: 0 };
+  const next = { id: 12 };
+  const released = [];
+  let requests = 0;
+  const context = vm.createContext({ liveDodge: next, console,
+    convertPreviewFrameInWorker: { exposureLiveEnd: async id => released.push(id), exposureLive: () => { requests++; } } });
+  vm.runInContext(['releaseLiveDodge', 'flushLiveDodge'].map(functionSource).join('\n'), context);
+  context.flushLiveDodge(old);
+  context.flushLiveDodge(old);
+  await settle();
+  assert.equal(requests, 0, 'the previous stroke cannot reset or append to the next store');
+  assert.deepEqual(released, [11]);
+  assert.equal(context.liveDodge, next);
+}

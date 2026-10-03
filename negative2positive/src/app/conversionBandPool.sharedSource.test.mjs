@@ -79,3 +79,26 @@ pool.dispose();
 for (const thread of threads) await thread.terminate();
 configurePlaneGuard({ enabled: null });
 console.log('conversion band pool: a shared source is copied by the bands, not by this thread');
+
+// The page kill switch governs a pool's default even on an isolated page.
+// The input may already be shared (loaded earlier), but pool outputs and load
+// messages must use the copy path while sharing is disabled.
+{
+  const previousIsolation = globalThis.crossOriginIsolated;
+  const previousLocation = globalThis.location;
+  globalThis.crossOriginIsolated = true;
+  globalThis.location = { search: '?sharedPlanes=0' };
+  const killed = createConversionBandPool({ size: 2, workerFactory: spyFactory });
+  try {
+    loads.length = 0;
+    const converted = await killed.convert({ imageData: frame(W, H, shared), settings, options: { forceFullProcess: true } }, { bands: 2 });
+    assert.ok(converted.__image16.data.buffer instanceof ArrayBuffer, 'kill switch: plain output');
+    assert.ok(loads.every(load => !load.shared && !load.sourceRows), 'kill switch: no shared pool loads');
+    assert.equal(sha(converted.__image16.data), sha(expected.__image16.data));
+  } finally {
+    killed.dispose();
+    globalThis.crossOriginIsolated = previousIsolation;
+    globalThis.location = previousLocation;
+    for (const thread of threads) await thread.terminate();
+  }
+}

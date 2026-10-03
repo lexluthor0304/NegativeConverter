@@ -27,7 +27,7 @@ import { createEmbeddedPreviewPool } from './scanDecodeClient.js';
 import { isTiffContainerRawName } from './rawEmbeddedPreview.js';
 import { renderEmbeddedPreview, createDocumentPreviewEnv } from './embeddedPreviewRender.js';
 import { canPublishThumbnail } from './thumbnailRank.js';
-import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isSharedPlane } from './crossOriginIsolation.js';
+import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isSharedPlane, allocPlane16 } from './crossOriginIsolation.js';
     import { detectedImportSettings } from './filmTypeDetection.js';
     import { createAiModelLoader } from './aiModelLoading.js';
     import { opencvGlueUrl, installPageOpenCvHook } from './opencvModule.js';
@@ -1518,7 +1518,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       );
       const source = use16 ? plane16.data : data;
       const maxValue = use16 ? 65535 : 255;
-      const out16 = use16 ? new Uint16Array(data.length) : null;
+      const out16 = use16 ? allocPlane16(data.length, { shared: isSharedPlane(plane16.data) && sharedPlanesAvailable() }) : null;
       const gridWidth = maps.gridWidth;
       const gridHeight = maps.gridHeight;
       const step = Math.max(1, maps.step || 1);
@@ -3593,6 +3593,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     const DETAIL_LAYER_ENABLED = new URLSearchParams(window.location.search).get('detailLayer') !== '0';
     const detailLayer = {
       renderer: null, failed: false, timer: null, request: null, shown: null, visible: false, warmed: null, modesPoll: 0,
+      probe: new URLSearchParams(window.location.search).get('detailProbe') === '1',
       counters: { requests: 0, conversions: 0, crops: 0, shown: 0, dropped: 0, failures: 0, lastReadyMs: null }
     };
     // The settings token of the conversion frame on screen: a region is never
@@ -5153,9 +5154,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         // again with the exact colour model (#242).
         schedulePreviewUpdate();
         if (!isWebGLActive()) scheduleFullUpdate();
+        noteCoreReprocessSettled();
       }).catch((err) => {
         if (displayPreviewRebuild === job) displayPreviewRebuild = null;
         console.warn('Display preview rebuild failed:', err?.message || err);
+        noteCoreReprocessSettled();
       });
     }
 
@@ -5899,7 +5902,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       photo: null,
       // Bumped when the frame fonts load: the background is composed again.
       generation: 0,
-      smear: null,
+      smear: null, source: null, smearSource: null,
       smearToken: 0,
       smearFlight: 0
     };
@@ -6310,7 +6313,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const rescueOn = Boolean(state.expiredEnabled && state.expiredAnalysis) && !expiredCompareHeld;
       const look = state.look || null;
       const analysis = rescueOn ? state.expiredAnalysis : null;
-      const key = [look, analysis, rescueOn, ...(rescueOn ? EXPIRED_RESCUE_KEYS.map(name => state[name]) : [])];
+      const vibrance = sanitizeNumeric(state.vibrance, state.vibrance ?? 0, -100, 100);
+      const key = [look, analysis, rescueOn, vibrance, ...(rescueOn ? EXPIRED_RESCUE_KEYS.map(name => state[name]) : [])];
       const cache = displayStageCache;
       if (cache.key && cache.key.length === key.length && cache.key.every((value, i) => value === key[i])) return cache.stages;
       const sameLook = cache.look === look, sameAnalysis = cache.analysis === analysis;
@@ -6319,6 +6323,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const safeAnalysis = sameAnalysis ? cache.safeAnalysis : (analysis ? sanitizeExpiredAnalysis(analysis) : null);
       const recipe = {
         curves: state.curves,
+        vibrance,
         look: safeLook,
         ...sanitizeExpiredRescueParams(state, state),
         expiredEnabled: rescueOn,
@@ -6371,11 +6376,16 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // The photo the smear samples: the last settled adjusted frame of this size,
     // else the exact frame before Step 3, else none (a plain background).
     function glBorderSmearSource(width, height) {
+      const source = displaySourceImageData();
+      if (glBorder.source !== source) {
+        glBorder.source = source;
+        glBorder.smear = null;
+        glBorder.smearSource = null;
+        glBorder.smearFlight++;
+        glBorder.smearToken++;
+      }
       const smear = glBorder.smear;
-      if (smear && smear.width === width && smear.height === height) return smear;
-      const source = state.webglSourceImageData;
-      if (source && source.width === width && source.height === height) return source;
-      return null;
+      return smear && glBorder.smearSource === source && smear.width === width && smear.height === height ? smear : null;
     }
 
     // Pass 1 of a bordered frame. Returns the photo's viewport in the drawing buffer.
@@ -6385,12 +6395,14 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (!webglState.borderUnderlay) webglState.borderUnderlay = createBorderUnderlay(gl);
       const underlay = webglState.borderUnderlay;
       const overexposed = Boolean(composeOptions.edgeMarkings?.overexposedSprockets);
+      const smear = glBorderSmearSource(width, height);
       const key = JSON.stringify([width, height, composeOptions.edgeMarkings, areSprocketFrameFontsReady(composeOptions),
         glBorder.generation, overexposed ? glBorder.smearToken : 0]);
       if (underlay.key() !== key) {
         // Without the smear the background reads only the photo's size: any
         // frame of that size serves, and a blank one only when none is at hand.
-        const photo = glBorderSmearSource(width, height) || new ImageData(width, height);
+        const source = state.webglSourceImageData;
+        const photo = smear || (source === glBorder.source && source?.width === width && source?.height === height ? source : null) || new ImageData(width, height);
         underlay.upload(composeSprocketFrameBackground(photo, composeOptions), key);
         displayDebugCounters.glBorderComposes++;
       }
@@ -6410,6 +6422,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const prepared = buildDisplayAdjustmentSettings();
       const land = (adjusted) => {
         if (flight !== glBorder.smearFlight || !adjusted || source !== displaySourceImageData()) return;
+        glBorder.source = source;
+        glBorder.smearSource = source;
         glBorder.smear = adjusted;
         glBorder.smearToken++;
         if (isWebGLActive()) schedulePreviewUpdate();
@@ -6433,7 +6447,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     function releaseGlBorder() {
       glBorder.photo = null;
       glBorder.smear = null;
+      glBorder.source = null;
+      glBorder.smearSource = null;
       glBorder.smearFlight++;
+      glBorder.smearToken++;
       webglState.borderUnderlay?.release();
     }
 
@@ -6676,7 +6693,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (!tag || tag.source !== conversionSourceSize() || tag.generation !== coreReprocessGeneration
         || tag.token !== coreReprocessToken) return false;
       if (tag.full) return tag.full === detailFullFrame() && tag.dustRevision === state.dustRemoval.revision;
-      return !hasFrameRepairs();
+      return !hasFrameRepairs() && !detailFullFrame();
     }
 
     function hideDetailLayer() {
@@ -6689,6 +6706,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     function dropDetailLayer() {
       if (detailLayer.timer) clearTimeout(detailLayer.timer);
       detailLayer.timer = null;
+      coreReprocessSettledListeners.delete(wakeDetailAfterConversion);
+      detailLayer.request?.controller.abort();
       detailLayer.request = null;
       if (detailLayer.shown) detailLayer.counters.dropped += 1;
       detailLayer.shown = null;
@@ -6725,7 +6744,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         hideDetailLayer();
         return false;
       }
-      const source = state.conversionSourceImageData;
+      const source = conversionSourceSize();
       renderer.uploadCurves(state.curves);
       renderer.drawStep3(values, glDetailCanvas.width, glDetailCanvas.height, {
         frame: source ? regionFrame(shown.plan, shown.width, shown.height, source.width, source.height) : null
@@ -6805,6 +6824,20 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       });
     }
 
+    // A retained 16-bit preview and its commit do not change ROI analysis.
+    // Wake when conversions finish, independently of the export/commit barrier.
+    function detailConversionBusy() {
+      return _coreReprocessActive > 0 || _coreReprocessPending !== null || _coreReprocessFullInFlight
+        || Boolean(_coreReprocessPreviewInFlight) || coreReprocessTimer || coreReprocessScheduled
+        || gpuPreviewScheduler.isAhead() || processNegativeInFlight || displayPreviewRebuild;
+    }
+
+    function wakeDetailAfterConversion() {
+      if (detailConversionBusy()) return;
+      coreReprocessSettledListeners.delete(wakeDetailAfterConversion);
+      scheduleDetailRequest(0);
+    }
+
     async function requestDetailRegion() {
       if (!detailLayerAllowed() || gpuPreview.lastDraw === 'apply') {
         hideDetailLayer();
@@ -6812,11 +6845,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       }
       // The base settles first: its conversion carries the settings the
       // region is made for, and the preview worker keeps its analysis.
-      if (coreReprocessBusy() || coreReprocessTimer || coreReprocessScheduled || gpuPreviewScheduler.isAhead()
-        || processNegativeInFlight || corePreviewCommit || displayPreviewRebuild) {
-        scheduleDetailRequest(DETAIL_SETTLE_MS);
+      if (detailConversionBusy()) {
+        coreReprocessSettledListeners.add(wakeDetailAfterConversion);
         return;
       }
+      coreReprocessSettledListeners.delete(wakeDetailAfterConversion);
       const view = detailView();
       let plan = planDetailRegion(view);
       if (!plan) {
@@ -6859,11 +6892,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         }
       }
       const tag = detailTag(full);
-      const job = { tag, plan, started: performance.now() };
+      pending?.controller.abort();
+      const job = { tag, plan, controller: new AbortController(), started: performance.now() };
       detailLayer.request = job;
       detailLayer.counters.requests += 1;
       try {
-        const image = full ? await detailFromFrame(full, plan) : await detailFromSource(plan);
+        const image = full ? await detailFromFrame(full, plan, job.controller.signal) : await detailFromSource(plan, job.controller.signal);
         if (detailLayer.request !== job) return;
         detailLayer.request = null;
         if (!image || !detailTagCurrent(tag) || !detailLayerAllowed()) return;
@@ -6871,24 +6905,24 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         detailLayer.counters.lastReadyMs = Math.round(performance.now() - job.started);
       } catch (err) {
         if (detailLayer.request === job) detailLayer.request = null;
-        detailLayer.counters.failures += 1;
+        if (err?.code !== WORKER_ABORTED) detailLayer.counters.failures += 1;
         if (err?.code !== WORKER_ABORTED) console.warn('Detail layer region failed:', err?.message || err);
       }
     }
 
     // A region of a current full-resolution frame: its 8-bit pixels, reduced
     // in the preview worker below full density.
-    async function detailFromFrame(frame, plan) {
+    async function detailFromFrame(frame, plan, signal) {
       detailLayer.counters.crops += 1;
       const rows = copyRegionRows(frame.data, frame.width, plan);
       const region = new ImageData(new Uint8ClampedArray(rows.buffer), plan.width, plan.height);
       if (plan.outWidth === plan.width && plan.outHeight === plan.height) return region;
-      return convertPreviewFrameInWorker.resample(region, { width: plan.outWidth, height: plan.outHeight }, { transfer: true });
+      return convertPreviewFrameInWorker.resample(region, { width: plan.outWidth, height: plan.outHeight }, { transfer: true, signal });
     }
 
     // A region converted by the preview worker from native rows of the
     // conversion source (or from its cached level), with the base's analysis.
-    async function detailFromSource(plan) {
+    async function detailFromSource(plan, signal) {
       // Native rows of a Tier B session (#249) wait for its source.
       if (!plan.fromLevel && !state.conversionSourceImageData) {
         requestSourceForDisplay();
@@ -6911,10 +6945,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (!convertPreviewFrameInWorker.holds(base.imageData, analysisImageData)) {
         await convertPreviewFrameInWorker.analyze({ ...base, settings, options: { preview: true, analysisImageData } });
       }
+      if (signal?.aborted) return null;
       const rows = plan.fromLevel ? null
         : copyRegionRows(source.__image16?.data instanceof Uint16Array ? source.__image16.data : source.data, source.width, plan);
       return convertPreviewFrameInWorker.roi({
-        settings, region, rows,
+        settings, region, rows, signal,
         base: { levelWidth: base.imageData.width, levelHeight: base.imageData.height, display: base.display }
       });
     }
@@ -6927,7 +6962,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (!renderer.uploadExact(image, true)) return;
       if (glDetailCanvas.width !== image.width) glDetailCanvas.width = image.width;
       if (glDetailCanvas.height !== image.height) glDetailCanvas.height = image.height;
-      detailLayer.shown = { plan, tag, width: image.width, height: image.height };
+      detailLayer.shown = { plan, tag, width: image.width, height: image.height, image: detailLayer.probe ? image : null };
       detailLayer.counters.shown += 1;
       drawDetailLayer();
     }
@@ -6968,6 +7003,29 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
     // Read by the smoke tests and the benchmark (#230 S4).
     window.__ncDetailLayer = {
+      // Explicit test opt-in: production does not retain the uploaded RGBA8
+      // plane. Read in the draw task, before preserveDrawingBuffer discards it.
+      parity: () => {
+        const shown = detailLayer.shown;
+        if (!shown?.image || !detailTagCurrent(shown.tag) || !drawDetailLayer()) return { error: 'no current probe region' };
+        const { plan, image, tag } = shown;
+        const source = conversionSourceSize();
+        const expected = new ImageData(image.width, image.height);
+        const density = image.width / plan.width;
+        applyPreparedAdjustmentsToBuffer(image, buildDisplayAdjustmentSettings(), expected, { quality: 'full',
+          region: { x: Math.round(plan.x * density), y: Math.round(plan.y * density),
+            frameWidth: Math.round(source.width * density), frameHeight: Math.round(source.height * density) } });
+        const gl = detailLayer.renderer.gl;
+        const bottomUp = new Uint8Array(image.data.length);
+        gl.readPixels(0, 0, image.width, image.height, gl.RGBA, gl.UNSIGNED_BYTE, bottomUp);
+        const data = new Uint8ClampedArray(bottomUp.length);
+        for (let y = 0; y < image.height; y++) data.set(bottomUp.subarray((image.height - 1 - y) * image.width * 4,
+          (image.height - y) * image.width * 4), y * image.width * 4);
+        const crop = tag.full && density === 1 ? cropRows(tag.full, plan.x, plan.y, image.width, image.height) : null;
+        const cropEqual = crop ? crop.every((value, i) => value === image.data[i]) : null;
+        return { ...displayParity(expected.data, data), exact: Boolean(tag.full), cropEqual, fromLevel: plan.fromLevel,
+          fog: Boolean(webglStep3Values().stages?.fogOn), source: [source.width, source.height] };
+      },
       state: () => {
         const shown = detailLayer.shown;
         const fit = canvasDisplayFit.scale;
@@ -6981,7 +7039,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           sourcePxPerDevicePx: detailLayer.visible && shown
             ? shown.width / (shown.plan.width * fit * state.zoomLevel * dpr)
             : (webglState.sourceSize.w || 0) / Math.max(1e-9, (state.conversionSourceImageData?.width || 1) * fit * state.zoomLevel * dpr),
-          current: shown ? detailTagCurrent(shown.tag) : false,
+          current: shown ? detailTagCurrent(shown.tag) : false, exact: Boolean(shown?.tag.full),
           roiToken: shown ? shown.tag.token : null, baseToken: displayedFrameToken
         };
       }
@@ -8128,6 +8186,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         displayModes.renderer = renderer;
       }
       if (displayModes.status === 'none') {
+        if (webglState.renderer?.software && GPU_PREVIEW_MODE !== 'force') return failDisplayModes('software renderer', 'unsupported');
         if (!webgl2PrecisionOk(renderer.gl)) return failDisplayModes('highp precision', 'unsupported');
         renderer.startModesCompile();
         displayModes.status = 'compiling';
@@ -8150,7 +8209,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           scheduleDisplayModesWarmup();
           return;
         }
-        const result = renderer.modesSelfTest(displayModes.cases, { corrupt: GPU_PREVIEW_MODE === 'modes-fail' });
+        const result = renderer.modesSelfTest(displayModes.cases, { corrupt: GPU_PREVIEW_MODE === 'modes-fail'
+          || new URLSearchParams(window.location.search).get('displayModesFail') === '1' });
         displayModes.cases = null;
         displayModes.selfTest = result;
         if (!result.ok) return failDisplayModes(`self-test ${JSON.stringify(result)}`);
@@ -8277,7 +8337,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       return _coreReprocessIdle;
     }
 
+    const coreReprocessSettledListeners = new Set();
+
     function noteCoreReprocessSettled() {
+      for (const listener of coreReprocessSettledListeners) listener();
       if (coreReprocessBusy()) return;
       const resolve = _resolveCoreReprocessIdle;
       _coreReprocessIdle = null;
@@ -9523,6 +9586,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         return await promise;
       } finally {
         if (processNegativeInFlight === promise) processNegativeInFlight = null;
+        noteCoreReprocessSettled();
       }
     }
 
@@ -11508,7 +11572,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // buffers, a parked photo's base, and a two-stage import's full decode
     // from its return to the swap (#255), which no plane holds yet.
     function openPhotoMemoryRoots() {
-      return [liveHistoryRoots(), settledAdjustedBuffer, previewAdjustedBuffer, parkedPhoto?.base, state.fullDecode?.decodedImage];
+      return [liveHistoryRoots(), settledAdjustedBuffer, previewAdjustedBuffer, glBorder.smear, glBorder.smearSource, glBorder.source, parkedPhoto?.base, state.fullDecode?.decodedImage];
     }
 
     function memoryLedgerConsumers() {
@@ -13345,11 +13409,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       setUploadPlaceholderStatus(i18n[currentLang].processing);
       const fileName = file.name.toLowerCase();
       const isRawLikeFile = isRawLikeFileName(fileName);
-      // A TIFF-container RAW import opens through the same viewer-local veil
+      // Every RAW import opens through the same viewer-local veil
       // as a cold switch (busy/locked datasets, "Opening {name}" live region),
       // not the full-screen overlay, so its provisional frame is visible. The
-      // embedded-preview job is posted before the container read is issued.
-      const openingItem = !quiet && studioWorkspace && isRawLikeFile && isTiffContainerRawName(fileName)
+      // TIFF RAWs post an embedded-preview job before the container read.
+      const openingItem = !quiet && studioWorkspace && isRawLikeFile
         ? state.fileQueue.find(entry => entry.file === file) || null : null;
       if (openingItem) beginImportOpening(openingItem);
 
@@ -19380,6 +19444,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // convertFullResolutionFrameInWorker's contract, on the export's bands. A
     // pool that cannot convert the frame hands it to that single worker.
     async function convertForExportInBands(request) {
+      // The band pool does not build #248's display level/histogram yet.
+      // Editor renders must return those planes, including export-triggered
+      // ones, so installDisplayFor never resamples the full frame on main.
+      if (request.options?.displayTarget) return convertFullResolutionFrameInWorker(request);
       const bands = exportBands;
       const pixels = request.imageData ? request.imageData.width * request.imageData.height : 0;
       if (bands && bands.pool.available && pixels >= BAND_POOL_MIN_PIXELS && bandsSupported(request)) {
@@ -22373,12 +22441,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           if (result?.status === 'error') {
             fileItem.status = 'error';
             fileItem.error = result.message;
-            // Presentation images live on the veil, never on #canvas: the
-            // outgoing photo's display is untouched and needs no restoring.
+            // Invalidation hid its native detail layer. Restore the outgoing
+            // view too when its planes stayed in place.
             state.currentFileIndex = state.fileQueue.findIndex(item => item.file === state.loadedFile);
             // Planes released for the switch come back through the outgoing
             // photo's session.
             if (released) reactivateReleasedPhoto(released);
+            else if (state.loadedFile !== fileItem.file) updatePreview();
           }
           return;
         }
@@ -22399,7 +22468,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         fileItem.status = 'error';
         fileItem.error = String(error?.message || error);
         state.currentFileIndex = state.fileQueue.findIndex(item => item.file === state.loadedFile);
-        if (released && state.loadedFile !== fileItem.file) reactivateReleasedPhoto(released);
+        if (state.loadedFile !== fileItem.file) {
+          if (released) reactivateReleasedPhoto(released);
+          else updatePreview();
+        }
         showToast(getLocalizedText('loadError', 'Error loading file'));
       } finally {
         // A switch that ended before its load (superseded) holds no decode.
@@ -23205,7 +23277,6 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         } else if (entry.target === curveCanvas) curve = true;
       }
       if (container) refreshCanvasContainerSize();
-      if (container) syncBrushTools({ resize: true });
       if (histogramWidth !== null) {
         // Hidden (another tab): keep the last width rather than shrink to 1.
         if (histogramWidth > 0) histogramLayout.width = Math.max(1, Math.round(histogramWidth - histogramPaddingX()));
@@ -23216,7 +23287,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         curveLayout.height = curveCanvas.offsetHeight;
         curveDragRect = null;
       }
-      if (container) refitCanvasToContainer();
+      if (container) {
+        refitCanvasToContainer();
+        syncBrushTools({ resize: true });
+      }
       if (histogramWidth !== null && resizeHistogramCanvas()) redrawHistogramIfPossible();
       if (curve && curveLayout.width > 0 && curveLayout.height > 0) renderCurve();
     }
@@ -23239,6 +23313,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       window.addEventListener('resize', () => {
         refreshCanvasContainerSize();
         refitCanvasToContainer();
+        syncBrushTools({ resize: true });
         const histogramResized = resizeHistogramCanvas();
         if (histogramResized) redrawHistogramIfPossible();
         if (curveCanvas.getBoundingClientRect().width > 0) renderCurve();
@@ -23251,13 +23326,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // the display preview. The query matches one ratio, so re-arm each time.
     function watchDevicePixelRatio() {
       if (typeof window.matchMedia !== 'function') return;
-      const query = window.matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`);
+      const query = window.matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx), (-webkit-device-pixel-ratio: ${window.devicePixelRatio || 1})`);
       const onChange = () => {
         if (query.removeEventListener) query.removeEventListener('change', onChange);
         else query.removeListener?.(onChange);
         watchDevicePixelRatio();
         invalidateCanvasDisplayFit();
-        scheduleDisplayPreviewResize();
+        refitCanvasToContainer();
         syncBrushTools({ resize: true });
       };
       if (query.addEventListener) query.addEventListener('change', onChange);
@@ -25490,7 +25565,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     function beginLiveDodge(parameters, geometry, firstPoint) {
       if (!LIVE_DODGE_ENABLED) return;
       const display = liveDodgeDisplay();
-      const session = { parameters, geometry, display, target: liveDodgeTarget(display),
+      const session = { id: liveDodgeCounters.strokes + 1, parameters, geometry, display, target: liveDodgeTarget(display),
         // The stored strokes this one is painted over; the pen-up adds it to them.
         committed: state.localExposure || null,
         base: [], sent: 0, inFlight: false, reset: true, fullStroke: false, ended: null, touched: false, warming: false };
@@ -25531,15 +25606,17 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     function flushLiveDodge(session) {
+      if (session.released) return;
+      if (liveDodge !== session) { releaseLiveDodge(session); return; }
       if (session.inFlight || session.ended === 'cancel') return;
       if (!liveDodgeStillShown(session)) {
-        if (session.ended) return;
+        if (session.ended) { releaseLiveDodge(session); return; }
         retargetLiveDodge(session);
       }
-      if (!session.target) return;
+      if (!session.target) { if (session.ended) releaseLiveDodge(session); return; }
       const points = session.reset ? session.base.slice() : session.base.slice(session.sent);
-      if (!points.length && !session.reset && !session.fullStroke) return;
-      const request = { frame: session.target.frame, stroke: session.parameters, points, committed: session.committed,
+      if (!points.length && !session.reset && !session.fullStroke) { if (session.ended) releaseLiveDodge(session); return; }
+      const request = { frame: session.target.frame, strokeId: session.id, stroke: session.parameters, points, committed: session.committed,
         reset: session.reset, fullStroke: session.fullStroke, withCommitted: session.target.mode === 'delta' };
       session.sent = session.base.length;
       session.reset = false;
@@ -25555,6 +25632,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           session.inFlight = false;
           // Points that arrived meanwhile, or the rest of an ended stroke.
           if (session.base.length > session.sent || session.reset || session.fullStroke) flushLiveDodge(session);
+          else if (session.ended) releaseLiveDodge(session);
         });
     }
 
@@ -25629,6 +25707,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
     // Pen-up keeps the rectangles (and sends the last points) until the new
     // frame replaces them; a cancelled stroke draws the frame on screen again.
+    function releaseLiveDodge(session) {
+      if (session.released) return;
+      session.released = true;
+      void convertPreviewFrameInWorker.exposureLiveEnd(session.id)
+        .catch(error => console.warn('Live stroke release failed:', error?.message || error));
+    }
+
     function endLiveDodge(committed) {
       const session = liveDodge;
       if (!session) return;
@@ -25638,6 +25723,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         return;
       }
       session.ended = 'cancel';
+      releaseLiveDodge(session);
       liveDodge = null;
       if (!session.touched) return;
       liveDodgeCounters.restored++;

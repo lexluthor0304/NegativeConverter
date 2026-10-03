@@ -6,6 +6,7 @@ import { createRequire } from 'node:module';
 const UPNG = createRequire(import.meta.url)('upng-js');
 
 export async function runDarkroomSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port, root }) {
+  const cpuDisplay = process.env.NC_DARKROOM_CPU === '1';
   const fixture = join(root, 'negative2positive', 'test-fixtures', 'negative-strip-dx.png');
   await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en` });
   await waitFor('darkroom workspace boot', `!!document.getElementById('studioImportAutoCrop') && (!!document.getElementById('fileInput') && !!document.getElementById('testStripRenderBtn'))`);
@@ -154,6 +155,11 @@ export async function runDarkroomSmoke({ send, evaluate, waitFor, wait, fail, in
   if (Math.abs(restored - plain) > 1) fail(`paper "none" did not restore the image: ${plain} -> ${restored}`);
 
   // ---- 4. Dodge and burn ----
+  if (cpuDisplay) {
+    await evaluate(`(() => { const input = document.getElementById('coreUseWebGL'); if (input.checked) input.click(); })()`);
+    await waitFor('CPU darkroom display', `window.__ncDisplay.frame().surface === 'cpu'`);
+    await wait(1200);
+  }
   const webglBeforeTool = await evaluate(`window.__ncBrush.state().webgl`);
   await evaluate(`document.getElementById('studioTab-repair').click(); document.getElementById('studioDodgeBurn').open = true;`);
   await evaluate(`(() => { const el = document.getElementById('dodgeBurnEnabled'); el.checked = true; el.dispatchEvent(new Event('change', { bubbles: true })); })()`);
@@ -210,6 +216,7 @@ export async function runDarkroomSmoke({ send, evaluate, waitFor, wait, fail, in
   if (during.surface === 'gl' && (during.canvasWrites.put || during.canvasWrites.draw)) {
     fail('#canvas was written during a stroke on the GPU display: ' + JSON.stringify(during.canvasWrites));
   }
+  if (cpuDisplay && during.surface !== 'cpu') fail('CPU live-dodge run did not use the CPU display');
   if (during.surface === 'cpu') {
     const display = await evaluate(`window.__ncDisplay.frame().display`);
     const diameter = 0.3 * Math.min(display[0], display[1]);

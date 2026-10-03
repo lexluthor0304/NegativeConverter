@@ -380,7 +380,7 @@ for (const outcome of ['success', 'load-error', 'prepare-error']) {
   if (outcome === 'load-error') {
     assert.equal(f.state.currentFileIndex, 0);
     assert.equal(f.state.loadedFile, f.item.file);
-    assert.equal(redraws, 0, 'presentation images live on the veil: a failed target has nothing to restore');
+    assert.equal(redraws, 1, 'failed target restores the outgoing view and requests its detail layer again');
   }
 }
 

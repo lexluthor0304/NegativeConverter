@@ -60,6 +60,24 @@ for (const filmType of ['color', 'bw', 'positive']) {
   const again = await send({ type: 'exposureLive', id: ++id, slot: 'preview', frameSeq: converted.liveFrame.seq, stroke: live, points: [], fullStroke: true });
   assert.ok(again.rect && again.rect.width > 0);
 
+  // Pen-up and cancel release every live tile and the committed list.
+  for (const reason of ['commit', 'cancel']) {
+    const ended = await send({ type: 'exposureLive', id: ++id, end: true, reason });
+    assert.equal(ended.ended, true);
+    const probe = await send({ type: 'exposureLive', id: ++id, probe: true });
+    assert.equal(probe.hasLive, false);
+    assert.equal(probe.hasCommitted, false);
+    const unstarted = await send({ type: 'exposureLive', id: ++id, slot: 'preview', frameSeq: converted.liveFrame.seq,
+      stroke: live, points: [{ x: 0.5, y: 0.5, p: 1 }] });
+    assert.equal(unstarted.needsReset, true, 'the next stroke starts empty');
+    await send({ type: 'exposureLive', id: ++id, slot: 'preview', frameSeq: converted.liveFrame.seq,
+      strokeId: 42, stroke: live, points: painted.points.slice(0, 2), reset: true, committed });
+  }
+  await send({ type: 'exposureLive', id: ++id, end: true, strokeId: 41 });
+  assert.equal((await send({ type: 'exposureLive', id: ++id, probe: true })).hasLive, true, 'late end cannot clear the new stroke');
+  await send({ type: 'exposureLive', id: ++id, end: true, strokeId: 42 });
+  assert.equal((await send({ type: 'exposureLive', id: ++id, probe: true })).hasLive, false);
+
   // A request for another frame, and a stroke that never started, are refused.
   assert.equal((await send({ type: 'exposureLive', id: ++id, slot: 'preview', frameSeq: converted.liveFrame.seq + 1000, stroke: live, points: [] })).stale, true);
   assert.equal((await send({ type: 'exposureLive', id: ++id, slot: 'preview', frameSeq: converted.liveFrame.seq, stroke: live, points: [{ x: 0.5, y: 0.5, p: 1 }] })).needsReset, true);

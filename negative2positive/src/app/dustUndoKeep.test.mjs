@@ -162,6 +162,7 @@ function fixture({ width = 160, height = 120, specks = 24, ai = false } = {}) {
       processing: false, particleCount: 0, revision: 0 },
   };
   const target = {
+    coreReprocessSettledListeners: new Set(),
     state, console: { warn() {}, error(...args) { target.errors.push(args.map(String).join(' ')); }, info() {} },
     errors: [], document: { body: { dataset: {} } }, structuredClone, Uint8Array, DOMException,
     setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout,

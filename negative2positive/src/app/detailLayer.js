@@ -8,8 +8,8 @@
 export const DETAIL_TRIGGER_TEXEL = 1.25;
 // Converted beyond the visible rect so a short pan reveals no base pixels.
 export const DETAIL_MARGIN_PX = 128;
-// A native region above this many pixels is cut down around the view (below
-// half density; the worker box-decimates what it gets).
+// Prefer the retained level above this native-row budget. It covers the whole
+// view; a source without a level falls back to a bounded centred cut.
 export const DETAIL_MAX_NATIVE_PIXELS = 16_000_000;
 // The conversion slot is the container's device size rounded up to this, plus
 // the margin, so panning never rebuilds the engine.
@@ -52,9 +52,13 @@ export function planDetailRegion(view, { margin = DETAIL_MARGIN_PX, withMargin =
   const k = Math.max(1, Math.floor(view.levelFactor || 1));
   // The level's density is 1 / k: while that holds 90 % of what the view
   // needs, the worker crops the level it already keeps.
-  const fromLevel = k > 1 && 1 / k >= DETAIL_LEVEL_DENSITY_SHARE * density;
+  let fromLevel = k > 1 && 1 / k >= DETAIL_LEVEL_DENSITY_SHARE * density;
   const pad = withMargin ? margin / density : 0;
   let rect = snapRect(vx0 - pad, vy0 - pad, vx1 + pad, vy1 + pad, W, H, fromLevel ? k : 1);
+  if (!fromLevel && rect.width * rect.height > maxNativePixels && k > 1) {
+    fromLevel = true;
+    rect = snapRect(vx0 - pad, vy0 - pad, vx1 + pad, vy1 + pad, W, H, k);
+  }
   if (!fromLevel && rect.width * rect.height > maxNativePixels) {
     // Without the margin first, then a centred cut of the visible rect.
     rect = snapRect(vx0, vy0, vx1, vy1, W, H, 1);
@@ -87,6 +91,10 @@ export function detailRegionServes(shown, plan) {
   if (!shown || !plan) return false;
   if (shown.fromLevel !== plan.fromLevel) return false;
   if (Math.abs(shown.density - plan.density) > plan.density * 0.1) return false;
+  // A bounded cut may not cover the view, but asking for the same cut again
+  // cannot improve it. Source identity is checked by the caller's tag.
+  if (shown.x === plan.x && shown.y === plan.y && shown.width === plan.width && shown.height === plan.height
+    && shown.density === plan.density && shown.levelFactor === plan.levelFactor) return true;
   const v = plan.visible;
   return shown.x <= v.x + 0.5 && shown.y <= v.y + 0.5
     && shown.x + shown.width >= v.x + v.width - 0.5 && shown.y + shown.height >= v.y + v.height - 0.5;
@@ -97,6 +105,21 @@ export function detailSlotSize(containerWidth, containerHeight, dpr, margin = DE
   const round = value => Math.ceil(Math.max(1, value) / DETAIL_SLOT_ROUND) * DETAIL_SLOT_ROUND;
   const scale = Math.max(1, dpr || 1);
   return { width: round(containerWidth * scale + 2 * margin), height: round(containerHeight * scale + 2 * margin) };
+}
+
+// Conservative live plane/texture accounting, not process RSS. Row resampling
+// may hold native rows, a decimated plane and the output; conversion later
+// holds the owned pad, sparse stops, RGBA8 output/crop and old/new GL surfaces.
+// The base/analysis are retained independently and driver scratch is unknown.
+export function estimateDetailRoiBytes(plan, slot) {
+  const inputPixels = plan.fromLevel
+    ? Math.floor(plan.width / plan.levelFactor) * Math.floor(plan.height / plan.levelFactor)
+    : plan.width * plan.height;
+  const slotPixels = Math.max(slot.width, plan.outWidth) * Math.max(slot.height, plan.outHeight);
+  // A superseded active conversion can finish its synchronous pass while one
+  // newer row payload waits. Older queued payloads are removed on cancellation.
+  const pendingRows = plan.fromLevel ? 0 : 8 * inputPixels;
+  return Math.max(10 * inputPixels + 16 * slotPixels, 32 * slotPixels) + pendingRows + 1024 * 1024;
 }
 
 /**

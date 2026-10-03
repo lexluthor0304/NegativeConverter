@@ -374,6 +374,13 @@ or the batch drops it, so the budget's other requests see it.
   (the scheduler's counters), `bands` (the pool's) and `residentFrames` are
   the last batch's; the other counters add up.
 
+Editor renders carrying `displayTarget`, including the render an export triggers,
+use `convertFullResolutionFrameInWorker` until the band pool can produce a display
+level and histogram sample. They return prebuilt previews rather than resampling
+the full frame on the page thread. Batch frames without that display contract
+continue through the band pool. Positive-analysis parity uses the frozen
+1703835 oracle, independent of the band's live sampling helpers.
+
 Parity: `pipeline/silverBands.parity.test.mjs` (band counts 1-7 against the
 whole frame by SHA-256, every mode, references, flat field, strokes,
 overrides, profiles, paper, sharpening radii, Step 3 with the expired

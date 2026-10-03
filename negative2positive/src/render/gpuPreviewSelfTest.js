@@ -427,7 +427,17 @@ export function buildDisplayModesCase({ name, image, settings, curves = 'identit
 export function buildDisplayModesCases(width = 64, height = 48) {
   const image = agedPositiveFixture(width, height);
   const analysis = expiredAnalysisOf(image);
-  return displayModesSpecs(analysis).map((spec) => buildDisplayModesCase({ ...spec, image }));
+  const specs = displayModesSpecs(analysis);
+  const cases = specs.map((spec) => buildDisplayModesCase({ ...spec, image }));
+  // The combined program is larger than either shader tested by #239. Its
+  // own CPU reference must pass before modesReady enables live core drags.
+  const preview = buildPreviewCase({ name: 'apply', mode: 'color',
+    settings: { filmType: 'color', colorModel: 'standard', temperature: 8, contrast: 12 },
+    image: parityFrame('color', width, height) });
+  const spec = specs.find(item => item.name === 'rescue + look + vibrance');
+  const converted = { width, height, data: new Uint8ClampedArray(preview.expected) };
+  cases.push({ ...buildDisplayModesCase({ name: 'apply + modes', image: converted, settings: spec.settings, curves: 'tone' }), preview });
+  return cases;
 }
 
 /**

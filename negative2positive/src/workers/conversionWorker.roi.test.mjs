@@ -143,11 +143,11 @@ assert.equal(checked, cases.length * rects.length);
   // level (k 3) holds the detail, no native rows.
   const lowPlan = planDetailRegion({ ...view, zoom: 1.5 });
   assert.ok(lowPlan && lowPlan.fromLevel && lowPlan.x % 3 === 0 && lowPlan.width % 3 === 0, 'from the level, on its grid');
-  // Between the level's density and half density (2x fit, 0.46): native rows
-  // bounded to 16 MP.
+  // Between the level's density and half density, prefer full coverage from
+  // the level over a native cut that cannot fill the view.
   const midPlan = planDetailRegion({ ...view, zoom: 2 });
-  assert.ok(midPlan && !midPlan.fromLevel && midPlan.density < 0.5);
-  assert.ok(midPlan.width * midPlan.height <= 16_000_000 + 2 * (midPlan.width + midPlan.height) + 4, 'bounded to 16 MP');
+  assert.ok(midPlan && midPlan.fromLevel && midPlan.density < 0.5);
+  assert.ok(detailRegionServes(midPlan, midPlan), 'the oversized plan serves its entire view');
   // A pan inside the margin keeps the region; out of it asks for a new one.
   assert.equal(detailRegionServes(plan, planDetailRegion({ ...view, zoom: zoom100, panX: -(zoom100 - 1) * 545 + 30, panY: -(zoom100 - 1) * 362 })), true);
   assert.equal(detailRegionServes(plan, planDetailRegion({ ...view, zoom: zoom100, panX: -(zoom100 - 1) * 545 + 400, panY: -(zoom100 - 1) * 362 })), false);
@@ -158,3 +158,14 @@ assert.equal(checked, cases.length * rects.length);
 }
 
 console.log('conversionWorker.roi: detail regions equal the frame (sample) or meet the base (no sample) byte for byte with strokes, flat field, positive and edges; planning, slot and pan snap');
+
+// Cancelled queued work must release its rows and never run behind a newer
+// conversion. No timer or large fixture is needed to hold the serial queue.
+{
+  const before = received;
+  const cancelledId = ++id;
+  const pending = self.onmessage({ data: { type: 'roi', id: cancelledId, settings: {}, region: {}, image16: new ArrayBuffer(64) } });
+  self.onmessage({ data: { type: 'cancel', id: cancelledId } });
+  await pending;
+  assert.equal(received, before, 'a cancelled queued ROI emits no result/error');
+}

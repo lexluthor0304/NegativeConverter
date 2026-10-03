@@ -1,6 +1,6 @@
 import { isLargeImage } from './imageMemoryBudget.js';
 import { markOwnedPlanes, mayTransferBuffer, releaseOwnedPlanes } from './planeRelease.js';
-import { isSharedPlane, guardSharedPlanes } from './crossOriginIsolation.js';
+import { isSharedPlane, guardSharedPlanes, sharedPlanesAvailable } from './crossOriginIsolation.js';
 import { planConversionBands, haloFor } from '../pipeline/silverBands.js';
 import { unsharpMaskHaloRows } from '../silvercore/engine/Sharpening.js';
 
@@ -426,6 +426,8 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
         if (!pending.has(id)) return;
         pending.delete(id);
         clearTimeout(timer);
+        try { w.postMessage({ type: 'cancel', id }); } catch {}
+        signal?.removeEventListener?.('abort', onAbort);
         reject(workerError('Conversion was aborted', WORKER_ABORTED));
       };
       const settle = (fn) => (value) => {
@@ -492,8 +494,8 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
   // they changed). `reset` starts the stroke over (all points so far),
   // `fullStroke` asks for its whole box again. Resolves to { rect, rgba,
   // committedRgba } (8-bit RGBA of the rectangle, typed arrays) or { stale }.
-  convert.exposureLive = async ({ frame, stroke, points, committed = null, reset = false, fullStroke = false, withCommitted = false, signal = null }) => {
-    const body = { slot: frame.slot, frameSeq: frame.seq, stroke, points, reset, fullStroke, withCommitted };
+  convert.exposureLive = async ({ frame, strokeId = null, stroke, points, committed = null, reset = false, fullStroke = false, withCommitted = false, signal = null }) => {
+    const body = { slot: frame.slot, frameSeq: frame.seq, strokeId, stroke, points, reset, fullStroke, withCommitted };
     let w;
     try { w = getWorker(); } catch { w = null; }
     if (!liveCommittedSent || liveCommittedSent.worker !== w || liveCommittedSent.committed !== committed) {
@@ -507,6 +509,11 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
       rgba: new Uint8ClampedArray(reply.rgba),
       committedRgba: reply.committedRgba ? new Uint8ClampedArray(reply.committedRgba) : null,
     };
+  };
+
+  convert.exposureLiveEnd = async (strokeId) => {
+    liveCommittedSent = null;
+    return postUncached('exposureLive', { end: true, strokeId }, [], 1);
   };
 
   // Brings back the 16-bit plane a retaining conversion left in the worker.
@@ -652,7 +659,7 @@ export function planBandCount({ hardwareConcurrency = globalThis.navigator?.hard
 
 /** Whether bands can share one plane (SharedArrayBuffer needs cross-origin isolation). */
 export function sharedBandPlanesAvailable(env = globalThis) {
-  return Boolean(env && env.crossOriginIsolated === true && typeof env.SharedArrayBuffer === 'function');
+  return sharedPlanesAvailable(env);
 }
 
 function bandYield() {

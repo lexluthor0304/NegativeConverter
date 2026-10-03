@@ -74,7 +74,8 @@ class TestImageData {
     state, ImageData: TestImageData, JSON, glCanvas: { width: 0, height: 0 },
     glBorder: { photo: null, generation: 0, smear: null, smearToken: 0, smearFlight: 0 },
     webglState: { borderUnderlay: null },
-    displayDebugCounters: { glBorderComposes: 0 },
+    displayDebugCounters: { glBorderComposes: 0 }, displaySourceImageData: () => state.webglSourceImageData,
+    liveHistoryRoots: () => [], settledAdjustedBuffer: null, previewAdjustedBuffer: null, parkedPhoto: null,
     getSprocketFrameLayout, photoViewport, step3FrameReference,
     getSprocketFrameComposeOptions: () => ({ edgeMarkings: { ...edge } }),
     prepareSprocketPreviewFont: () => {}, areSprocketFrameFontsReady: () => true,
@@ -91,7 +92,7 @@ class TestImageData {
     }),
   });
   vm.runInContext(['sprocketFrameSize', 'sprocketFrameReference', 'glFrameSize', 'glBorderSmearSource', 'drawGlBorder', 'dropGlBorder',
-    'releaseGlBorder', 'displayFrameReference', 'conversionSourceSize'].map(functionSource).join('\n'), context);
+    'releaseGlBorder', 'displayFrameReference', 'conversionSourceSize', 'openPhotoMemoryRoots'].map(functionSource).join('\n'), context);
   const framed = context.glFrameSize(900, 600);
   const layout = getSprocketFrameLayout(900, 600, { edgeMarkings: edge });
   assert.deepEqual([framed.width, framed.height], [layout.frameWidth, layout.frameHeight], 'the buffer is the framed display size');
@@ -116,14 +117,22 @@ class TestImageData {
   assert.equal(composeCalls.length, 2, 'the smear lags a drag');
   const adjusted = new TestImageData(900, 600);
   context.glBorder.smear = adjusted;
+  context.glBorder.smearSource = state.webglSourceImageData;
   context.glBorder.smearToken++;
   context.drawGlBorder({}, 900, 600, framed.layout);
   assert.equal(composeCalls.length, 3);
   assert.equal(composeCalls[2].photo, adjusted, 'the smear samples the settled adjusted frame');
+  assert.ok(context.openPhotoMemoryRoots().includes(adjusted), 'the retained smear is counted by the open photo ledger');
+  assert.ok(context.openPhotoMemoryRoots().includes(state.webglSourceImageData), 'the smear source identity also holds pixels');
   // Fonts loading compose again; a frame without the border drops it all.
   context.glBorder.generation++;
   context.drawGlBorder({}, 900, 600, framed.layout);
   assert.equal(composeCalls.length, 4);
+  const previousToken = context.glBorder.smearToken;
+  state.webglSourceImageData = new TestImageData(900, 600);
+  assert.equal(context.glBorderSmearSource(900, 600), null, 'a same-size photo never borrows the previous smear');
+  assert.equal(context.glBorder.smear, null, 'previous photo pixels are released');
+  assert.ok(context.glBorder.smearToken > previousToken);
   state.sprocketPreviewEnabled = false;
   assert.equal(context.glFrameSize(900, 600).layout, null);
   context.dropGlBorder();
@@ -134,6 +143,13 @@ class TestImageData {
   state.sprocketPreviewEnabled = true;
   const portrait = context.glFrameSize(600, 900);
   assert.ok(portrait.height > portrait.width && portrait.layout.x > 0 && portrait.layout.width === 600);
+  // Between activation and the incoming texture upload, the old GL source
+  // can have the new photo's dimensions. It cannot supply even a raw smear.
+  const outgoingTexture = state.webglSourceImageData;
+  const incoming = new TestImageData(900, 600);
+  context.displaySourceImageData = () => incoming;
+  context.drawGlBorder({}, 900, 600, framed.layout);
+  assert.notEqual(composeCalls.at(-1).photo, outgoingTexture, 'old texture pixels cannot smear the incoming photo');
 }
 
 // ---- the overlay layer ----
@@ -204,3 +220,18 @@ class TestImageData {
 }
 
 console.log('displayModesWiring: the GL gate keeps only its three exclusions and the mode readiness, the border underlay composes once per key and lags the smear by a settle, the overlay is display-sized over the photo and repaints only on change');
+
+// Software GL stays on the CPU unless deliberately forced in a driver test.
+for (const forced of [false, true]) {
+  let compiled = 0;
+  const renderer = { gl: {}, startModesCompile: () => compiled++, modesStatus: () => 'pending' };
+  const displayModes = { renderer, status: 'none' };
+  const context = vm.createContext({ displayModes, webglState: { renderer2: renderer, renderer: { software: true } },
+    GPU_PREVIEW_MODE: forced ? 'force' : 'auto', webgl2PrecisionOk: () => true,
+    failDisplayModes: (reason, status) => { displayModes.status = status; },
+    requestAnimationFrame() {}, scheduleDisplayModesWarmup() {}, resetDisplayModes() {} });
+  vm.runInContext(functionSource('warmUpDisplayModes'), context);
+  context.warmUpDisplayModes();
+  assert.equal(displayModes.status, forced ? 'compiling' : 'unsupported');
+  assert.equal(compiled, forced ? 1 : 0);
+}

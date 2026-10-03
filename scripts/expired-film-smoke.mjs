@@ -17,7 +17,7 @@ export async function runExpiredFilmSmoke({ send, evaluate, waitFor, wait, fail,
     writeFileSync(join(root, 'output', 'playwright', name), Buffer.from(shot.result.data, 'base64'));
   };
   // The normal preview tier, so the GL frame is the display source's size (#253).
-  await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en&previewTier=normal` });
+  await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en&previewTier=normal&gpuPreview=force` });
   await waitFor('expired boot', `!!document.getElementById('studioImportAutoCrop') && !!document.getElementById('uploadExpiredBtn')`);
   await installDialogAutoAccept();
   await wait(500);
@@ -434,7 +434,7 @@ export async function runExpiredFilmSmoke({ send, evaluate, waitFor, wait, fail,
 export async function runExpiredRollRetypeSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port }) {
   const count = 5;
   const ready = `document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy`;
-  await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en` });
+  await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en&gpuPreview=force` });
   await waitFor('expired roll boot', `!!document.getElementById('autoRollOnImport') && !!document.getElementById('uploadExpiredBtn')`);
   await installDialogAutoAccept();
   await wait(1000);

@@ -97,3 +97,23 @@ assert.equal(repairsNeedSettling({ repairs: true, mask, processing: true }), tru
 assert.equal(repairsNeedSettling({ repairs: true, mask, pendingBrushRepairs: 1 }), true);
 
 console.log('fullResolutionRouting: routing matrix, kept planes, stale flags and size guard, restored flags, viewport branches and export repair waits passed');
+
+// The export-triggered editor render retains the single worker's display
+// preview contract even while an export band pool is active.
+{
+  const { readFileSync } = await import('node:fs');
+  const vm = await import('node:vm');
+  const source = readFileSync(new URL('./main.js', import.meta.url), 'utf8');
+  const start = source.indexOf('    async function convertForExportInBands(');
+  const text = source.slice(start, source.indexOf('\n    }', start) + 6);
+  let fullRequests = 0, bandRequests = 0;
+  const context = vm.createContext({ exportBands: { pool: { available: true, convert: () => bandRequests++ } },
+    BAND_POOL_MIN_PIXELS: 4_000_000, bandsSupported: () => true,
+    convertFullResolutionFrameInWorker: async request => { fullRequests++; return { __displayPreview: request.options.displayTarget }; } });
+  vm.runInContext(text, context);
+  const target = { width: 1110, height: 700 };
+  const result = await context.convertForExportInBands({ imageData: { width: 9536, height: 6336 }, options: { displayTarget: target, histogramSamples: 24576 } });
+  assert.equal(result.__displayPreview, target);
+  assert.equal(fullRequests, 1);
+  assert.equal(bandRequests, 0, 'prebuilt preview is preserved for export-triggered large renders');
+}

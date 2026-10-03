@@ -388,7 +388,7 @@ async function roi(msg) {
       // A first conversion costs engine set-up and compilation: done at idle.
       const blank = { width: region.slotWidth, height: region.slotHeight, data: new Uint16Array(region.slotWidth * region.slotHeight * 4) };
       await convertFrameWithRouter({ imageData: blank, settings, options: { region: { originX: 0, originY: 0, frameWidth: blank.width, frameHeight: blank.height },
-        forceFullProcess: true, includeAnalysisPreview: false } });
+        forceFullProcess: true, ownedSource: true, includeAnalysisPreview: false } });
       self.postMessage({ type: 'roi', id, warm: true, width: 0, height: 0 });
       return;
     }
@@ -398,6 +398,7 @@ async function roi(msg) {
     // slot keeps it, as the GPU preview's `analyze` does).
     const baseNegative = base.display ? displayNegativeFor(level, base.display) : level;
     const analysis = await analyzeSilverCorePreview(baseNegative, settings, mode, { preview: true, analysisImageData: cachedAnalysis });
+    if (cancelledRequests.has(id)) return;
     const out = { width: region.outWidth, height: region.outHeight };
     let plane;
     if (region.fromLevel) {
@@ -418,6 +419,11 @@ async function roi(msg) {
     }
     const density = out.width / region.width;
     const padded = padPlane(plane, Math.max(region.slotWidth, out.width), Math.max(region.slotHeight, out.height));
+    // The padded plane is private. Release received rows and resampling scratch
+    // before the adapter awaits profile loading, then convert this plane in place.
+    plane = null;
+    msg.image16 = null;
+    msg.rgba = null;
     const result = await convertFrameWithRouter({
       imageData: padded,
       settings,
@@ -427,12 +433,15 @@ async function roi(msg) {
           : { originX: Math.round(region.x * density), originY: Math.round(region.y * density),
             frameWidth: Math.round(region.frameWidth * density), frameHeight: Math.round(region.frameHeight * density) },
         forceFullProcess: true,
+        ownedSource: true,
         includeAnalysisPreview: false,
         sharedAnalysis: { channelData: analysis.channelData, positiveAnalysis: analysis.positiveAnalysis }
       }
     });
-    const rgba = new Uint8ClampedArray(out.width * out.height * 4);
-    for (let row = 0; row < out.height; row++) {
+    if (cancelledRequests.has(id)) return;
+    const rgba = out.width === result.width && out.height === result.height
+      ? result.data : new Uint8ClampedArray(out.width * out.height * 4);
+    if (rgba !== result.data) for (let row = 0; row < out.height; row++) {
       rgba.set(result.data.subarray(row * padded.width * 4, (row * padded.width + out.width) * 4), row * out.width * 4);
     }
     self.postMessage({ type: 'roi', id, width: out.width, height: out.height, rgba: rgba.buffer }, [rgba.buffer]);
@@ -452,6 +461,19 @@ async function roi(msg) {
 function exposureLive(msg) {
   const { id, slot, frameSeq } = msg;
   try {
+    if (msg.probe) {
+      self.postMessage({ type: 'exposureLive', id, hasLive: Boolean(liveStroke), hasCommitted: Boolean(liveCommitted) });
+      return;
+    }
+    if (msg.end) {
+      // A late final reply from the previous stroke cannot clear a new one.
+      if (!liveStroke || msg.strokeId == null || liveStroke.strokeId === msg.strokeId) {
+        liveStroke = null;
+        liveCommitted = null;
+      }
+      self.postMessage({ type: 'exposureLive', id, ended: true });
+      return;
+    }
     if ('committed' in msg) liveCommitted = msg.committed || null;
     const geometry = liveExposureGeometry(slot, frameSeq);
     if (!geometry) {
@@ -459,7 +481,7 @@ function exposureLive(msg) {
       self.postMessage({ type: 'exposureLive', id, stale: true });
       return;
     }
-    if (msg.reset) liveStroke = { slot, frameSeq, store: createLiveStrokeCoverage(msg.stroke, geometry) };
+    if (msg.reset) liveStroke = { slot, frameSeq, strokeId: msg.strokeId, store: createLiveStrokeCoverage(msg.stroke, geometry) };
     if (!liveStroke || liveStroke.slot !== slot || liveStroke.frameSeq !== frameSeq) {
       self.postMessage({ type: 'exposureLive', id, needsReset: true });
       return;
@@ -519,8 +541,27 @@ async function handleMessage(msg) {
 // conversion posted before it, and a conversion must not start while an
 // earlier one still awaits a profile load.
 let queue = Promise.resolve();
+const queuedMessages = new Map();
+const cancelledRequests = new Set();
+let activeRequest = null;
 self.onmessage = function (e) {
-  const run = queue.then(() => handleMessage(e.data));
+  const msg = e.data;
+  if (msg.type === 'cancel') {
+    // Drop queued rows immediately; the queue closes over IDs, never planes.
+    queuedMessages.delete(msg.id);
+    if (activeRequest === msg.id) cancelledRequests.add(msg.id);
+    return;
+  }
+  queuedMessages.set(msg.id, msg);
+  const id = msg.id;
+  const run = queue.then(async () => {
+    const request = queuedMessages.get(id);
+    queuedMessages.delete(id);
+    if (!request) return;
+    activeRequest = id;
+    try { await handleMessage(request); }
+    finally { activeRequest = null; cancelledRequests.delete(id); }
+  });
   queue = run.catch(() => {});
   return run;
 };
