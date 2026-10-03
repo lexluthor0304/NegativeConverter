@@ -164,9 +164,12 @@ through `processNegative`), or in its export. "These are positives" only
 converts the open photo again: `remeasureExpiredAfterRetype` measures the
 first frame of the new mode once it has settled, with its 16-bit plane, and
 Studio is busy until then. A semantic colour pass still running when the
-film type changes is dropped (#229 review R1-017). The film-type buttons and
-the positive-mode select in Step 3 still keep the measurement
-(docs/audit-backlog.md).
+film type changes is dropped (#229 review R1-017). Completed semantic anchors
+are invalidated by the same interpretation rule, including the live film-type
+buttons and positive-mode select in Step 3. Those controls remeasure the new
+converted frame through `remeasureExpiredAfterRetype`; user strengths, other
+settings and manual white balance survive. Undo restores the old interpretation
+and its anchors together.
 
 `state.expiredSession` is the session-level entry: photos added while it is
 on start rescued, and the Studio shows the rescue tab first. It is switched

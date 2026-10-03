@@ -164,7 +164,13 @@ instead (step 4 runs it on the full base). It then swaps in one task:
    alongside the provisional geometry.
 2. The history is rebased: every entry's crop goes to full units, entries go
    cold (#244: rebuilt from the full base on restore), and dust-stroke
-   entries (they patch stand-in planes) go with everything older.
+   entries (they patch stand-in planes) go with everything older. Both Undo
+   and Redo stacks replay each entry's Apply/Confirm intent on the full
+   import's diagnostics. Stand-in hit tokens are discarded. Restoring a
+   promoted entry redetects its crop on the full base before conversion;
+   automatic WB follows that analysis, while manual WB remains the entry's.
+   Pending restoration joins the crop-analysis barrier, so exports and saved
+   recipes cannot sample the intermediate diagnostics (#229 R2-052).
 3. The full base is installed (`rawDecodePending` false). The stand-in's
    renders are dropped, and `restoreSettings(..., { holdBusy: false })`
    rebuilds the geometry in the #244 pool without `studioBusy`.

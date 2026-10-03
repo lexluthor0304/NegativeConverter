@@ -592,6 +592,74 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
       console.log(`ok: ${label}: crop-hit then leave before stage 2 exports one stage's decoded samples in every format`);
     }
 
+    // R2-052 supplemental: real Apply/slider/Undo/Redo callers through the
+    // full-base swap. Capture exposure history on both sides of the stand-in
+    // hit; each restored recipe/export must equal the one-stage actions.
+    if (runs('crop-history')) {
+      for (const timing of ['pending-hit', 'completed-hit']) {
+        const flow = async (staged, recipe = null) => {
+          const scene = `${label} ${timing} crop history ${staged ? 'two stages' : 'one stage'}`;
+          await boot(staged ? two : one, { holdSemantic: true });
+          await evaluate(`(() => {
+            const auto = document.getElementById('studioImportAutoCrop'); if (auto.checked) auto.click();
+            const probe = window.__historyCropProbe = { hold: false, held: [] };
+            const post = Worker.prototype.postMessage;
+            Worker.prototype.postMessage = function (message, ...args) {
+              if (probe.hold && message?.type === 'detect-crop-area') { probe.held.push(() => post.call(this, message, ...args)); return; }
+              return post.call(this, message, ...args);
+            };
+            probe.release = () => { probe.hold = false; for (const deliver of probe.held.splice(0)) deliver(); };
+          })()`);
+          if (staged) await evaluate('window.__ncTwoStage.holdFullDecodes()');
+          await importFiles([cropFile]);
+          await waitFor(scene + ': photo', `${ready} && ${filename(basename(cropFile))} && ${staged ? `${status}.pending` : exact}`, 150_000);
+          const base = (await evaluate(status)).base, scale = staged ? base.scale : 1;
+          recipe ||= { confirm: { left: 0, top: 0, width: Math.floor(base.width * .35) / scale, height: Math.floor(base.height * .35) / scale },
+            crop: { left: 0, top: 0, width: (base.width - 2) / scale, height: (base.height - 2) / scale } };
+          for (const [analysisOnly, rect] of [[true, recipe.confirm], [false, recipe.crop]]) {
+            const projected = Object.fromEntries(Object.entries(rect).map(([key, value]) => [key, value * scale + (key === 'width' || key === 'height' ? .01 : 0)]));
+            await evaluate(`document.getElementById('studioTab-composition').click(); document.getElementById('${analysisOnly ? 'studioConfirmAnalysis' : 'cropBtn'}').click()`);
+            await waitFor(scene + ': crop mode', `document.getElementById('canvasContainer').classList.contains('crop-mode')`, 30_000);
+            await wait(300);
+            await evaluate(`window.__historyCropProbe.hold = ${!analysisOnly && timing === 'pending-hit'};
+              window.__ncAnalysis.setDraftRect(${JSON.stringify(projected)}); document.getElementById('applyCropBtn').click()`);
+            await waitFor(scene + ': applied', `${ready} && !document.getElementById('canvasContainer').classList.contains('crop-mode') && !window.__ncAnalysis.converting()`, 120_000);
+            if (analysisOnly || timing === 'completed-hit') await evaluate('window.__ncAnalysis.settle()');
+          }
+          if (timing === 'pending-hit') await waitFor(scene + ': detector held', `window.__historyCropProbe.held.length === 1 && window.__ncAnalysis.pendingDetection()`, 60_000);
+          await evaluate(`(() => { const el = document.getElementById('coreExposure'); el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+            el.value = '15'; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+          await evaluate('window.__historyCropProbe.release(); window.__ncAnalysis.settle()');
+          const hit = await evaluate('window.__ncAnalysis.diagnostics()');
+          if (hit?.method !== 'manual-image-window' || hit.analysisNeedsReview) fail(scene + ': stand-in/reference detector must hit: ' + JSON.stringify(hit));
+          if (staged) {
+            if (!(await evaluate(`${status}.pending && !${status}.swapped`))) fail(scene + ': full base installed before history capture');
+            await evaluate('window.__ncTwoStage.releaseFullDecodes()');
+          }
+          await waitFor(scene + ': full source installed', `${ready} && ${exact} && !window.__ncAnalysis.converting()`, 150_000);
+          await evaluate('window.__ncAnalysis.settle()');
+          const result = { recipe };
+          for (const action of ['undo', 'redo']) {
+            await evaluate(`document.getElementById('${action}Btn').click()`);
+            // The exact consumer also waits for promoted history's analysis.
+            await evaluate('window.__ncAnalysis.settle()');
+            await waitFor(scene + ': ' + action, `${ready} && !window.__ncAnalysis.converting() && document.getElementById('coreExposure').value === '${action === 'undo' ? '0' : '15'}'`, 120_000);
+            result[action] = { diagnostics: await evaluate('window.__ncAnalysis.diagnostics()'), wb: await evaluate('window.__ncAnalysis.whiteBalance()'),
+              exports: await exportFormats(scene + ' ' + action, [FORMATS[0], FORMATS[2]]) };
+          }
+          await evaluate(releaseSemantic);
+          return result;
+        };
+        const staged = await flow(true), single = await flow(false, staged.recipe);
+        for (const action of ['undo', 'redo']) {
+          same(`${label} ${timing}: ${action} diagnostics`, staged[action].diagnostics, single[action].diagnostics);
+          same(`${label} ${timing}: ${action} WB`, staged[action].wb, single[action].wb);
+          sameExports(`${label} ${timing}: ${action} PNG8/TIFF16`, staged[action].exports, single[action].exports);
+        }
+        console.log(`ok: ${label} ${timing}: full-swap Undo/Redo diagnostics, WB and PNG8/TIFF16 samples/bytes equal one stage`);
+      }
+    }
+
     // 6. Analyze roll during stage 2 (#255 review R2-029): the stand-in gets an
     // exposure edit, then Analyze roll is clicked while stage 2 is held. The
     // analysis persists the open photo's recipe and reads it back, so it waits

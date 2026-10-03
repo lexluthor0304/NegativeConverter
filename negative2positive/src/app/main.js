@@ -1,4 +1,4 @@
-import { applyAutomaticFilmType, applyFilmTypeOverride, sanitizeFilmTypeOverride } from './filmTypeOverride.js';
+import { applyAutomaticFilmType, applyFilmTypeOverride, sanitizeFilmTypeOverride, withoutFilmTypeAnalysis } from './filmTypeOverride.js';
 import { decideRollFilmType, mergeRollDecision, ownFilmTypeVerdict, rollDecisionFrame, rollFilmTypeTarget, ROLL_MONOCHROME } from './rollFilmType.js';
 import { createPhotoSessionCache, backingBuffers } from './photoSessionCache.js';
 import { displayProxyKey, displayPlaneHash } from './displayProxy.js';
@@ -3060,6 +3060,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       settings.expiredAnalysis = state.expiredAnalysis ? structuredClone(state.expiredAnalysis) : null;
       settings.frameMetadata = sanitizeFrameMetadata(state.frameMetadata);
       settings.autoFrameMeta = state.autoFrame.lastDiagnostics ? structuredClone(state.autoFrame.lastDiagnostics) : null;
+      if (state.fullBaseHistoryPending && state.fullBaseFrameEdit) settings.fullBaseFrameEdit = { ...state.fullBaseFrameEdit };
       // Taken while Apply's crop-area detection runs (#245): the entry holds
       // its miss outcome and gets a hit when restored (restoreSnapshot).
       if (cropDetection && state.autoFrame.lastDiagnostics === cropDetection.meta) settings.cropDetectionToken = cropDetection.token;
@@ -3192,6 +3193,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       updateExpiredRescueUI();
       updateMetadataUI();
       state.autoFrame.lastDiagnostics = s.autoFrameMeta ? structuredClone(s.autoFrameMeta) : null;
+      if (s.fullBaseFrameEdit) restoreAutoFrameDiagnostics(s.autoFrameMeta);
       if (keptDetection) keptDetection.meta = state.autoFrame.lastDiagnostics;
       // An entry taken while Apply's crop-area detection ran holds the miss
       // outcome. The single pass before #245 had the hit in place before any
@@ -3303,9 +3305,22 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       updateSprocketControlsUI();
       const step = s.currentStep;
       const ready = applyGeometryFromBase({ cropRegion: state.cropRegion });
-      return afterGeometry(ready, async isCurrent => {
+      const promoted = s.fullBaseFrameEdit;
+      // History promoted from a stand-in holds full-base intent, not its hit.
+      // Start before yielding so exact consumers see the restoration barrier.
+      let detection = promoted?.detect && base && state.cropRegion ? startCropDetection({
+        meta: state.autoFrame.lastDiagnostics, base, frame: geometryFrameSize(base, state.rotationAngle),
+        cropRegion: { ...state.cropRegion }, ready
+      }) : null;
+      const restoring = afterGeometry(ready, async isCurrent => {
+        if (promoted?.detect && !detection && state.loadedBaseImageData && state.cropRegion) {
+          detection = startCropDetection({ meta: state.autoFrame.lastDiagnostics, base: state.loadedBaseImageData,
+            frame: geometryFrameSize(state.loadedBaseImageData, state.rotationAngle), cropRegion: { ...state.cropRegion }, ready });
+        }
+        if (detection) await detection.settled;
+        if (!isCurrent()) return false;
         if (step >= 3) {
-          await convertAfterGeometryEdit(isCurrent, { quiet: true, automatic: false });
+          await convertAfterGeometryEdit(isCurrent, { quiet: true, automatic: Boolean(promoted?.automatic) });
         } else {
           const sourceData = state.croppedImageData || state.originalImageData;
           if (sourceData) {
@@ -3315,6 +3330,16 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           goToStep(step);
         }
       });
+      if (!promoted) return restoring;
+      const pending = restoring.finally(() => {
+        if (state.fullBaseHistoryPending === pending) {
+          state.fullBaseHistoryPending = null;
+          state.fullBaseFrameEdit = null;
+        }
+      });
+      state.fullBaseFrameEdit = promoted;
+      state.fullBaseHistoryPending = pending;
+      return pending;
     }
 
     // Snapshots hold references to up to eight full-resolution buffers each.
@@ -9667,16 +9692,16 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // A model released by #236 or #241 is still the inpainter of the pass
     // kept with its revision (dustPassUsesAi); a load in flight decides first.
     async function commitDustPass(source, mask, isCurrent = () => true, info = dustMaskInfo(mask),
-      maskUnchanged = () => dustMaskInfo(mask) === info) {
+      maskUnchanged = () => dustMaskInfo(mask) === info, { requireAi = false } = {}) {
       if (state.dustRemoval.ai && aiRepair.status === 'loading') await settleAiRepairModel({ load: false, isCurrent });
       const usedAi = dustPassUsesAi();
       const key = { source, maskHash: info?.hash, usedAi, revision: aiRepair.revision };
-      if (info && usedAi !== null && dustPassMatches(dustPassCache, key)) {
+      if (info && usedAi !== null && (!requireAi || usedAi === true) && dustPassMatches(dustPassCache, key)) {
         const imageData = await restoreDustPass(dustPassCache, source, { check: () => assertRepairCurrent(isCurrent) });
         if (imageData) return { imageData, usedAi };
       }
       const report = {};
-      const imageData = await inpaintForCommit(source, mask, isCurrent, null, { report });
+      const imageData = await inpaintForCommit(source, mask, isCurrent, null, { report, ...(requireAi ? { requireAi } : {}) });
       if (info && isCurrent() && maskUnchanged() && report.revision === aiRepair.revision) {
         dustPassCache = captureDustPass(imageData, { source, maskHash: info.hash, usedAi: report.usedAi,
           revision: report.revision, blocks: report.usedAi ? report.blocks : info.blocks });
@@ -11990,7 +12015,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // are owed. A display preview waiting for its render (a photo just
       // opened or restored) is settled.
       const settled = state.currentStep >= 3 && state.processedImageData && !processNegativeInFlight
-        && !state.geometryPending && !ensureSourcePromise && !state.baseDescriptor?.decoding
+        && !state.geometryPending && !state.fullBaseHistoryPending && !ensureSourcePromise && !state.baseDescriptor?.decoding
         && !coreReprocessBusy() && !coreReprocessTimer && !state.dustRemoval.processing
         && !dustDetectionTimer && !pendingBrushRepairs && !dustDrawing && !dustAiRefresh.rects.length
         && !(fullResolutionRenderTimer && !state.processedImageDataIsPreview)
@@ -14129,7 +14154,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // size) and their pixels are rebuilt from the full base on restore (#244
     // cold entries). Dust-stroke entries patch the stand-in's planes: they go,
     // with everything older on their stack.
-    function rebaseProvisionalHistory(provisional, realSize) {
+    function rebaseProvisionalHistory(provisional, realSize, settled = null) {
       for (const stack of [undoStack, redoStack]) {
         for (let i = 0; i < stack.length; i++) {
           if (stack[i].dustDelta) { stack.splice(0, i + 1); i = -1; }
@@ -14141,6 +14166,18 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
             const live = { cropRegion: s.cropRegion, rotationAngle: s.rotationAngle, mirrored: s.mirrored };
             geometry.restore(s.provisionalGeometry, live);
             s.cropRegion = geometry.rebase(realSize, live).cropRegion;
+            if (settled) {
+              const intent = windowFrameIntent(provisional.settledSnapshot, s, s.provisionalFrameEditIntent || null);
+              const applied = frameMetaWithWindowIntent(settled, s, intent, realSize);
+              s.autoFrameMeta = applied.meta;
+              delete s.cropDetectionToken;
+              const automatic = !s.wbUserOverride && !s.grayPointSampled && !s.wbSemanticApplied;
+              if (automatic) {
+                for (const key of ['wbR', 'wbG', 'wbB', 'wbAutoConfidence']) s[key] = settled[key];
+              }
+              s.fullBaseFrameEdit = { detect: applied.detect, automatic };
+              delete s.provisionalFrameEditIntent;
+            }
             delete s.provisionalGeometry;
           }
           entry.refs = { cold: true };
@@ -14166,9 +14203,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
     // Only user intent crosses an early leave: no detector output measured
     // on the stand-in is saved in the photo's recipe (R2-052).
-    function windowFrameIntent(baseline, live) {
+    function windowFrameIntent(baseline, live, recorded = provisionalUnits() ? state.provisional.frameEditIntent : null) {
       const before = baseline?.autoFrameMeta || null, now = live.autoFrameMeta || null;
-      const recorded = provisionalUnits() ? state.provisional.frameEditIntent : null;
       return {
         analysis: analysisAreaEdited(baseline, live), confirmed: confirmedImageArea(live),
         crop: now?.method === 'manual-image-window', detect: now?.method === 'manual-image-window',
@@ -14259,7 +14295,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         ({ meta: merged.autoFrameMeta, detect: detectCrop } = windowFrameMetaOnFull(settled, merged, provisional.settledSnapshot, live, image));
         edits.autoFrameMeta = merged.autoFrameMeta ? structuredClone(merged.autoFrameMeta) : null;
       }
-      rebaseProvisionalHistory(provisional, realSize);
+      rebaseProvisionalHistory(provisional, image, settled);
       provisional.swapped = true;
       provisional.swapEdits = edits;
       state.loadedBaseImageData = image;
@@ -15208,15 +15244,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     document.querySelectorAll('.film-type-btn').forEach(btn => {
       btn.addEventListener('click', () => {
         pushUndo('filmType');
-        state.filmType = btn.dataset.type;
-        state.filmTypeSource = 'manual';
-        state.filmTypeConfidence = null;
-        state.filmTypeReason = null;
-        if (state.wbAutoConfidence && !state.wbUserOverride && !state.grayPointSampled) {
-          state.wbR = state.wbG = state.wbB = 1;
-          state.wbAutoConfidence = null; state.wbSemanticApplied = false;
-          updateWBSliders();
-        }
+        Object.assign(state, withoutFilmTypeAnalysis(state, { ...state, filmType: btn.dataset.type,
+          filmTypeSource: 'manual', filmTypeConfidence: null, filmTypeReason: null }));
+        updateWBSliders();
         setFilmTypeButtons(state.filmType);
         // The paper list is per film kind: offer this type's papers now. The
         // stored paper stays; a conversion ignores one of another kind.
@@ -15236,6 +15266,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         } else {
           schedulePreviewUpdate();
         }
+        remeasureExpiredAfterRetype();
       });
     });
 
@@ -15283,14 +15314,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     });
     document.getElementById('positiveModeSelect').addEventListener('change', event => {
       pushUndo('filmType');
-      state.positiveMode = event.target.value === 'edit' ? 'edit' : 'correct';
-      if (state.wbAutoConfidence && !state.wbUserOverride && !state.grayPointSampled) {
-        state.wbR = state.wbG = state.wbB = 1;
-        state.wbAutoConfidence = null; state.wbSemanticApplied = false;
-        updateWBSliders();
-      }
+      Object.assign(state, withoutFilmTypeAnalysis(state, { ...state, positiveMode: event.target.value === 'edit' ? 'edit' : 'correct' }));
+      updateWBSliders();
       markCurrentFileDirty();
       scheduleSilverSourceRefresh({ commit: true });
+      remeasureExpiredAfterRetype();
     });
     setFilmTypeButtons(state.filmType);
 
@@ -18408,7 +18436,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     const CROP_DETECTION_TARGETS = Object.entries(AUTO_FRAME_FORMAT_RATIOS).map(([key, ratio]) => ({ key, ratio }));
 
     function hasPendingCropDetection() {
-      return Boolean(cropDetection);
+      return Boolean(cropDetection || state.fullBaseHistoryPending);
     }
 
     function noteConversionStarted() {
@@ -18454,7 +18482,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // Resolves once no crop-area detection is pending, a hit's conversion
     // included.
     async function settlePendingCropDetection() {
-      while (cropDetection) await cropDetection.settled;
+      while (cropDetection || state.fullBaseHistoryPending) await (state.fullBaseHistoryPending || cropDetection.settled);
     }
 
     // Starts the detection for the frame Apply has just set up (state holds
@@ -19330,7 +19358,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const { ai, enabled, mask: dustMask } = state.dustRemoval;
       const aiDust = Boolean(ai && enabled && dustMask && (aiRepairReady() || dustMaskHasPixels(dustMask)));
       const needsRepair = aiDust || state.repairStrokes.length;
-      if (needsRepair && repairStamps.matches(state.dustRemoval.inpaintedImageData, currentRepairRecipe())) {
+      if (needsRepair && (!aiDust || repairStamps.recipeOf(state.dustRemoval.inpaintedImageData)?.dustUsedAi === true)
+        && repairStamps.matches(state.dustRemoval.inpaintedImageData, currentRepairRecipe())) {
         if (state.processedImageData !== state.dustRemoval.inpaintedImageData) applyDustResultToState();
       } else if (needsRepair) {
         // An unstamped AI repair always needs the model, including retries
@@ -19348,7 +19377,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         const lensMapping = state.conversionSourceImageData?.__lensMapping || null;
         const modelRevision = aiRepair.revision;
         // The pass reads its own copy of the mask, which nothing patches.
-        const dust = dustEnabled && mask ? await commitDustPass(source, mask, () => true, dustMaskInfo(liveMask), () => true) : null;
+        const dust = dustEnabled && mask ? await commitDustPass(source, mask, () => true, dustMaskInfo(liveMask), () => true, { requireAi: aiDust }) : null;
         const repaired = await inpaintManualBrush(dust ? dust.imageData : source);
         // Manual-only background repair creates a fresh, unused zero dust
         // mask. Its identity does not change the export recipe. Actual dust
@@ -19877,6 +19906,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // converted (#255): leaving keeps only the user's edits.
       if (item.provisional) return false;
       if (state.provisional && state.provisional.item === item) return false;
+      if (state.fullBaseHistoryPending) return false;
       if (!state.originalImageData) return false;
       if (!force && !item.isDirty && item.settings) return false;
 
@@ -20515,7 +20545,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // Dust removal on a converted frame. `scaleFrom`, the short side of the
     // full-resolution working frame, scales the particle size to a
     // preview-size frame (never below three pixels).
-    async function removeFrameDust(processed, { dustRemoval, scaleFrom = 0, isCurrent = () => true, dustWorker = null, own = plane => plane, trace = null }) {
+    async function removeFrameDust(processed, { dustRemoval, scaleFrom = 0, isCurrent = () => true, dustWorker = null, own = plane => plane, trace = null, requireAi = false }) {
       const strength = Number.isFinite(dustRemoval.strength) ? dustRemoval.strength : state.dustRemoval.strength;
       let maxParticleSize = Number.isFinite(dustRemoval.maxParticleSize)
         ? dustRemoval.maxParticleSize
@@ -20530,7 +20560,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       let result = processed;
       // Batch lanes and thumbnails reuse the open photo's tiles but never
       // evict them (lookups only).
-      if (particleCount > 0) result = own(await withAiRepairTurn(() => inpaintForCommit(processed, mask, isCurrent, dustWorker, { memoInsert: false, ai })), processed);
+      if (particleCount > 0) result = own(await withAiRepairTurn(() => inpaintForCommit(processed, mask, isCurrent, dustWorker, { memoInsert: false, ai, ...(requireAi && ai ? { requireAi } : {}) })), processed);
       trace?.mark('dustRemoval', {
         pixels: getImageDataPixelCount(result)
       });
@@ -20983,7 +21013,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // sheet leaves it out (a flagged proof-sheet approximation, #247).
       const dustRemoval = options.dustRemoval || state.dustRemoval;
       if (!tileMax && dustRemoval && dustRemoval.enabled && processed) {
-        processed = await removeFrameDust(processed, { dustRemoval, isCurrent, dustWorker: options.dustWorker, own, trace });
+        processed = await removeFrameDust(processed, { dustRemoval, isCurrent, dustWorker: options.dustWorker, own, trace, requireAi: true });
       }
 
       if (settings.repairStrokes?.length) {
@@ -27090,7 +27120,14 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // `report`, when given, learns which inpainter ran (`usedAi`), the model
     // revision it ran with and, for MI-GAN, the blocks it wrote. `ai` is the
     // AI switch: a batch job passes the one it started with (#241).
-    async function inpaintForCommit(source, mask, isCurrent = () => true, worker = null, { memoInsert = true, report = null, ai = state.dustRemoval.ai } = {}) {
+    async function inpaintForCommit(source, mask, isCurrent = () => true, worker = null, { memoInsert = true, report = null, ai = state.dustRemoval.ai, requireAi = false } = {}) {
+      const requireModel = () => {
+        if (requireAi && ai && !aiRepairReady(ai)) {
+          const message = aiRepair.error || aiRepair.status;
+          throw new Error(getInterpolatedText('exportAiModelUnavailable', { message },
+            `The AI repair model could not be loaded (${message}), so nothing was exported. Load it in Retouch and export again.`));
+        }
+      };
       assertRepairCurrent(isCurrent);
       if (ai && aiRepair.status === 'idle') await loadAiRepairModel(...aiRepairLoadArgs({ refresh: false }));
       while (ai && aiRepair.status === 'loading') {
@@ -27098,6 +27135,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         assertRepairCurrent(isCurrent);
       }
       assertRepairCurrent(isCurrent);
+      requireModel();
       if (report) Object.assign(report, { usedAi: aiRepairReady(ai), revision: aiRepair.revision, blocks: null });
       if (!aiRepairReady(ai)) return inpaintDustOffMainThread(source, mask, isCurrent, worker);
       const started = performance.now();
@@ -27116,16 +27154,17 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         assertRepairCurrent(isCurrent);
         console.warn('AI repair failed:', error);
         // A WebGPU session that fails mid-run is rebuilt on WASM once; only
-        // when that fails too does TELEA take over.
+        // when that fails too may a preview use TELEA. An AI export fails.
         if (aiRepair.provider === 'webgpu' && aiRepair.sourceRef) {
           await loadAiRepairModel(aiRepair.sourceRef, { prefer: 'wasm', refresh: false });
-          if (aiRepairReady(ai)) return inpaintForCommit(source, mask, isCurrent, worker, { memoInsert, report, ai });
+          if (aiRepairReady(ai)) return inpaintForCommit(source, mask, isCurrent, worker, { memoInsert, report, ai, requireAi });
         }
         aiRepair.status = 'error';
         aiRepair.revision += 1;
         aiRepair.error = error?.message || String(error);
         aiRepair.run = null;
         updateAiRepairUI();
+        requireModel();
         return inpaintDustOffMainThread(source, mask, isCurrent, worker);
       }
     }

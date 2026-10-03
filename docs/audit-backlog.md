@@ -221,8 +221,10 @@ proof does not establish the unmeasured performance targets.
 
 - **low/bug** — Undo entries taken inside a two-stage window keep the stand-in pass's automatic values; an undo after the swap restores them  
   `negative2positive/src/app/main.js rebaseProvisionalHistory`  
-  Every entry carries the whole live recipe (captureSnapshot). The swap converts their crops to full units and makes them cold, but their film base, auto-frame crop and angle, and autoFrameMeta (the image area the analysis samples) are the provisional pass's, measured on the half-size stand-in. Undoing a window edit after the swap therefore converts and exports with those values, where one decode's entry held the full decode's. Display and export after such an undo differ from one decode by the swap's automatic drift (a few pixels of frame, a slight film base change). Since a failed stage 2 no longer holds the automatic roll import (#255 review R2-033), a roll it commits beside the stand-in leaves such an entry too (rollAnalysis).  
-  _Suggested fix:_ At the swap, rebase each entry like the live recipe: the full decode's automatic fields with the entry's own window edits (windowEdits against the pass's settled snapshot) on top, and its autoFrameMeta replayed with windowFrameMetaOnFull (without a detection).
+  Every entry carries the whole live recipe (captureSnapshot). The swap converts their crops to full units and makes them cold, but their film base and automatic crop/angle can still be the provisional pass's, measured on the half-size stand-in. Undoing a window edit after the swap therefore converts and exports with those values, where one decode's entry held the full decode's. Display and export after such an undo differ from one decode by the swap's automatic drift (a few pixels of frame, a slight film base change). Since a failed stage 2 no longer holds the automatic roll import (#255 review R2-033), a roll it commits beside the stand-in leaves such an entry too (rollAnalysis).
+  _Suggested fix:_ At the swap, rebase each entry like the live recipe: the full decode's automatic fields with the entry's own window edits (windowEdits against the pass's settled snapshot) on top, retaining each entry's user intent.
+
+  _Diagnostics resolved (#229 R2-052):_ Promotion replays Apply/Confirm intent for both stacks on the full-base diagnostics, discards stand-in hit tokens and redetects before restored conversion. Automatic WB follows the full-base area; manual WB stays. Real pending/completed-hit and confirmation histories assert exact 8/16 samples. The broader automatic-field observation above is outside this supplemental diagnostics fix.
 
 - **low/bug** — Touch pinch-zoom and pointer panning run simultaneously and fight over panX/panY  
   `negative2positive/src/app/main.js:8465`  
@@ -274,15 +276,9 @@ proof does not establish the unmeasured performance targets.
   studioBackgroundReady() does not look at a pending detection, so the import's film-type flip (flipImportPhoto) and applyImportPositives can persist the open photo with the miss outcome and restore it; the restore installs new diagnostics, which ends the detection without its hit (it counts as stale).  
   _Suggested fix:_ Add `!hasPendingCropDetection()` to studioBackgroundReady (its callers already retry until it holds).
 
-- **low/bug** — The Step-3 film-type buttons and the positive-mode select keep the expired rescue's measurement of the previous interpretation  
-  `negative2positive/src/app/main.js:13954`  
-  Both change state.filmType / state.positiveMode and reconvert through scheduleSilverSourceRefresh (the core reprocess), which never calls maybeAnalyzeExpiredRescue: only processNegative's first frame does. A rescued photo switched from positive to B&W (or between correct and edit) therefore keeps the measurement of the old mode, on screen and in its exports, until Analyze is pressed. 1703835 behaves the same; the recipe path (filmTypeOverride.js, restoreSettings) re-measures since #229 review R1-017.  
-  _Suggested fix:_ In both handlers, drop expiredAnalysis and the brightness and contrast it set when the interpretation changes (the rule of filmTypeOverride.js withoutFilmTypeAnalysis), then call remeasureExpiredAfterRetype().
-
-- **low/bug** — A film-type change across the negative/positive boundary keeps the semantic map of the old interpretation  
-  `negative2positive/src/app/filmTypeOverride.js:10`  
-  The map is a segmentation of the positive render, and a negative read as a positive (or the reverse) renders inverted. applyFilmTypeOverride and applyAutomaticFilmType keep semanticMap, so the re-measured rescue (and, for colour film, the automatic white balance) is weighted by anchors of the other render. For the B&W retypes of #231 the frames are monochrome and the anchors move no pixels; Apply film type to roll between colour and positive does. 1703835 behaves the same.  
-  _Suggested fix:_ Drop semanticMap in withoutFilmTypeAnalysis when one side is 'positive' and the other is not, and schedule semantic colour again for the new render (reset item.semanticAttempted; prepareStudioPhoto schedules it for fresh files only).
+- **resolved/bug** — Live film-type and positive-mode controls invalidate old rescue measurements and completed semantic anchors (#229 R1-017)
+  `negative2positive/src/app/main.js`, `app/filmTypeOverride.js`
+  Both production listeners use `withoutFilmTypeAnalysis` and remeasure the converted frame after it settles. User strengths/settings and manual WB survive; Undo/Redo restore each interpretation with its corresponding anchors. The override helpers already follow the same invalidation rule. Real listener regressions measure with a completed valid map and compare to a fresh map-free reference; expired-film smoke exercises completed-map live crossings and history.
 
 - **low/i18n** — Export failure alert and several export-path Error messages are hard-coded English; 'selected folder' fallback leaks into localized toast  
   `negative2positive/src/app/main.js:9010`  

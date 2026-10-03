@@ -65,6 +65,14 @@ Now one driver (`runBatchExport` in `main.js`) runs the per-file pipeline
   so lanes take turns with it (`withAiRepairTurn`). Lanes look tiles up in
   the session's tile memo but never insert (`memoInsert: false`), so a roll
   export does not evict the open photo's tiles (#246).
+- AI-selected dust export requires the model in both the batch caller and
+  single-export preparation (`inpaintForCommit`, `requireAi`). Failed loading
+  or inference stops that export with the existing model-unavailable message;
+  retries cannot encode TELEA. A matching TELEA preview stamp also cannot
+  satisfy AI-selected export. A successful WebGPU-to-WASM retry still uses
+  the selected model and its provider/revision cache key. Released-model AI
+  stamps remain reusable; explicit AI-off repair remains TELEA. Previews keep
+  their existing fallback, and an empty dust mask needs no model (#229 R1-102).
 - The geometry chain (base → rotation → mirror → crop) runs in one pass that
   only builds the cropped window, for right angles and mirror-only geometry
   too, bit-identical to the step chain (`planGeometry` + `renderGeometryRows`

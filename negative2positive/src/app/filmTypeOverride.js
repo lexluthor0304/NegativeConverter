@@ -27,7 +27,7 @@ function interpretationOf(settings) {
   return `${settings.filmType || 'color'}|${settings.positiveMode === 'edit' ? 'edit' : 'correct'}`;
 }
 
-function withoutFilmTypeAnalysis(previous, next) {
+export function withoutFilmTypeAnalysis(previous, next) {
   // Semantic anchors were measured on the old interpretation's positive too.
   if (next.semanticMap && interpretationOf(previous) !== interpretationOf(next)) next.semanticMap = null;
   if (next.wbAutoConfidence && !next.wbUserOverride && !next.grayPointSampled) {

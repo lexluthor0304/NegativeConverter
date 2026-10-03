@@ -420,6 +420,81 @@ export async function runExpiredFilmSmoke({ send, evaluate, waitFor, wait, fail,
   console.log(`ok: fog surfaces measured in the worker (${realm.tasks.worker} requests), no OpenCV in the page`);
 
   await runExpiredRollRetypeSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port });
+  await runExpiredLiveTypeSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port });
+}
+
+// Complete a valid semantic answer through the production analyzer, then use
+// the actual type/mode controls. Only the inference leaf is deterministic;
+// import, rescue measurement, user strengths and Undo/Redo are the real flow.
+async function runExpiredLiveTypeSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port }) {
+  const ready = `document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy`;
+  const settings = `window.__ncTwoStage.status().settings`;
+  const map = { width: 2, height: 1, labels: [0, 4], confidence: .95 };
+  await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en&debug=1` });
+  await waitFor('live-type boot', `!!document.getElementById('uploadExpiredBtn') && !!window.__ncTwoStage`);
+  await installDialogAutoAccept();
+  await wait(500);
+  await evaluate(`(() => {
+    const NativeWorker = window.Worker;
+    window.Worker = class extends NativeWorker {
+      constructor(url, options) {
+        if (/semanticWorker/.test(String(url))) return {
+          onmessage: null, terminate() {}, postMessage() { queueMicrotask(() => this.onmessage?.({ data: ${JSON.stringify(map)} })); }
+        };
+        super(url, options);
+      }
+    };
+    for (const id of ['studioImportAutoCrop', 'importFilmTypeAuto', 'autoRollOnImport']) {
+      const el = document.getElementById(id); if (el.checked) el.click();
+    }
+    document.querySelector('.film-type-btn[data-type="positive"]').click();
+    const label = document.getElementById('uploadExpiredBtn');
+    label.addEventListener('click', event => event.preventDefault(), { once: true }); label.click();
+  })()`);
+  await evaluate(`(async () => {
+    const canvas = document.createElement('canvas'); canvas.width = 160; canvas.height = 120;
+    const ctx = canvas.getContext('2d'), image = ctx.createImageData(160, 120);
+    for (let y = 0; y < 120; y++) for (let x = 0; x < 160; x++) {
+      const v = 48 + (x * 3 + y * 7) % 130, tint = x < 80 ? [1.25, 1, .8] : [.7, 1.15, .85];
+      image.data.set([...tint.map(t => Math.round(v * t)), 255], (y * 160 + x) * 4);
+    }
+    ctx.putImageData(image, 0, 0);
+    const dt = new DataTransfer(); dt.items.add(new File([await new Promise(r => canvas.toBlob(r, 'image/png'))], 'live-type-positive.png', { type: 'image/png' }));
+    const input = document.getElementById('fileInput'); input.files = dt.files; input.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+  await waitFor('live-type completed semantic rescue', `${ready} && ${settings}?.semanticMap && ${settings}.expiredAnalysis?.spatial
+    && !window.__ncTwoStage.status().semanticPending`, 120_000);
+  await evaluate(`(() => {
+    for (const [id, value] of [['expiredBrightness', 17], ['expiredContrast', 23], ['expiredNeutralize', 61], ['coreExposure', 19]]) {
+      const el = document.getElementById(id); el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+      el.value = String(value); el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  })()`);
+  await evaluate('window.__ncAnalysis.settle()');
+  await wait(700);
+  const before = await evaluate(settings);
+  if (JSON.stringify(before.semanticMap) !== JSON.stringify(map)) fail('the semantic leaf did not complete through the real caller');
+  const strengths = s => [s.expiredBrightness, s.expiredContrast, s.expiredNeutralize, s.coreExposure];
+  const check = async (label, type, mode) => {
+    await waitFor(label, `${ready} && ${settings}.filmType === '${type}' && ${settings}.positiveMode === '${mode}'
+      && !${settings}.semanticMap && ${settings}.expiredAnalysis?.spatial`, 120_000);
+    const s = await evaluate(settings);
+    if (JSON.stringify(strengths(s)) !== JSON.stringify(strengths(before))) fail(label + ': user strengths/settings changed');
+  };
+  await evaluate(`document.querySelector('.film-type-btn[data-type="bw"]').click()`);
+  await check('live positive to B&W measured again', 'bw', before.positiveMode);
+  await evaluate(`document.getElementById('undoBtn').click()`);
+  await waitFor('live-type undo retains old anchors', `${ready} && ${settings}.filmType === 'positive' && !!${settings}.semanticMap`, 120_000);
+  const undone = await evaluate(settings);
+  if (JSON.stringify(undone.semanticMap) !== JSON.stringify(map) || JSON.stringify(strengths(undone)) !== JSON.stringify(strengths(before))) fail('live-type undo did not restore the old interpretation/settings');
+  const mode = before.positiveMode === 'correct' ? 'edit' : 'correct';
+  await evaluate(`(() => { const el = document.getElementById('positiveModeSelect'); el.value = '${mode}'; el.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+  await check('live positive-mode crossing measured again', 'positive', mode);
+  await evaluate(`document.getElementById('undoBtn').click()`);
+  await waitFor('mode undo retains old anchors', `${ready} && ${settings}.positiveMode === '${before.positiveMode}' && !!${settings}.semanticMap`, 120_000);
+  await evaluate(`document.getElementById('redoBtn').click()`);
+  await check('mode redo retains new interpretation', 'positive', mode);
+  console.log('ok: completed semantic anchors clear at actual film-type/positive-mode crossings; rescue remeasures, user strengths persist, Undo/Redo retain interpretation intent');
 }
 
 // #229 review R1-017: an expired-roll session imports a B&W roll without

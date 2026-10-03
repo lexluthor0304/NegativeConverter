@@ -207,4 +207,63 @@ export async function runRepairReleaseSmoke({ send, evaluate, waitFor, wait, fai
   const toasts = await evaluate(`window.__brushToasts`);
   if (toasts.some(text => /still loading/.test(text))) fail('the first AI-brush stroke after a release was refused: ' + JSON.stringify(toasts));
   console.log('ok: an armed AI brush after a release shows a crosshair, takes its first stroke and repairs it with the model it loads again');
+
+  // R1-102 supplemental: the real Export/Export All controls must never
+  // encode TELEA after a ready WASM model fails inference. Retries keep the
+  // failure, while an explicit AI-off recipe can still export plain repair.
+  await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en&debug=1` });
+  await waitFor('AI failure boot', `!!window.__ncAiRepair && !!document.getElementById('studioImportAutoCrop')`);
+  await installDialogAutoAccept();
+  await installDownloadCapture(evaluate);
+  await evaluate(`(() => {
+    const probe = window.__requiredAiProbe = { fail: false, errors: [], runs: 0 };
+    const NativeWorker = window.Worker;
+    window.Worker = class extends NativeWorker {
+      constructor(url, options) { super(url, options); this.requiredAi = /aiInpaintWorker/.test(String(url)); }
+      postMessage(message, ...args) {
+        if (this.requiredAi && probe.fail && message?.type === 'run') {
+          probe.runs++;
+          queueMicrotask(() => this.onmessage?.({ data: { id: message.id, error: 'required AI fixture inference failure' } }));
+          return;
+        }
+        return super.postMessage(message, ...args);
+      }
+    };
+    const error = console.error.bind(console);
+    console.error = (...args) => {
+      if (/^(Export failed:|Error processing )/.test(String(args[0])) && /required AI fixture inference failure/.test(args[1]?.message || '')) {
+        probe.errors.push(args[1].message);
+        console.warn('Expected required AI export rejection:', args[1].message);
+      } else error(...args);
+    };
+  })()`);
+  const doc = await send('DOM.getDocument');
+  const input = await send('DOM.querySelector', { nodeId: doc.result.root.nodeId, selector: '#fileInput' });
+  await send('DOM.setFileInputFiles', { files: [fixture], nodeId: input.result.nodeId });
+  await waitFor('AI failure photo', `${ready} && document.getElementById('studioFilename').textContent === 'negative-sample.jpg'`, 150_000);
+  await evaluate(`window.__ncAiRepair.load('wasm')`);
+  await evaluate(`document.getElementById('studioTab-repair').click();
+    if (!document.getElementById('dustAiEnabled').checked) document.getElementById('dustAiEnabled').click();
+    document.getElementById('dustRemovalEnabled').click()`);
+  await waitFor('AI failure committed nonempty dust', `${ready} && /^Detected [1-9][0-9]* dust particles$/.test(document.getElementById('dustStatus').textContent)
+    && window.__ncAiRepair.state().provider === 'wasm' && window.__ncAiRepair.state().strokes === 0`, 120_000);
+  // A new model session invalidates the old committed stamp and tile memo.
+  await evaluate(`window.__ncAiRepair.load('wasm')`);
+  await evaluate(`window.__requiredAiProbe.fail = true`);
+  for (const button of ['exportSingleBtn', 'exportAllBtn']) for (const depth of [8, 16]) {
+    const before = await evaluate('window.__requiredAiProbe.errors.length');
+    await evaluate(`document.querySelector('.format-btn[data-format="${depth === 16 ? 'tiff' : 'png'}"]').click();
+      document.querySelector('.bitdepth-btn[data-bitdepth="${depth}"]').click(); window.__downloads = []; document.getElementById('${button}').click()`);
+    await waitFor(`${button}/${depth}: explicit AI failure`, `window.__requiredAiProbe.errors.length > ${before} && ${exportIdle}
+      && window.__ncAiRepair.state().status === 'error'`, 120_000);
+    if (await evaluate('window.__downloads.length')) fail(`${button}/${depth}: AI-selected failure wrote a file`);
+    const message = await evaluate('window.__requiredAiProbe.errors.at(-1)');
+    if (!/AI repair model could not be loaded.*required AI fixture inference failure.*nothing was exported/.test(message)) fail('required AI failure was not clear: ' + message);
+  }
+  if (await evaluate('window.__requiredAiProbe.runs') !== 1) fail('failed-model retries inferred or fetched again');
+  await evaluate(`document.getElementById('dustAiEnabled').click()`);
+  await waitFor('explicit AI-off plain repair', `${ready} && /^Detected [1-9][0-9]* dust particles$/.test(document.getElementById('dustStatus').textContent)`, 120_000);
+  await exportFile('explicit AI-off after failure', 'png', 8);
+  if (await evaluate('window.__requiredAiProbe.runs') !== 1) fail('AI-off export ran the failed model');
+  console.log('ok: ready WASM inference failure rejects actual single/batch PNG8/TIFF16 exports and retries without a file; explicit AI-off TELEA still exports');
 }
