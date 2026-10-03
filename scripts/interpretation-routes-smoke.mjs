@@ -102,7 +102,7 @@ export async function runInterpretationRoutesSmoke({ send, evaluate, waitFor, wa
   await evaluate(`window.__routeOld = ${JSON.stringify(old)}`);
   // A saved project restores valid completed analysis while offering a B&W
   // edge detection; the Apply detected film button is the production writer.
-  const openProject = async (values, all = true) => {
+  const openProject = async (values, all = true, reference = null) => {
     await evaluate(`(async () => {
       const { buildRollProject, serializeRollProject } = await import('/src/app/rollProject.js');
       window.__routeProjectOpened = false;
@@ -110,7 +110,7 @@ export async function runInterpretationRoutesSmoke({ send, evaluate, waitFor, wa
       const values = ${JSON.stringify(values)};
       const entries = files.map((file, i) => ({ name: file.name, size: file.size, selected: true,
         settings: values[i] || null, lastModified: file.lastModified }));
-      const project = new File([serializeRollProject(buildRollProject({ files: entries }))], 'routes.ncroll.json', { type: 'application/json' });
+      const project = new File([serializeRollProject(buildRollProject({ files: entries, rollReference: ${JSON.stringify(reference)} }))], 'routes.ncroll.json', { type: 'application/json' });
       const dt = new DataTransfer(); for (const file of files) dt.items.add(file); dt.items.add(project);
       const input = document.getElementById('projectInput'); input.files = dt.files; input.dispatchEvent(new Event('change', { bubbles: true }));
     })()`);
@@ -283,8 +283,12 @@ export async function runInterpretationRoutesSmoke({ send, evaluate, waitFor, wa
     await openProject([donorRecipe, old, old], action !== 'import-lock');
     const donorSettings = await measured(label + ' donor measured', donorRecipe.filmType, donorRecipe.positiveMode);
     if (action !== 'applyToSelectedBtn') {
-      await evaluate('document.getElementById("setRollReferenceBtn").click()');
-      await wait(300);
+      // B&W/positive views hide the film-base reference controls. Restore the
+      // donor's actual measured recipe as a saved roll reference and open a
+      // color recipient, where the real reference/lock controls are available.
+      await openProject([{ ...donorSettings, filmType: 'color', positiveMode: 'correct', semanticMap: null, expiredAnalysis: null }, old, old],
+        action !== 'import-lock', { enabled: true, settingsSnapshot: donorSettings, applyLock: false, applyCrop: false });
+      await waitFor(label + ' reference control available', '!document.getElementById("applyRollReferenceBtn").disabled && !document.getElementById("lockRollReference").disabled');
     }
     if (action === 'import-lock') {
       await evaluate(`(() => {
