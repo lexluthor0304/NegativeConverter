@@ -171,6 +171,13 @@ export async function runInterpretationRoutesSmoke({ send, evaluate, waitFor, wa
   }
   const batch = await exports('selected recipe batch', true);
   equalExports(first, batch, 'current single vs real batch', false);
+  const batchSettings = await evaluate('window.__ncTwoStage.queuedRecipes()');
+  console.log('selected recipe settings differences:', JSON.stringify(batchSettings.slice(1).map(item => ({ name: item.name,
+    values: Object.fromEntries(Object.keys(item.settings || {}).filter(key => !['semanticMap', 'expiredAnalysis', 'curves'].includes(key)
+      && JSON.stringify(item.settings[key]) !== JSON.stringify(current[key])).map(key => [key, { current: current[key], selected: item.settings[key] }])),
+    analysis: item.settings?.expiredAnalysis ? { method: item.settings.expiredAnalysis.method, confidence: item.settings.expiredAnalysis.confidence,
+      interpretation: item.settings.expiredAnalysis.interpretation, spatial: Boolean(item.settings.expiredAnalysis.spatial) } : null
+  }))));
   for (const format of ['png', 'tiff']) for (const entry of batch[format]) {
     if (entry.samples !== first[format][0].samples) fail('selected/unopened remeasurement differs from fresh current: ' + JSON.stringify(entry));
   }
