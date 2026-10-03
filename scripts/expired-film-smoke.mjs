@@ -420,13 +420,13 @@ export async function runExpiredFilmSmoke({ send, evaluate, waitFor, wait, fail,
   console.log(`ok: fog surfaces measured in the worker (${realm.tasks.worker} requests), no OpenCV in the page`);
 
   await runExpiredRollRetypeSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port });
-  await runExpiredLiveTypeSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port });
 }
 
 // Complete a valid semantic answer through the production analyzer, then use
-// the actual type/mode controls. Only the inference leaf is deterministic;
+// the actual type/mode controls. Model fetch/inference leaves are deterministic;
 // import, rescue measurement, user strengths and Undo/Redo are the real flow.
-async function runExpiredLiveTypeSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port }) {
+// Run as --expired-live-type-only in a fresh browser, without prior model heaps.
+export async function runExpiredLiveTypeSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port }) {
   const ready = `document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy`;
   const settings = `window.__ncTwoStage.status().settings`;
   const map = { width: 2, height: 1, labels: [0, 4], confidence: .95, model: 'efficientvit-b1-ade20k-v1' };
@@ -437,13 +437,21 @@ async function runExpiredLiveTypeSmoke({ send, evaluate, waitFor, wait, fail, in
   await installDialogAutoAccept();
   await wait(500);
   await evaluate(`(() => {
-    const probe = window.__liveSemantic = { created: 0, posted: 0, delivered: 0 };
+    const probe = window.__liveSemantic = { modelLoads: 0, created: 0, posted: 0, delivered: 0, terminated: 0 };
+    const fetch = window.fetch.bind(window);
+    window.fetch = (input, options) => {
+      if (/efficientvit-b1-ade20k.*\.onnx/.test(String(input?.url || input))) {
+        probe.modelLoads++;
+        return Promise.resolve(new Response(new Uint8Array([1]), { headers: { 'content-type': 'application/octet-stream', 'content-length': '1' } }));
+      }
+      return fetch(input, options);
+    };
     const NativeWorker = window.Worker;
     window.Worker = class extends NativeWorker {
       constructor(url, options) {
         if (/semanticWorker/.test(String(url))) {
           probe.created++;
-          return { onmessage: null, terminate() {}, postMessage() {
+          return { onmessage: null, terminate() { probe.terminated++; }, postMessage() {
             probe.posted++; queueMicrotask(() => { if (this.onmessage) { probe.delivered++; this.onmessage({ data: ${JSON.stringify(map)} }); } });
           } };
         }
@@ -484,6 +492,8 @@ async function runExpiredLiveTypeSmoke({ send, evaluate, waitFor, wait, fail, in
   await wait(700);
   const before = await evaluate(settings);
   if (JSON.stringify(before.semanticMap) !== JSON.stringify(map)) fail('the semantic leaf did not complete through the real caller');
+  const leaf = await evaluate('window.__liveSemantic');
+  if (Object.values(leaf).some(value => value !== 1)) fail('semantic leaf must fetch one byte and deliver/terminate exactly once: ' + JSON.stringify(leaf));
   const strengths = s => [s.expiredBrightness, s.expiredContrast, s.expiredNeutralize, s.coreExposure];
   const check = async (label, type, mode) => {
     await waitFor(label, `${ready} && ${settings}.filmType === '${type}' && ${settings}.positiveMode === '${mode}'

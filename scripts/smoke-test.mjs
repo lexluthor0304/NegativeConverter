@@ -48,7 +48,7 @@ import { runDarkroomSmoke } from './darkroom-smoke.mjs';
 import { runCameraSmoke } from './camera-smoke.mjs';
 import { runRollHomeSmoke } from './roll-home-smoke.mjs';
 import { runTechnicalDepthSmoke } from './technical-depth-smoke.mjs';
-import { runExpiredFilmSmoke } from './expired-film-smoke.mjs';
+import { runExpiredFilmSmoke, runExpiredLiveTypeSmoke } from './expired-film-smoke.mjs';
 import { runNativeFilmFontSmoke } from './native-film-font-smoke.mjs';
 import { runExportGainMapSmoke } from './export-gain-map-smoke.mjs';
 import { runSilverCoreCacheSmoke } from './silvercore-cache-smoke.mjs';
@@ -689,6 +689,12 @@ if (process.argv.includes('--crop-apply-only')) {
 }
 if (process.argv.includes('--expired-only')) {
   await runExpiredFilmSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS');
+  process.exit(0);
+}
+if (process.argv.includes('--expired-live-type-only')) {
+  await runExpiredLiveTypeSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
   if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
   console.log('SMOKE PASS');
   process.exit(0);
