@@ -668,7 +668,7 @@ if (process.argv.includes('--geometry-only')) {
   console.log('SMOKE PASS'); process.exit(0);
 }
 if (process.argv.includes('--two-stage-only')) {
-  await runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+  await runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, onCdpEvent, port: PORT, root: ROOT });
   if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
   console.log('SMOKE PASS (two-stage imports)'); process.exit(0);
 }

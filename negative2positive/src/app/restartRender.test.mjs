@@ -8,7 +8,8 @@ import { hasWindowEdits, geometryEdits, overlayWindowEdits, createExactGeometry,
 import { displaySessionStubs, DISPLAY_SESSION_HELPERS } from './displaySessionHarness.mjs';
 import { applyLearnedDefaults, learnedDefaultsKey } from './learnedDefaults.js';
 import { decideRollFilmType, mergeRollDecision, ownFilmTypeVerdict, rollDecisionFrame, rollFilmTypeTarget, ROLL_MONOCHROME } from './rollFilmType.js';
-import { applyAutomaticFilmType, sanitizeFilmTypeOverride } from './filmTypeOverride.js';
+import { applyAutomaticFilmType, filmInterpretationChanged, sanitizeFilmTypeOverride } from './filmTypeOverride.js';
+import { releaseOwnedPlanes } from './planeRelease.js';
 
 // Exercise the actual browser lifecycle functions without loading a DOM,
 // OpenCV, or ONNX. Only their UI and expensive conversion dependencies are
@@ -47,6 +48,8 @@ function fixture({ repairs = true, locked = false, large = false } = {}) {
     brushFeedback: { drawing: false, end: () => {}, cancel: () => {}, sync: () => {} }, remapBrushStroke: () => {},
     liveDisplaySerial: 0,
     state, coreReprocessToken: 1, coreReprocessGeneration: 0, geometryToken: 0, loadGeneration: 1, cropDetection: null,
+    captureSnapshot: () => ({ settings: structuredClone({ filmType: 'color', positiveMode: 'correct', coreExposure: state.coreExposure }) }),
+    filmInterpretationChanged, releaseOwnedPlanes,
     _coreReprocessFullInFlight: false, _coreReprocessPreviewInFlight: false,
     _coreReprocessPending: null, _coreReprocessActive: 0,
     _coreReprocessIdle: null, _resolveCoreReprocessIdle: null,
@@ -101,6 +104,7 @@ function fixture({ repairs = true, locked = false, large = false } = {}) {
   });
   vm.runInContext([
     ...DISPLAY_SESSION_HELPERS,
+    'cropMeasurementInputsMatch',
     'clearFullResolutionRenderState', 'clearCoreReprocessTimer', 'cancelPendingTimers', 'clearDustState', 'cancelCropDetection',
     'coreReprocessBusy', 'whenCoreReprocessIdle', 'noteCoreReprocessSettled',
     'runCoreReprocess', 'flushScheduledCoreReprocess',
@@ -564,6 +568,7 @@ function prepareFixture({ itemSettings = null, detectFrame = true, learned = 0 }
     brushFeedback: { drawing: false, end: () => {}, cancel: () => {}, sync: () => {} }, remapBrushStroke: () => {},
     liveDisplaySerial: 0,
     state, console, structuredClone, DOMException, AbortController, JSON, Promise,
+    captureSnapshot: () => ({ settings: structuredClone(state.live) }), filmInterpretationChanged, releaseOwnedPlanes, cropDetection: null,
     loadGeneration: 1, coreReprocessGeneration: 0, geometryToken: 0, processNegativeInFlight: null, importDetectionAbort: null,
     fullResolutionRenderTimer: null, FULL_RESOLUTION_IDLE_DELAY_MS: 2500, manualEditRevision: 0,
     document: { body: { dataset: { photoSwitching: 'true' } } },
@@ -662,6 +667,7 @@ function prepareFixture({ itemSettings = null, detectFrame = true, learned = 0 }
     'prepareStudioPhoto', 'startImportDetection', 'autoFrameDetectionFilmType', 'buildFinalImportSettings', 'importUserEdited', 'revealProvisionalPhoto',
     'whiteBalanceMeasurementSettings', 'provisionalWhiteBalanceMeasurement', 'provisionalUnits', 'liveGeometry', 'windowFrameIntent',
     'armSettledConversion', 'processNegative', 'scheduleFullResolutionRender', 'withPendingEditsOf',
+    'cropMeasurementInputsMatch',
   ].map(functionSource).join('\n'), context);
   const answer = async (index = conversions.length - 1) => {
     conversions[index].reply.resolve({ width: 8, height: 6, id: `converted:${conversions[index].settings.id}` });

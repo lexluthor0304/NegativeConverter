@@ -53,6 +53,7 @@ import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { join, basename } from 'node:path';
 import { writeSyntheticDng, previewSizes, stubJpeg, pack12, cfaValue } from './perf/fixtures.mjs';
+import { installFrozenHistoryControl, runInterpretationHistoryCropSmoke } from './interpretation-history-smoke.mjs';
 
 // A separate small CFA fixture with the clear, textured image window used by
 // crop-apply-smoke. The benchmark scene's thin side rebate makes its window
@@ -245,9 +246,10 @@ const comparable = settings => {
   return { ...settings, rollFrame };
 };
 
-export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port, root,
+export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, onCdpEvent, port, root,
   parityFiles = (process.env.TWO_STAGE_PARITY_FILES || '').split(':').filter(Boolean) }) {
   const dir = mkdtempSync(join(tmpdir(), 'nc-two-stage-'));
+  await installFrozenHistoryControl({ send, onCdpEvent, root, fail });
   const importFiles = async paths => {
     const doc = await send('DOM.getDocument');
     const input = await send('DOM.querySelector', { nodeId: doc.result.root.nodeId, selector: '#fileInput' });
@@ -1053,6 +1055,10 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
         console.log(`ok: ${scene}: real saved automatic WB, RAW window/full install, Undo/Redo and exact current/batch/fresh PNG8/TIFF16`);
       }
     }
+
+    if (runs('crop-interpretation-history')) await runInterpretationHistoryCropSmoke({ send, evaluate, waitFor, fail, boot,
+      dir, file: cropFile, seedRecipe: reference.recipe, one, two, ready, status, exact,
+      exportFormats, exportAllFormats, same, sameExports, formats: [FORMATS[0], FORMATS[2]] });
 
     // 6. Analyze roll during stage 2 (#255 review R2-029): the stand-in gets an
     // exposure edit, then Analyze roll is clicked while stage 2 is held. The

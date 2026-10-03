@@ -190,6 +190,13 @@ retyped entry's reset gains. An automatic WB measurement keeps its original
 interpretation through promotion and asynchronous replay. The new frame
 measures rescue using its own interpretation; matching saved analysis,
 manual/gray-point WB, manual film bases and explicit strengths remain paired.
+Pending crop hits measure each historical interpretation from its own
+converted positive, including its film base, semantic map and roll inputs.
+Dispatch captures those settings before awaiting the worker; a type/mode or
+measurement-input change during conversion is converted again before live
+adoption. Matching old and new history entries retain their genuine completed
+WB/rescue measurements. A WB lock does not suppress a missing rescue
+measurement during cold replay.
 
 The same rule applies to recipes on the current/selected photos, detected-film
 application, film-edge import merges, the Step-2 roll reference and the positive

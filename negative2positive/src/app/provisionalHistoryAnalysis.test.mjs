@@ -84,7 +84,7 @@ function fixture(staged, manualWb = false) {
     },
     getUndoLabel: label => label, inferConfidenceLevel: () => 'high', MAX_UNDO: 30 });
   vm.runInContext(['liveGeometry', 'rebaseProvisionalHistory', 'windowFrameMetaOnFull', 'windowFrameIntent', 'frameMetaWithWindowIntent',
-    'installFullDecode', 'restoreAutoFrameDiagnostics', 'automaticWhiteBalanceResult', 'maybeAutoWhiteBalance', 'analysisRegionSample',
+    'installFullDecode', 'restoreAutoFrameDiagnostics', 'automaticWhiteBalanceResult', 'maybeAutoWhiteBalance', 'frameWantsAutoWhiteBalance', 'cropMeasurementInputs', 'cropMeasurementInputsMatch', 'analysisRegionSample',
     'whiteBalanceMeasurementSettings', 'provisionalWhiteBalanceMeasurement', 'promoteWhiteBalanceMeasurement', 'restorePromotedWhiteBalance',
     'restoreColdSnapshotPixels', 'hasPendingCropDetection', 'settlePendingCropDetection',
     'cancelGeometryJob', 'restoreSettings', 'pushUndo', 'resetAllAdjustments',

@@ -216,6 +216,13 @@ instead (step 4 runs it on the full base). It then swaps in one task:
    cannot be relabelled by promotion or replayed into a different mode.
    Replay checks the interpretation and user ownership both before and after
    awaiting conversion. Pending crop-WB events carry the same provenance.
+   A late crop hit converts the original historical interpretation when the
+   dispatched positive belongs to another recipe. Completed events match
+   type/mode, WB ownership, film base, semantic map and roll inputs; both old
+   and new entries keep their own measurements. Dispatch settings stay fixed
+   across the worker wait, and a crossing converts the current recipe before
+   adopting it. Manual/gray WB locks still permit missing rescue analysis on
+   cold replay.
    Other automatic conversion measurements, including expired-film analysis,
    still run before that WB replay, preserving user rescue strengths.
    Pending restoration joins the crop-analysis barrier, so exports and saved

@@ -84,13 +84,14 @@ function setup({ expired = false, step = 3, points = null, immediate = false, au
         conversions.push({ start, end: structuredClone(h.state.autoFrame.lastDiagnostics), options });
         h.state.processedImageData = h.state.croppedImageData || h.state.originalImageData;
         h.state.currentStep = 3;
-        if (autoWb && options.automatic !== false) c.maybeAutoWhiteBalance(h.state.processedImageData);
+        if (autoWb && options.automatic !== false) await c.maybeAutoWhiteBalance(h.state.processedImageData);
       })();
       h.target.processNegativeInFlight = promise;
       return promise.finally(() => { if (h.target.processNegativeInFlight === promise) h.target.processNegativeInFlight = null; });
-    }
+    },
+    convertFromCurrentSource: async () => h.state.processedImageData
   });
-  vm.runInContext(['automaticWhiteBalanceResult', 'maybeAutoWhiteBalance', 'autoWbSampleKey'].map(functionSource).join('\n'), c);
+  vm.runInContext(['automaticWhiteBalanceResult', 'maybeAutoWhiteBalance', 'autoWbSampleKey', 'frameWantsAutoWhiteBalance'].map(functionSource).join('\n'), c);
   vm.runInContext(applyCropHandlerSource(), c);
   h.state.currentStep = step;
   h.state.expiredEnabled = expired;
@@ -586,6 +587,7 @@ async function fullResolutionRun({ hitFirst = false } = {}) {
     assert.ok(check(), what);
   };
   await c.applyCropHandler();
+  await h.target.processNegativeInFlight;
   const missArea = areaOf(h.state.autoFrame.lastDiagnostics);
   assert.equal(h.state.processedImageDataIsPreview, true, 'the conversion shows a preview');
   if (!hitFirst) {
