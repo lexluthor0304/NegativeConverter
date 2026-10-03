@@ -215,8 +215,9 @@ export function createAutoFrameWorkerClient({
    * detection (`frame`: analyzer options, or null) and the film-edge read
    * (`filmEdge`: reader options, or null) on the same 8-bit buffer.
    *
-   * - `owned: false` (the photo on screen): one copy of the 8-bit plane.
-   * - `owned: true` (a decode no one else references, e.g. a roll lane's):
+   * - `owned: false` (the editor's or a roll lane's shared base): one copy
+   *   of the 8-bit plane on the copy path; shared 16-bit planes use a view.
+   * - `owned: true` (a decode no one else references, e.g. this batch file's):
    *   the 8-bit buffer is transferred without a copy and handed back; the
    *   result's `image` is the frame rebuilt over it. The caller must use
    *   that image from then on.

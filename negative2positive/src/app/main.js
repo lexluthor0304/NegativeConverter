@@ -15450,7 +15450,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // The import analyses of one decoded frame (#251): the frame detection
     // (sizes only) and the film-edge read in one worker request on one
     // buffer, each falling back to this thread as it always did. `owned` (a
-    // decode nothing else references: a roll lane's, a batch file's)
+    // decode nothing else references: a batch file's or this selected-file
+    // loop's). A roll lane's base can be adopted by the foreground and held
+    // by sessions or the prefetch, so it must use owned: false. owned: true
     // transfers the 8-bit plane instead of copying it; the result's `image`
     // is then the frame to use from now on, and `reload` decodes it again if
     // a failed worker kept its planes. Resolves { image, detection, read }
@@ -16515,8 +16517,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
             // Only this loop holds the decode: it goes to the worker without
             // a copy and comes back; only the rotated frame's size is read
             // (#251).
-            const analysed = await runImportDetections(await decode(), {
-              owned: true, reload: decode, frameFilmType: item.settings?.filmType ?? null
+            const decoded = await decode();
+            const defaults = item.settings || settleImportFilmType(item, createDefaultSettings(decoded, item));
+            const analysed = await runImportDetections(decoded, {
+              owned: true, reload: decode, frameFilmType: defaults.filmType
             });
             const imageData = analysed.image;
             if (!imageData) throw analysed.detection?.error || new Error('The frame could not be decoded again');

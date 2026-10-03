@@ -394,9 +394,20 @@ each decode with the foreground and the tile and prefetch needs of that frame
 (`docs/photo-sessions.md`). A frame measured on the page sends frame
 detection and film edge to its lane's auto-frame worker in one request, sizes
 only (#251); the decode is shared, so its 8-bit plane goes as one copy rather
-than being transferred. The per-frame measurements and the group commit,
+than being transferred on the non-shared copy path (about 241 MB at 60 MP).
+This is the recorded #251 / #229 review R1-097 ownership deviation: the
+zero-main-thread-copy target for five background frames is not met there;
+`owned: true` is only for a decode no foreground, session or prefetch can
+adopt. Shared 16-bit planes travel as views instead, and #252's RAW frame
+worker detects and samples on its own post-decode planes.
+The per-frame measurements and the group commit,
 built from `pending` in import order, are unchanged, and
 `runBatchPipeline`'s export sink order and cancellation are untouched.
+Idle roll-frame realms and page-path analyzer heaps remain in the memory
+ledger between frames/retries and leave at roll completion; the frame's
+lane claim covers its acquired worker. Failed OpenCV warm-up removes a
+worker, and process/sample/release requests terminate it after a 120 s
+reply timeout, allowing the existing retry/page path to finish the roll.
 
 Roll analysis has its own lane plan and its own per-frame worker (#252):
 

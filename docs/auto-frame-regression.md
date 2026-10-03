@@ -15,9 +15,11 @@
 ## 検出の周辺処理（#251）
 
 - 取り込み時のワーカー要求はフレームごとに 1 回（`analyze-import`）。枠検出とフィルム縁の読み取りを同じバッファで行い、両方の結果（それぞれのエラーを含む）を返す。main.js（`runImportDetections`、`autoFrameExecution.js` の `runImportAnalyses`）は従来どおり「枠 → 縁 → 学習済み既定値」の順で設定に統合する。
-- 表示中の写真は 8 bit プレーンを 1 回だけ複製する。ロールのレーン、自分でデコードした `processFileWithSettings`、「選択を自動取景」、ロール解析 1 段目の新しいデコードは、8 bit バッファを複製せずに転送し、返ってきたバッファで ImageData を作り直す（16 bit プレーン・付加プロパティ・フィルム統計のキャッシュ `carryFilmStats` を引き継ぐ）。
+- 表示中の写真とロールのレーンの共有基画像は `owned: false`。共有メモリーを使えない経路では主スレッドで 8 bit プレーンを 1 回複製する（60 MP で約 241 MB）。レーンの基画像は表示側、セッション、先読みへ引き渡せるため転送しない。#251 の「背景 5 コマで主スレッドの複製 0 回」はこの経路では未達（#229 review R1-097、所有者の承認が必要）。自分だけでデコードした `processFileWithSettings` と「選択を自動取景」は `owned: true` で転送し、戻ったバッファで ImageData を作り直す（16 bit プレーン・付加プロパティ・`carryFilmStats` を引き継ぐ）。#252 の RAW ロールワーカーでは処理・検出・サンプルを同じワーカーのプレーン上で行う。
 - 16 bit プレーンは送らず、結果は回転後の寸法（`rotatedWidth` / `rotatedHeight`、`rotatedOutput: 'none'`）だけで、回転した画素は返さない。全解像度の画素を読む唯一の経路（プレビューで通った枠が拡大後の検証で落ちた場合の再検出）が 0 以外の角度で必要になると、ワーカーは `needsFullResolution` を返し、両プレーンで 1 回だけ再試行する。ワーカーが転送済みのフレームを持ったまま失敗した場合は、再デコードしてから主スレッドで検出する（切り離されたバッファは読まない）。
 - 「自動取景」ボタンだけは両プレーンを送り、回転済みプレーンを受け取って作業画像にする（角度 0 では基画像そのもの）。寸法の規則は `imageGeometry.js` の `rotatedDimensions` の 1 か所（#244）。
+- 「選択を自動取景」で設定のない写真は、要求前に `settleImportFilmType(item, createDefaultSettings(decoded, item))` を計算してその写真の `frameFilmType` を渡す。取り込みと同じ B&W の灰色プレーン探索を使い、戻った画像の既定値は引き継いだ統計から同じ値になる。`autoFrameSelectedFilmType.test.mjs` は色かぶりのある B&W の裁切と 8/16 bit 書き出しサンプル、PNG16 を比較する。
+- `--autoframe-import-only` は 16 bit PNG を含む 4 コマを複製経路で取り込み、最初の要求で `image16Omitted === true && !image16`、実際のワーカー返信で `result.frame.rotatedImageData` がないことを確認する。
 - 線分探索の厳密な高速化: 中央値は型付き配列のソート、`lineEvidence` は支持なし差分 11 個または低差分 16 個で打ち切り、`walkLineSegments` は歩ごとの配列を作らず、`boundaryEvidence` は最初に失敗した辺で打ち切り、線分の四辺形は傾き判定を先に行う。同じバイト列の平面（R = G = B のグレースケール）は 1 回だけ探索する。HEAD の凍結コピー `imageWindowSearch.reference.mjs` との一致を `imageWindowSearch.parity.test.mjs` が検証する。
 - フラグ付きの変更（#229 で許容済み）:
   - グレー平面だけの線分探索（part 4b、既定で有効）: フレーム自身のフィルム種別が白黒、またはプレビューの 4×4 ブロック平均の彩度（最大 − 最小）の p95 が 10 未満のとき。判定は線分探索を行うときだけ下し、`diagnostics.lineSearch` に記録する（輪郭で窓が見つかった場合は `not-run`）。橙色マスクのネガは p95 ≈ 126–142 で発火しない。キルスイッチ: `localStorage.nc_autoframe_neutral_lines_v1 = 'off'`（`state.autoFrame.neutralLineSearch`）。
