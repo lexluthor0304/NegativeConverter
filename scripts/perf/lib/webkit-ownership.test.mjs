@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { verifiedWebKitAssociation, WebKitOwnership, sameProcess } from './webkit-ownership.mjs';
-import { webkitMemory, launchWebKitProcess, runWebKit } from './webkit.mjs';
+import { webkitMemory, launchWebKitScript, runWebKit } from './webkit.mjs';
 import { cleanupResources } from './resources.mjs';
 
 const identity = (pid, path, parentPid = 1, parentUnique = '0') => ({ pid, unique: String(pid + 100), version: 7, uid: 501, path, parentPid, parentUnique });
@@ -28,10 +28,12 @@ assert.equal(verify({ ...snapshot, views: [{ ...snapshot.views[0], gpu: { ...sna
 assert.equal(sameProcess(gpu, { ...gpu, version: gpu.version + 1 }), false);
 
 let bound, spawned;
-const launch = launchWebKitProcess('/owned/tauri', ['dev'], {
+const launch = launchWebKitScript('/owned/tauri.js', ['dev'], {
   memory: { processEnv: () => ({ NC_PERF_OWNERSHIP_PORT: '5581' }), bindProcess: child => { bound = child; }, stopOwnedProcess() {} },
   spawnProcess: (bin, argv, options) => { spawned = { bin, argv, options }; return { pid: root.pid }; }
 });
+assert.equal(spawned.bin, process.execPath, 'the production script launcher bypasses the protected env interpreter');
+assert.deepEqual(spawned.argv, ['/owned/tauri.js', 'dev']);
 assert.equal(spawned.options.env.NC_PERF_OWNERSHIP_PORT, '5581', 'production launch propagates the provider environment');
 assert.equal(bound.pid, root.pid, 'production launch binds the exact spawned native ancestry');
 launch.unregister();

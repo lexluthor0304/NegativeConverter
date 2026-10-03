@@ -8,12 +8,22 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { buildWebKitObserver, WebKitOwnership, processMetadata } from './lib/webkit-ownership.mjs';
-import { webkitMemory, launchWebKitProcess } from './lib/webkit.mjs';
+import { webkitMemory, launchWebKitScript } from './lib/webkit.mjs';
 
 const run = promisify(execFile), port = Number(process.env.PORT || 5581);
 const out = resolve(process.argv[2]);
 mkdirSync(out, { recursive: true });
 const library = await buildWebKitObserver(out), binary = join(out, 'tiny-wkwebview');
+// Reproduce the installed Tauri shim's interpreter path without running its
+// CLI/build. The production script launcher must preserve the real observer.
+const envProbe = join(out, 'dyld-env-probe.js');
+writeFileSync(envProbe, '#!/usr/bin/env node\nconsole.log(JSON.stringify({observer:process.env.DYLD_INSERT_LIBRARIES||null}));\n', { mode: 0o700, flag: 'wx' });
+const env = { ...process.env, DYLD_INSERT_LIBRARIES: library };
+const shebang = JSON.parse((await run(envProbe, [], { env })).stdout);
+const directNode = JSON.parse((await run(process.execPath, [envProbe], { env })).stdout);
+writeFileSync(join(out, 'launcher-environment.json'), JSON.stringify({ shebang, directNode }, null, 2) + '\n');
+assert.equal(shebang.observer, null, 'the protected env shebang drops the injected observer on this OS');
+assert.equal(directNode.observer, library, 'direct Node preserves the actual observer library');
 const launcher = fileURLToPath(new URL('./native/webkit-fixture-launcher.mjs', import.meta.url));
 await run('xcrun', ['clang', '-fobjc-arc', '-O1', '-framework', 'AppKit', '-framework', 'WebKit',
   fileURLToPath(new URL('./native/webkit-fixture.m', import.meta.url)), '-o', binary]);
@@ -27,7 +37,7 @@ const results = [], children = [], owners = [];
 function launch(ownership, label, memory = {
   processEnv: () => ownership.environment(), bindProcess: child => ownership.bindProcess(child), stopOwnedProcess: signal => ownership.killOwnedProcess(signal)
 }) {
-  const { child, unregister } = launchWebKitProcess(process.execPath, [launcher, binary, `http://127.0.0.1:${port}/?instance=${label}`], { memory });
+  const { child, unregister } = launchWebKitScript(launcher, [binary, `http://127.0.0.1:${port}/?instance=${label}`], { memory });
   children.push(child); owners.push(ownership);
   child.once('exit', unregister);
   let output = '', errors = '';

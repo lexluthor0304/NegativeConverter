@@ -427,13 +427,19 @@ export function launchWebKitProcess(bin, argv, { memory, cwd, spawnProcess = spa
   return { child, unregister };
 }
 
+export function launchWebKitScript(script, argv, options) {
+  // The protected /usr/bin/env shebang strips DYLD_* on macOS. Keep the
+  // observer environment by invoking this developer Node executable directly.
+  return launchWebKitProcess(process.execPath, [script, ...argv], options);
+}
+
 async function tauriScenario(id, { ref, fixtureNames, record, note, log, outDir, label, memory }) {
-  const bin = join(ref.worktree.path, 'node_modules', '.bin', process.platform === 'win32' ? 'tauri.cmd' : 'tauri');
+  const script = join(ref.worktree.path, 'node_modules', '@tauri-apps', 'cli', 'tauri.js');
   const before = new Set(existsSync(ref.resultsDir) ? readdirSync(ref.resultsDir) : []);
   const exports = id === 's9-parallel' ? PARALLEL_EXPORTS.map(spec => ({ ...spec, id: `zip.${spec.id}`, zip: true }))
     : id === 's9' ? [...SINGLE_EXPORTS.map(spec => ({ ...spec, id: `single.${spec.id}.imported` })),
       ...ZIP_EXPORTS.map(spec => ({ ...spec, id: `zip.${spec.id}`, zip: true }))] : [];
-  const { child, unregister } = launchWebKitProcess(bin, tauriDevArgs({ port: ref.port, scenario: id, fixtures: fixtureNames, exports }),
+  const { child, unregister } = launchWebKitScript(script, tauriDevArgs({ port: ref.port, scenario: id, fixtures: fixtureNames, exports }),
     { cwd: ref.worktree.path, memory });
   let output = '';
   child.stdout.on('data', chunk => { output = (output + chunk).slice(-8000); });
