@@ -1,7 +1,9 @@
 // The export branch of processFileWithSettings (no previewMaxDimension, no
 // tileMaxDimension) must behave exactly as it did before #247: the same
 // stage calls with the same arguments, the same returned pixels (8 and 16
-// bits), the same prepared settings and recipe writes. The function as #251
+// bits) and prepared settings. R1-017 additionally adopts a newly measured
+// saved frame's rescue; all other recipe fields/writes remain identical.
+// The function as #251
 // left it (processFileWithSettings.reference.mjs) and the current one run
 // side by side against the same deterministic stages; the current one uses
 // its real helpers from main.js.
@@ -35,7 +37,8 @@ const current = ['processFileWithSettings', 'removeFrameDust', 'frameWantsAutoWh
   'normalizeViewedWhiteBalance', 'normalizeSliderValue',
   'applyFrameExpiredAnalysis', 'resolveLensCorrection', 'lensCorrectionActive', 'tileRecipeSettled', 'perPhotoSettingsFallback',
   'expiredImportKeepsFullFrame', 'renderPreviewFromWorkingImage', 'tileAnalysisReference',
-  'reconcileHalfSizeImage', 'autoFrameDetectionFilmType'].map(functionSource).join('\n');
+  'reconcileHalfSizeImage', 'autoFrameDetectionFilmType',
+  'adoptFrameExpiredAnalysis', 'copiedFrameAnalysisMatches'].map(functionSource).join('\n');
 
 const exportSteps = {
   rotate: applyRotationToImageData,
@@ -49,6 +52,15 @@ const exportSteps = {
 const digest = image => image ? createHash('sha256').update(Buffer.from(image.data.buffer, image.data.byteOffset, image.data.byteLength))
   .update(image.__image16 ? Buffer.from(image.__image16.data.buffer) : Buffer.alloc(0)).digest('hex').slice(0, 16) : null;
 const describe = image => image ? `${image.width}x${image.height}:${digest(image)}` : null;
+
+function expectedRecipeWrite(reference, saved, options, prepared) {
+  const expected = structuredClone(reference);
+  if (saved?.expiredEnabled && !saved.expiredAnalysis && options.stage !== 'source' && options.updateItemSettings !== false) {
+    assert.ok(prepared.expiredAnalysis, 'saved invalidated recipe has a newly measured rescue');
+    expected.expiredAnalysis = structuredClone(prepared.expiredAnalysis);
+  }
+  return JSON.stringify(expected);
+}
 
 function makeBase(width, height, seed) {
   let s = seed;
@@ -221,7 +233,8 @@ for (const [label, saved] of [...Object.entries(recipes), ['no recipe', null]]) 
       const b = await call(now);
       assert.deepEqual(b, a, `${label2}: result`);
       assert.deepEqual(now.log, head.log, `${label2}: stage calls and arguments`);
-      assert.deepEqual(JSON.stringify(now.item.settings), JSON.stringify(head.item.settings), `${label2}: recipe write`);
+      assert.deepEqual(JSON.stringify(now.item.settings), expectedRecipeWrite(head.item.settings, saved, options,
+        prepared.length ? JSON.parse(prepared[1]) : {}), `${label2}: only corresponding rescue adoption changes recipe writes`);
       assert.equal(prepared.length, options.stage === 'source' ? 0 : 2);
       if (prepared.length) assert.equal(prepared[1], prepared[0], `${label2}: prepared settings`);
       cases++;
@@ -274,7 +287,8 @@ for (const [label, saved] of [...Object.entries(recipes), ['no recipe', null]]) 
     });
     assert.equal(describe(b.processed), describe(a.processed), `${label2}: pixels`);
     assert.equal(JSON.stringify(b.settings), JSON.stringify(a.settings), `${label2}: settings`);
-    assert.deepEqual(JSON.stringify(now.item.settings), JSON.stringify(head.item.settings), `${label2}: recipe write`);
+    assert.deepEqual(JSON.stringify(now.item.settings), expectedRecipeWrite(head.item.settings, saved, headOptions, b.settings),
+      `${label2}: only corresponding rescue adoption changes recipe writes`);
     const expected = prepared ? head.log.filter(line => !line.startsWith('load:')) : head.log;
     if (lost) {
       // The rebuild repeats the geometry and lens calls of the first pass.
