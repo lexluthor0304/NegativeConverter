@@ -12710,8 +12710,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         }
       };
       const decoding = (async () => {
-        const lease = sharedDecodes.adopt(file, { signal, context: { claim, priority: 'user' } })
-          || sharedDecodes.open(file, { signal, context: { claim, priority: 'user' } });
+        const lease = sharedDecodes.adopt(file, { signal, context: { claim, priority: 'user', filmStats: false } })
+          || sharedDecodes.open(file, { signal, context: { claim, priority: 'user', filmStats: false } });
         try {
           const decoded = await lease.result;
           if (!isCurrentLoad(generation) || state.baseDescriptor !== descriptor || state.loadedFile !== file) return null;
@@ -13232,7 +13232,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         // decode options (full, defects on), with its rawMetadata. A heavy
         // file skips its half-size stage for it.
         const adoptsRunningDecode = !(decoded?.file === file && decoded.base) && sharedDecodes.inFlight(file);
-        const shared = !(decoded?.file === file && decoded.base) ? adoption || adoptSharedDecode(file, { signal }) : null;
+        const shared = !(decoded?.file === file && decoded.base) ? adoption || adoptSharedDecode(file, { signal, filmStats: !queued?.settings }) : null;
 
         if (decoded?.file === file && decoded.base) {
           imageData = decoded.base;
@@ -21981,7 +21981,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         // would otherwise drop the decode loadFile adopts below, and the file
         // would be read and decoded again (R1-061). loadFile takes the lease
         // over; a switch that ends another way releases it.
-        if (!(cached?.base && cached.file === fileItem.file)) adoption = adoptSharedDecode(fileItem.file, { signal });
+        if (!(cached?.base && cached.file === fileItem.file)) adoption = adoptSharedDecode(fileItem.file, { signal, filmStats: !fileItem.settings });
 
         // The outgoing photo lives in the session cache now.
         if (released) releaseOutgoingPhotoPlanes();
@@ -23153,9 +23153,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       });
     }
 
-    function adoptSharedDecode(file, { signal = null } = {}) {
+    function adoptSharedDecode(file, { signal = null, filmStats = true } = {}) {
       if (!sharedDecodes.has(file)) return null;
-      return sharedDecodes.adopt(file, { signal, context: { claim: claimForActivation(signal, file), priority: 'user' } });
+      return sharedDecodes.adopt(file, { signal, context: { claim: claimForActivation(signal, file), priority: 'user', filmStats } });
     }
 
     function sharedDecodeInFlight(file) {

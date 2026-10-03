@@ -166,8 +166,12 @@ Now one driver (`runBatchExport` in `main.js`) runs the per-file pipeline
   will build default settings (`loadFileToImageData(file, { filmStats: true })`,
   used by `processFileWithSettings` without saved settings and by the roll
   lanes) also get the film-type and film-base statistics from that worker;
-  `filmStatsCache.js` hands them to `createDefaultSettings`. The embedded
-  JPEG preview is read from the source File only when a fallback needs it.
+  `filmStatsCache.js` hands them to `createDefaultSettings`.
+  Shared foreground adoption forwards that recipe need to a replacement
+  decode if a held worker loses its planes. Restoring the original through
+  `ensureBase` always skips statistics: its recipe already exists.
+  The embedded JPEG preview is read from the source File only when a fallback
+  needs it.
 - Batch exports can be cancelled: the loading overlay's Cancel button
   (browser) and a Cancel button in the header progress strip (desktop).
 - The adjustment stage runs in the export worker and its result is used: a
