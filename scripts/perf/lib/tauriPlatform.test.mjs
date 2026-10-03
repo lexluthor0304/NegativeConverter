@@ -16,6 +16,9 @@ assert.deepEqual(config.app.windows, [{ ...window, incognito: true }], 'nonpersi
 assert.equal(config.build.beforeDevCommand, '');
 assert.match(config.build.devUrl, /^http:\/\/127\.0\.0\.1:5591\/\?lang=en&perf=1/);
 assert.ok(!tauriDevArgs({ ...input, release: false }).includes('--release'), 'the bounded caller proof can reuse the debug cache');
+const legacy = tauriDevArgs({ port: input.port, scenario: input.scenario, fixtures: input.fixtures });
+assert.deepEqual(legacy.slice(0, 4), ['dev', '--release', '--no-watch', '--config'], 'legacy caller argument positions stay stable');
+assert.equal(JSON.parse(legacy[4]).app.windows[0].incognito, true, 'legacy callers use the configured window with isolated storage');
 assert.throws(() => tauriDevArgs({ ...input, windows: [] }), /one configured window/);
 assert.throws(() => tauriDevArgs({ ...input, windows: [window, window] }), /one configured window/);
 

@@ -414,12 +414,13 @@ export async function safariScenario(id, { wd, origin, fixture, roll, record, no
 
 // ---- Tauri ----
 
-export function tauriDevArgs({ port, scenario, fixtures, sliders = S2_SLIDERS, exports = [], windows, release = true }) {
+export function tauriDevArgs({ port, scenario, fixtures, sliders = S2_SLIDERS, exports = [],
+  windows = JSON.parse(readFileSync(new URL('../../../src-tauri/tauri.conf.json', import.meta.url), 'utf8')).app.windows, release = true }) {
   if (windows?.length !== 1) throw new Error('Tauri performance harness requires one configured window');
   const url = `http://127.0.0.1:${port}/?lang=en&perf=1&scenario=${scenario}&fixtures=${encodeURIComponent(fixtures.join(','))}&sliders=${sliders.join(',')}&exports=${encodeURIComponent(JSON.stringify(exports))}`;
-  return ['dev', ...(release ? ['--release'] : []), '--no-watch', '--features', 'perf-harness', '--config', JSON.stringify({
+  return ['dev', ...(release ? ['--release'] : []), '--no-watch', '--config', JSON.stringify({
     build: { beforeDevCommand: '', devUrl: url }, app: { windows: windows.map(window => ({ ...window, incognito: true })) }
-  })];
+  }), '--features', 'perf-harness'];
 }
 
 export function createTauriCache(outDir) {

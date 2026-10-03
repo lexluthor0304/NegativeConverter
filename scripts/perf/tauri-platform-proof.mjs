@@ -78,6 +78,7 @@ function checkOutsider() {
 let failure = null;
 try {
   for (const guard of ['scope', 'memory-ceiling', 'swap-growth', 'low-disk']) {
+    const previousCaches = new Set(readdirSync(out).filter(name => name.startsWith('tauri-cache-')));
     const ownership = owner(guard);
     const state = { guard, nativeProbe: null, association: null, triggerAt: null, abortAt: null, crossing: false };
     active = state;
@@ -135,11 +136,13 @@ try {
         assert.ok(state.abortAt - state.triggerAt >= 0 && state.abortAt - state.triggerAt < 1500, 'observed guard response must be bounded');
       }
       checkOutsider();
-      const cacheRoots = readdirSync(out).filter(name => name.startsWith('tauri-cache-'));
-      assert.ok(cacheRoots.some(name => existsSync(join(out, name, 'display-proxies', 'session'))), 'actual startup used an isolated cache');
+      const cacheRoots = readdirSync(out).filter(name => name.startsWith('tauri-cache-') && !previousCaches.has(name));
+      assert.equal(cacheRoots.length, 1, 'this exact application launch creates one fresh cache claim');
+      const cacheRoot = join(out, cacheRoots[0]);
+      assert.ok(existsSync(join(cacheRoot, 'display-proxies', 'session')), 'this exact application startup used its isolated cache');
       results.push({ ...state, crossing: undefined, startedAt: started, settledAt: Date.now(), responseMs: state.abortAt === null ? null : state.abortAt - state.triggerAt,
         callerResponseMs: state.triggerAt === null ? null : Date.now() - state.triggerAt, samples: memory.sampler.samples,
-        cleanupAttempts: ownership.cleanupAttempts, root: ownership.root, metrics, notes, unrelated: outsider.association,
+        cleanupAttempts: ownership.cleanupAttempts, root: ownership.root, cacheRoot, metrics, notes, unrelated: outsider.association,
         automaticSampler: true, manualProofTicks: 0, policyInputsSynthetic: true, pageSynthetic: true, nativeFootprintsReal: true });
     } finally { memory.stop(); }
   }
