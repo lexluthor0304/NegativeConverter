@@ -225,6 +225,7 @@ for (const route of ['live-controls', 'live-recipe', 'live-detected', 'live-refe
     }
     recipe ||= c.extractCurrentSettings();
     const backingBefore = canon(item.settings);
+    const deferredBefore = route.startsWith('live-') ? canon({ baseline: item.pendingFrameEdit.baseline, edits: item.pendingEdits }) : null;
     const fresh = { ...recipe, rollFrame: null, semanticMap: null, expiredAnalysis: null };
     const router = c.buildRouterSettings(recipe), comparisons = [];
     f.measurements.length = 0;
@@ -254,8 +255,8 @@ for (const route of ['live-controls', 'live-recipe', 'live-detected', 'live-refe
       assert.equal(backingBefore.semanticMap, null, `${name}: active backing anchors invalidated before save`);
       assert.equal(backingBefore.expiredAnalysis, null, `${name}: active backing rescue invalidated before save`);
       assert.deepEqual([backingBefore.filmType, backingBefore.positiveMode], [state.filmType, state.positiveMode], 'backing interpretation follows live choice');
-      assert.equal(item.pendingFrameEdit.baseline.rollFrame, null, 'deferred baseline cannot reinstall old roll metadata');
-      assert.deepEqual([item.pendingEdits.filmType, item.pendingEdits.positiveMode], [state.filmType, state.positiveMode], 'deferred choice cannot override the latest live interpretation');
+      assert.equal(deferredBefore.baseline.rollFrame, null, 'deferred baseline cannot reinstall old roll metadata');
+      assert.deepEqual([deferredBefore.edits.filmType, deferredBefore.edits.positiveMode], [state.filmType, state.positiveMode], 'deferred choice cannot override the latest live interpretation');
       assert.notEqual(c.photoSettingsKey(item), originalKey, 'old session recipe key cannot restore stale analysis');
       for (const timer of f.timers.splice(0)) await timer();
       if (!state.expiredAnalysis) { await target.flushScheduledCoreReprocess(); c.runExpiredAnalysis(); }
