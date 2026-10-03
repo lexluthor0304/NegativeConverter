@@ -3064,6 +3064,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (provisionalUnits()) {
         state.provisional.geometry.exact(liveGeometry());
         settings.provisionalGeometry = state.provisional.geometry.save();
+        settings.provisionalFrameEditIntent = state.provisional.frameEditIntent ? structuredClone(state.provisional.frameEditIntent) : null;
       }
 
       // Category B: references. While geometry is being rebuilt the planes
@@ -3148,7 +3149,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       state.filmBase = s.filmBase ? { ...s.filmBase } : { r: 210, g: 140, b: 90 };
       state.cropRegion = s.cropRegion ? { ...s.cropRegion } : null;
       // An entry of a stand-in's window brings its exact geometry back (#255).
-      if (provisionalUnits()) state.provisional.geometry.restore(s.provisionalGeometry || null, liveGeometry());
+      if (provisionalUnits()) {
+        state.provisional.geometry.restore(s.provisionalGeometry || null, liveGeometry());
+        state.provisional.frameEditIntent = s.provisionalFrameEditIntent ? structuredClone(s.provisionalFrameEditIntent) : null;
+      }
       state.curves = {
         r: s.curves.r ? new Uint8Array(s.curves.r) : null,
         g: s.curves.g ? new Uint8Array(s.curves.g) : null,
@@ -14063,9 +14067,22 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // on the stand-in is saved in the photo's recipe (R2-052).
     function windowFrameIntent(baseline, live) {
       const before = baseline?.autoFrameMeta || null, now = live.autoFrameMeta || null;
+      const recorded = provisionalUnits() ? state.provisional.frameEditIntent : null;
       return {
         analysis: analysisAreaEdited(baseline, live), confirmed: confirmedImageArea(live),
+        crop: now?.method === 'manual-image-window', detect: now?.method === 'manual-image-window',
+        ...(recorded || {}),
         appliedMode: now && now.appliedMode !== before?.appliedMode ? now.appliedMode : null
+      };
+    }
+
+    function recordProvisionalFrameEdit(selectedArea, { analysisOnly, detect }) {
+      if (!provisionalUnits()) return;
+      const previous = state.provisional.frameEditIntent;
+      state.provisional.frameEditIntent = {
+        analysis: true, crop: !analysisOnly, detect: !analysisOnly && detect,
+        confirmed: analysisOnly ? { imageArea: structuredClone(selectedArea), analysisNeedsReview: false }
+          : previous?.confirmed || confirmedImageArea({ autoFrameMeta: state.autoFrame.lastDiagnostics })
       };
     }
 
@@ -14082,8 +14099,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (confirmed) applied = appliedCropDiagnostics(applied.meta, { selectedArea: confirmed.imageArea, base, previous, analysisOnly: true });
       // A crop: the last Apply, or one after the confirmed area that was not
       // its frame.
-      if ((!confirmed || confirmed.analysisNeedsReview) && merged.cropRegion) {
+      if ((intent.crop || !confirmed || confirmed.analysisNeedsReview) && merged.cropRegion) {
         applied = appliedCropDiagnostics(applied.meta, { selectedArea: imageAreaFromWorkingRect(merged.cropRegion, merged, base), base, previous });
+        // The window requested this detection, possibly after a confirmation
+        // a hit replaced. A close full-import area cannot cancel that intent.
+        if (intent.detect) { applied.meta.analysisNeedsReview = true; applied.detect = true; }
       }
       return applied;
     }
@@ -14222,7 +14242,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         trace.mark('converted');
         record.status = 'installed';
         state.provisional = null;
-        if (item) { delete item.pendingFrameEdit; delete item.pendingEdits; }
+        if (item) {
+          if (item.pendingFrameEdit) delete item.automaticSettings;
+          delete item.pendingFrameEdit; delete item.pendingEdits;
+        }
         noteFullDecodeChange(record);
         // Valid only while nothing was edited, and no export clicked, since
         // the stand-in pass ended: a later pass would land inside an export.
@@ -14299,6 +14322,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         }),
         exact: () => ensureFullDecode({ reason: 'debug' }),
         ...(DEBUG_UI ? {
+          queuedRecipes: () => state.fileQueue.map(item => ({
+            name: item.file?.name, settings: cloneSettings(item.settings),
+            pendingEdits: item.pendingEdits ? structuredClone(item.pendingEdits) : null,
+            pendingFrameEdit: item.pendingFrameEdit ? structuredClone(item.pendingFrameEdit) : null,
+            automatic: Boolean(item.automaticSettings)
+          })),
           failNextFullDecodes: (count = 1) => { failNextFullDecodes = Math.max(0, count | 0); },
           holdFullDecodes: () => {
             if (fullDecodeHold) return;
@@ -18495,12 +18524,14 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         ), draftFrame, frame);
         if (!cropRegion) return;
 
+        const selectedArea = imageAreaFromWorkingRect(cropRegion, nextGeometry, base);
         const { meta: nextMeta, detect } = appliedCropDiagnostics(state.autoFrame.lastDiagnostics, {
-          selectedArea: imageAreaFromWorkingRect(cropRegion, nextGeometry, base), base, analysisOnly: draft.analysisOnly,
+          selectedArea, base, analysisOnly: draft.analysisOnly,
           previous: { rotationAngle: state.rotationAngle, mirrored: state.mirrored, cropRegion: state.cropRegion, frame: state.originalImageData }
         });
 
         const edit = pushUndo('crop');
+        recordProvisionalFrameEdit(selectedArea, { analysisOnly: draft.analysisOnly, detect });
         state.autoFrame.lastDiagnostics = nextMeta;
         let ready = Promise.resolve(true);
         if (!draft.analysisOnly) {
@@ -20396,6 +20427,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       trace?.mark('autoWhiteBalance', { confidence: estimate.confidence });
     }
 
+    // A viewed photo's automatic gains pass through its two-decimal sliders.
+    // Replacing a provisional recipe off-state must settle to that same WB.
+    function normalizeViewedWhiteBalance(settings) {
+      for (const key of ['wbR', 'wbG', 'wbB']) settings[key] = normalizeSliderValue(settings[key], 0.5, 2, 0.01, 2);
+    }
+
     // The expired-film measurement of a frame nobody opened, from its own
     // positive. `base` is read for its size only (the analysis region).
     async function applyFrameExpiredAnalysis(processed, settings, base, trace = null) {
@@ -20423,7 +20460,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const {
         baseSize, analysisImageData = null, maxSize, fullWorkingShortSide = Math.min(working.width, working.height),
         preview = true, lensMapping = null, convert = convertFrameOffMainThread, sourceRole = 'derived',
-        isCurrent = () => true, dustRemoval = state.dustRemoval, dustWorker = null, automaticWhiteBalance = false,
+        isCurrent = () => true, dustRemoval = state.dustRemoval, dustWorker = null, automaticWhiteBalance = false, viewedWhiteBalance = false,
         own = plane => plane, trace = null
       } = ctx;
       let processed = own(await convert({
@@ -20445,6 +20482,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       }
       if (automaticWhiteBalance && processed && frameWantsAutoWhiteBalance(settings)) {
         applyFrameAutoWhiteBalance(processed, settings, baseSize, trace);
+        if (viewedWhiteBalance) normalizeViewedWhiteBalance(settings);
       }
       if (settings.expiredEnabled && !settings.expiredAnalysis && processed) {
         await applyFrameExpiredAnalysis(processed, settings, baseSize, trace);
@@ -20639,12 +20677,27 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       });
       // The linear DNG wants the geometry-applied negative, not the conversion.
       if (options.stage === 'source') {
+        // A provisional photo was already viewed. Even a first DNG export
+        // settles its automatic WB before the pending recipe is committed.
+        if (pendingFrame && frameWantsAutoWhiteBalance(settings)) {
+          const reference = getColorAnalysisSample(settings, imageData);
+          if (reference) {
+            const positive = own(await convertFrameOffMainThread({
+              imageData: reference, settings: buildRouterSettings(settings, imageData),
+              options: { scratch: true, forceFullProcess: true, analysisImageData: reference }
+            }), reference);
+            assertRepairCurrent(isCurrent);
+            applyFrameAutoWhiteBalance(positive, settings, imageData, trace);
+            normalizeViewedWhiteBalance(settings);
+          }
+        }
         trace.end({ outputPixels: getImageDataPixelCount(workingData) });
         if (!savedSettings || pendingFrame) {
           const item = state.fileQueue.find((entry) => entry.file === file);
           if (item && options.updateItemSettings !== false) {
             item.settings = cloneSettings(settings);
             delete item.pendingFrameEdit;
+            if (pendingFrame) { delete item.pendingEdits; delete item.automaticSettings; }
           }
         }
         return { source: workingData, settings };
@@ -20688,6 +20741,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           dustRemoval: options.dustRemoval || state.dustRemoval,
           dustWorker: options.dustWorker,
           automaticWhiteBalance: !savedSettings || Boolean(pendingFrame) || Boolean(state.fileQueue.find(item => item.file === file)?.automaticSettings),
+          viewedWhiteBalance: Boolean(pendingFrame),
           own,
           trace
         });
@@ -20699,7 +20753,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         options.onPreparedSettings?.(settings);
         if ((!savedSettings || pendingFrame) && options.updateItemSettings !== false) {
           const item = state.fileQueue.find(item => item.file === file);
-          if (item) { item.settings = cloneSettings(settings); delete item.pendingFrameEdit; }
+          if (item) {
+            item.settings = cloneSettings(settings); delete item.pendingFrameEdit;
+            if (pendingFrame) { delete item.pendingEdits; delete item.automaticSettings; }
+          }
         }
         return adjusted;
       }
@@ -20793,6 +20850,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if ((!savedSettings || pendingFrame || state.fileQueue.find(item => item.file === file)?.automaticSettings)
         && processed && frameWantsAutoWhiteBalance(settings)) {
         applyFrameAutoWhiteBalance(processed, settings, imageData, trace);
+        if (pendingFrame) normalizeViewedWhiteBalance(settings);
       }
 
       // Expired-film rescue: a frame the user never opened carries no
@@ -20810,7 +20868,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         options.onPreparedSettings?.(settings);
         if ((!savedSettings || pendingFrame) && options.updateItemSettings !== false) {
           const item = state.fileQueue.find(item => item.file === file);
-          if (item) { item.settings = cloneSettings(settings); delete item.pendingFrameEdit; }
+          if (item) {
+            item.settings = cloneSettings(settings); delete item.pendingFrameEdit;
+            if (pendingFrame) { delete item.pendingEdits; delete item.automaticSettings; }
+          }
         }
         return { processed, settings };
       }
@@ -20830,7 +20891,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       options.onPreparedSettings?.(settings);
       if ((!savedSettings || pendingFrame) && options.updateItemSettings !== false) {
         const item = state.fileQueue.find(item => item.file === file);
-        if (item) { item.settings = cloneSettings(settings); delete item.pendingFrameEdit; }
+        if (item) {
+          item.settings = cloneSettings(settings); delete item.pendingFrameEdit;
+          if (pendingFrame) { delete item.pendingEdits; delete item.automaticSettings; }
+        }
       }
       return adjusted;
     }
@@ -24420,6 +24484,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         item.settings = cloneSettings(replayed.settings);
         delete item.pendingFrameEdit;
         delete item.pendingEdits;
+        delete item.automaticSettings;
         restoreSettings(replayed.settings, { refreshDisplay: false });
       }
       // Edits the user made to this photo in an earlier provisional window

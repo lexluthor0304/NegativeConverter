@@ -157,7 +157,11 @@ instead (step 4 runs it on the full base). It then swaps in one task:
    (`appliedCropDiagnostics`), the frame they replaced being the settled
    one. An image area the user confirmed keeps its fractions of the base,
    the same area on both decodes. A crop that is not the image area's frame
-   gets the miss outcome.
+   gets the miss outcome. The window also records its confirmation and
+   whether Apply requested crop detection, independently of the hit that
+   later replaces the confirmed area. A close automatic area on the full
+   import cannot cancel that requested detection. Undo restores this intent
+   alongside the provisional geometry.
 2. The history is rebased: every entry's crop goes to full units, entries go
    cold (#244: rebuilt from the full base on restore), and dust-stroke
    entries (they patch stand-in planes) go with everything older.
@@ -220,9 +224,10 @@ quiet.
   plus the user's window edits. A photo without a recipe keeps only those
   edits as `item.pendingEdits`. Switch-back (`prepareStudioPhoto`), batch
   export (`processFileWithSettings`), roll analysis, Auto Frame Selected and
-  the flat field compute the automatic fields as for a fresh file. Geometry
-  and analysis-area edits first rebuild the full decode's diagnostics, then
-  replay the user intent; other window edits are applied on top.
+  the flat field compute the automatic fields as for a fresh file. Reopening
+  and batch export first rebuild the full decode's diagnostics for geometry
+  and analysis-area edits, then replay the user intent; other window edits
+  are applied on top.
   That fresh recipe decides as the window's pass began: leaving records the
   pass's `userEdited` as `item.pendingUserEdited`, which `importUserEdited`
   hands to the recipe's learned-default and film-type steps until the photo
@@ -255,6 +260,11 @@ The targeted `TWO_STAGE_SCENES=crop-leave` browser scene holds stage 2,
 confirms an area, crops, requires the stand-in detector to hit, then leaves
 before full installation. Export All's decoded samples (including 16-bit
 PNG/TIFF and linear DNG) must match the same edits after a single decode.
+The scene uses a separate small framed CFA fixture and exports DNG first:
+even a source-only export must finish the viewed photo's automatic WB before
+committing its full recipe. Those gains use the viewed sliders' two-decimal
+normalization, and the settled recipe stops being a thumbnail's automatic
+recipe, so subsequent exports retain them.
 Node regressions exercise full-base replay after early leaving for fresh and
 previously configured photos, hits, misses and manual confirmations.
 

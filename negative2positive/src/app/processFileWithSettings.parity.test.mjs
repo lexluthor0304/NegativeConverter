@@ -29,6 +29,7 @@ function functionSource(name) {
   return source.slice(match.index, source.indexOf('\n    }', match.index) + '\n    }'.length);
 }
 const current = ['processFileWithSettings', 'removeFrameDust', 'frameWantsAutoWhiteBalance', 'applyFrameAutoWhiteBalance',
+  'normalizeViewedWhiteBalance', 'normalizeSliderValue',
   'applyFrameExpiredAnalysis', 'resolveLensCorrection', 'lensCorrectionActive', 'tileRecipeSettled', 'perPhotoSettingsFallback',
   'expiredImportKeepsFullFrame', 'renderPreviewFromWorkingImage', 'tileAnalysisReference'].map(functionSource).join('\n');
 
@@ -348,6 +349,29 @@ console.log(`processFileWithSettings batch options: ${batchCases} cases match HE
   assert.deepEqual([JSON.parse(control.settings).filmType, JSON.parse(control.settings).contrast], ['positive', 0], 'control: the edit decided');
   assert.notEqual(control.pixels, persisted.pixels);
   console.log('processFileWithSettings: a window-left photo exports the recipe one decode persisted (pixels and settings)');
+}
+
+// A window-left viewed photo settles one recipe, even when its first export
+// is a DNG. Background thumbnails must not keep re-estimating that recipe's
+// automatic gains on every later export (R2-052).
+for (const stage of ['source', 'processed']) {
+  const saved = { filmType: 'color', coreExposure: 0, filmEdge: { checked: true },
+    autoFrameMeta: { imageArea: [{ x: 0.1, y: 0.1 }, { x: 0.9, y: 0.1 }, { x: 0.9, y: 0.9 }, { x: 0.1, y: 0.9 }] },
+    wbR: 1, wbG: 1, wbB: 1 };
+  const base = makeBase(64, 40, 17);
+  const r = run(current, { base, saved, options: {}, dust: false, automatic: true });
+  r.item.pendingFrameEdit = { baseline: structuredClone(saved), intent: { analysis: true, crop: true, detect: true } };
+  r.item.pendingEdits = { coreExposure: 0 };
+  r.context.resolvePendingFrameEdits = async item => structuredClone(item.settings);
+  r.context.getColorAnalysisSample = () => base;
+  const first = await r.context.processFileWithSettings(r.file, saved, { stage });
+  assert.equal(first.settings.wbAutoConfidence, 'high');
+  for (const key of ['wbR', 'wbG', 'wbB']) assert.equal(first.settings[key], Number(first.settings[key].toFixed(2)), `${stage}: viewed slider precision`);
+  assert.ok(!r.item.pendingFrameEdit && !r.item.pendingEdits && !r.item.automaticSettings, `${stage}: the full recipe is settled once`);
+  const estimates = r.log.filter(entry => entry.startsWith('wb:')).length;
+  const again = await r.context.processFileWithSettings(r.file, r.item.settings, { stage: 'processed' });
+  assert.deepEqual([again.settings.wbR, again.settings.wbG, again.settings.wbB], [first.settings.wbR, first.settings.wbG, first.settings.wbB]);
+  assert.equal(r.log.filter(entry => entry.startsWith('wb:')).length, estimates, 'later exports retain the viewed gains');
 }
 
 // #256 acceptance: once the conversion has resolved, the frame's decoded base

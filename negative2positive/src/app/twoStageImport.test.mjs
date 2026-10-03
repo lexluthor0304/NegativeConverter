@@ -218,7 +218,7 @@ function fixture({ search = '?twoStageMinMp=40&twoStageMode=sequential', settled
     'createFullDecode', 'beginFullDecodeAttempt', 'noteFullDecodeChange', 'nextFullDecodeChange', 'failFullDecode', 'reportFullDecodeFailure',
     'retryFullDecode', 'beginProvisionalPhoto', 'abandonFullDecode', 'currentPhotoExact', 'ensureFullDecode',
     'ensureFullDecodeWithNotice', 'whenCropModeClosed', 'startProvisionalSettle', 'waitForProvisionalSwap',
-    'settledImportSettings', 'rebaseProvisionalHistory', 'windowFrameMetaOnFull', 'windowFrameIntent', 'frameMetaWithWindowIntent',
+    'settledImportSettings', 'rebaseProvisionalHistory', 'windowFrameMetaOnFull', 'windowFrameIntent', 'recordProvisionalFrameEdit', 'frameMetaWithWindowIntent',
     'resolvePendingFrameEdits', 'appliedCropDiagnostics', 'geometryFrameSize',
     'effectiveGeometryAngle', 'installFullDecode', 'settleProvisionalPhoto',
     'leaveProvisionalPhoto', 'withPendingEdits', 'pendingGeometryEdits', 'extractCurrentSettings', 'restoreSettings',
@@ -1157,6 +1157,7 @@ function applyCrop(f, { rect = null, selectedArea = null, analysisOnly = false }
     selectedArea: selectedArea || imageAreaFromWorkingRect(rect, geometry, base), base, analysisOnly,
     previous: { ...geometry, cropRegion: state.cropRegion, frame }
   });
+  context.recordProvisionalFrameEdit(selectedArea || imageAreaFromWorkingRect(rect, geometry, base), { analysisOnly, detect });
   state.autoFrame.lastDiagnostics = meta;
   if (!analysisOnly) target.applyGeometryFromBase({ cropRegion: rect });
   return detect ? target.startCropDetection({ meta, base, frame, cropRegion: { ...state.cropRegion }, ready: Promise.resolve(true) }) : null;
@@ -1296,14 +1297,21 @@ const double = r => ({ left: r.left * 2, top: r.top * 2, width: r.width * 2, hei
 // Export All's real processFileWithSettings recomputes full-base diagnostics,
 // even after the stand-in's detector hit. The import metadata fixtures above
 // allocate four bytes; the detector input here is only 80 x 56 pixels.
-for (const operation of ['crop-hit', 'crop-miss', 'confirm']) {
+for (const operation of ['crop-hit', 'crop-miss', 'confirm', 'confirmed-crop-hit']) {
   for (const saved of [false, true]) {
     const f = areaFixture({ twoStage: true });
     await loadedStandIn(f);
     await importFrame(f);
     if (saved) f.item.settings = await f.target.analyzeStudioImportFrame(image(FULL), f.target.createDefaultSettings(image(FULL)));
     const analysisOnly = operation === 'confirm';
-    const detection = applyCrop(f, { rect: analysisOnly ? WINDOW_AREA : WINDOW_CROP, analysisOnly });
+    let confirmedArea = null;
+    const cropRect = operation === 'confirmed-crop-hit' ? { left: 0, top: 0, width: HALF.width - 2, height: HALF.height - 2 } : WINDOW_CROP;
+    if (operation === 'confirmed-crop-hit') {
+      applyCrop(f, { rect: { left: 0, top: 0, width: Math.floor(HALF.width * 0.35), height: Math.floor(HALF.height * 0.35) }, analysisOnly: true });
+      confirmedArea = structuredClone(f.state.autoFrame.lastDiagnostics.imageArea);
+    }
+    const detection = applyCrop(f, { rect: analysisOnly ? WINDOW_AREA : cropRect, analysisOnly });
+    if (!analysisOnly) assert.ok(detection, `${operation}: the stand-in must request crop detection`);
     if (detection) {
       f.land(detection, imageAreaFromDetection({ cropRegion: { left: 202, top: 131, width: 1798, height: 1369 }, angle: 0.5 }, HALF));
     }
@@ -1312,6 +1320,9 @@ for (const operation of ['crop-hit', 'crop-miss', 'confirm']) {
     assert.ok(f.item.pendingFrameEdit, 'the user intent survives leaving');
     assert.ok(!f.item.pendingEdits?.autoFrameMeta, 'stand-in detector output is not stored in pending edits');
     if (saved && !analysisOnly) assert.notEqual(canon(f.item.settings.autoFrameMeta.imageArea), provisionalArea, 'a saved full-base area is not replaced by the stand-in hit');
+    // The rotated frame's integer dimensions need not be exactly twice the
+    // stand-in's. Apply the same saved full-unit crop intent on one stage.
+    const exactCrop = structuredClone(f.item.settings?.cropRegion || f.item.pendingEdits?.cropRegion);
     const sample = { width: 80, height: 56, data: new Uint8ClampedArray(80 * 56 * 4).fill(90) };
     const points = [{ x: 400, y: 260 }, { x: 4000, y: 260 }, { x: 4000, y: 3000 }, { x: 400, y: 3000 }];
     let cropCalls = 0;
@@ -1334,8 +1345,9 @@ for (const operation of ['crop-hit', 'crop-miss', 'confirm']) {
       sourceImageData: image(FULL), stage: 'settings', updateItemSettings: false
     });
     const one = await singleFlow(async g => {
+      if (confirmedArea) applyCrop(g, { selectedArea: confirmedArea, analysisOnly: true });
       const fullDetection = applyCrop(g, {
-        rect: double(WINDOW_CROP), analysisOnly,
+        rect: exactCrop, analysisOnly,
         selectedArea: analysisOnly ? f.item.pendingFrameEdit.intent.confirmed.imageArea : null
       });
       if (fullDetection && operation !== 'crop-miss') g.land(fullDetection, workingPointsToBase(points, g.state, FULL));

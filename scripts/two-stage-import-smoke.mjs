@@ -49,10 +49,40 @@
 // runs the same scenarios for each file, with the second generated DNG as
 // the other photo, at ?twoStageMinMp=TWO_STAGE_PARITY_MIN_MP (default 40, the
 // flag's target). One 60 MP file at a time on a 16 GB machine.
-import { mkdtempSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, basename } from 'node:path';
-import { writeSyntheticDng, previewSizes, stubJpeg } from './perf/fixtures.mjs';
+import { writeSyntheticDng, previewSizes, stubJpeg, pack12, cfaValue } from './perf/fixtures.mjs';
+
+// A separate small CFA fixture with the clear, textured image window used by
+// crop-apply-smoke. The benchmark scene's thin side rebate makes its window
+// wider than the supported film ratios, so it cannot exercise a crop hit.
+// Keep the ordinary synthetic scene (and all of its existing checks) intact.
+function writeCropHitDng(path, size) {
+  writeSyntheticDng(path, { ...size, seed: 19, kind: 'color' });
+  const bytes = readFileSync(path), view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const ifd = view.getUint32(4, true), count = view.getUint16(ifd, true);
+  let strip = null;
+  for (let i = 0; i < count; i++) {
+    const entry = ifd + 2 + i * 12;
+    if (view.getUint16(entry, true) === 273) strip = view.getUint32(entry + 8, true);
+  }
+  if (strip === null) throw new Error('The generated CFA fixture has no strip');
+  const row = new Uint16Array(size.width), sample = new Float64Array(3);
+  for (let y = 0; y < size.height; y++) {
+    for (let x = 0; x < size.width; x++) {
+      const px = x * 1500 / size.width, py = y * 1000 / size.height;
+      if (px < 150 || px >= 1350 || py < 120 || py >= 880) sample.set([232 / 255, 158 / 255, 92 / 255]);
+      else {
+        const n = (Math.floor(px / 6) * 6 * 13 + Math.floor(py / 6) * 6 * 29) % 90;
+        sample.set([(40 + n) / 255, (22 + n / 2) / 255, (14 + n / 3) / 255]);
+      }
+      row[x] = cfaValue(sample, x, y);
+    }
+    pack12(row, bytes, strip + y * size.width * 3 / 2);
+  }
+  writeFileSync(path, bytes);
+}
 
 const ready = `document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy && !document.body.dataset.studioDetecting && !document.querySelector('.loading-overlay.visible')`;
 const status = `window.__ncTwoStage.status()`;
@@ -249,9 +279,9 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
   };
   // Export All in each format, by file name: the queue order (and so the
   // download order) may differ.
-  const exportAllFormats = async (count, label) => {
+  const exportAllFormats = async (count, label, formats = FORMATS) => {
     const out = {};
-    for (const format of FORMATS) {
+    for (const format of formats) {
       await selectFormat(format);
       await evaluate(`document.getElementById('exportAllBtn').click()`);
       const byName = {};
@@ -312,7 +342,7 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
   // against one decode of the same files with the same query `extra`.
   // `formats` are exported after each scenario, `duringFormats` while stage 2
   // is held.
-  const scenarios = async ({ label, a, b, c = null, twoStage, extra = '', only = null, formats = FORMATS, duringFormats = formats }) => {
+  const scenarios = async ({ label, a, b, c = null, cropFile = a, twoStage, extra = '', only = null, formats = FORMATS, duringFormats = formats }) => {
     const nameA = basename(a), nameB = basename(b);
     // TWO_STAGE_SCENES=adopt,failure-lanes runs only those scenes (their
     // references still run).
@@ -513,8 +543,8 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
         await boot(held ? two : one, { holdSemantic: true });
         await evaluate(`(() => { const el = document.getElementById('studioImportAutoCrop'); if (el.checked) el.click(); })()`);
         if (held) await evaluate('window.__ncTwoStage.holdFullDecodes()');
-        await importFiles([a, b]);
-        await waitFor(scene + ': first photo', `${ready} && ${filename(nameA)} && ${held ? `${status}.pending` : exact}`, 150_000);
+        await importFiles([cropFile, b]);
+        await waitFor(scene + ': first photo', `${ready} && ${filename(basename(cropFile))} && ${held ? `${status}.pending` : exact}`, 150_000);
         const base = (await evaluate(status)).base;
         const scale = held ? base.scale : 1;
         const confirm = cropRecipe?.confirm || {
@@ -543,12 +573,21 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
         await evaluate(releaseSemantic);
         await waitFor(scene + ': second photo exact', `${ready} && ${filename(nameB)} && ${exact} && ${lanesReady}`, 150_000);
         await settledRecipe();
-        const all = await exportAllFormats(2, scene);
-        return { all, geometry: { cropRegion: geometry.cropRegion, rotationAngle: geometry.rotationAngle, mirrored: geometry.mirrored }, recipe: { confirm, crop } };
+        const beforeExport = await evaluate('window.__ncTwoStage.queuedRecipes()');
+        const all = await exportAllFormats(2, scene, [FORMATS[4], ...FORMATS.slice(0, 4)]);
+        const afterExport = await evaluate('window.__ncTwoStage.queuedRecipes()');
+        return { all, beforeExport, afterExport, geometry: { cropRegion: geometry.cropRegion, rotationAngle: geometry.rotationAngle, mirrored: geometry.mirrored }, recipe: { confirm, crop } };
       };
       const staged = await flow(true);
       const single = await flow(false, staged.recipe);
       same(label + ': crop geometry before leaving', staged.geometry, single.geometry);
+      const byFile = entries => entries.find(item => item.name === basename(cropFile));
+      if (!byFile(staged.beforeExport)?.pendingFrameEdit?.intent.detect) fail(label + ': Export All did not receive the pending crop-detection intent');
+      const resolved = byFile(staged.afterExport), reference = byFile(single.afterExport);
+      if (resolved.pendingFrameEdit || resolved.pendingEdits || resolved.automatic) fail(label + ': the viewed full recipe did not settle: ' + JSON.stringify(resolved));
+      same(label + ': full-base cropped analysis area', resolved.settings.autoFrameMeta.imageArea, reference.settings.autoFrameMeta.imageArea);
+      const wb = settings => Object.fromEntries(['wbR', 'wbG', 'wbB', 'wbAutoConfidence', 'wbUserOverride'].map(key => [key, settings[key]]));
+      same(label + ': settled crop white balance', wb(resolved.settings), wb(reference.settings));
       for (const format of Object.keys(single.all)) sameExports(`${label}: crop then leave Export All ${format}`, staged.all[format], single.all[format]);
       console.log(`ok: ${label}: crop-hit then leave before stage 2 exports one stage's decoded samples in every format`);
     }
@@ -682,7 +721,9 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
     const third = join(dir, 'two-stage-c.dng');
     writeSyntheticDng(third, { width: size.width, height: size.height, seed: 17, kind: 'color' },
       previewSizes(size).map(preview => ({ ...preview, jpeg: stubJpeg(preview.width, preview.height) })));
-    await scenarios({ label: 'synthetic', a: files[0], b: files[1], c: third, twoStage });
+    const cropFile = join(dir, 'two-stage-crop-hit.dng');
+    writeCropHitDng(cropFile, size);
+    await scenarios({ label: 'synthetic', a: files[0], b: files[1], c: third, cropFile, twoStage });
     // The paths 60 MP files take (#255 review R2-032): the full decode is
     // large (a separate preview source) and banded on export; the stand-in
     // is neither.
