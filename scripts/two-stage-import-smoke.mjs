@@ -599,6 +599,8 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
       for (const timing of ['pending-hit', 'completed-hit']) {
         const flow = async (staged, recipe = null) => {
           const scene = `${label} ${timing} crop history ${staged ? 'two stages' : 'one stage'}`;
+          const wbTimeline = [];
+          const noteWb = async phase => wbTimeline.push({ phase, exposure: await evaluate(`${status}.settings.coreExposure`), wb: await evaluate('window.__ncAnalysis.whiteBalance()') });
           await boot(staged ? two : one, { holdSemantic: true });
           await evaluate(`(() => {
             const auto = document.getElementById('studioImportAutoCrop'); if (auto.checked) auto.click();
@@ -625,11 +627,13 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
               window.__ncAnalysis.setDraftRect(${JSON.stringify(projected)}); document.getElementById('applyCropBtn').click()`);
             await waitFor(scene + ': applied', `${ready} && !document.getElementById('canvasContainer').classList.contains('crop-mode') && !window.__ncAnalysis.converting()`, 120_000);
             if (analysisOnly || timing === 'completed-hit') await evaluate('window.__ncAnalysis.settle()');
+            await noteWb(analysisOnly ? 'confirmed' : 'crop applied');
           }
           if (timing === 'pending-hit') await waitFor(scene + ': detector held', `window.__historyCropProbe.held.length === 1 && window.__ncAnalysis.pendingDetection()`, 60_000);
           await evaluate(`(() => { const el = document.getElementById('coreExposure'); el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
             el.value = '15'; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); })()`);
           await evaluate('window.__historyCropProbe.release(); window.__ncAnalysis.settle()');
+          await noteWb('hit, exposure edited');
           const hit = await evaluate('window.__ncAnalysis.diagnostics()');
           if (hit?.method !== 'manual-image-window' || hit.analysisNeedsReview) fail(scene + ': stand-in/reference detector must hit: ' + JSON.stringify(hit));
           if (staged) {
@@ -638,7 +642,8 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
           }
           await waitFor(scene + ': full source installed', `${ready} && ${exact} && !window.__ncAnalysis.converting()`, 150_000);
           await evaluate('window.__ncAnalysis.settle()');
-          const result = { recipe };
+          await noteWb('full base');
+          const result = { recipe, wbTimeline };
           for (const action of ['undo', 'redo']) {
             await evaluate(`document.getElementById('${action}Btn').click()`);
             // The exact consumer also waits for promoted history's analysis.
@@ -649,6 +654,7 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
               exports: await exportFormats(scene + ' ' + action, [FORMATS[0], FORMATS[2]]) };
           }
           await evaluate(releaseSemantic);
+          console.log(scene + ' WB timeline:', JSON.stringify(wbTimeline));
           return result;
         };
         const staged = await flow(true), single = await flow(false, staged.recipe);
@@ -657,6 +663,11 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
           const differing = Object.fromEntries(fields.filter(key => JSON.stringify(staged[action].settings[key]) !== JSON.stringify(single[action].settings[key]))
             .map(key => [key, { staged: staged[action].settings[key], single: single[action].settings[key] }]));
           if (Object.keys(differing).length) console.log(`${label} ${timing} ${action} recipe differences:`, JSON.stringify(differing));
+          const wbKeys = new Set(['wbR', 'wbG', 'wbB', 'wbAutoConfidence']);
+          const allDifferences = [...new Set([...Object.keys(staged[action].settings), ...Object.keys(single[action].settings)])]
+            .filter(key => !wbKeys.has(key) && JSON.stringify(staged[action].settings[key]) !== JSON.stringify(single[action].settings[key]));
+          if (allDifferences.length) console.log(`${label} ${timing} ${action} other recipe differences:`, JSON.stringify(Object.fromEntries(allDifferences
+            .map(key => [key, { staged: staged[action].settings[key], single: single[action].settings[key] }]))));
           for (const key of fields) same(`${label} ${timing}: ${action} ${key}`, staged[action].settings[key], single[action].settings[key]);
           same(`${label} ${timing}: ${action} diagnostics`, staged[action].diagnostics, single[action].diagnostics);
           same(`${label} ${timing}: ${action} WB`, staged[action].wb, single[action].wb);
