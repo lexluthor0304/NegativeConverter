@@ -11345,6 +11345,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           // history. Nothing can be dropped until the complete record commits
           // and this is still the same settled, hidden photo.
           if (document.visibilityState !== 'hidden' || loadGeneration !== generation || manualEditRevision !== editRevision
+            || processNegativeInFlight || coreReprocessBusy() || coreReprocessTimer || state.dustRemoval.processing
+            || dustDetectionTimer || pendingBrushRepairs || dustDrawing || state.cropping
+            || document.body.dataset.studioBusy || document.body.dataset.photoSwitching
             || state.dustRemoval.revision !== dustRevision || getCurrentQueueItem() !== item
             || Object.entries(refs).some(([key, value]) => state[key] !== value)
             || Object.entries(current.dust).some(([key, value]) => dust[key] !== value)

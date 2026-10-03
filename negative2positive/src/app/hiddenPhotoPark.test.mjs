@@ -18,7 +18,7 @@ import { createConversionWorkerClient } from './conversionWorkerClient.js';
 import { createHarness, makeBase, samePixels } from './geometryTestHarness.mjs';
 import { encodeTiffBlob } from './exportImageEncoders.js';
 
-const source = readFileSync(new URL('./main.js', import.meta.url), 'utf8');
+const source = readFileSync(process.env.NC229_PARK_MAIN || new URL('./main.js', import.meta.url), 'utf8');
 function functionSource(name) {
   const start = new RegExp(`^    (?:async )?function ${name}\\(`, 'm').exec(source)?.index;
   assert.notEqual(start, undefined, `${name} exists in main.js`);
@@ -265,7 +265,7 @@ for (const failure of ['open', 'write']) {
   await f.c.unparkOpenPhoto();
   assert.deepEqual([...f.state.processedImageData.data], [...f.target.data]);
 }
-for (const change of ['visible', 'edit', 'plane']) {
+for (const change of ['visible', 'edit', 'plane', 'core', 'timer', 'dust', 'negative']) {
   const f = fixture();
   const save = f.c.dustHistoryArchive.save;
   let finish;
@@ -276,6 +276,10 @@ for (const change of ['visible', 'edit', 'plane']) {
   if (change === 'visible') f.c.document.visibilityState = 'visible';
   if (change === 'edit') f.c.manualEditRevision++;
   if (change === 'plane') f.state.processedImageData = plane('newer');
+  if (change === 'core') f.c.coreReprocessBusy = () => true;
+  if (change === 'timer') f.c.coreReprocessTimer = 1;
+  if (change === 'dust') f.state.dustRemoval.processing = true;
+  if (change === 'negative') f.c.processNegativeInFlight = Promise.resolve();
   finish();
   assert.equal(await parking, false, `a ${change} change during storage invalidates the park`);
   assert.equal(f.stroke.dustDelta, delta, 'history was never made cold');
@@ -330,6 +334,19 @@ for (const change of ['visible', 'edit', 'plane']) {
   assert.equal(client.holds(outgoing), true, 'failed archival retains the live conversion source');
   assert.equal(workers[0].terminated, false);
   f.db.failures.write = false;
+  const save = f.c.dustHistoryArchive.save;
+  let finish;
+  const wait = new Promise(resolve => { finish = resolve; });
+  f.c.dustHistoryArchive.save = async (...args) => { await wait; return save(...args); };
+  const parking = f.c.parkOpenPhotoForHiddenJob();
+  f.c.coreReprocessBusy = () => true;
+  finish();
+  assert.equal(await parking, false, 'an exact flight starting during storage prevents ownership release');
+  assert.equal(client.holds(outgoing), true, 'the newly busy conversion keeps its cached source');
+  assert.equal(workers[0].terminated, false);
+  assert.equal(f.db.records.size, 0, 'the unused archive is removed without dropping live ownership');
+  f.c.coreReprocessBusy = () => false;
+  f.c.dustHistoryArchive.save = save;
   assert.equal(await f.c.parkOpenPhotoForHiddenJob(), true);
   assert.equal(client.holds(outgoing), false, 'committed parking releases the cached conversion source');
   assert.equal(workers[0].terminated, true, 'the unused preview worker is actually terminated');
