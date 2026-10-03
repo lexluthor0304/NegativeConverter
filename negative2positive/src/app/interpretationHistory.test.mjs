@@ -129,8 +129,12 @@ if (selection === 'all' || selection === 'crop-review-exact') {
   f.pool.dispose(); cases++;
 }
 
-if (selection === 'all' || selection === 'crop-events') {
-  for (const before of interpretations) for (const after of interpretations) for (const rescue of [false, true])
+// The complete crop matrix has separate rescue OFF/ON test entries so npm's
+// unchanged 120-second per-file deadline covers each bounded real-kernel run.
+if (selection === 'crop-events') {
+  const rescueCases = [false, true].filter(value => process.env.NC229_HISTORY_CROP_RESCUE === undefined
+    || value === (process.env.NC229_HISTORY_CROP_RESCUE === 'on'));
+  for (const before of interpretations) for (const after of interpretations) for (const rescue of rescueCases)
     for (const ownership of ['automatic', 'manual', 'gray', 'semantic']) for (const timing of ['pending', 'applied']) {
     const label = `${timing} crop ${before.join('/')} -> ${after.join('/')} ${ownership} rescue=${rescue}`;
     const f = await measurementFixture(before, ownership, rescue), { context: c, state, target } = f;
