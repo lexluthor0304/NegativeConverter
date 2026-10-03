@@ -251,4 +251,55 @@ if (typeof SharedArrayBuffer !== 'undefined') {
   assert.deepEqual(evicted, []);
 }
 
+// #229 review R2-038: a background lane's hand-over (putIfRoom) never
+// becomes the protected 1-back key, and lane entries are let go before any
+// session the user left, by a trim and by a put that needs room.
+{
+  const cache = createPhotoSessionCache({ maxBytes: 10_000 });
+  cache.put('A', { base: new Uint8Array(3000) });
+  assert.equal(cache.putIfRoom('F', { base: new Uint8Array(3000) }, { background: true }), true);
+  assert.equal(cache.lastStoredKey, 'A', 'the lane hand-over leaves the protected key at the photo just left');
+  const protectedKey = cache.lastStoredKey;
+  const freed = cache.trim(cache.bytes - 1000, { keep: [protectedKey] });
+  assert.equal(freed, 3000);
+  assert.deepEqual([cache.has('A'), cache.has('F')], [true, false], 'the trim lets the lane base go and keeps A');
+  // Without the flag a putIfRoom does not move the key either.
+  assert.equal(cache.putIfRoom('G', { base: new Uint8Array(100) }), true);
+  assert.equal(cache.lastStoredKey, 'A');
+
+  // Lane entries go first even when they are more recent than the user's,
+  // and a peek (a lane job reading a retained base) keeps them lane entries.
+  const order = createPhotoSessionCache({ maxBytes: 100 });
+  const evicted = [];
+  const watched = createPhotoSessionCache({ maxBytes: 100, onEvict: key => evicted.push(key) });
+  for (const cache2 of [order, watched]) {
+    cache2.put('U1', { base: new Uint8Array(30) });
+    cache2.put('U2', { base: new Uint8Array(30) });
+    assert.equal(cache2.putIfRoom('L1', { base: new Uint8Array(20) }, { background: true }), true);
+    assert.equal(cache2.putIfRoom('L2', { base: new Uint8Array(20) }, { background: true }), true);
+    cache2.peek('L1');
+    assert.deepEqual(cache2.keys(), ['U1', 'U2', 'L2', 'L1']);
+    assert.equal(cache2.lastStoredKey, 'U2');
+  }
+  // The user leaves U3: the put evicts the lane entries, oldest first, before U1.
+  order.put('U3', { base: new Uint8Array(30) });
+  assert.deepEqual(order.keys(), ['U1', 'U2', 'U3'], 'both lane bases went, no session the user left');
+  assert.equal(order.lastStoredKey, 'U3');
+  watched.put('U3', { base: new Uint8Array(50) });
+  assert.deepEqual(evicted, ['L2', 'L1', 'U1'], 'lane entries first (least recently used first), then the oldest session');
+  // A trim without a kept key: lane entries first, then the oldest sessions.
+  const trimmed = createPhotoSessionCache({ maxBytes: 100 });
+  trimmed.put('U1', { base: new Uint8Array(30) });
+  trimmed.putIfRoom('L1', { base: new Uint8Array(30) }, { background: true });
+  trimmed.put('U2', { base: new Uint8Array(30) });
+  assert.equal(trimmed.trim(60), 30);
+  assert.deepEqual(trimmed.keys(), ['U1', 'U2'], 'the lane entry goes before the older U1');
+  // A user put over a lane entry's key makes it the user's.
+  trimmed.putIfRoom('L2', { base: new Uint8Array(10) }, { background: true });
+  trimmed.put('L2', { base: new Uint8Array(10) });
+  assert.equal(trimmed.lastStoredKey, 'L2');
+  assert.equal(trimmed.trim(40), 30);
+  assert.deepEqual(trimmed.keys(), ['U2', 'L2'], 'no longer a lane entry: U1 is the oldest and goes first');
+}
+
 console.log('photoSessionCache: shared backing stores/history, LRU, ownership, replacement, limits and cleanup passed');

@@ -11201,10 +11201,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     // The session the user just left stays: the warm 1-back switch (#222) is
-    // never traded for other work. Trimmed sessions are demoted to their
-    // display form (#249) through the cache's onEvict. `demoteLast` (the idle
-    // check) lets the one just left go too when it has a display form to be
-    // demoted to; without one it stays.
+    // never traded for other work. Only the editor's puts (rememberPhotoBase,
+    // rememberPhotoSession) make a session the one just left; the lanes' bases
+    // never do and go first (#229 review R2-038). Trimmed sessions are
+    // demoted to their display form (#249) through the cache's onEvict.
+    // `demoteLast` (the idle check) lets the one just left go too when it has
+    // a display form to be demoted to; without one it stays.
     function trimPhotoSessions(remaining, { demoteLast = false } = {}) {
       const last = photoSessions.lastStoredKey;
       const keep = demoteLast && photoSessions.get(last)?.display ? [] : [last];
@@ -21436,9 +21438,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       }
       photoSessions.retainKeys(state.fileQueue);
       photoPreviews.retainKeys(state.fileQueue);
+      photoPrefetch.retainKeys(state.fileQueue);
       void displayProxySpill.retain(state.fileQueue.map(item => item.id));
       thumbnailSources.retainKeys(state.fileQueue);
       watchRollSamples.retainKeys(state.fileQueue);
+      forgetRemovedBackgroundPhotos();
       syncEmbeddedPreviewQueue();
       const container = document.getElementById('fileListItems');
       const countEl = document.getElementById('fileListCount');
@@ -22837,10 +22841,15 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // for lens correction and EXIF.
     // `context.claim`: the memory claim of the job that opened the decode
     // (#258), corrected to the real size at the loader gate.
+    // `context.filmStats`: false when the frame has a recipe (#232): nothing
+    // builds its default settings, so its planes do not wait for the film
+    // statistics. A frame that later loses its recipe misses filmStatsCache
+    // and is measured on the page instead, with the same result (#229 review
+    // R1-021).
     async function decodeForBackground(file, signal, context = null) {
       let rawMetadata = null;
       const base = await loadFileToImageData(file, {
-        filmStats: true, signal, onMetadata: meta => { rawMetadata = meta; },
+        filmStats: context?.filmStats !== false, signal, onMetadata: meta => { rawMetadata = meta; },
         claim: context?.claim || null, priority: 'background',
         // Adopted, prefetched or analysed for the editor: shared where it can be (#264).
         sharedPlanes: true
@@ -22896,15 +22905,17 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // routes apart by these frames of the read's stack. A roll pass may
     // bring its own decode (the lane's roll-frame worker, #252); it reads
     // the file in this same call chain. The lane's memory claim (#258)
-    // reaches either decode as its context.
+    // reaches either decode as its context, with whether the frame needs
+    // its film statistics (only without a recipe, #229 review R1-021).
     function openAnalysisDecode(item, signal, claim = null, decode = null, adoptable = true) {
-      return sharedDecodes.open(item.file, decode ? { signal, context: { claim }, decode, adoptable } : { signal, context: { claim } });
+      const context = { claim, filmStats: !item.settings };
+      return sharedDecodes.open(item.file, decode ? { signal, context, decode, adoptable } : { signal, context });
     }
     function openTileDecode(item, signal, claim = null) {
-      return sharedDecodes.open(item.file, { signal, context: { claim } });
+      return sharedDecodes.open(item.file, { signal, context: { claim, filmStats: !item.settings } });
     }
     function openPrefetchDecode(item, signal, claim = null) {
-      return sharedDecodes.open(item.file, { signal, context: { claim } });
+      return sharedDecodes.open(item.file, { signal, context: { claim, filmStats: !item.settings } });
     }
     // A tile of a settled recipe with no tile source, when the job needs
     // nothing else of the frame: a half-size decode of its own (#247 1b). It
@@ -22930,6 +22941,18 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         if (job.decoding && job.item.file !== except) {
           job.controller.abort(new DOMException('Foreground photo activation on a low-memory device', 'AbortError'));
         }
+      }
+    }
+
+    // Photos that left the queue (Clear queue, a new import or project):
+    // nothing is prefetched for them any more (renderFileListUI let the
+    // slot's base go), and a lane's job on one stops, its decode included
+    // (#229 review R1-140, R1-141). A decode the foreground adopted goes on:
+    // the foreground's own lease keeps it (sharedDecodes.js).
+    function forgetRemovedBackgroundPhotos() {
+      if (prefetchedItem && !state.fileQueue.includes(prefetchedItem)) prefetchedItem = null;
+      for (const job of backgroundLanes.active.values()) {
+        if (!state.fileQueue.includes(job.item)) job.controller.abort(new DOMException('The photo left the queue', 'AbortError'));
       }
     }
 
@@ -23132,11 +23155,15 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       return true;
     }
 
-    // The slot follows the user: once they are 2 or more photos from it, it goes.
+    // The slot follows the user: once they are 2 or more photos from it, it
+    // goes, unless it still holds the photo the lane would prefetch now (the
+    // photos in between are retained sessions); dropped, that photo would be
+    // decoded again at every step (#229 review R1-060).
     function dropDistantPrefetch() {
       if (!prefetchedItem || !photoPrefetch.has(prefetchedItem)) { prefetchedItem = null; return; }
       const order = backgroundDisplayOrder();
-      if (displayDistance(order, state.fileQueue.indexOf(prefetchedItem), state.currentFileIndex) >= 2) {
+      if (displayDistance(order, state.fileQueue.indexOf(prefetchedItem), state.currentFileIndex) >= 2
+        && prefetchedItem !== prefetchTargetItem()) {
         photoPrefetch.clear();
         prefetchedItem = null;
       }
@@ -23155,14 +23182,17 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // A finished lane base: a prefetch goes to the slot; otherwise a
     // base-only session if it fits without evicting anything, else the slot
     // when it is the next photo, else it is dropped. A hidden macOS window
-    // keeps none: its sheds emptied those caches (R1-053).
+    // keeps none: its sheds emptied those caches (R1-053). The session is a
+    // lane's (`background`): it never becomes the photo just left, which
+    // pressure and the idle check keep, and goes before any session the user
+    // left (#229 review R2-038).
     function handOverBackgroundBase(item, decoded, { prefetch = false } = {}) {
       if (!decoded?.base || hiddenJobs.safeMode || hiddenWindowLimited() || !state.fileQueue.includes(item)) return;
       // The open photo holds its own reference (it may have adopted this decode).
       if (item.file === state.loadedFile || item === state.fileQueue[state.currentFileIndex]) return;
       if (photoSessions.has(item) || photoPrefetch.has(item)) return;
       if (prefetch) { holdPrefetchedBase(item, decoded); return; }
-      if (photoSessions.putIfRoom(item, { file: item.file, base: decoded.base, rawMetadata: decoded.rawMetadata || null })) return;
+      if (photoSessions.putIfRoom(item, { file: item.file, base: decoded.base, rawMetadata: decoded.rawMetadata || null }, { background: true })) return;
       if (item === prefetchTargetItem()) holdPrefetchedBase(item, decoded);
     }
 

@@ -57,10 +57,15 @@ export function backingBuffers(value, buffers = new Set()) {
  * A zero budget disables storage, including entries without pixel buffers.
  *
  * `onEvict(key, value)` (#249) is called for each entry a put pushed out of
- * the budget or a trim let go (#258), once that put or trim is complete,
- * oldest first; never for take, delete, clear or retainKeys. The callback may
- * store a smaller form of the entry again (`putIfRoom(key, value, { oldest:
- * true })`, which never displaces a more recent entry) or keep it elsewhere.
+ * the budget or a trim let go (#258), once that put or trim is complete, in
+ * the order they went; never for take, delete, clear or retainKeys. The
+ * callback may store a smaller form of the entry again (`putIfRoom(key,
+ * value, { oldest: true })`, which never displaces a more recent entry) or
+ * keep it elsewhere.
+ *
+ * A background lane's entry (`putIfRoom(..., { background: true })`, #243)
+ * is let go before any other, by a put's eviction and by a trim, and never
+ * becomes `lastStoredKey` (#229 review R2-038).
  */
 export function createPhotoSessionCache({ maxBytes = DEFAULT_MAX_BYTES, onEvict = null } = {}) {
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
@@ -69,13 +74,15 @@ export function createPhotoSessionCache({ maxBytes = DEFAULT_MAX_BYTES, onEvict 
   let entries = new Map();
   const owners = new Map();
   let bytes = 0;
-  // The entry stored last (the photo the user just left, #258): pressure and
-  // idle trimming keep it, so the warm 1-back switch survives them.
+  // The entry put() stored last (the photo the user just left, #258):
+  // pressure and idle trimming keep it, so the warm 1-back switch survives
+  // them. putIfRoom never moves it: a lane's base is not the photo just left.
   let lastStoredKey;
 
-  function register(key, value, buffers, { oldest = false } = {}) {
-    if (oldest) entries = new Map([[key, { value, buffers }], ...entries]);
-    else entries.set(key, { value, buffers });
+  function register(key, value, buffers, { oldest = false, background = false } = {}) {
+    const entry = { value, buffers, background };
+    if (oldest) entries = new Map([[key, entry], ...entries]);
+    else entries.set(key, entry);
     for (const buffer of buffers) {
       const owner = owners.get(buffer);
       if (owner) owner.count++;
@@ -93,6 +100,13 @@ export function createPhotoSessionCache({ maxBytes = DEFAULT_MAX_BYTES, onEvict 
     for (const [key, value] of evicted) {
       try { onEvict(key, value); } catch (error) { console.warn('Photo-session eviction handler failed:', error); }
     }
+  }
+
+  // The order entries are let go in: background lanes' entries first, then
+  // the rest, each least recently used first.
+  function evictionOrder() {
+    const keys = [...entries.keys()];
+    return [...keys.filter(key => entries.get(key).background), ...keys.filter(key => !entries.get(key).background)];
   }
 
   function remove(key) {
@@ -126,10 +140,10 @@ export function createPhotoSessionCache({ maxBytes = DEFAULT_MAX_BYTES, onEvict 
       // must not release a backing store shared with this newly cached value.
       register(key, value, buffers);
       const evicted = [];
-      while (bytes > maxBytes) {
-        const oldest = entries.keys().next().value;
-        const entry = remove(oldest);
-        if (entry) evicted.push([oldest, entry.value]);
+      for (const victim of evictionOrder()) {
+        if (bytes <= maxBytes) break;
+        const entry = remove(victim);
+        if (entry) evicted.push([victim, entry.value]);
       }
       if (entries.has(key)) lastStoredKey = key;
       notifyEvicted(evicted);
@@ -139,8 +153,9 @@ export function createPhotoSessionCache({ maxBytes = DEFAULT_MAX_BYTES, onEvict 
     // (#243: a background lane's finished base never displaces a photo the
     // user visited). Buffers this cache already holds count once. `oldest`
     // (#249) files it as the least recently used entry: a demoted session
-    // is evicted before any photo visited after it.
-    putIfRoom(key, value, { oldest = false } = {}) {
+    // is evicted before any photo visited after it. `background` marks a
+    // lane's entry, which goes before any other. Never moves lastStoredKey.
+    putIfRoom(key, value, { oldest = false, background = false } = {}) {
       if (maxBytes === 0) return false;
       const previous = entries.get(key);
       const releasing = new Set();
@@ -152,9 +167,8 @@ export function createPhotoSessionCache({ maxBytes = DEFAULT_MAX_BYTES, onEvict 
         if (!owners.has(buffer) || releasing.has(buffer)) total += buffer.byteLength;
       }
       if (total > maxBytes) return false;
-      if (!oldest) return this.put(key, value);
       remove(key);
-      register(key, value, buffers, { oldest: true });
+      register(key, value, buffers, { oldest, background });
       return true;
     },
     /** Whether `extraBytes` more would fit next to everything retained, evicting nothing. */
@@ -187,19 +201,19 @@ export function createPhotoSessionCache({ maxBytes = DEFAULT_MAX_BYTES, onEvict 
       for (const key of entries.keys()) if (!retained.has(key)) remove(key);
     },
     /**
-     * Evict least recently used entries until at most `targetBytes` are
-     * retained, never one of the keys in `keep` (#258). The entries it lets
-     * go reach onEvict like a put's, so a session is demoted to its display
-     * form rather than dropped (#249). Returns the bytes this cache let go,
-     * net of what onEvict stored again; a buffer another retained entry
-     * shares stays.
+     * Evict entries until at most `targetBytes` are retained, background
+     * lanes' entries first, then least recently used first, never one of the
+     * keys in `keep` (#258). The entries it lets go reach onEvict like a
+     * put's, so a session is demoted to its display form rather than dropped
+     * (#249). Returns the bytes this cache let go, net of what onEvict stored
+     * again; a buffer another retained entry shares stays.
      */
     trim(targetBytes, { keep = [] } = {}) {
       const target = Math.max(0, Number(targetBytes) || 0);
       const kept = new Set(keep);
       const before = bytes;
       const evicted = [];
-      for (const key of [...entries.keys()]) {
+      for (const key of evictionOrder()) {
         if (bytes <= target) break;
         if (kept.has(key)) continue;
         const entry = remove(key);
@@ -212,7 +226,7 @@ export function createPhotoSessionCache({ maxBytes = DEFAULT_MAX_BYTES, onEvict 
     buffers() { return owners.keys(); },
     get bytes() { return bytes; },
     get size() { return entries.size; },
-    /** The key of the entry stored last, while it is still retained. */
+    /** The key of the entry put() stored last, while it is still retained. */
     get lastStoredKey() { return lastStoredKey; },
   };
 }

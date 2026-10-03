@@ -160,10 +160,14 @@ page, so the page never holds two objects for one allocation.
 the shortfall is freed, then `poke()`:
 
 1. `photoPreviews`;
-2. `photoSessions`, except the entry stored last (`lastStoredKey`): the warm
-   1-back switch is never traded for other work. A trimmed session reaches the
-   cache's `onEvict` like one a put pushed out, so it is demoted to its
-   display form (#249's Tier B, or the spill) rather than dropped;
+2. `photoSessions`: a background lane's base-only entries first (#243's
+   hand-overs, `putIfRoom(..., { background: true })`), then the others least
+   recently used first, never the session the user just left
+   (`lastStoredKey`, which only the editor's own puts set, never a lane's
+   hand-over; #229 review R2-038): the warm 1-back switch is never traded for
+   other work. The idle check below trims in the same order. A trimmed session
+   reaches the cache's `onEvict` like one a put pushed out, so it is demoted
+   to its display form (#249's Tier B, or the spill) rather than dropped;
 3. the open photo's full-resolution `processedImageData`, demoted to the
    preview plane by #250's `demoteFullResolutionPlane`, only for a large frame
    (above `LARGE_IMAGE_PIXELS`, where no idle render brings it back) and only

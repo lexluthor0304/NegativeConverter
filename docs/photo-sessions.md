@@ -36,12 +36,13 @@ for revisits after full-session eviction. These are retained-buffer limits,
 not a total renderer-memory promise on their own; the renderer-wide memory
 budget (#258, `docs/memory-budget.md`) counts them with the active editor,
 history, bounded stores and worker residents in one ledger. When a lane or a
-job needs room, it evicts previews first, then sessions except the one stored
-last (the warm 1-back switch stays), each demoted to its display form (Tier B
-below) where it has one, and on WebKit the idle check trims them toward 1 GiB
-of ledger bytes the same way, demoting the one stored last too when it has a
-display form. Native GPU resources and file
-storage are not counted. While a job runs in a hidden
+job needs room, it evicts previews first, then sessions, the lanes' base-only
+entries first, except the one the user left last (the warm 1-back switch
+stays; a lane's hand-over never takes that place, #229 review R2-038), each
+demoted to its display form (Tier B below) where it has one, and on WebKit the
+idle check trims them toward 1 GiB of ledger bytes the same way, demoting the
+one the user left last too when it has a display form. Native GPU resources
+and file storage are not counted. While a job runs in a hidden
 macOS window, or once an idle window has been hidden for five minutes, these
 caches and the prefetch slot (#243) are emptied to stay under WebKit's inactive memory limit; the
 background lanes keep no base and do not prefetch there, and the caches refill
@@ -559,9 +560,13 @@ hides come last. No job starts on a file another lane is working on.
   decode-ahead uses it, capped at 2 s (#256, `docs/batch-export-pipeline.md`).
 - **One decode.** Background decodes go through `sharedDecodes.js`: the
   foreground's options (full size, defects repaired) with the RAW metadata,
-  so an adopted base carries lens and EXIF data exactly like a cold open. A
-  job's decode serves every need of its frame (analysis, tile, prefetch), and
-  a retained session or prefetched base is used instead of a decode. When the
+  so an adopted base carries lens and EXIF data exactly like a cold open. The
+  decode's worker computes the film statistics (#232) only for a frame
+  without a recipe, whose analysis, tile or opening builds default settings;
+  a frame with one gets its planes without waiting for them (#229 review
+  R1-021). A job's decode serves every need of its frame (analysis, tile,
+  prefetch), and a retained session or prefetched base is used instead of a
+  decode. When the
   user opens a frame a lane is decoding, or still holds while it analyses it,
   `loadFile` adopts that decode instead of reading the file again (a
   two-stage file skips its stand-in); the lane's analysis of the now-current frame
@@ -581,8 +586,15 @@ hides come last. No job starts on a file another lane is working on.
 - **In-flight decodes.** With the desktop session budget, a cold activation
   lets a lane's decode finish (it would have to be redone); on low-memory
   devices the activation aborts the lanes' decodes, except the target's own.
+  A photo that leaves the queue (Clear queue, an import that replaces the
+  roll) stops its lane job, its decode or its wait for memory included,
+  unless the foreground adopted that decode: its own lease keeps it (#229
+  review R1-141).
 - **After a job.** Its base becomes a base-only `photoSessions` entry only if
-  it fits without evicting anything (`putIfRoom`); otherwise it goes to the
+  it fits without evicting anything (`putIfRoom`), filed as a lane's entry:
+  the editor's own puts, memory pressure and the idle check let lane entries
+  go before any session the user left, and one never becomes the protected
+  session the user just left (#229 review R2-038); otherwise it goes to the
   prefetch slot when the frame is the next photo, or is dropped. In a hidden
   macOS window it is always dropped: that window sheds those caches (#241).
   Tiles and prefetch previews use the lanes' own conversion and
@@ -598,8 +610,12 @@ hides come last. No job starts on a file another lane is working on.
   opens without a read or decode: the veil shows the matching preview in the
   click's task and the exact positive follows from the base. A new recipe (a
   roll commit) re-renders the preview from the held base; the slot is dropped
-  once the user is two photos away from it. A hidden macOS window prefetches
-  nothing (#241): each hidden admission empties the slot again. A preview the
+  once the user is two photos away from it, unless it still holds the photo
+  the lane would prefetch now (the photos in between are retained sessions),
+  which would otherwise be decoded again at every step (#229 review R1-060),
+  and once its photo leaves the queue (R1-140). A hidden macOS window
+  prefetches nothing (#241): each hidden admission empties the slot again. A
+  preview the
   hide stopped renders from the held base once the window is shown.
 - **Buffers.** A shared, retained or prefetched base is read-only: it is
   listed among the editor's live buffers, so no export transfers it (#244 and

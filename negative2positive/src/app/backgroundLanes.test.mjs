@@ -15,7 +15,7 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
   assert.equal(f.decodes.length, 0, 'the lane lets the import start first');
   await f.clock.advance(250);
   assert.deepEqual(f.started(), ['1.dng'], 'priority 1: the next photo in the direction of travel');
-  assert.equal(f.decodeOf(1)[0].options.filmStats, true);
+  assert.equal(f.decodeOf(1)[0].options.filmStats, false, 'a frame with a recipe needs no film statistics (R1-021)');
   await f.finishDecode(1);
   assert.equal(f.renders.length, 1);
   assert.equal(f.renders[0].options.sourceImageData.id, 1, 'the tile renders from the shared decode');
@@ -335,6 +335,78 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
   await g.clock.advance(2000);
   assert.equal(g.decodes.length, 1, 'a failed prefetch is not retried');
   assert.equal(g.warnings.length, 1);
+}
+
+// --- film statistics only for a frame that builds its recipe (#232; #229 review R1-021) ------
+// The worker measures them before it posts the planes back: a tile or a
+// prefetch of a frame with a recipe would only wait for them.
+{
+  const f = createLaneFixture({ count: 4, current: 0, prefetch: true });
+  f.items[3].settings = null;
+  const measured = [];
+  const load = f.context.loadFileToImageData;
+  f.context.loadFileToImageData = (file, options = {}) => {
+    if (options.filmStats) measured.push(file.name);
+    return load(file, options);
+  };
+  f.context.kickBackgroundPhotoWork();
+  await f.clock.advance(250);
+  assert.deepEqual(f.started(), ['1.dng'], 'the next photo: its tile and its prefetch');
+  assert.equal(f.decodeOf(1)[0].options.filmStats, false);
+  await f.finishDecode(1); await f.finishRender(1); await f.finishRender(1, 'veil-1');
+  assert.equal(f.context.photoPrefetch.has(f.items[1]), true);
+  await f.clock.advance(30);
+  await f.finishDecode(2); await f.finishRender(2); await f.clock.advance(30);
+  assert.deepEqual(f.started(), ['1.dng', '2.dng', '3.dng']);
+  assert.equal(f.decodeOf(3)[0].options.filmStats, true, 'a frame without a recipe: its tile prepares one');
+  await f.finishDecode(3); await f.finishRender(3); await f.clock.advance(1000);
+  assert.equal(f.decodes.length, 3);
+  assert.deepEqual(measured, ['3.dng'], 'statistics were computed for the frame without a recipe only');
+  // A roll pass analyses frames without a recipe: always measured.
+  const g = createLaneFixture({ count: 3, current: 0, settings: false });
+  g.context.automaticRollImportRunning = true;
+  void g.context.runRollAnalysisPass([g.items[1]], {
+    valid: () => true, wants: item => !item.settings, sink: async () => {}, onError: () => {},
+    begin: () => ({ valid: () => true, analyze: async () => null })
+  });
+  await g.clock.advance(250);
+  assert.deepEqual(g.started(), ['1.dng']);
+  assert.equal(g.decodeOf(1)[0].options.filmStats, true);
+}
+
+// --- a prefetch target several photos away is kept across a step (#229 review R1-060) ----------
+// Small frames: the lanes keep the neighbours' bases as sessions, so the
+// first photo without one, the prefetch target, is three photos ahead.
+{
+  const f = createLaneFixture({ count: 7, current: 0, prefetch: true, sessionBudget: 1 << 20, tilesDone: true });
+  const c = f.context;
+  const base = id => ({ file: f.items[id].file, base: { data: new Uint8Array(64) } });
+  for (const id of [1, 2, 3]) c.photoSessions.putIfRoom(f.items[id], base(id), { background: true });
+  c.kickBackgroundPhotoWork();
+  await f.clock.advance(250);
+  assert.deepEqual(f.started(), ['4.dng'], 'the first photo without a session is prefetched');
+  assert.equal(f.decodeOf(4)[0].options.filmStats, false, 'a prefetch of a frame with a recipe measures nothing (R1-021)');
+  await f.finishDecode(4);
+  await f.finishRender(4, 'veil-4');
+  assert.equal(c.photoPrefetch.has(f.items[4]), true);
+  // Next, as switchToFile does it: photo 1's session is taken, photo 0's stored.
+  c.photoSessions.take(f.items[1]);
+  c.photoSessions.put(f.items[0], base(0));
+  f.open(1);
+  assert.equal(c.photoPrefetch.has(f.items[4]), true, 'three photos away, but still the prefetch target: kept');
+  await f.clock.advance(5000);
+  assert.equal(f.decodeOf(4).length, 1, 'photo 4 is decoded once across the step');
+  // Next again: photo 4 is two ahead, and still the target.
+  c.photoSessions.take(f.items[2]);
+  c.photoSessions.put(f.items[1], base(1));
+  f.open(2);
+  await f.clock.advance(5000);
+  assert.equal(f.decodeOf(4).length, 1);
+  assert.equal(c.photoPrefetch.has(f.items[4]), true);
+  // Back the other way: photo 4 is no longer where the user is heading.
+  f.open(0);
+  assert.equal(c.photoPrefetch.has(f.items[4]), false, 'dropped once it is not the target');
+  assert.equal(c.photoPrefetch.bytes, 0);
 }
 
 console.log('backgroundLanes tests passed');

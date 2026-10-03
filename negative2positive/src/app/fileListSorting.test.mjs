@@ -39,7 +39,7 @@ const context = vm.createContext({
   getLocalizedText: (_key, fallback) => fallback, getInterpolatedText: (_key, _values, fallback) => fallback,
   currentLang: 'en', i18n: { en: {} },
   updateAutoFrameButtons: noop, syncBatchUIState: noop, refreshThumbnailStates: noop,
-  kickBackgroundPhotoWork: noop, observeBackgroundVisibility: noop, supersedeActivation: noop, updateExportButtons: noop,
+  kickBackgroundPhotoWork: noop, forgetRemovedBackgroundPhotos: noop, observeBackgroundVisibility: noop, supersedeActivation: noop, updateExportButtons: noop,
   syncEmbeddedPreviewQueue: noop, tileVisibility: null, observeTileVisibility: noop,
 });
 vm.runInContext('let fileOrderCache = null, fileSelectionAnchor = null, reviewFilter = false;\n'
