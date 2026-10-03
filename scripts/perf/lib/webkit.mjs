@@ -17,7 +17,7 @@
 
 import { spawn, execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { loadavg, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { WebDriverSession, startSafariDriver, KEY } from './webdriver.mjs';
@@ -424,7 +424,7 @@ export function tauriDevArgs({ port, scenario, fixtures, sliders = S2_SLIDERS, e
 }
 
 export function createTauriCache(outDir) {
-  const root = mkdtempSync(join(resolve(outDir), 'tauri-cache-'));
+  const root = realpathSync(mkdtempSync(join(resolve(outDir), 'tauri-cache-')));
   const token = randomBytes(16).toString('hex');
   writeFileSync(join(root, '.nc-perf-harness'), `${token}\n`, { flag: 'wx', mode: 0o600 });
   return { NC_PERF_TAURI_CACHE_ROOT: root, NC_PERF_TAURI_CACHE_TOKEN: token };

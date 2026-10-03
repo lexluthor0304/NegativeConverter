@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, statSync } from 'node:fs';
+import { mkdtempSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -24,6 +24,7 @@ assert.throws(() => tauriDevArgs({ ...input, windows: [window, window] }), /one 
 
 const out = mkdtempSync(join(tmpdir(), 'nc229-platform-cache-test-'));
 const a = createTauriCache(out), b = createTauriCache(out);
+assert.equal(a.NC_PERF_TAURI_CACHE_ROOT, realpathSync(a.NC_PERF_TAURI_CACHE_ROOT), 'macOS temporary-directory aliases must produce canonical native claims');
 assert.notEqual(a.NC_PERF_TAURI_CACHE_ROOT, b.NC_PERF_TAURI_CACHE_ROOT, 'every native run gets a fresh cache');
 assert.notEqual(a.NC_PERF_TAURI_CACHE_TOKEN, b.NC_PERF_TAURI_CACHE_TOKEN);
 assert.equal(readFileSync(join(a.NC_PERF_TAURI_CACHE_ROOT, '.nc-perf-harness'), 'utf8'), `${a.NC_PERF_TAURI_CACHE_TOKEN}\n`);
