@@ -240,11 +240,18 @@ export async function webkitMemory({ label, port, outDir, args, swapAtStart, fre
     waitForScope: ({ timeoutMs = 30_000 } = {}) => {
       if (!ownership) return Promise.reject(new Error('exclusive native workload ownership is unavailable'));
       if (verdict || stopped) return Promise.reject(new Error(verdict?.detail || 'WebKit memory monitoring stopped'));
-      if (acquired) return Promise.resolve();
       return new Promise((resolve, reject) => {
         const waiter = { resolve, reject };
         waiter.timer = setTimeout(() => { void abort({ reason: 'error', detail: 'initial WebKit renderer/GPU attribution timed out before workload admission' }); }, timeoutMs);
         waiters.add(waiter);
+        // A page can request admission after a previously valid sample has
+        // been revoked. Require a fresh guarded sample even after acquisition.
+        void sampler.tick();
+      }).then(async () => {
+        // Readiness is published from onSample; drain that same tick before
+        // a caller can admit work or request another fresh sample.
+        await sampler.inFlight;
+        if (verdict || stopped) throw new Error(verdict?.detail || 'WebKit memory monitoring stopped');
       });
     },
     get scopeAcquired() { return acquired; },

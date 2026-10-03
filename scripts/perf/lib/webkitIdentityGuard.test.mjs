@@ -71,7 +71,7 @@ for (const loss of ['version', 'reuse', 'missing', 'revoked', 'ambiguous', 'upda
     await memory.sampler.tick();
     assert.equal(memory.verdict?.reason, 'error', `${loss} must automatically abort the real sampler caller`);
     assert.equal(state.aborts.length, 1);
-    assert.equal(memory.sampler.samples.length, 1, 'no zero/partial replacement can erase the valid sample');
+    assert.equal(memory.sampler.samples.length, before.samples, 'no zero/partial replacement can erase the valid samples');
     assert.deepEqual(memory.summary(), before, 'partial metrics survive the failure');
     assert.ok(state.signals.some(p => p.native && p.pid === host.pid), 'verified cleanup stops the actual native host');
     assert.ok(state.signals.some(p => p.native && p.pid === root.pid), 'verified cleanup stops its launcher too');
@@ -83,6 +83,22 @@ for (const loss of ['version', 'reuse', 'missing', 'revoked', 'ambiguous', 'upda
     assert.equal(state.aborts.length, 1, 'abort is latched');
   } finally { memory.stop(); }
   console.log(`native identity guard: ${loss} passed (pure OS data)`);
+}
+
+// A previously acquired scope is not a reusable admission grant. This loss
+// precedes the next automatic timer tick and the page's first gate request.
+{
+  const { state, memory } = await world();
+  try {
+    await memory.sampler.tick();
+    const before = memory.summary();
+    state.current[gpu.pid].version++;
+    await assert.rejects(memory.waitForScope({ timeoutMs: 50 }), /identity|attribution/);
+    assert.equal(memory.verdict?.reason, 'error');
+    assert.deepEqual(memory.summary(), before);
+    assert.ok(state.signals.some(p => p.native && p.pid === host.pid));
+    assert.ok(!state.signals.some(p => p.pid === gpu.pid));
+  } finally { memory.stop(); }
 }
 
 for (const outcome of ['ready', 'timeout', 'zero', 'zero-gpu', 'initial-invalid', 'initial-reuse', 'initial-ambiguous', 'changed-launcher']) {

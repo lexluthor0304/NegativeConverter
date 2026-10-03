@@ -269,6 +269,7 @@ export class MemorySampler {
     this.samples = [];
     this.timer = null;
     this.busy = false;
+    this.inFlight = null;
   }
 
   start() {
@@ -277,9 +278,14 @@ export class MemorySampler {
     this.tick();
   }
 
-  async tick() {
-    if (this.busy) return;
+  tick() {
+    if (this.inFlight) return this.inFlight;
     this.busy = true;
+    this.inFlight = this.#sample().finally(() => { this.busy = false; this.inFlight = null; });
+    return this.inFlight;
+  }
+
+  async #sample() {
     const bounded = async task => {
       if (!this.timeoutMs) return task();
       let timer;
@@ -306,8 +312,6 @@ export class MemorySampler {
       // Chrome may ignore a vanished process. An acquired native scope must
       // explicitly abort on errors, timeouts or missing footprints.
       await this.onError(error);
-    } finally {
-      this.busy = false;
     }
   }
 
