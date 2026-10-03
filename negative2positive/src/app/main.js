@@ -3064,6 +3064,16 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       settings.frameMetadata = sanitizeFrameMetadata(state.frameMetadata);
       settings.autoFrameMeta = state.autoFrame.lastDiagnostics ? structuredClone(state.autoFrame.lastDiagnostics) : null;
       if (state.fullBaseHistoryPending && state.fullBaseFrameEdit) settings.fullBaseFrameEdit = { ...state.fullBaseFrameEdit };
+      const provisionalWb = state.provisional?.swapped && state.provisional.fullBaseWhiteBalance;
+      const wbBaseline = state.provisional?.swapBaseline;
+      // The detector may finish before its conversion. Entries captured in
+      // that interval still share the event whose reply will supply WB.
+      const pendingWb = provisionalWb?.pending && !provisionalWb.measurement && wbBaseline
+        && ['wbR', 'wbG', 'wbB', 'wbAutoConfidence', 'filmType', 'expiredEnabled',
+          'grayPointSampled', 'wbUserOverride', 'wbSemanticApplied'].every(key => state[key] === wbBaseline[key])
+        && effectiveGeometryAngle(state.rotationAngle) === effectiveGeometryAngle(wbBaseline.rotationAngle)
+        && Boolean(state.mirrored) === Boolean(wbBaseline.mirrored) && sameCropRect(state.cropRegion, wbBaseline.cropRegion);
+      if (pendingWb) settings.fullBaseFrameEdit = { detect: Boolean(cropDetection), automatic: true, whiteBalance: provisionalWb };
       // Taken while Apply's crop-area detection runs (#245): the entry holds
       // its miss outcome and gets a hit when restored (restoreSnapshot).
       if (cropDetection && state.autoFrame.lastDiagnostics === cropDetection.meta) settings.cropDetectionToken = cropDetection.token;
@@ -3082,7 +3092,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // session holds no planes to refer to (#249): a restore converts its
       // display proxy again, or rebuilds from the base when the geometry
       // differs.
-      if (state.geometryPending || state.sourcePending) return { label, settings, refs: { cold: true } };
+      if (state.geometryPending || state.sourcePending || pendingWb) return { label, settings, refs: { cold: true } };
       const refs = {};
       for (const key of SNAPSHOT_REF_KEYS) {
         refs[key] = state[key];
@@ -7635,8 +7645,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       return { wbR: estimate.wbR, wbG: estimate.wbG, wbB: estimate.wbB, wbAutoConfidence: estimate.confidence };
     }
 
-    function maybeAutoWhiteBalance(processed) {
-      const result = automaticWhiteBalanceResult(processed, state);
+    function maybeAutoWhiteBalance(processed, measurement = null) {
+      const settings = measurement ? { ...measurement.settings, ...measurement.live } : state;
+      const context = measurement ? { meta: settings.autoFrameMeta, base: baseSizeSource(), wbSample: autoWbSampleFor(autoWbSampleKey()) } : null;
+      const result = state.filmType === settings.filmType && state.expiredEnabled === settings.expiredEnabled
+        && !state.wbUserOverride && !state.grayPointSampled && !state.wbSemanticApplied
+        ? automaticWhiteBalanceResult(processed, settings, context) : null;
       // The hit also belongs to history captured before a manual WB edit.
       // Estimate from the same positive even when the live user's gains now
       // suppress automatic WB; only matching pre-override entries adopt it.
@@ -7648,17 +7662,18 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         && Boolean(state.mirrored) === Boolean(event.hit.geometry.mirrored) && sameCropRect(state.cropRegion, event.hit.geometry.cropRegion));
       if (hit && before) {
         const historyResult = Object.keys(before).every(key => state[key] === before[key]) ? result
-          : automaticWhiteBalanceResult(processed, { ...state, ...before });
+          : automaticWhiteBalanceResult(processed, { ...settings, ...before }, context);
         if (historyResult) {
-          const measurement = provisionalWhiteBalanceMeasurement({ ...state, ...before });
-          if (cropDetection?.token.hit) cropDetection.token.hit.whiteBalance = { before, result: historyResult, ...(measurement ? { measurement } : {}) };
-          if (event?.pending && !event.measurement) event.measurement = measurement || {
-            settings: whiteBalanceMeasurementSettings({ ...state, ...before }), intent: event.intent, settled: event.settled
+          const recipe = measurement ? { ...measurement.settings, ...before } : whiteBalanceMeasurementSettings({ ...state, ...before });
+          const measured = measurement?.geometry ? { ...measurement, settings: recipe } : provisionalWhiteBalanceMeasurement(settings, recipe);
+          if (cropDetection?.token.hit) cropDetection.token.hit.whiteBalance = { before, result: historyResult, ...(measured ? { measurement: measured } : {}) };
+          if (event?.pending && !event.measurement) event.measurement = measured || {
+            settings: recipe, intent: event.intent, settled: event.settled
           };
         }
       }
       if (!result) return;
-      if (provisionalUnits()) state.provisional.whiteBalanceMeasurement = provisionalWhiteBalanceMeasurement(state);
+      if (provisionalUnits()) state.provisional.whiteBalanceMeasurement = measurement || provisionalWhiteBalanceMeasurement(state);
       Object.assign(state, result);
       updateWBSliders();
       updateGrayPointGuideUI();
@@ -7681,9 +7696,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       return recipe;
     }
 
-    function provisionalWhiteBalanceMeasurement(settings) {
+    function provisionalWhiteBalanceMeasurement(settings, capturedRecipe = null) {
       if (!provisionalUnits()) return null;
-      const recipe = whiteBalanceMeasurementSettings(settings);
+      const recipe = capturedRecipe || whiteBalanceMeasurementSettings(settings);
       return {
         settings: recipe, geometry: state.provisional.geometry.save(), live: liveGeometry(),
         intent: windowFrameIntent(state.provisional.settledSnapshot, recipe)
@@ -9670,6 +9685,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           const records = [proxy && pendingSource, !state.loadedBaseImageData && state.baseDescriptor].filter(Boolean);
           // With the first frame the worker converts the viewport-independent
           // auto-WB sample (#248 part 3).
+          const wbRecipe = automatic ? whiteBalanceMeasurementSettings(state) : null;
+          const wbMeasurement = automatic ? provisionalWhiteBalanceMeasurement(state, wbRecipe) || { settings: wbRecipe, live: liveGeometry() } : null;
           const processed = await convertFromCurrentSource(state, { preview: hasPreviewSource, wbSample: automatic });
           if (!isCurrentConversion()) return;
           if (!processed) {
@@ -9687,7 +9704,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           overlay.updateProgress(hasPreviewSource ? 78 : 85, lang.loadingProcessing);
           applyProcessedImageToState(processed, { previewOnly: hasPreviewSource });
           if (automatic) {
-            if (maybeAutoWhiteBalance(processed)) for (const record of records) autoWbFromRecords.add(record);
+            if (maybeAutoWhiteBalance(processed, wbMeasurement)) for (const record of records) autoWbFromRecords.add(record);
             maybeAnalyzeExpiredRescue(processed);
           }
           // Reset dust removal state for new conversion

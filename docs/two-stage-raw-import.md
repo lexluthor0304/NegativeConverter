@@ -181,6 +181,13 @@ instead (step 4 runs it on the full base). It then swaps in one task:
    preceding import/confirmation measurement over the new crop hit. A miss
    keeps that preceding completed measurement; manual, gray-point and
    semantic WB overrides still win. The intent retains no pixel planes.
+   The measurement recipe and geometry are captured at conversion dispatch,
+   before awaiting the worker reply. A control edited while that reply is
+   pending stays live; replay measures the recipe that actually produced the
+   pixels. History captured after full-source installation and before WB
+   completion shares the same pending event even after the detector finishes.
+   Those matching entries are cold, so restoring them rebuilds full-source
+   pixels and awaits the event rather than retaining the previous positive.
    Other automatic conversion measurements, including expired-film analysis,
    still run before that WB replay, preserving user rescue strengths.
    Pending restoration joins the crop-analysis barrier, so exports and saved
@@ -370,6 +377,11 @@ previously configured photos, hits, misses and manual confirmations.
   PNG8/TIFF16 decoded samples and file bytes with a delayed-hit single-stage
   reference. The cancelled late preview answer must leave WB and diagnostics
   unchanged. Existing before/after-exposure hit scenes remain included.
+  The conversion-in-flight scene lets the replacement detector finish while
+  full-source geometry is held, then holds the actual WB conversion reply
+  dispatched at exposure 15. A new history entry edits exposure to 0 before
+  release. Live/Undo/Redo PNG8/TIFF16 samples and bytes must match the same
+  delayed conversion on a single-stage decode.
 
 ## Verification on real files (not in the repository)
 

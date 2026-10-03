@@ -46,15 +46,21 @@ function fixture(staged, manualWb = false) {
   // restoreSettings treats saved user WB as sampled too; use that canonical
   // recipe in both fixtures so ownership comparisons test the same state.
   if (manualWb) Object.assign(state, { wbR: 1.17, wbG: 1, wbB: .83, wbUserOverride: true, grayPointSampled: true });
-  const detections = [], held = [];
+  const detections = [], held = [], conversionReplies = [], dispatched = [];
   Object.assign(target, { createExactGeometry, windowEdits, overlayWindowEdits, analysisAreaEdited, confirmedImageArea,
     resolveAnalysisRegion, imageAreaFromWorkingRect, workingPointsToBase, buildCropDetectionInput, isSameAnalysisFrame,
     estimateAutoWhiteBalance, deepCopySanitizedSettings, stripLegacyToneSettingsForSilverCore, cropHitHold: false,
     usesSilverCoreConversion: () => true,
     // Use real geometry pixels and WB sampling; no display-sized stand-in.
-    convertFromCurrentSource: async (settings = state) => convertColorWithSilverCore(state.conversionSourceImageData,
-      { filmBase: settings.filmBase, colorModel: 'standard', filmPreset: 'none', borderBuffer: 0, exposure: settings.coreExposure },
-      { analysisImageData: c.getColorAnalysisSample(settings === state ? { ...settings, autoFrameMeta: state.autoFrame.lastDiagnostics } : settings) }),
+    convertFromCurrentSource: async (settings = state) => {
+      const recipe = canon(settings === state ? target.extractCurrentSettings() : settings);
+      const processed = convertColorWithSilverCore(state.conversionSourceImageData,
+        { filmBase: settings.filmBase, colorModel: 'standard', filmPreset: 'none', borderBuffer: 0, exposure: settings.coreExposure },
+        { analysisImageData: c.getColorAnalysisSample(settings === state ? { ...settings, autoFrameMeta: state.autoFrame.lastDiagnostics } : settings) });
+      dispatched.push(recipe);
+      if (target.conversionHold) await new Promise(resolve => conversionReplies.push(resolve));
+      return processed;
+    },
     buildRouterSettings: settings => settings,
     convertFrameOffMainThread: async ({ imageData, settings, options }) => convertColorWithSilverCore(imageData,
       { filmBase: settings.filmBase, colorModel: 'standard', filmPreset: 'none', borderBuffer: 0, exposure: settings.coreExposure },
@@ -77,9 +83,9 @@ function fixture(staged, manualWb = false) {
     'whiteBalanceMeasurementSettings', 'provisionalWhiteBalanceMeasurement', 'promoteWhiteBalanceMeasurement', 'restorePromotedWhiteBalance',
     'restoreColdSnapshotPixels', 'hasPendingCropDetection', 'settlePendingCropDetection',
     'waitForProvisionalSwap', 'startCropDetection', 'applyCropDetectionOutcome', 'resolvePendingFrameEdits', 'cloneSettings', 'renderGeometryChain',
-    'buildAdjustmentSettings'].map(fn).join('\n'), c);
+    'buildAdjustmentSettings', 'processNegative', 'captureSnapshot', 'restoreSnapshot'].map(fn).join('\n'), c);
   c.restoreAutoFrameDiagnostics(staged ? standInMeta : fullMeta);
-  return { ...h, detections, held };
+  return { ...h, detections, held, conversionReplies, dispatched };
 }
 async function apply(h, crop, { held = false, analysisOnly = false, selectedArea = null } = {}) {
   const { context: c, state, target } = h;
@@ -328,6 +334,88 @@ for (const stack of ['undo', 'redo']) for (const wbMode of ['automatic', 'manual
     check(action);
   }
   h.pool.dispose(); reference.pool.dispose(); cases++;
+}
+for (const defect of ['conversion-in-flight', 'post-install-history']) for (const wbMode of ['automatic', 'late-manual', 'late-gray-point', 'late-semantic']) {
+  if (selected !== 'all' && selected !== defect) continue;
+  const h = fixture(true), reference = fixture(false), { context: c, state, target } = h;
+  const baseline = target.extractCurrentSettings();
+  const record = { decodedImage: full, status: 'decoded', urgent: true };
+  const provisional = { size: { width: 32, height: 24 }, fullSize: { width: 64, height: 48 },
+    geometry: createExactGeometry({ size: { width: 32, height: 24 }, fullSize: { width: 64, height: 48 } }), settledSnapshot: baseline, record };
+  state.provisional = provisional;
+  for (const item of [h, reference]) {
+    await item.context.processNegative();
+    await apply(item, item === h ? rect : fullRect, { held: true });
+    for (let i = 0; i < 8 && !item.held.length; i++) await new Promise(setImmediate);
+    assert.equal(item.held.length, 1, 'preview/reference detector explicitly held');
+    item.context.pushUndo('exposure');
+    item.state.coreExposure = 15;
+    await item.context.processNegative({ automatic: false });
+  }
+  const old = target.cropDetection;
+  await c.waitForProvisionalSwap(record, provisional, () => true);
+  assert.equal(old.token.hit, null, 'preview detector has no hit through promotion');
+  assert.equal(h.held.length, 1, 'preview detector reply still held at swap');
+  target.cropHitHold = false;
+  c.installFullDecode(record, provisional, full, { ...baseline, autoFrameMeta: structuredClone(fullMeta), filmBase: { ...fullFilmBase }, cropRegion: null });
+  await c.whenGeometrySettled(); await c.settlePendingCropDetection();
+  assert.equal(target.cropDetection, null, 'full-source detector finishes before conversion dispatch');
+  assert.ok(provisional.fullBaseWhiteBalance.hit, 'replacement hit owns the pending WB event');
+  target.conversionHold = reference.target.conversionHold = true;
+  const converting = c.processNegative();
+  const referenceLanding = land(reference);
+  for (let i = 0; i < 16 && (!h.conversionReplies.length || !reference.conversionReplies.length); i++) await new Promise(setImmediate);
+  assert.equal(h.conversionReplies.length, 1, 'full-source conversion reply explicitly held');
+  assert.equal(reference.conversionReplies.length, 1, 'single-stage conversion reply explicitly held');
+  assert.equal(h.dispatched.at(-1).coreExposure, 15, 'staged pixels dispatched at exposure 15');
+  assert.equal(reference.dispatched.at(-1).coreExposure, 15, 'reference pixels dispatched at exposure 15');
+  for (const item of [h, reference]) {
+    item.context.pushUndo('in-flight-exposure');
+    item.state.coreExposure = 0;
+    if (wbMode !== 'automatic') Object.assign(item.state, { wbR: 1.17, wbG: 1, wbB: .83, wbAutoConfidence: 'high',
+      [wbMode === 'late-manual' ? 'wbUserOverride' : wbMode === 'late-gray-point' ? 'grayPointSampled' : 'wbSemanticApplied']: true });
+    item.target.conversionHold = false;
+    item.conversionReplies.splice(0).forEach(resolve => resolve());
+  }
+  await converting; await referenceLanding;
+  // Isolate the second defect: supply the correct dispatch recipe in memory
+  // so an omitted post-install history event cannot hide behind recipe timing.
+  if (defect === 'post-install-history') provisional.fullBaseWhiteBalance.measurement.settings.coreExposure = 15;
+  await c.restorePromotedWhiteBalance(provisional.fullBaseWhiteBalance, () => true);
+  state.provisional = null; record.status = 'installed';
+  h.held.splice(0).forEach(resolve => resolve()); await old.done;
+  const failures = [];
+  const check = async phase => {
+    await c.processNegative({ automatic: false });
+    await reference.context.processNegative({ automatic: false });
+    const actual = Object.fromEntries([8, 16].map(depth => [depth, createHash('sha256').update(Buffer.from(new Uint16Array(samples(h, depth)).buffer)).digest('hex')]));
+    const expected = Object.fromEntries([8, 16].map(depth => [depth, createHash('sha256').update(Buffer.from(new Uint16Array(samples(reference, depth)).buffer)).digest('hex')]));
+    console.log(defect, wbMode, phase, JSON.stringify({ dispatchedExposure: 15, recordedExposure: provisional.fullBaseWhiteBalance.measurement.settings.coreExposure,
+      liveExposure: state.coreExposure, wb: [state.wbR, state.wbG, state.wbB], referenceWb: [reference.state.wbR, reference.state.wbG, reference.state.wbB], actual, expected }));
+    // Keep exercising real Undo/Redo on the negative control, retaining every
+    // strict failure instead of stopping before the other sample depths run.
+    for (const depth of [8, 16]) {
+      try { assert.deepEqual(samples(h, depth), samples(reference, depth), defect + '/' + phase + `: exact ${depth}-bit samples`); }
+      catch (error) { failures.push(error); }
+    }
+    try {
+      assert.equal(state.coreExposure, reference.state.coreExposure, 'later live exposure edit survives WB replay');
+      assert.equal(provisional.fullBaseWhiteBalance.measurement.settings.coreExposure, 15, 'recorded recipe is the actual immutable dispatch');
+      assert.deepEqual([state.wbUserOverride, state.grayPointSampled, state.wbSemanticApplied],
+        [reference.state.wbUserOverride, reference.state.grayPointSampled, reference.state.wbSemanticApplied], 'late WB ownership survives completion/replay');
+      assert.deepEqual([state.wbR, state.wbG, state.wbB], [reference.state.wbR, reference.state.wbG, reference.state.wbB], defect + '/' + phase + ': actual WB');
+      samePixels(state.processedImageData, reference.state.processedImageData, defect + '/' + phase + ': Silver samples');
+    } catch (error) { failures.push(error); }
+  };
+  await check('live');
+  for (const action of ['Undo', 'Redo']) {
+    const restoring = c[`perform${action}`](); await c.settlePendingCropDetection(); await restoring;
+    await reference.context[`perform${action}`]();
+    await check(action);
+  }
+  h.pool.dispose(); reference.pool.dispose();
+  assert.equal(failures.length, 0, failures.map(error => error.message).join('\n'));
+  cases++;
 }
 // A promoted Undo may have settled geometry while its full-base crop/WB
 // measurement still runs. Parking must not save the previous recipe or
