@@ -30,6 +30,17 @@ export function rollFrameClass(frame) {
 export function decideRollFilmType(frames, { minimum = 3 } = {}) {
   const list = Array.isArray(frames) ? frames : [];
   const classes = list.map(rollFrameClass);
+  // Neither neighbour may take an end of a multi-frame run between B&W
+  // cores. At an import end, a segment still takes at most one open frame.
+  const betweenRuns = new Set();
+  for (let i = 0; i < classes.length; i++) {
+    if (classes[i] !== 'open') continue;
+    const start = i;
+    while (classes[i + 1] === 'open') i++;
+    if (i > start && classes[start - 1] === 'bw' && classes[i + 1] === 'bw') {
+      betweenRuns.add(start); betweenRuns.add(i);
+    }
+  }
   const segments = [];
   const typed = new Map();
   let index = 0;
@@ -46,8 +57,8 @@ export function decideRollFilmType(frames, { minimum = 3 } = {}) {
     index = end + 1;
     let bw = 0;
     for (let i = start; i <= end; i++) if (classes[i] === 'bw') bw++;
-    const lead = classes[start - 1] === 'open' ? start - 1 : null;
-    const trail = classes[end + 1] === 'open' ? end + 1 : null;
+    const lead = classes[start - 1] === 'open' && !betweenRuns.has(start - 1) ? start - 1 : null;
+    const trail = classes[end + 1] === 'open' && !betweenRuns.has(end + 1) ? end + 1 : null;
     const fits = (a, b) => {
       const count = end - start + 1 + (a === null ? 0 : 1) + (b === null ? 0 : 1);
       return count >= minimum && bw * 3 >= count * 2;

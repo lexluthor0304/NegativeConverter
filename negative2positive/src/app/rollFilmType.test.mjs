@@ -57,13 +57,21 @@ assert.equal(rollFrameClass({ verdict: rebate, locked: true }), 'bw', 'a locked 
 }
 
 // A run of noMask frames after a B&W segment (a colour roll whose mask auto WB
-// neutralised): at most one of them joins the segment.
+// neutralised): at most one joins at an import end; none from a run between
+// two B&W segments can be absorbed by either neighbour.
 {
   const decision = decideRollFilmType(frames(...Array(6).fill(mono), ...Array(5).fill(noMask)));
-  assert.deepEqual(retyped(decision), ['f6']);
+  assert.deepEqual(retyped(decision), ['f6'], 'a trailing run lends at most one end frame');
   assert.deepEqual(decideRollFilmType(frames(...Array(12).fill(noMask))).typed.size, 0, 'a noMask roll stays positive');
   const between = decideRollFilmType(frames(mono, mono, mono, noMask, noMask, noMask, noMask, mono, mono, mono));
-  assert.deepEqual(retyped(between), ['f3', 'f6'], 'each B&W neighbour takes one end of the run, the middle stays');
+  assert.deepEqual(retyped(between), [], 'neither B&W neighbour takes an end of a run');
+  for (const gap of [[noMask, noMask], [empty, noMask], [noMask, empty]]) {
+    const two = decideRollFilmType(frames(mono, mono, mono, ...gap, mono, mono, mono));
+    assert.deepEqual(retyped(two), [], 'a two-frame run stays untouched');
+    assert.deepEqual(two.segments.map(segment => [segment.start, segment.end]), [[0, 2], [5, 7]]);
+  }
+  assert.deepEqual(retyped(decideRollFilmType(frames(noMask, empty, mono, mono, mono))), ['f1'], 'a leading run lends at most one end frame');
+  assert.deepEqual(retyped(decideRollFilmType(frames(mono, mono, mono, noMask))), ['f3'], 'a single open frame at an end is retyped');
   const single = decideRollFilmType(frames(mono, mono, mono, noMask, mono, mono, mono));
   assert.deepEqual(retyped(single), ['f3'], 'a single noMask frame inside the roll is retyped');
   assert.equal(decideRollFilmType(frames(mono, noMask, mono, noMask, mono)).typed.size, 0, 'at least two thirds must be B&W');

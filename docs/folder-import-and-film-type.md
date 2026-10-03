@@ -73,7 +73,10 @@ least three frames of which at least two thirds are B&W is a B&W segment:
 
 - auto-typed frames without film evidence (`noMask`, `empty`) between its B&W
   frames are retyped, plus at most one at each end, such as a leader with a dark
-  holder edge. A run of two or more of them is never absorbed: a colour negative
+  holder edge. A run of two or more between B&W segments is never absorbed,
+  even at its ends: `[bw × 3, noMask × 2, bw × 3]` leaves both `noMask`
+  recipes unchanged. At an import end, only the one open frame touching the
+  segment may join it; the rest of a run keeps its own recipes. A colour negative
   whose mask LibRaw's auto white balance neutralised can also come out `noMask`;
 - frames with `dx`, `edge-text`, `orangeRebate`, `orangeMask` or `warmScene`
   verdicts, or with film-edge evidence, split segments and are never retyped;
