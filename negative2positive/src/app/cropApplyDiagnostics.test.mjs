@@ -20,17 +20,21 @@ function functionSource(name) {
   const end = source.indexOf('\n    }', match.index);
   return source.slice(match.index, end + 6);
 }
-// The click handler's call, as main.js makes it.
+// Execute the click handler's calculation and helper call. This covers its
+// forwarded draft, geometry and prior frame even when the selected area is
+// also named for recording provisional crop intent.
 const handler = source.slice(source.indexOf("    applyCropBtn.addEventListener('click', async () => {"));
-assert.match(handler.slice(0, 6000), /appliedCropDiagnostics\(state\.autoFrame\.lastDiagnostics, \{\s*selectedArea: imageAreaFromWorkingRect\(cropRegion, nextGeometry, base\), base, analysisOnly: draft\.analysisOnly,\s*previous: \{ rotationAngle: state\.rotationAngle, mirrored: state\.mirrored, cropRegion: state\.cropRegion, frame: state\.originalImageData \}\s*\}\)/,
-  'the handler passes its draft, geometry and working frame');
+const callStart = handler.indexOf('        const selectedArea =');
+const callEnd = handler.indexOf("\n\n        const edit = pushUndo('crop');", callStart);
+assert.ok(callStart >= 0 && callEnd > callStart, 'the handler calculates diagnostics before recording its edit');
 
 const context = vm.createContext({ structuredClone, imageAreaFromWorkingRect, isSameAnalysisFrame });
 vm.runInContext(functionSource('appliedCropDiagnostics'), context);
-const fresh = (state, draft, cropRegion, nextGeometry, base) => context.appliedCropDiagnostics(state.autoFrame.lastDiagnostics, {
-  selectedArea: imageAreaFromWorkingRect(cropRegion, nextGeometry, base), base, analysisOnly: draft.analysisOnly,
-  previous: { rotationAngle: state.rotationAngle, mirrored: state.mirrored, cropRegion: state.cropRegion, frame: state.originalImageData }
-});
+vm.runInContext(`function applyFromHandler(state, draft, cropRegion, nextGeometry, base) {
+${handler.slice(callStart, callEnd)}
+return { meta: nextMeta, detect };
+}`, context);
+const fresh = (state, draft, cropRegion, nextGeometry, base) => context.applyFromHandler(state, draft, cropRegion, nextGeometry, base);
 // d9bb55b's handler, from `const selectedArea` to `nextMeta.importAuto = true`.
 function inline(state, draft, cropRegion, nextGeometry, base) {
   const selectedArea = imageAreaFromWorkingRect(cropRegion, nextGeometry, base);
