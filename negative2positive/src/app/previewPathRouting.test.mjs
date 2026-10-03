@@ -241,7 +241,7 @@ function fixture({ large = true, repairs = false, strokes = 0, aiBrush = false, 
     'poolRepairStroke', 'repairedPreviewBaseFor', 'currentRepairPool',
     'scheduleRepairedPreviewAfterInput', 'clearFullResolutionRenderState', 'ensureConversionPreviewForDisplay', 'noteTierImage',
     'previewRequestImage', 'convertRequestOnMain', 'installDisplayFor', 'installDisplayPreview', 'cancelDisplayPreviewRebuild',
-    'rebuildDisplayPreview', 'flushDisplayPreviewRebuild', 'countMainResample', 'updateConversionTarget', 'conversionTargetFor',
+    'rebuildDisplayPreview', 'captureSnapshotWithPendingDisplay', 'countMainResample', 'updateConversionTarget', 'conversionTargetFor',
   ].map(functionSource).join('\n'), context);
   // A result has the size the request converts at: its display target, or
   // the image it sent.
@@ -1182,4 +1182,88 @@ for (const large of [true, false]) {
   await assert.rejects(f.context.ensureFullResolutionReadyForExport(), /Error loading file/);
 }
 
-console.log('previewPathRouting: downgraded undo/reset routing, kept planes, idle repair pass, restore flags and paint, viewport branches, Step-3 gate, export repair waits at both entry points, cleared masks and strokes in the idle window, aborted exact renders, the repaired preview source, a stroke fill after input, the reduced tier fill and the colour-analysis sample barrier passed');
+// #229 R1-044: a branch-3 reply must not stale the exact render that won.
+{
+  const f = fixture();
+  f.state.processedImageData = f.shown;
+  f.state.processedImageDataIsPreview = true;
+  f.state.fullResolutionPending = true;
+  const exporting = f.context.ensureFullResolutionReadyForExport();
+  await settle();
+  f.setTarget({ width: 1200, height: 800 });
+  f.context.refreshDisplayPreviewForViewport();
+  await settle();
+  assert.equal(f.clients.preview.length, 1);
+  assert.equal(f.clients.exact.length, 1);
+  f.reply('exact');
+  await settle();
+  const exact = f.state.processedImageData;
+  assert.equal(f.state.fullResolutionPending, false);
+  f.reply('preview');
+  await settle();
+  assert.ok(f.state.processedImageData === exact, 'display-only reply preserves the exact plane');
+  assert.equal(f.state.fullResolutionPending, false);
+  await exporting;
+  await f.context.ensureFullResolutionReadyForExport();
+  assert.equal(f.clients.exact.length, 1, 'the barrier never repeats the exact conversion');
+}
+
+{
+  const f = fixture();
+  const exact = { ...LARGE, __displayPreview: { width: 100, height: 100 } };
+  f.context.applyExactPlaneKeepingView(exact);
+  assert.equal(Object.hasOwn(exact, '__displayPreview'), false, 'unused display planes cannot enter history');
+}
+
+// The real mode exits replay a viewport refresh skipped while they were open.
+for (const mode of ['crop', 'comparison', 'step']) {
+  const f = fixture();
+  Object.assign(f.context, {
+    beforeAfterCanvas: null, beforeAfterBtn: null, updateSprocketControlsUI: noop,
+    renderHistogramForWebGL: noop, renderHistogram: noop, updateWorkflowUI: noop,
+    updateCanvasVisibility: noop, cropPreviewRenderFrame: null, activeCropPointerId: null,
+    releaseCropCanvas: noop, hideCropModeHint: noop, setCropActionUi: noop,
+    updateBeforeAfterButtonState: noop, cropModeWaiters: [],
+  });
+  vm.runInContext(['exitBeforeAfter', 'exitCropMode', 'goToStep'].map(functionSource).join('\n'), f.context);
+  if (mode === 'crop') f.state.cropping = true;
+  if (mode === 'comparison') f.state.beforeAfterActive = true;
+  if (mode === 'step') f.state.currentStep = 2;
+  f.setTarget({ width: 1200, height: 800 });
+  f.context.refreshDisplayPreviewForViewport();
+  assert.equal(f.context.displayViewportPending, true, mode);
+  assert.equal(f.resampled.length, 0);
+  if (mode === 'crop') f.context.exitCropMode();
+  if (mode === 'comparison') f.context.exitBeforeAfter();
+  if (mode === 'step') f.context.goToStep(3);
+  f.clock.run(100);
+  await settle();
+  assert.equal(f.context.displayViewportPending, false, mode);
+  assert.equal(f.resampled.length, 1, mode + ' replays the resize');
+}
+
+{
+  const f = snapshotFixture({ repairs: true });
+  f.state.dustRemoval.maskTag = 1;
+  const answers = [];
+  f.context.convertPreviewFrameInWorker.resample = () => new Promise(resolve => { answers.push(resolve); });
+  f.context.isLargeImage = () => false;
+  f.setTarget({ width: 600, height: 400 });
+  f.context.rebuildDisplayPreview(f.fullPlane, { width: 600, height: 400 });
+  f.resampled.length = 0;
+  const snapshot = f.context.captureSnapshot('sliderPointerdown');
+  assert.equal(f.resampled.length, 0, 'captureSnapshot performs zero full resamples');
+  assert.equal(snapshot.refs.displayPreviewPending, true);
+  assert.ok(snapshot.refs.processedImageData === f.fullPlane);
+  f.context.cancelDisplayPreviewRebuild();
+  f.context.restoreSnapshot(snapshot, { reprocess: false });
+  assert.equal(answers.length, 2, 'restore before completion restarts the asynchronous display build');
+  assert.equal(f.resampled.length, 0, 'restore also performs no full resample');
+  const preview = { width: 600, height: 400, name: 'finished snapshot display' };
+  for (const answer of answers) answer(preview);
+  await settle();
+  assert.ok(snapshot.refs.previewSourceImageData === preview, 'snapshot completes with the pending worker result');
+  assert.equal(snapshot.refs.displayPreviewPending, undefined);
+}
+
+console.log('previewPathRouting: routing, kept planes, both repair barriers, idle Clear, repaired stroke and reduced-tier fill, colour-analysis barrier, exact/display races, mode exits and asynchronous history display passed');

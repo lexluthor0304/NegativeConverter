@@ -477,7 +477,7 @@ for (const [width, height] of [[1500, 1000], [1000, 1500]]) {
   const source = ramp(1203, 803);
   const level = buildDisplayLevel(source, 3);
   const target = displayTargetFor(level, { width: 301, height: 201 });
-  const state = { conversionPreviewImageData: target, conversionSourceImageData: source };
+  const state = { currentStep: 3, conversionPreviewImageData: target, conversionSourceImageData: source };
   const built = [];
   // ImageData's (width, height) form too, as the page has it.
   class PageImageData extends TestImageData {
@@ -486,11 +486,13 @@ for (const [width, height] of [[1500, 1000], [1000, 1500]]) {
   const context = vm.createContext({
     // #249: no photo here takes a display form.
     ...displaySessionStubs(),
-    state, ImageData: PageImageData, Uint16Array, Math, beforeAfterBuiltReference: null, beforeAfterCanvasSource: null,
+    state, setTimeout, convertPreviewFrameInWorker: { displayNegative: async () => { throw Error('worker unavailable'); } }, previewRequestImage: () => ({}), buildRouterSettings: () => ({}), getColorAnalysisSample: () => null, ImageData: PageImageData, Uint16Array, Math, beforeAfterBuiltReference: null, beforeAfterCanvasSource: null,
     beforeAfterCanvas: null, isDisplayTarget, resampleDisplayLevel, displayLevelGeometry,
     buildPreviewSourceImageData: imageData => { built.push(imageData); return image(4, 4); },
   });
-  vm.runInContext([...DISPLAY_SESSION_HELPERS, 'getBeforeAfterReferenceImageData', 'displayNegativeOfTarget', 'releaseBeforeAfterCanvas'].map(functionSource).join('\n'), context);
+  vm.runInContext([...DISPLAY_SESSION_HELPERS, 'prepareBeforeAfterReference', 'getBeforeAfterReferenceImageData', 'displayNegativeOfTarget', 'releaseBeforeAfterCanvas'].map(functionSource).join('\n'), context);
+  assert.equal(context.getBeforeAfterReferenceImageData(), null);
+  await new Promise(resolve => setTimeout(resolve, 10));
   const reference = context.getBeforeAfterReferenceImageData();
   assert.ok(reference instanceof TestImageData, 'an 8-bit ImageData to put');
   assert.deepEqual([reference.width, reference.height], [301, 201]);
@@ -505,6 +507,8 @@ for (const [width, height] of [[1500, 1000], [1000, 1500]]) {
   assert.equal(context.getBeforeAfterReferenceImageData(), small);
   // No preview: built once from the source, never the source itself.
   state.conversionPreviewImageData = null;
+  context.getBeforeAfterReferenceImageData();
+  await new Promise(resolve => setTimeout(resolve, 10));
   const fallback = context.getBeforeAfterReferenceImageData();
   assert.equal(context.getBeforeAfterReferenceImageData(), fallback);
   assert.deepEqual(built, [source]);

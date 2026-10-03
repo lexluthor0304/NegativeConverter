@@ -696,3 +696,12 @@ Remaining performance proposals below are not claims of completed work.
 - **#190 platform acceptance:** run native folder arrival/stop tests on macOS
   and Windows/Linux, plus the MAS App Sandbox lifetime test in mas-release.md.
   The Rust/JS tests alone do not establish platform picker permissions.
+
+
+<!-- #229 review: settle lane -->
+The #229 settle review fixes R1-057/R1-058/R1-090/R1-091/R2-060 and
+R1-043/R1-044/R1-088/R1-028/R1-143 are documented in
+[the realtime preview notes](realtime-preview-2026-09-06.md#229-review-comparison-preparation-and-viewport-settle).
+Comparison preparation and snapshot display rebuilds now stay outside input;
+viewport retries preserve current exact planes. Targeted tests assert these
+contracts and smoke checks inspect the actual displayed frame and source size.

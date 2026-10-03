@@ -97,7 +97,7 @@ function fixture({ sourceSize = { width: 1200, height: 800 }, container = { widt
     ...DISPLAY_SESSION_HELPERS,
     'getDisplayPreviewSize', 'conversionTargetFor', 'updateConversionTarget', 'noteTierImage', 'buildPreviewSourceImageData',
     'histogramSourceFor', 'installDisplayPreview', 'cancelDisplayPreviewRebuild', 'rebuildDisplayPreview',
-    'flushDisplayPreviewRebuild', 'countMainResample', 'scheduleDisplayPreviewResize', 'refreshDisplayPreviewForViewport', 'installDisplayFor',
+    'captureSnapshotWithPendingDisplay', 'countMainResample', 'scheduleDisplayPreviewResize', 'refreshDisplayPreviewForViewport', 'installDisplayFor',
     'applyProcessedImageToState', 'hasSeparateConversionPreview', 'ensureConversionPreviewForDisplay', 'previewRequestImage',
   ].map(functionSource).join('\n'), context);
   state.conversionPreviewImageData = context.conversionTargetFor(conversionSource, conversionSource, 'normal');
@@ -255,10 +255,42 @@ function fixture({ sourceSize = { width: 1200, height: 800 }, container = { widt
   // A snapshot taken while one is pending gets the frame's own preview.
   const again = image(1200, 800, 19);
   f.context.applyProcessedImageToState(again, { deferDisplay: true });
-  f.context.flushDisplayPreviewRebuild();
-  assert.deepEqual(f.state.previewSourceImageData.__image16.data,
-    resizeDisplayPreview(again, f.context.getDisplayPreviewSize(again)).__image16.data, 'flushed at once');
-  assert.equal(f.context.displayPreviewRebuild, null);
+  // Exercise captureSnapshot's actual pending-job guard; the remaining
+  // history fields are covered by the existing dispatcher/history tests.
+  f.context.captureSnapshot = label => ({ label, refs: {
+    processedImageData: f.state.processedImageData, previewSourceImageData: f.state.previewSourceImageData
+  } });
+  const captured = f.context.captureSnapshotWithPendingDisplay('drag');
+  assert.equal(f.mainResamples.length, 0, 'pointerdown never flushes a whole-frame resample');
+  assert.equal(captured.refs.displayPreviewPending, true);
+  const other = image(1200, 800, 23);
+  f.state.processedImageData = other;
+  f.context.cancelDisplayPreviewRebuild();
+  await settle(); await settle();
+  assert.equal(captured.refs.displayPreviewPending, undefined, 'history finishes after leaving the frame');
+  assert.ok(captured.refs.processedImageData === again);
+  assert.deepEqual(captured.refs.previewSourceImageData.__image16.data,
+    filterDisplayImage(again, f.context.getDisplayPreviewSize(again)).__image16.data, 'same worker filter as the live preview');
+  assert.ok(f.state.processedImageData === other, 'late history completion cannot replace the live frame');
 }
 
 console.log('displayPreviewWiring: size-decided display targets, no input-path resample, hysteresis, prebuilt full-resolution previews, fallbacks and deferred whole-frame previews');
+
+// A brush patch while a snapshot waits must finish history with the restarted
+// build too; pruning that history meanwhile must not revive its display refs.
+{
+  const f = fixture();
+  f.context.applyProcessedImageToState(image(1200, 800));
+  f.context.applyProcessedImageToState(image(1200, 800, 7), { deferDisplay: true });
+  f.context.captureSnapshot = label => ({ label, refs: { processedImageData: f.state.processedImageData,
+    previewSourceImageData: f.state.previewSourceImageData } });
+  const kept = f.context.captureSnapshotWithPendingDisplay('kept');
+  const discarded = f.context.captureSnapshotWithPendingDisplay('discarded');
+  discarded.refs = { cold: true };
+  f.state.dustRemoval.revision++;
+  await settle(); await settle();
+  assert.equal(f.workerResamples.length, 2);
+  assert.ok(kept.refs.previewSourceImageData === f.state.previewSourceImageData, 'history follows the restarted build');
+  assert.equal(kept.refs.displayPreviewPending, undefined);
+  assert.deepEqual(discarded.refs, { cold: true }, 'late build cannot revive pruned history');
+}

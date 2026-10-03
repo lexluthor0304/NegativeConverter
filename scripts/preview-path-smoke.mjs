@@ -189,6 +189,23 @@ export async function runPreviewPathSmoke({ send, evaluate, waitFor, fail, insta
     await wheel(60);
     await quiet(`${label}: zoomed back`);
   };
+  const resizeDisplay = async (label, height, previews = 0, dpr = null) => {
+    const before = await evaluate(`({ state: window.__ncDisplay.state(), token: window.__ncDisplay.state().token, at: performance.now() })`);
+    if (dpr) await send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: dpr, mobile: false });
+    await evaluate(`Object.assign(document.getElementById('canvasContainer').style, { flex: '0 0 ${height}px', height: '${height}px' })`);
+    await until(label + ': target changed', `JSON.stringify(window.__ncDisplay.state().target) !== ${JSON.stringify(JSON.stringify(before.state.target))}`);
+    await quiet(label);
+    const after = await evaluate(`({ state: window.__ncDisplay.state(), token: window.__ncDisplay.state().token })`);
+    const work = await counts(before.at);
+    expect(work.full === 0 && work.preview === previews && work.detect === 0 && work.inpaint === 0,
+      label + ': unexpected work ' + JSON.stringify(work));
+    expect(after.token === before.token, label + ': token changed');
+    if (!previews) expect(after.state.counters.workerRebuilds + after.state.counters.bandedRebuilds >
+      before.state.counters.workerRebuilds + before.state.counters.bandedRebuilds, label + ': no rebuild');
+    expect(after.state.shown.width === after.state.target.width && after.state.shown.height === after.state.target.height,
+      label + ': new target not displayed ' + JSON.stringify(after));
+    console.log('ok: ' + label + ' ' + JSON.stringify({ work, token: after.token, counters: after.state.counters }));
+  };
   const boot = async (query, fileName) => {
     const origin = await evaluate('performance.timeOrigin');
     await send('Page.navigate', { url: `http://127.0.0.1:${port}/${query}` });
@@ -230,6 +247,7 @@ export async function runPreviewPathSmoke({ send, evaluate, waitFor, fail, insta
     // ---- Part 1: large-image rules (the fixture counts as >16 MP) ----
     await boot('?lang=en&largeImagePixels=1000000', 'preview-path-large.png');
     await quiet('large fixture idle', 3500);
+    await resizeDisplay('branch 3 preview-only resize', 410, 1);
     let mark = await now();
     expect((await counts(0)).full === 0, 'a >16 MP import converted at full resolution before export: ' + JSON.stringify(await counts(0)));
 
@@ -280,8 +298,8 @@ export async function runPreviewPathSmoke({ send, evaluate, waitFor, fail, insta
     const first = await exportPng(8, 'first export');
     const firstExport = await counts(mark);
     const rendered = await evaluate(`window.__previewPathProbe.events.filter(event => event.type === 'full').at(-1)`);
-    expect(firstExport.full === 1 && rendered && first.width === rendered.width && first.height === rendered.height
-      && first.width * first.height > 1_000_000,
+    expect(firstExport.full === 1 && rendered && first.width === SOURCE.width && first.height === SOURCE.height
+      && rendered.width === SOURCE.width && rendered.height === SOURCE.height,
     'the first export did not render the original exactly once: ' + JSON.stringify({ firstExport, rendered, first }));
 
     // Step-3 edits after an export invalidate nothing; a zoom neither.
@@ -292,6 +310,7 @@ export async function runPreviewPathSmoke({ send, evaluate, waitFor, fail, insta
     const step8 = await exportPng(8, 'step-3 export');
     const step16 = await exportPng(16, 'step-3 export');
     await zoomInAndOut('no repairs');
+    await resizeDisplay('branch 1 exact plane DPR and container resize', 550, 0, 1.5);
     const zoomed8 = await exportPng(8, 'export after zoom');
     const reused = await counts(mark);
     expect(reused.full === 0 && reused.preview === 0,
@@ -324,7 +343,7 @@ export async function runPreviewPathSmoke({ send, evaluate, waitFor, fail, insta
     mark = await now();
     const processing = await evaluate('window.__previewPathProbe.dustProcessing');
     await zoomInAndOut('repairs');
-    await evaluate(`(() => { window.dispatchEvent(new Event('resize')); })()`);
+    await resizeDisplay('branch 1 repaired plane resize', 410);
     await quiet('resize with repairs');
     const afterZoom = await exportPng(8, 'repaired export after zoom');
     const zoomRepairs = await counts(mark);
@@ -353,6 +372,16 @@ export async function runPreviewPathSmoke({ send, evaluate, waitFor, fail, insta
     const dragged = await drag(ramp(20, 40));
     expect(dragged.during.full === 0 && dragged.during.detect === 0 && dragged.during.inpaint === 0 && dragged.draws >= 10,
       'a dust-on drag converted at full resolution, detected, or painted too little while input continued: ' + JSON.stringify(dragged));
+    await until('drag preview landed before branch 2', 'window.__previewPathProbe.inFlight === 0', 1500);
+    const repairMark = await now();
+    const repairToken = await evaluate('window.__ncDisplay.state().token');
+    const repairTarget = await evaluate('JSON.stringify(window.__ncDisplay.state().target)');
+    await evaluate(`Object.assign(document.getElementById('canvasContainer').style, { flex: '0 0 550px', height: '550px' })`);
+    await until('branch 2 repair target changed', `JSON.stringify(window.__ncDisplay.state().target) !== ${JSON.stringify(repairTarget)}`);
+    expect(await evaluate('window.__ncDisplay.state().token') === repairToken, 'branch 2 changed the token');
+    const repairResizeWork = await counts(repairMark);
+    expect(repairResizeWork.full === 0 && repairResizeWork.preview === 0 && repairResizeWork.detect === 0,
+      'branch 2 resize added work before its existing repair pass: ' + JSON.stringify(repairResizeWork));
     await until('idle repair pass', `window.__previewPathProbe.count(${dragged.last}).detect >= 1`, 60_000);
     await quiet('idle repair settled', 3500);
     const idle = await evaluate(`(() => {
@@ -449,6 +478,7 @@ export async function runPreviewPathSmoke({ send, evaluate, waitFor, fail, insta
     await evaluate('window.__previewPathProbe.restore()');
 
     // ---- Part 2: 16 MP or less, Step-3 commits start no render ----
+    await send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
     await boot('?lang=en', 'preview-path-small.png');
     await quiet('small fixture idle (initial full render done)', 3500);
     expect((await counts(0)).full >= 1, 'the 16 MP-or-less fixture never rendered at full resolution: ' + JSON.stringify(await counts(0)));

@@ -215,7 +215,7 @@ function fixture({ width = 3000, height = 2000, repairs = false, largePreviewFra
     'reducedConversionInFlight', 'redrawForPreviewTier', 'leavePreviewTier', 'restoreNormalTierDisplay', 'onPreviewTierChange',
     'onPreviewTierSessionEnd', 'resetPreviewTierForActivation', 'resizeWebGLCanvas',
     'installDisplayFor', 'installDisplayPreview', 'cancelDisplayPreviewRebuild', 'rebuildDisplayPreview',
-    'flushDisplayPreviewRebuild', 'countMainResample', 'updateConversionTarget', 'conversionTargetFor',
+    'captureSnapshotWithPendingDisplay', 'countMainResample', 'updateConversionTarget', 'conversionTargetFor',
     'coreReprocessBusy', 'whenCoreReprocessIdle', 'noteCoreReprocessSettled', 'runCoreReprocess',
     'rerenderWithCoreControls', 'postPendingPreviewEarly', 'hasSeparateConversionPreview',
     'cancelScheduledFullResolutionRender', 'scheduleCoreReprocess', 'takeScheduledCoreReprocess',

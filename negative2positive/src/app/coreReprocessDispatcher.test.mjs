@@ -163,6 +163,7 @@ function schedulerFixture({ repairs = false, large = false, gpu = null } = {}) {
     }) },
     buildPreviewSourceImageData: image => image,
     buildHistogramSourceImageData: image => ({ sampleOf: image }),
+    installDisplayPreview: (full, preview) => { state.previewSourceImageData = preview; log.push('apply'); },
     webglState: { gl: null }, schedulePreviewUpdate: () => {},
     gpuPreviewScheduler: DISABLED_GPU_PREVIEW_SCHEDULER, gpuPreviewCanTake: () => false, gpuPreview: { status: 'none' },
     coreReprocessTimer: null, coreReprocessScheduled: null,
@@ -266,14 +267,17 @@ function schedulerFixture({ repairs = false, large = false, gpu = null } = {}) {
   // settings request merges into it, at the end-of-task gate and in the
   // busy lane's newest-wins slot alike.
   const f = schedulerFixture();
-  f.request(undefined, { full: false, displayResize: true });
+  f.request(undefined, { full: false, displayOnly: true });
   await Promise.resolve();
   f.conversions[0].resolve(f.result());
   await settle();
   assert.deepEqual(f.log, ['post:0', 'apply', 'carry', 'draw'], 'a lone resize carries the tile source');
   f.log.length = 0;
   f.clock.nextFrame();
-  f.request(undefined, { full: false, displayResize: true });
+  f.request(undefined, { full: false, displayOnly: true });
+  const scheduledResize = f.context.coreReprocessScheduled;
+  f.request(undefined, { full: false, displayOnly: true });
+  assert.ok(f.context.coreReprocessScheduled === scheduledResize, 'an already scheduled resize keeps its carry origin');
   f.request(5);
   await Promise.resolve();
   f.conversions[1].resolve(f.result());
@@ -284,7 +288,7 @@ function schedulerFixture({ repairs = false, large = false, gpu = null } = {}) {
   f.request(6);
   await Promise.resolve();
   f.clock.nextFrame();
-  f.request(undefined, { full: false, displayResize: true });
+  f.request(undefined, { full: false, displayOnly: true });
   assert.equal(f.context._coreReprocessPending.displayResize, true);
   f.request(7);
   assert.equal(f.context._coreReprocessPending.displayResize, false, 'a settings request merged in the slot clears it');
@@ -297,16 +301,14 @@ function schedulerFixture({ repairs = false, large = false, gpu = null } = {}) {
 }
 
 {
-  // The resize request itself marks the full-resolution pixels pending, which
-  // turns currentConvertedPreviewSource() from them to the preview raster: the
-  // tile sampled the full-resolution pixels, and those are what it carries.
+  // A display-only request keeps the current full plane and carries the tile
+  // sampled from it, without marking that plane stale.
   const f = schedulerFixture();
   const full = { width: 400, height: 300, name: 'full' };
   const preview = { width: 200, height: 150, name: 'shown preview' };
   Object.assign(f.state, { processedImageData: full, processedImageDataIsPreview: false, previewSourceImageData: preview });
-  f.request(undefined, { full: false, displayResize: true });
-  assert.equal(f.state.fullResolutionPending, true);
-  assert.equal(f.context.currentConvertedPreviewSource(), preview);
+  f.request(undefined, { full: false, displayOnly: true });
+  assert.equal(f.context.currentConvertedPreviewSource(), full);
   await Promise.resolve();
   f.conversions[0].resolve(f.result());
   await settle();
@@ -320,7 +322,7 @@ function schedulerFixture({ repairs = false, large = false, gpu = null } = {}) {
   f.clock.nextFrame();
   f.request(5);
   await Promise.resolve();
-  f.request(undefined, { full: false, displayResize: true });
+  f.request(undefined, { full: false, displayOnly: true });
   assert.equal(f.context._coreReprocessPending.displayResize, true);
   f.conversions[1].resolve(f.result());
   await settle();
@@ -688,7 +690,7 @@ for (const earlyPost of [false, true]) {
     localExposure: null, look: null, expiredAnalysis: null, frameMetadata: null, autoFrame: { lastDiagnostics: null } });
   Object.assign(f.context, { SNAPSHOT_SCALAR_KEYS: ['coreExposure'], SNAPSHOT_REF_KEYS: ['processedImageData'],
     structuredClone, createSprocketEdgeSettings: () => null, sanitizeFrameMetadata: () => null,
-    flushDisplayPreviewRebuild: () => {}, dustStateSettled: () => false, cropDetection: null });
+    captureSnapshotWithPendingDisplay: () => {}, dustStateSettled: () => false, cropDetection: null });
   vm.runInContext(functionSource('captureSnapshot'), f.context);
   const snapshot = f.context.captureSnapshot('coreExposure');
   assert.equal(f.commits.length, 1, 'taking a snapshot commits the plane');

@@ -30,6 +30,8 @@ export function emptyDisplayProxySpill() {
 // captured, nothing spills, and nothing waits on the original.
 export function displaySessionStubs(overrides = {}) {
   return {
+    displayViewportPending: false, prepareBeforeAfterReference: () => {},
+    captureSnapshotWithPendingDisplay: () => null,
     ensureSourcePromise: null, preparingOriginal: 0, displaySourceRequest: null,
     displaySessionDiagnostics: displaySessionDiagnosticsStub(),
     displayProxySpill: emptyDisplayProxySpill(),

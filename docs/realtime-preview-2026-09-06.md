@@ -535,3 +535,31 @@ Chrome では `compare-preview-smoke.mjs`（DPR 2、8.6 MP）が読み込みの�
 フラットフィールド・端の領域が、書き出しの同じ範囲、または基底の解析での変換と
 バイト単位で一致）。Chrome smoke は `zoom-detail-smoke.mjs`（`--zoom-detail-only`）。
 60 MP の時間とメモリは #230 の S4（等倍の段を追加）で測る。
+
+
+### #229 review: comparison preparation and viewport settle
+
+The before/after reference is requested from the preview worker outside the
+input task after conversion or a target change. It is cached by target and keeps
+only the 8-bit negative. An early press records the comparison intent; the
+reply shows only if that target is still current and the comparison is still
+active. Worker failure uses the compatibility resample in the deferred task.
+
+Snapshot capture never flushes a pending full-frame display resample. It keeps
+the visible planes and the pending job, then completes the snapshot's display
+references asynchronously with the worker/banded result. A restore before that
+completion restarts the display rebuild. A discarded/cold history entry is not
+revived by a late reply. Exact repair planes discard unused worker-attached
+`__displayPreview` planes before entering state or history.
+
+Viewport changes blocked by crop, comparison or Steps 1–2 are remembered and
+retried on exit/Step 3. Display-only conversions preserve the exact plane and
+its current flag if an exact render lands first; repaired exact planes rebuild
+their display from the repaired pixels. Neither path repeats an exact conversion.
+
+Regression coverage: `beforeAfterPreparation.test.mjs`,
+`displayPreviewWiring.test.mjs`, `previewPathRouting.test.mjs` and
+`coreReprocessDispatcher.test.mjs`. The targeted comparison smoke rejects CPU
+settle fallback, measures first presses, and hashes the displayed GL/CPU frame
+on reopen. The preview-path smoke drives container resizes and requires the
+first export and the worker's full-size label to match the known source size.

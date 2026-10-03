@@ -2998,7 +2998,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // that same object when the commit lands.
       requestCorePreviewCommit();
       // ...and the display preview of that frame, not of the one before it.
-      flushDisplayPreviewRebuild();
+      const pendingSnapshot = captureSnapshotWithPendingDisplay(label);
+      if (pendingSnapshot) return pendingSnapshot;
       const settings = {};
       for (const key of SNAPSHOT_SCALAR_KEYS) {
         settings[key] = state[key];
@@ -3228,6 +3229,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           frame: snapshot.frame, previewOnly,
           processedImageData: state.processedImageData, conversionSourceImageData: state.conversionSourceImageData
         }));
+        if (r.displayPreviewPending) rebuildDisplayPreview(state.processedImageData, getDisplayPreviewSize(state.processedImageData, undefined, 'normal'));
         if (reprocess && usesSilverCoreConversion(state)) {
           // The restored frame is on screen in the next frame. Its pixels can
           // still lag its settings (captured while a reprocess was pending),
@@ -3960,6 +3962,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
     function goToStep(step) {
       state.currentStep = step;
+      if (step === 3 && displayViewportPending) scheduleDisplayPreviewResize();
       if (step === 2 && requiresFilmBase()) {
         setStep2Mode(suggestStep2Mode());
       }
@@ -3974,20 +3977,40 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       return Boolean(state.croppedImageData || state.originalImageData);
     }
 
-    // The Step-3 "before": the display-size conversion preview (<= 4 MP). A
-    // display target (#248) holds no pixels here, so its negative is resampled
-    // from the level once, on the first press, and kept for the photo's later
-    // presses; a missing preview is built once from the source. Never the
-    // full-resolution source itself.
+    // Warm the reference outside input. A press arriving before the worker
+    // reply records intent; only the current target may show that reply.
+    function prepareBeforeAfterReference() {
+      const key = state.conversionPreviewImageData || state.conversionSourceImageData;
+      if (!key || state.currentStep < 3 || beforeAfterBuiltReference?.key === key) return;
+      const entry = { key, image: null };
+      beforeAfterBuiltReference = entry;
+      setTimeout(async () => {
+        if (beforeAfterBuiltReference !== entry) return;
+        try {
+          entry.image = isDisplayTarget(key)
+            ? await convertPreviewFrameInWorker.displayNegative({ ...previewRequestImage(key), settings: buildRouterSettings(state),
+              options: { preview: true, analysisImageData: getColorAnalysisSample(state) } })
+            : buildPreviewSourceImageData(key);
+        } catch {
+          // Worker unavailable: keep the compatibility resample off the press.
+          if (beforeAfterBuiltReference !== entry) return;
+          entry.image = isDisplayTarget(key) ? displayNegativeOfTarget(key) : buildPreviewSourceImageData(key);
+        }
+        if (beforeAfterBuiltReference !== entry
+          || key !== (state.conversionPreviewImageData || state.conversionSourceImageData)) return;
+        // The reference needs only 8 bits; never retain the worker's extra plane.
+        if (entry.image !== key) delete entry.image.__image16;
+        if (state.beforeAfterActive && showBeforeAfterReference(entry.image)) renderHistogram(entry.image);
+      }, 0);
+    }
+
     function getBeforeAfterReferenceImageData() {
       const preview = state.conversionPreviewImageData;
       if (preview && !isDisplayTarget(preview)) return preview;
       const key = preview || state.conversionSourceImageData;
       if (!key) return null;
-      if (beforeAfterBuiltReference?.key !== key) {
-        beforeAfterBuiltReference = { key, image: preview ? displayNegativeOfTarget(preview) : buildPreviewSourceImageData(key) };
-      }
-      return beforeAfterBuiltReference.image;
+      prepareBeforeAfterReference();
+      return beforeAfterBuiltReference?.key === key ? beforeAfterBuiltReference.image : null;
     }
 
     // The 8-bit display negative of a display target, as the preview worker
@@ -4059,7 +4082,6 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
       // Steps 1-2: the negative is already on screen, nothing to draw.
       const referenceImageData = state.currentStep >= 3 ? getBeforeAfterReferenceImageData() : null;
-      if (state.currentStep >= 3 && !referenceImageData) return;
 
       state.beforeAfterActive = true;
       state.beforeAfterSource = source;
@@ -4079,6 +4101,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
       state.beforeAfterActive = false;
       state.beforeAfterSource = null;
+      if (displayViewportPending) scheduleDisplayPreviewResize();
       const shown = Boolean(beforeAfterCanvas && beforeAfterCanvas.style.display !== 'none');
       if (beforeAfterCanvas) beforeAfterCanvas.style.display = 'none';
       if (beforeAfterBtn) {
@@ -4111,6 +4134,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     function updateBeforeAfterButtonState() {
+      prepareBeforeAfterReference();
       if (!beforeAfterBtn) return;
 
       const enabled = canActivateBeforeAfter();
@@ -5002,6 +5026,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (current && current !== source && next !== source && !reducedDisplayImages.has(current)
         && current.__displayOf === level && displaySizeServes(current, next)) return false;
       state.conversionPreviewImageData = next;
+      prepareBeforeAfterReference();
       return true;
     }
 
@@ -5076,7 +5101,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         && pending.target.height === target.height && pending.revision === state.dustRemoval.revision) return;
       const job = { processed, target: { ...target }, revision: state.dustRemoval.revision };
       displayPreviewRebuild = job;
-      const isCurrent = () => displayPreviewRebuild === job && state.processedImageData === processed;
+      const isCurrent = () => (displayPreviewRebuild === job && state.processedImageData === processed) || Boolean(job.snapshots?.length);
       const banded = () => {
         displayCounters.bandedRebuilds += 1;
         return resizeDisplayPreviewInBands(processed, target, { isCurrent });
@@ -5089,12 +5114,26 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         }, () => (isCurrent() ? banded() : null));
       build.then((preview) => {
         if (!preview || !isCurrent()) return;
-        displayPreviewRebuild = null;
-        if (job.revision !== state.dustRemoval.revision) {
-          // Patched in place while it was built: the patched rows may be missing.
+        if (displayPreviewRebuild === job && state.processedImageData === processed
+          && job.revision !== state.dustRemoval.revision) {
+          // A live brush patch invalidates the display for history as well.
+          displayPreviewRebuild = null;
           rebuildDisplayPreview(processed, getDisplayPreviewSize(processed, undefined, 'normal'));
+          displayPreviewRebuild.snapshots = job.snapshots;
+          job.snapshots = null;
           return;
         }
+        for (const snapshot of job.snapshots || []) {
+          if (!snapshot.refs.displayPreviewPending) continue; // History may have gone cold meanwhile.
+          if (snapshot.refs.processedImageData === snapshot.refs.previewSourceImageData) snapshot.refs.processedImageData = preview;
+          snapshot.refs.previewSourceImageData = preview;
+          snapshot.refs.webglSourceImageData = preview;
+          snapshot.refs.histogramSourceImageData = buildHistogramSourceImageData(preview);
+          delete snapshot.refs.displayPreviewPending;
+        }
+        job.snapshots = null;
+        if (displayPreviewRebuild !== job || state.processedImageData !== processed) return;
+        displayPreviewRebuild = null;
         installDisplayPreview(processed, preview);
         // The display preview changed: draw it, and in a CPU mode settle it
         // again with the exact colour model (#242).
@@ -5106,18 +5145,24 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       });
     }
 
-    // Finishes a pending rebuild at once: history and photo sessions capture the
-    // display preview with its frame, so it must be the frame's own.
-    function flushDisplayPreviewRebuild() {
+    // Capture the visible planes now and complete their references when the
+    // pending job lands. Restoring before then restarts the asynchronous build.
+    function captureSnapshotWithPendingDisplay(label) {
       const job = displayPreviewRebuild;
-      if (!job) return;
+      if (!job) return null;
       displayPreviewRebuild = null;
-      if (state.processedImageData !== job.processed) return;
-      const preview = resizeDisplayPreview(job.processed, getDisplayPreviewSize(job.processed, undefined, 'normal'));
-      installDisplayPreview(job.processed, countMainResample(job.processed, preview));
+      let snapshot;
+      try { snapshot = captureSnapshot(label); }
+      finally { displayPreviewRebuild = job; }
+      if (!snapshot.refs.cold) {
+        snapshot.refs.displayPreviewPending = true;
+        (job.snapshots ||= []).push(snapshot);
+      }
+      return snapshot;
     }
 
     let displayPreviewResizeTimer = null;
+    let displayViewportPending = false;
     // The settle hook of every viewport change. It records the conversion
     // source it was asked for and does nothing once that has been replaced: a
     // new source (photo switch, rotate, crop) builds its own display preview,
@@ -5140,6 +5185,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // holds no pixels), and a display preview within the hysteresis band is kept.
     function refreshDisplayPreviewForViewport() {
       const source = state.conversionSourceImageData;
+      if (state.currentStep < 3 || state.cropping || state.beforeAfterActive) {
+        displayViewportPending = Boolean(source || state.sourcePending);
+        return;
+      }
+      displayViewportPending = false;
       if (!source && state.sourcePending && state.currentStep >= 3 && !state.cropping && !state.beforeAfterActive
         && previewTier !== 'reduced') {
         // A Tier B session (#249): the preview worker resamples its display
@@ -6888,6 +6938,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         const preview = state.conversionPreviewImageData;
         const shown = state.previewSourceImageData;
         return {
+          token: coreReprocessToken,
           level: level ? { width: level.width, height: level.height, k: displayLevelGeometry(level).k,
             isSource: level === state.conversionSourceImageData } : null,
           target: preview ? { width: preview.width, height: preview.height, displayTarget: isDisplayTarget(preview) } : null,
@@ -7190,6 +7241,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         overlayBox: displayOverlay ? ['left', 'top', 'width', 'height'].map(key => displayOverlay.style[key]) : null,
         glPhoto: glBorder.photo ? { ...glBorder.photo } : null,
         comparison: {
+          ready: Boolean(beforeAfterBuiltReference?.image && beforeAfterBuiltReference.key === (state.conversionPreviewImageData || state.conversionSourceImageData)),
           shown: Boolean(beforeAfterCanvas && beforeAfterCanvas.style.display === 'block'),
           cached: Boolean(beforeAfterCanvasSource),
           box: beforeAfterCanvas ? ['left', 'top', 'width', 'height'].map(key => beforeAfterCanvas.style[key]) : null
@@ -8517,6 +8569,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // The exact frame of a repair pass, applied while the repaired preview
     // stays on screen: detection replaces the view once it has repaired it.
     function applyExactPlaneKeepingView(processed) {
+      delete processed.__displayPreview;
       state.processedImageData = processed;
       state.processedImageDataIsPreview = false;
       state.fullResolutionPending = false;
@@ -8674,7 +8727,16 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
           const replacedSource = displayResizeReplaces(options);
           const repairs = hasFrameRepairs();
-          if (hasSmallPreview || superseded) {
+          if (options.displayOnly && !superseded && state.processedImageData && !state.processedImageDataIsPreview
+            && !state.fullResolutionPending) {
+            // An exact render won the race. Keep its current export plane.
+            // Repairs belong to that plane, so rebuild from it when needed.
+            if (repairs) rebuildDisplayPreview(state.processedImageData, getDisplayPreviewSize(state.processedImageData));
+            else installDisplayPreview(state.processedImageData, previewProcessed);
+            carryStudioThumbnailSource(replacedSource);
+            updatePreview();
+            scheduleFullUpdate();
+          } else if (hasSmallPreview || superseded) {
             // Preview source is smaller — update preview display path only.
             // A downgraded request (>16 MP) drops a full-resolution plane it
             // would leave stale, unless a brush paints on that plane.
@@ -9166,7 +9228,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // A conversion carries the newest settings now; it settles a GPU frame on screen.
       gpuPreviewScheduler.handOver(token);
       const wasFull = coreReprocessScheduled?.full;
-      coreReprocessScheduled = { full, token, sourceRef: state.conversionSourceImageData, displayResize, displayResizeFrom };
+      coreReprocessScheduled = { full, token, sourceRef: state.conversionSourceImageData, displayOnly, displayResize, displayResizeFrom };
       if (full) {
         // Settings that need a full-resolution pass still settle for 70 ms.
         clearCoreReprocessTimer();
@@ -17487,6 +17549,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       }
 
       state.cropping = false;
+      if (displayViewportPending) scheduleDisplayPreviewResize();
       state.croppingActive = false;
       state.cropStart = null;
       state.cropDraft = null;

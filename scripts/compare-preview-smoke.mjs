@@ -118,10 +118,11 @@ export async function runComparePreviewSmoke({ send, evaluate, waitFor, wait, fa
     if (!withinCap(settled.frame.display) || settled.frame.display[0] >= 3600) fail('the display preview is not display-size: ' + JSON.stringify(settled.frame));
     if (JSON.stringify(settled.frame.handle) !== JSON.stringify(settled.frame.display)) fail('state.displayImageData is not the display-size frame: ' + JSON.stringify(settled.frame));
     if (!settled.parity.equal) fail('the settled frame differs from applyPreparedAdjustmentsToBuffer(preview, full): ' + JSON.stringify(settled.parity));
-    if (settled.counters.settleWorker < 1) fail('a display preview above 1 MP did not settle in the export worker: ' + JSON.stringify(settled.counters));
+    if (settled.counters.settleWorker < 1 || settled.counters.settleSync !== 0) fail('a display preview above 1 MP did not settle in the export worker: ' + JSON.stringify(settled.counters));
     const [mainW, mainH] = settled.frame.canvases.main, [shownW, shownH] = settled.frame.display;
     if (mainW < shownW || mainH <= shownH || mainW > shownW * 1.25 || mainH > shownH * 2) fail('#canvas is not the display-size bordered frame: ' + JSON.stringify(settled.frame.canvases));
 
+    await waitFor('comparison reference prepared', `window.__ncDisplay.frame().comparison.ready`);
     const result = await evaluate(`(async () => {
       const slider = document.getElementById('wbR'), compare = document.getElementById('beforeAfterBtn');
       const probe = window.__comparePreviewProbe, hash = window.__comparePreviewHash;
@@ -131,7 +132,7 @@ export async function runComparePreviewSmoke({ send, evaluate, waitFor, wait, fa
         probe.writes.length = 0; probe.recording = true;
         const start = performance.now(); action(); const ms = performance.now() - start;
         probe.recording = false;
-        return { ms, writes: probe.writes.splice(0).filter(w => w.id !== 'histogramCanvas') };
+        return { start, ms, writes: probe.writes.splice(0).filter(w => w.id !== 'histogramCanvas') };
       };
       // Input, not change: this isolates synchronous adjustment freshness from
       // asynchronous SilverCore conversion and does not schedule a full pass.
@@ -140,6 +141,7 @@ export async function runComparePreviewSmoke({ send, evaluate, waitFor, wait, fa
       input(1.35); await nextFrame();
       const recent = hash();
       const firstPress = writesDuring(() => compare.click());
+      firstPress.paintMs = await new Promise(resolve => requestAnimationFrame(() => resolve(performance.now())));
       const reference = hash('beforeAfterCanvas'), underComparison = hash();
       const comparisonFrame = window.__ncDisplay.frame();
       const firstExit = writesDuring(() => compare.click());
@@ -162,6 +164,7 @@ export async function runComparePreviewSmoke({ send, evaluate, waitFor, wait, fa
     })()`);
     console.log('compare preview:', JSON.stringify({ ...result, firstPress: { ms: result.firstPress.ms, writes: result.firstPress.writes },
       secondPress: { ms: result.secondPress.ms, writes: result.secondPress.writes } }));
+    if (result.firstPress.ms > 16 || result.firstPress.paintMs - result.firstPress.start > 50) fail('first comparison press exceeded entry/paint budget: ' + JSON.stringify(result.firstPress));
     if (!result.cpuVisible || result.glVisible || result.border !== 'true') fail('compare scenario did not use the CPU border display');
     if (result.baseline === result.recent || result.reference === result.recent) fail('compare fixture did not distinguish changed settings/reference');
     if (result.underComparison !== result.recent) fail('entering the comparison drew over #canvas: ' + JSON.stringify(result));
@@ -298,23 +301,72 @@ export async function runComparePreviewSmoke({ send, evaluate, waitFor, wait, fa
       const input = document.getElementById('fileInput'); input.files = transfer.files; input.dispatchEvent(new Event('change', { bubbles: true }));
     })()`);
     await waitFor('compare session reopened', ready, 120000);
+    await waitFor('reopened comparison reference prepared', `window.__ncDisplay.frame().comparison.ready`);
     const regenerated = await evaluate(`(async () => {
       const border = document.getElementById('sprocketPreviewBtn'); if (border.getAttribute('aria-pressed') !== 'true') border.click();
       const slider = document.getElementById('wbR'); slider.value = '1.2'; slider.dispatchEvent(new Event('input', { bubbles: true }));
       await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-      const before = window.__comparePreviewHash();
+      const hashShown = () => {
+        const shown = window.__ncDisplay.shownFrame();
+        let hash = 2166136261;
+        for (let i = 0; i < shown.data.length; i++) hash = Math.imul(hash ^ shown.data[i], 16777619);
+        return [shown.width, shown.height, hash >>> 0].join(':');
+      };
+      const before = hashShown();
       const compare = document.getElementById('beforeAfterBtn'); compare.click();
       const during = window.__ncDisplay.frame();
       compare.click();
-      return { before, after: window.__comparePreviewHash(), during, frame: window.__ncDisplay.frame() };
+      return { before, after: hashShown(), during, frame: window.__ncDisplay.frame() };
     })()`);
     // The new session shows the photo on the GPU again (coreUseWebGL is a
     // recipe setting), where the border is a GL underlay (#253), not the 2D
     // border canvas: the border regenerates on whichever surface shows it.
     const shownBorder = regenerated.frame.surface === 'gl' ? regenerated.frame.canvases.glBorder : regenerated.frame.canvases.borderFrame;
-    if (regenerated.before !== regenerated.after || area(regenerated.during.canvases.comparison) <= 1 || area(shownBorder) <= 1) {
+    if (regenerated.frame.comparison.shown !== false || regenerated.before !== regenerated.after || area(regenerated.during.canvases.comparison) <= 1 || area(shownBorder) <= 1) {
       fail('border/compare canvases did not regenerate after reopen: ' + JSON.stringify(regenerated));
     }
+    await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en&largeImagePixels=1000000` });
+    await waitFor('large-route compare boot', `!!window.__ncDisplay?.frame && !!document.getElementById('studioImportAutoCrop')`);
+    await evaluate(`(async () => {
+      for (const id of ['studioImportAutoCrop', 'importFilmTypeAuto', 'autoRollOnImport']) {
+        const input = document.getElementById(id); if (input?.checked) input.click();
+      }
+      const transfer = new DataTransfer();
+      for (let n = 0; n < 2; n++) {
+        const c = document.createElement('canvas'); c.width = 2400; c.height = 1600;
+        const ctx = c.getContext('2d'); ctx.fillStyle = n ? '#b07040' : '#a06030'; ctx.fillRect(0, 0, c.width, c.height);
+        const blob = await new Promise(resolve => c.toBlob(resolve));
+        transfer.items.add(new File([blob], 'compare-large-' + n + '.png', { type: 'image/png' }));
+      }
+      const input = document.getElementById('fileInput'); input.files = transfer.files;
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    })()`);
+    await waitFor('large-route compare import', `${ready} && window.__ncDisplay.frame().comparison.ready`, 120000);
+    const press = async label => {
+      await waitFor(label + ': ready', `${ready} && window.__ncDisplay.frame().comparison.ready`, 120000);
+      const target = await evaluate('window.__ncDisplay.state().target');
+      if (!target.displayTarget) fail(label + ': fixture did not use a pixel-less display target');
+      const timing = await evaluate(`(async () => {
+        const button = document.getElementById('beforeAfterBtn');
+        const start = performance.now(); button.click(); const ms = performance.now() - start;
+        const shown = window.__ncDisplay.frame().comparison.shown;
+        const paintMs = await new Promise(resolve => requestAnimationFrame(() => resolve(performance.now() - start)));
+        button.click();
+        return { ms, paintMs, shown, exited: !window.__ncDisplay.frame().comparison.shown };
+      })()`);
+      if (!timing.shown || !timing.exited || timing.ms > 16 || timing.paintMs > 50) fail(label + ': first press failed ' + JSON.stringify(timing));
+      console.log('ok: first compare after ' + label + ' ' + JSON.stringify(timing));
+    };
+    await evaluate(`document.getElementById('rotateRightBtn').click()`);
+    await wait(500);
+    await press('rotate');
+    await evaluate(`document.querySelector('.file-list-name[data-index="1"]').click()`);
+    await waitFor('large-route second photo', `document.getElementById('studioFilename').textContent === 'compare-large-1.png'`, 120000);
+    await press('switch');
+    const targetBefore = await evaluate(`JSON.stringify(window.__ncDisplay.state().target)`);
+    await send('Emulation.setDeviceMetricsOverride', { width: 1000, height: 650, deviceScaleFactor: 1, mobile: false });
+    await waitFor('comparison target resized', `JSON.stringify(window.__ncDisplay.state().target) !== ${JSON.stringify(targetBefore)}`);
+    await press('resize');
     console.log('ok: settled CPU frames are exact, display-size and worker-made; #canvas holds the drawn buffer; one negative write per import; the comparison is a cached display-size element released on switch and close');
   } finally {
     await evaluate(`window.__restoreCompareHistogramProbe?.()`);
