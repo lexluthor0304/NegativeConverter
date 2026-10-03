@@ -166,9 +166,16 @@ consumer that holds it:
    it. Residency follows the client's `alive` lifetime independently of
    `maskTag`: a tagless detect on a new source, or a cleared reuse tag, still
    retains planes and the estimated heap after the reply, pinned or unpinned.
+   A queued smaller detect/inpaint source must not reduce the count before
+   the old source is replaced. Private plane estimates keep a conservative
+   maximum for the worker's lifetime, with shared 16-bit views excluded;
+   actual termination ends residency and idle disposal clears the estimate.
    Pinned or pending dust work is never evicted. `workerResidentsLedger.test.mjs`
    covers seeded → tagless request → reply → unpin → termination on small
    copied and shared planes; shared 16-bit views remain counted with their page owner.
+   `dustWorkerMemoryResize.test.mjs` pauses the real processor before source
+   replacement, queues 6×4 detect/inpaint behind pinned 24×16 planes, and
+   checks the estimate through reply, unpin, disposal and a fresh small worker.
    Roll-frame and page-path analyzer pools register their idle realms
    between frames and during import retries, and remove the registration at
    `finish()`. Acquired workers are covered by the frame's lane claim.

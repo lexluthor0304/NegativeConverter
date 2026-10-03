@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {
   parseImageDimensions, readImageHeaderDimensions, imagePixelsForBatch, imagePixelsWithSiblings, rememberImageDimensions,
-  halfDecodeFullSize, UNKNOWN_IMAGE_PIXELS, PHOTOMETRIC_CFA, PHOTOMETRIC_LINEAR_RAW
+  halfDecodeFullSize, resolveHalfDecodeFullSize, knownImageDimensions, UNKNOWN_IMAGE_PIXELS, PHOTOMETRIC_CFA, PHOTOMETRIC_LINEAR_RAW
 } from './imageDimensions.js';
 import { planBatchParallelism } from './batchExportScheduler.js';
 import { buildLinearDngParts } from './linearDng.js';
@@ -70,6 +70,23 @@ for (const report of [[NaN, Infinity], [Infinity, 320], [480, NaN]]) {
 }
 assert.deepEqual(halfDecodeFullSize(240, 160, 0, 0, { photometric: PHOTOMETRIC_LINEAR_RAW }), { width: 240, height: 160 }, 'a LinearRaw IFD is never halved');
 assert.deepEqual(halfDecodeFullSize(120, 80, 240, 160, { photometric: PHOTOMETRIC_CFA }), { width: 240, height: 160 }, 'a CFA IFD is');
+const knownFullSize = { width: 240, height: 160 };
+assert.deepEqual(resolveHalfDecodeFullSize(240, 160, { knownFullSize, metadataSize: { width: 480, height: 320 } }), knownFullSize,
+  'an earlier full decode defeats misleading doubled metadata');
+assert.deepEqual(resolveHalfDecodeFullSize(120, 80, { knownFullSize }), knownFullSize, 'missing metadata cannot erase a proven half match');
+assert.equal(resolveHalfDecodeFullSize(120, 80), null, 'unknown shrinkage requires a full decode');
+assert.equal(resolveHalfDecodeFullSize(100, 70, { knownFullSize, metadataSize: { width: 200, height: 140 } }), null,
+  'mismatched earlier full evidence is not replaced by metadata');
+const cfaSize = { ...knownFullSize, photometric: PHOTOMETRIC_CFA };
+assert.deepEqual(resolveHalfDecodeFullSize(120, 80, { headerSize: cfaSize, metadataSize: { width: 120, height: 80 } }), knownFullSize,
+  'metadata at decoded dimensions cannot hide the independent CFA half match');
+assert.deepEqual(resolveHalfDecodeFullSize(240, 160, { headerSize: cfaSize, metadataSize: { width: 480, height: 320 } }), knownFullSize,
+  'the independent CFA full match defeats misleading metadata');
+const headerOnly = new File([png], 'header-only.png');
+await imagePixelsForBatch(headerOnly);
+assert.equal(knownImageDimensions(headerOnly), null, 'a memory-planning header is not an earlier full decode');
+rememberImageDimensions(headerOnly, knownFullSize);
+assert.deepEqual(knownImageDimensions(headerOnly), knownFullSize);
 
 // The app's own LinearRaw DNG export, 240x160, re-imported with a recipe
 // whose tile takes a half-size decode (#247 1b). LibRaw cannot halve it and

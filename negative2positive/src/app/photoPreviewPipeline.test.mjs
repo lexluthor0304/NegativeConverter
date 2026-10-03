@@ -7,6 +7,9 @@ import { applyPreparedAdjustmentsToBuffer, applyPreparedAdjustmentsToBuffer16 } 
 import { markOwnedPlanes, planeBuffersOf, sharesPlaneBuffers } from './planeRelease.js';
 import { reducedTileGeometry, renderReducedGeometry, tileGeometryKey } from './reducedGeometry.js';
 import { sanitizeCropRect, normalizeAngleDegrees, rotatedDimensions } from './imageGeometry.js';
+import { isRawLikeFileName } from './imageFileLoaders.js';
+import { knownImageDimensions, resolveHalfDecodeFullSize } from './imageDimensions.js';
+import { ROLL_MONOCHROME } from './rollFilmType.js';
 
 // Execute the real orchestration with actual downsampling/final adjustments.
 // Only expensive conversion, Lensfun and AI operations are substituted. Their
@@ -25,7 +28,8 @@ function functionSource(name) {
 // roll tiles (#247); everything else is a stub below.
 const runtime = ['processFileWithSettings', 'renderPreviewFromWorkingImage', 'removeFrameDust', 'frameWantsAutoWhiteBalance',
   'applyFrameAutoWhiteBalance', 'applyFrameExpiredAnalysis', 'tileAnalysisReference', 'resolveLensCorrection',
-  'lensCorrectionActive', 'tileRecipeSettled', 'perPhotoSettingsFallback', 'expiredImportKeepsFullFrame']
+  'lensCorrectionActive', 'tileRecipeSettled', 'perPhotoSettingsFallback', 'expiredImportKeepsFullFrame',
+  'reconcileHalfSizeImage', 'autoFrameDetectionFilmType']
   .map(functionSource).join('\n');
 const noop = () => {};
 const identity = Uint8Array.from({ length: 256 }, (_, value) => value);
@@ -104,7 +108,8 @@ function fixture({ lens = false, brush = false, dust = false, width = 600, heigh
     usesSilverCoreConversion: () => false,
     sanitizePresetType: type => type,
     safeStorageGet: () => 'off',
-    markOwnedPlanes, planeBuffersOf, sharesPlaneBuffers
+    markOwnedPlanes, planeBuffersOf, sharesPlaneBuffers,
+    isRawLikeFileName, knownImageDimensions, resolveHalfDecodeFullSize, ROLL_MONOCHROME
   });
   vm.runInContext(runtime, context);
   return { context, calls, image, corrected, mapping, settings, file };

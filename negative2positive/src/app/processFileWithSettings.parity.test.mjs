@@ -21,6 +21,9 @@ const { applyPreparedAdjustmentsToBuffer, applyPreparedAdjustmentsToBuffer16 } =
 const { markOwnedPlanes, planeBuffersOf, sharesPlaneBuffers, releaseOwnedPlanes, configurePlaneRelease } = await import('./planeRelease.js');
 const { reducedTileGeometry, renderReducedGeometry, tileGeometryKey } = await import('./reducedGeometry.js');
 const { HEAD_PROCESS_FILE_WITH_SETTINGS } = await import('./processFileWithSettings.reference.mjs');
+const { ROLL_MONOCHROME } = await import('./rollFilmType.js');
+const { knownImageDimensions, resolveHalfDecodeFullSize } = await import('./imageDimensions.js');
+const { isRawLikeFileName } = await import('./imageFileLoaders.js');
 
 const source = readFileSync(new URL('./main.js', import.meta.url), 'utf8');
 function functionSource(name) {
@@ -31,7 +34,8 @@ function functionSource(name) {
 const current = ['processFileWithSettings', 'removeFrameDust', 'frameWantsAutoWhiteBalance', 'applyFrameAutoWhiteBalance',
   'normalizeViewedWhiteBalance', 'normalizeSliderValue',
   'applyFrameExpiredAnalysis', 'resolveLensCorrection', 'lensCorrectionActive', 'tileRecipeSettled', 'perPhotoSettingsFallback',
-  'expiredImportKeepsFullFrame', 'renderPreviewFromWorkingImage', 'tileAnalysisReference'].map(functionSource).join('\n');
+  'expiredImportKeepsFullFrame', 'renderPreviewFromWorkingImage', 'tileAnalysisReference',
+  'reconcileHalfSizeImage', 'autoFrameDetectionFilmType'].map(functionSource).join('\n');
 
 const exportSteps = {
   rotate: applyRotationToImageData,
@@ -138,6 +142,7 @@ function run(fn, { base, saved, options, dust, automatic }) {
   const file = { name: 'frame.dng', size: 1 };
   const item = { file, settings: saved ? structuredClone(saved) : null, automaticSettings: automatic, studioColors: { coreExposure: 7 } };
   const context = vm.createContext({
+    ROLL_MONOCHROME, knownImageDimensions, resolveHalfDecodeFullSize, isRawLikeFileName,
     // A photo left inside a two-stage window (#255): none here.
     pendingGeometryEdits: () => null, withPendingEdits: (item, settings) => settings,
     state: { fileQueue: [item], dustRemoval: { enabled: dust, strength: 4, maxParticleSize: 30 }, autoFrame: { enabled: true },

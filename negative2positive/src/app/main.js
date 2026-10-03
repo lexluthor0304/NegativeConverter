@@ -153,7 +153,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     import { renderFileList, setFileListRowDirty } from './fileListView.js';
     import { normalizeFileListSort, orderedFileIndices, selectionRangeIndices } from './fileListOrder.js';
     import { createSprocketFrameCache } from './sprocketFrameCache.js';
-    import { imagePixelsForBatch, imagePixelsWithSiblings, importPixelsForRoll, rememberImageDimensions, knownImageDimensions, rawDecodePlan } from './imageDimensions.js';
+    import { imagePixelsForBatch, imagePixelsWithSiblings, importPixelsForRoll, rememberImageDimensions, knownImageDimensions, resolveHalfDecodeFullSize, rawDecodePlan } from './imageDimensions.js';
     import {
       TWO_STAGE_MIN_MP_DEFAULT, twoStageMinPixels, stageTwoStartMode, createExactGeometry, windowEdits, overlayWindowEdits,
       geometryEdits, hasWindowEdits, analysisAreaEdited, confirmedImageArea
@@ -11588,9 +11588,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // alive here. Shared 16-bit views are already counted by their owner.
     function noteDustWorkerMemory(source, mask = null) {
       const plane16 = source?.__image16?.data;
-      dustWorkerPlaneBytes = (source?.data?.byteLength || 0)
+      const bytes = (source?.data?.byteLength || 0)
         + (isSharedPlane(plane16) ? 0 : plane16?.byteLength || 0)
         + (mask?.byteLength || (source?.width || 0) * (source?.height || 0));
+      // A queued smaller source has not released the worker's old planes.
+      // Keep a conservative maximum for this worker's lifetime.
+      dustWorkerPlaneBytes = Math.max(dustWorker.alive ? dustWorkerPlaneBytes : 0, bytes);
     }
 
     // The open photo: history's live roots (its planes), the display
@@ -13507,6 +13510,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
             try {
               imageData = await loadRawImageDataPreview(arrayBuffer, fileName, {
                 halfSize: true,
+                knownFullSize: knownImageDimensions(file),
                 outputBps: 16,
                 suppressSensorDefects: false,
                 sourceBlob: file,
@@ -13521,6 +13525,15 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
                   extractedRawMeta = meta;
                 }
               });
+              // Stage 2 may have proved the size while stage 1 was in flight.
+              reconcileHalfSizeImage(file, imageData);
+              if (imageData.__halfSizeUncertain) {
+                // Stage 2 already owns the full retry; an ambiguous stand-in
+                // must not establish crop units while waiting for it.
+                fullDecode = null;
+                imageData = await record.decoded();
+                extractedRawMeta = record.rawMetadata || extractedRawMeta;
+              }
             } catch (err) {
               if (err?.name === 'AbortError' || signal?.aborted) throw err;
               // Without a stand-in the full decode is this load.
@@ -13923,14 +13936,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       state.provisional = null;
       if (!record) return;
       const size = { width: stageOne.width, height: stageOne.height };
-      // LibRaw's own full size, else the header's (orientation matched), else
-      // the stand-in's own: a stand-in LibRaw did not halve is still not
-      // exact (no defect pass), and stage 2 still runs.
-      const plan = record.plan;
-      const header = plan?.width && plan?.height
-        ? ((plan.width >= plan.height) === (size.width >= size.height) ? { width: plan.width, height: plan.height } : { width: plan.height, height: plan.width })
-        : null;
-      const fullSize = stageOne.__fullSize ? { ...stageOne.__fullSize } : (header && header.width > size.width * 1.2 ? header : size);
+      // The loader has proved these units against an earlier full decode or
+      // independent raw evidence. The planning header must not infer them
+      // again. An unshrunk stand-in still needs stage 2's defect pass.
+      const fullSize = stageOne.__fullSize ? { ...stageOne.__fullSize } : size;
       if (!stageOne.__decodeScale) console.info('[RAW] the stand-in came back at full size; the full decode still runs:', record.fileName);
       noteTwoStageEvent(twoStageDiagnostics.stage1, { file: record.file.name, width: size.width, height: size.height, scale: stageOne.__decodeScale || 1, mode: record.mode });
       const geometry = createExactGeometry({ size, fullSize });
@@ -14090,7 +14099,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         const reload = () => loadFileToImageData(record.file, { signal, priority: 'foreground', label: `full-resolution ${record.fileName}`, sharedPlanes: true });
         const analysed = await runImportDetections(image, {
           frame: start.detectFrame, filmEdge: start.readEdge, owned: true, reload, silent: true,
-          autoFrame: start.autoFrame, filmType: snapshot.filmType, frameFilmType: snapshot.filmType, signal
+          autoFrame: start.autoFrame, filmType: snapshot.filmType, frameFilmType: autoFrameDetectionFilmType(image, item, snapshot), signal
         });
         if (!analysed.image) throw analysed.detection?.error || new Error('The full decode was lost');
         image = analysed.image;
@@ -16710,7 +16719,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       applyMirror();
     });
 
-    async function applyAutoFrameToCurrent() {
+    async function applyAutoFrameToCurrent({ frameFilmType = null } = {}) {
       if (state.currentStep !== 1) return;
       const source = state.loadedBaseImageData || state.originalImageData;
       if (!source) return;
@@ -16723,7 +16732,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       }
 
       try {
-        const result = await detectFrameAndRotation(source);
+        const settings = extractCurrentSettings();
+        const result = await detectFrameAndRotation(source, {
+          frameFilmType: frameFilmType ?? autoFrameDetectionFilmType(source, getCurrentQueueItem(), settings)
+        });
         if (state.currentStep !== 1 || (state.loadedBaseImageData || state.originalImageData) !== source) return;
         if (!result) {
           void appAlert(i18n[currentLang].autoFrameNoReliableBorder || 'No reliable frame border detected. Please crop manually.');
@@ -16800,12 +16812,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
     // Automatic roll grouping changes the rendering type, not this frame's
     // detection verdict. Saved recipes and explicit choices keep their type.
-    function autoFrameSelectedFilmType(image, item, settings) {
-      if (settings.filmTypeReason !== ROLL_MONOCHROME.reason || importFilmTypeLocked(item)) return settings.filmType;
+    function autoFrameDetectionFilmType(image, item, settings) {
+      if (settings.filmTypeReason !== ROLL_MONOCHROME.reason || settings.filmTypeSource !== 'auto'
+        || !item || importFilmTypeLocked(item)) return settings.filmType;
       return importFilmTypeRoll(item)?.verdicts.get(item)?.filmType || createDefaultSettings(image, item).filmType;
     }
 
-    async function applyAutoFrameToSelected() {
+    async function applyAutoFrameToSelected({ currentFrameFilmType = null } = {}) {
       if (state.currentStep !== 1) return;
       const selectedItems = state.fileQueue.filter(item => item.selected);
       if (selectedItems.length < 1) return;
@@ -16838,7 +16851,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
             const decoded = await decode();
             const defaults = item.settings || createDefaultSettings(decoded, item);
             const analysed = await runImportDetections(decoded, {
-              owned: true, reload: decode, frameFilmType: autoFrameSelectedFilmType(decoded, item, defaults)
+              owned: true, reload: decode,
+              frameFilmType: currentFrameFilmType && item === getCurrentQueueItem()
+                ? currentFrameFilmType : autoFrameDetectionFilmType(decoded, item, defaults)
             });
             const imageData = analysed.image;
             if (!imageData) throw analysed.detection?.error || new Error('The frame could not be decoded again');
@@ -16951,10 +16966,14 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         if (processNegativeInFlight) await processNegativeInFlight;
         if (!isCurrentLoad(generation)) return;
         persistCurrentFileSettings({ silent: true, force: true });
+        // Capture the accepted/own type before this action's undo entry
+        // marks the open photo edited; that mark must not change its gate.
+        const source = state.loadedBaseImageData || state.originalImageData;
+        const frameFilmType = autoFrameDetectionFilmType(source, getCurrentQueueItem(), extractCurrentSettings());
         pushUndo('autoFrame');
         // 旧 Step 1 の取景処理を内部で使い、完了後は同じ写真の調色へ戻す。
         goToStep(1);
-        await (selected ? applyAutoFrameToSelected() : applyAutoFrameToCurrent());
+        await (selected ? applyAutoFrameToSelected({ currentFrameFilmType: frameFilmType }) : applyAutoFrameToCurrent({ frameFilmType }));
         if (isCurrentLoad(generation) && state.originalImageData) await processNegative();
       } finally {
         studioAutoFrameRunning = false;
@@ -20142,6 +20161,23 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // keeps the planes, a RAW resolves `{ held: true, width, height }`.
     // `sharedPlanes` (#264): a decode the editor keeps, its 16-bit plane in
     // shared memory where the page is cross-origin isolated.
+    function reconcileHalfSizeImage(file, image) {
+      const knownFullSize = knownImageDimensions(file);
+      if (!image || !knownFullSize) return image;
+      const full = resolveHalfDecodeFullSize(image.width, image.height, { knownFullSize });
+      const tag = image.held ? 'fullSize' : '__fullSize';
+      const uncertain = image.held ? 'halfSizeUncertain' : '__halfSizeUncertain';
+      delete image[tag];
+      delete image.__decodeScale;
+      delete image[uncertain];
+      if (!full) image[uncertain] = true;
+      else if (full.width !== image.width || full.height !== image.height) {
+        image[tag] = full;
+        if (!image.held) image.__decodeScale = 0.5;
+      }
+      return image;
+    }
+
     async function loadFileToImageData(file, {
       filmStats = false, signal = null, onMetadata = null, halfSize = false, onStage = null, claim = null, priority = 'user', label = '',
       postDecode = null, decodeSlot = null, sharedPlanes = false
@@ -20167,15 +20203,17 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
             priority,
             ...(onMetadata ? { onMetadata } : {}),
             ...(onStage ? { onStage } : {}),
-            ...(halfSize ? { halfSize: true, outputBps: 16, suppressSensorDefects: false } : {}),
+            ...(halfSize ? { halfSize: true, outputBps: 16, suppressSensorDefects: false, knownFullSize: knownImageDimensions(file) } : {}),
             ...(postDecode ? { postDecode } : {}),
             ...(decodeSlot ? { decodeSlot } : {})
           });
           if (halfSize) {
-            // A full decode earlier in the session knows the size exactly.
-            const known = knownImageDimensions(file);
-            if (image.__fullSize && known && Math.abs(image.width - Math.ceil(known.width / 2)) <= 1
-              && Math.abs(image.height - Math.ceil(known.height / 2)) <= 1) image.__fullSize = known;
+            reconcileHalfSizeImage(file, image);
+            // A held result is recovered by decodeRollFrame after releasing
+            // its adapter. A page tile can retry here with the same claim.
+            if (image.__halfSizeUncertain && !postDecode) return await loadFileToImageData(file, {
+              filmStats, signal, onMetadata, onStage, claim: memoryClaim, priority, label, decodeSlot, sharedPlanes
+            });
             return image;
           }
         } else if (isPngFile(file)) {
@@ -20637,13 +20675,22 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // A base decoded ahead for this call (`sourceOwned`, #256 decode-ahead)
       // belongs to it like one it decodes itself. Any other base passed in (a
       // lane's shared decode, a session) is only read.
-      const baseOwned = !options.sourceImageData || Boolean(options.sourceOwned);
+      let baseOwned = !options.sourceImageData || Boolean(options.sourceOwned);
       let imageData = options.sourceImageData || own(await loadFileToImageData(file, { filmStats: !savedSettings, halfSize, ...claim }));
       if (options.sourceImageData && options.sourceOwned) {
         own(imageData);
         // Handed over: without the caller's handle, releasing the base below
         // leaves it unreachable.
         options.sourceImageData = null;
+      }
+      // Shared/session bases bypass the loader, but their tile geometry must
+      // still use an earlier full decode rather than a stale or absent tag.
+      if (previewMax && isRawLikeFileName(file.name.toLowerCase())) {
+        reconcileHalfSizeImage(file, imageData);
+        if (imageData.__halfSizeUncertain) {
+          imageData = own(await loadFileToImageData(file, { filmStats: !savedSettings, ...claim }));
+          baseOwned = true;
+        }
       }
       let baseSize = previewMax && imageData.__fullSize ? imageData.__fullSize : imageData;
       assertRepairCurrent(isCurrent);
@@ -20683,7 +20730,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         // base passed in (a lane's shared decode, #243) is copied.
         const owned = baseOwned && !options.onDecoded;
         const analysed = await runImportDetections(imageData, {
-          frame: detectFrame, filmEdge: readEdge, owned, silent, frameFilmType: initialSettings.filmType,
+          frame: detectFrame, filmEdge: readEdge, owned, silent,
+          frameFilmType: autoFrameDetectionFilmType(imageData, state.fileQueue.find(item => item.file === file), initialSettings),
           reload: owned ? () => loadFileToImageData(file, { filmStats: !savedSettings, halfSize, ...claim }) : null,
           ...(analyzers ? { analyzer: analyzers } : {})
         });
@@ -23475,7 +23523,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (item.pendingFrameEdit || !item.settings || !tileRecipeSettled(item.settings)) return null;
       const settings = sanitizeSettings(item.settings, { fallbackSettings: perPhotoSettingsFallback() });
       if (lensCorrectionActive(settings)) return null;
-      const source = thumbnailSources.lookup(item, baseSize => tileGeometryKey(settings, baseSize));
+      const known = knownImageDimensions(item.file);
+      const source = thumbnailSources.lookup(item, baseSize => {
+        // These pixels were already cropped in the stored units. A later
+        // full decode disproving those units requires a fresh source.
+        if (known && (known.width !== baseSize.width || known.height !== baseSize.height)) return null;
+        return tileGeometryKey(settings, baseSize);
+      });
       return source ? { ...source, settings } : null;
     }
 
@@ -23657,6 +23711,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         claim: context?.claim || null, priority: context?.priority || 'background',
         ...(half ? { halfSize: true } : {})
       }).then((image) => {
+        if (image?.halfSizeUncertain || image?.__halfSizeUncertain) {
+          adapter.done();
+          return decodeRollFrameOnPage(file, { signal, context, slots });
+        }
         settle(image);
         if (image?.held) {
           return { base: null, held: adapter.held, analysis: adapter.analysis, optionsKey, rawMetadata, fullSize: image.fullSize || null, half };
@@ -24485,12 +24543,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // provisional conversion instead of delaying its preview resize, and
     // reads its options from the snapshot, never from the state the
     // provisional restore changes. Resolves [framedSettings, filmEdgeRead].
-    function startImportDetection(source, snapshot, { detectFrame, readEdge, allowCrop, autoFrame, signal, trace }) {
+    function startImportDetection(source, snapshot, { detectFrame, readEdge, allowCrop, autoFrame, signal, trace, item = getCurrentQueueItem() }) {
       const detected = new Promise(resolve => setTimeout(resolve, 0)).then(() => {
         if (signal.aborted) throw new DOMException('Superseded photo activation', 'AbortError');
         const analysed = runImportDetections(source, {
           frame: detectFrame, filmEdge: readEdge, silent: true, autoFrame,
-          filmType: snapshot.filmType, frameFilmType: snapshot.filmType, signal
+          filmType: snapshot.filmType, frameFilmType: autoFrameDetectionFilmType(source, item, snapshot), signal
         });
         const detection = analysed.then(outcome => outcome.detection);
         analysed.catch(() => {});
@@ -24643,7 +24701,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           detection = new AbortController();
           importDetectionAbort = detection;
           const detected = startImportDetection(source, analysisSnapshot, {
-            detectFrame, readEdge, allowCrop: freshFile, autoFrame: { ...state.autoFrame }, signal: detection.signal, trace
+            detectFrame, readEdge, allowCrop: freshFile, autoFrame: { ...state.autoFrame }, signal: detection.signal, trace, item
           });
           const provisionalSettings = withPendingEditsOf(pendingEdits, freshFile ? await provisionalLearnedSettings(snapshot, item) : snapshot);
           if (!isCurrentLoad(generation)) return;

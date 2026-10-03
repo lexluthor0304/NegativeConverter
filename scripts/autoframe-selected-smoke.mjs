@@ -18,6 +18,8 @@ export async function runAutoFrameSelectedSmoke({ send, evaluate, waitFor, wait,
       Worker.prototype.postMessage = function(message, transfer) {
         if (message?.type === 'analyze-import' && message.frame) p.posts.push({ width: message.width, height: message.height,
           frameFilmType: message.frame.frameFilmType, returnPlanes: Boolean(message.returnPlanes) });
+        if (message?.type === 'analyze-frame') p.posts.push({ width: message.width, height: message.height, current: true,
+          frameFilmType: message.options?.frameFilmType, scoringFilmType: message.options?.settings?.filmType });
         return original.call(this, message, transfer);
       };
       const revoke = URL.revokeObjectURL.bind(URL), pending = new Set();
@@ -86,7 +88,21 @@ export async function runAutoFrameSelectedSmoke({ send, evaluate, waitFor, wait,
     }
     const posts = await evaluate(`window.__afSelected.posts.filter(post => post.width === 900)`);
     if (posts.some(post => post.frameFilmType !== 'positive')) fail('import and Selected sent different gates: ' + JSON.stringify(posts));
-    console.log('ok: import and Selected use the own positive gate for a B&W-grouped frame, with and without settings; crop and roll type preserved');
+    await evaluate(`document.querySelector('.file-list-name[data-index="2"]').click()`);
+    await wait(1000);
+    await waitFor('Current grouped frame opened', `${ready} && !document.getElementById('autoFrameBtn').disabled`);
+    await evaluate(`document.getElementById('autoFrameBtn').click()`);
+    await waitFor('Current frame settled', `${ready} && window.__afSelected.posts.some(post => post.width === 900 && post.current)`, 90_000);
+    const current = await evaluate(`window.__afSelected.posts.filter(post => post.width === 900 && post.current).at(-1)`);
+    if (current.frameFilmType !== 'positive' || current.scoringFilmType !== 'bw') {
+      fail('Current changed the own gate or grouped scoring type at the Studio undo boundary: ' + JSON.stringify(current));
+    }
+    const afterCurrent = (await save()).files.find(file => file.name === 'af-selected-2.png');
+    if (afterCurrent.settings.rotationAngle !== before.settings.rotationAngle
+      || JSON.stringify(afterCurrent.settings.cropRegion) !== JSON.stringify(before.settings.cropRegion)) {
+      fail('Current/Selected/import geometry differs: ' + JSON.stringify([before.settings, afterCurrent.settings]));
+    }
+    console.log('ok: import, Selected and Current use the own positive gate for a B&W-grouped frame; Studio edit boundary, crop and roll scoring preserved');
   } finally {
     await evaluate(`(() => { const before = ${JSON.stringify(previous)};
       if (before === null) localStorage.removeItem('nc_auto_roll_import_v1'); else localStorage.setItem('nc_auto_roll_import_v1', before);

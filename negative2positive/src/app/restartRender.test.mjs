@@ -580,7 +580,7 @@ function prepareFixture({ itemSettings = null, detectFrame = true, learned = 0 }
     studioWorkspace: { sync: noop, flush: noop }, updateAutoFrameButtons: noop, updateExpiredRescueUI: noop,
     // Records whether the compare button was last evaluated during the tail.
     updateBeforeAfterButtonState: () => { compareButton.detecting = Boolean(context.document.body.dataset.studioDetecting); },
-    createDefaultSettings: () => structuredClone(defaults), mergeStudioColors: settings => settings,
+    createDefaultSettings: () => structuredClone(defaults), mergeStudioColors: settings => settings, ROLL_MONOCHROME,
     restoreSettings: (settings, options = {}) => {
       log.push({ restore: settings.id, paintsNegative: options.refreshDisplay !== false });
       state.live = structuredClone(settings);
@@ -656,7 +656,7 @@ function prepareFixture({ itemSettings = null, detectFrame = true, learned = 0 }
   });
   vm.runInContext([
     ...DISPLAY_SESSION_HELPERS,
-    'prepareStudioPhoto', 'startImportDetection', 'buildFinalImportSettings', 'importUserEdited', 'revealProvisionalPhoto',
+    'prepareStudioPhoto', 'startImportDetection', 'autoFrameDetectionFilmType', 'buildFinalImportSettings', 'importUserEdited', 'revealProvisionalPhoto',
     'armSettledConversion', 'processNegative', 'scheduleFullResolutionRender', 'withPendingEditsOf',
   ].map(functionSource).join('\n'), context);
   const answer = async (index = conversions.length - 1) => {

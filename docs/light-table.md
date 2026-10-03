@@ -32,7 +32,14 @@ detected stocks and roll outliers are visible at a glance.
   frame's `processed` tile from its sample, frames no roll group took get
   theirs from their samples before the import ends, and recipe changes over
   unchanged geometry re-render from retained tile sources
-  (`docs/photo-sessions.md`). The canonical lane (the background photo lanes,
+  (`docs/photo-sessions.md`). Half-size RAW tile requests keep the units of
+  an earlier full decode: unshrunk output clears false full-size tags, and
+  proven half output carries the remembered full size even without metadata.
+  Supplied shared/session bases follow the same rule before rendering and
+  storing a tile source; ambiguous shrinkage takes a full decode.
+  `halfSizeTile.test.mjs` checks page/held callers, every 16-bit crop sample,
+  shared bases, full recovery and reopened retained tiles at 240×160 or less.
+  The canonical lane (the background photo lanes,
   #243) decodes only what is left: unanalysed frames, lens-corrected frames,
   changed geometry, evicted sources. A tile never moves back from `processed`
   or `analysis` to `embedded` (`data-thumbnail-kind` on each tile), except

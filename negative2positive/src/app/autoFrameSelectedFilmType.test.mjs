@@ -6,7 +6,7 @@ import { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
 import vm from 'node:vm';
 import { createAutoFrameWorkerClient } from './autoFrameWorkerClient.js';
-import { runImportAnalyses } from './autoFrameExecution.js';
+import { runImportAnalyses, detectFrameWithFallback } from './autoFrameExecution.js';
 import { runImportRequest } from '../workers/autoFrameImportTask.js';
 import { detectFrameAndRotation } from './autoFrameAnalyzer.js';
 import { areaResizeToMaxSide, blockChromaP95, planLineSearch } from './autoFramePreview.js';
@@ -27,9 +27,11 @@ globalThis.cv = await createRequire(import.meta.url)('@techstark/opencv-js');
 globalThis.ImageData = class ImageData {
   constructor(data, width, height) { this.data = data; this.width = width; this.height = height; }
 };
-const source = readFileSync(new URL('./main.js', import.meta.url), 'utf8');
+const source = readFileSync(process.env.NC229_ROLL_SIZING_MAIN || new URL('./main.js', import.meta.url), 'utf8');
 function functionSource(name) {
   const match = new RegExp(`^    (?:async )?function ${name}\\(`, 'm').exec(source);
+  if (!match && name === 'autoFrameDetectionFilmType') return functionSource('autoFrameSelectedFilmType')
+    + '\nvar autoFrameDetectionFilmType = autoFrameSelectedFilmType;';
   assert.ok(match, `${name} exists`);
   return source.slice(match.index, source.indexOf('\n    }\n', match.index) + 6);
 }
@@ -53,8 +55,16 @@ const observed = [];
 const client = createAutoFrameWorkerClient({ workerFactory: () => ({
   postMessage(message, transfers = []) {
     const received = structuredClone(message, { transfer: transfers });
-    observed.push(received.frame?.frameFilmType);
+    observed.push(received.frame?.frameFilmType ?? received.options?.frameFilmType);
     queueMicrotask(async () => {
+      if (received.type === 'analyze-frame') {
+        const image = new ImageData(received.rgba, received.width, received.height);
+        if (received.image16) image.__image16 = { width: received.width, height: received.height, data: received.image16 };
+        const result = detectFrameAndRotation(image, received.options);
+        if (result?.rotatedImageData) result.rotatedImageData.image16 = result.rotatedImageData.__image16?.data;
+        this.onmessage?.({ data: structuredClone({ id: received.id, result }) });
+        return;
+      }
       const { reply, transfers: moved } = await runImportRequest(received, { loadCv: async () => {}, detect: detectFrameAndRotation,
         rotate: applyRotationToImageData, readEdge: async () => null });
       this.onmessage?.({ data: structuredClone({ id: received.id, result: reply }, { transfer: moved }) });
@@ -75,7 +85,8 @@ const context = vm.createContext({
   AUTO_FRAME_MAX_SIDE: 1600, AUTO_FRAME_FORMAT_RATIOS, AUTO_FRAME_DEFAULT_120_FORMATS,
   AUTO_FRAME_SCORE_WEIGHTS: { area: .18, rectangularity: .20, orthogonality: .14, parallelism: .10, edgeSupport: .18, centerPrior: .08, aspect: .12 },
   createPerfTrace: () => ({ end() {} }), recordPerfStages() {}, canAutoApplyImportFrame, imageAreaFromDetection,
-  runImportAnalyses, analyzeFrameInWorker: client, ensureOpenCvReady: async () => true,
+  runImportAnalyses, detectFrameWithFallback, analyzeFrameInWorker: client, ensureOpenCvReady: async () => true,
+  detectionHelpersEnabled: () => false, geometryDiagnostics: { workerRotations: 0 },
   analyzeFrameOnMainThread: () => { throw new Error('the worker should answer'); },
   readFilmEdge: async () => null, withDetectionOverlay: (_silent, run) => run(),
   createFrameClaim: () => ({ release() { releases++; } }),
@@ -86,9 +97,10 @@ const context = vm.createContext({
   withPendingEdits: (_item, settings) => settings, cloneSettings: structuredClone
 });
 vm.runInContext(['getImageDataPixelCount', 'clampBetween', 'sanitizeNumeric', 'makeLinearCurveLut',
-  'createDefaultLensCorrectionSettings', 'autoDetectFilmBase', 'defaultFilmBaseBuffer', 'defaultSettingsInputs', 'createDefaultSettings',
+  'createDefaultLensCorrectionSettings', 'sanitizeLensSelection', 'sanitizeLensCorrection', 'autoDetectFilmBase',
+  'defaultFilmBaseBuffer', 'defaultSettingsInputs', 'createDefaultSettings',
   'settleImportFilmType', 'autoFrameAnalyzerOptions', 'runImportDetections', 'autoFrameEffectiveAngle', 'rotate180CropRegion',
-  'analyzeStudioImportFrame', 'autoFrameSelectedFilmType', 'applyAutoFrameToSelected'].map(functionSource).join('\n'), context);
+  'analyzeStudioImportFrame', 'autoFrameDetectionFilmType', 'applyAutoFrameToSelected'].map(functionSource).join('\n'), context);
 const createDefaults = context.createDefaultSettings;
 context.createDefaultSettings = (...args) => {
   const value = createDefaults(...args); defaults.push(structuredClone(value)); return value;
@@ -171,6 +183,66 @@ for (const settings of [null, context.settleImportFilmType(item, ownDefaults)]) 
   }
   assert.equal(sha(new Uint8Array(await encode(selected))), sha(new Uint8Array(await encode(imported))), 'roll-retyped PNG16 parity');
 }
+// Current and captured import snapshots must use the same own-type gate as
+// Selected/import/RAW workers, while scoring and rendering remain grouped.
+const groupedImport = context.settleImportFilmType(item, colourImport);
+item.settings = structuredClone(groupedImport);
+Object.assign(state, groupedImport, { loadedBaseImageData: colour, originalImageData: colour, currentStep: 1 });
+state.autoFrame.lastDiagnostics = {};
+Object.assign(context, {
+  setTimeout, AbortController, DOMException,
+  extractCurrentSettings: () => ({ ...item.settings, filmType: state.filmType }),
+  getCurrentQueueItem: () => item, formatAutoFrameDetail: () => '', appConfirm: async () => true,
+  markCurrentFileDirty() {}, updateAutoFrameButtons() {}, updateAutoFrameDiagnosticsUI() {}, updateMirrorButtonState() {},
+  offerAutoFrameRotation() {}, geometryFrameSize: (image, angle) => rotatedDimensions(image.width, image.height, angle),
+  applyGeometryFromBase: async ({ cropRegion }) => {
+    state.cropRegion = cropRegion;
+    state.croppedImageData = renderGeometry(colour, planGeometry(colour, { rotationAngle: state.rotationAngle, mirrored: state.mirrored, cropRegion }));
+    return true;
+  },
+  afterGeometry: async (ready, run) => { await ready; return run(); }, setStep2Mode() {}, suggestStep2Mode: () => 'crop',
+  overlayWindowEdits: settings => settings, buildFinalImportSettings: async (_image, settings) => ({ settings }),
+  restoreSettings: settings => Object.assign(state, settings)
+});
+vm.runInContext(['detectFrameAndRotation', 'applyAutoFrameResult', 'applyAutoFrameToCurrent', 'runStudioAutoFrame', 'startImportDetection',
+  'settledImportSettings'].map(functionSource).join('\n'), context);
+await context.applyAutoFrameToCurrent();
+console.log(`grouped Current/import gates: ${observed.at(-1)}/${importType}, scoring=${state.filmType}`);
+assert.equal(observed.at(-1), importType, 'Current uses the same own positive gate as import/Selected/RAW worker');
+assert.equal(planLineSearch(colour, { enabled: true, filmType: observed.at(-1) }).record.reason, 'colour');
+assert.equal(state.filmType, 'bw', 'the scoring/rendering roll type is preserved');
+assert.deepEqual(JSON.parse(JSON.stringify(state.cropRegion)), JSON.parse(JSON.stringify(colourImport.cropRegion)), 'Current/import crop parity');
+assert.equal(state.rotationAngle, colourImport.rotationAngle);
+const currentRecipe = { ...groupedImport, cropRegion: state.cropRegion, rotationAngle: state.rotationAngle,
+  mirrored: state.mirrored, autoFrameMeta: state.autoFrame.lastDiagnostics };
+const colourRender = settings => convertFrameWithRouter({ imageData: renderGeometry(colour, planGeometry(colour, settings)), settings });
+const currentExport = await colourRender(currentRecipe), groupedExport = await colourRender(groupedImport);
+for (const bitDepth of [8, 16]) assert.equal(sha(selectExportSamples(currentExport, bitDepth).samples),
+  sha(selectExportSamples(groupedExport, bitDepth).samples), `Current/Selected/import export parity (${bitDepth}-bit)`);
+assert.equal(sha(new Uint8Array(await encode(currentExport))), sha(new Uint8Array(await encode(groupedExport))), 'Current PNG16 parity');
+Object.assign(context, {
+  document: { body: { dataset: {} }, getElementById: () => null }, studioWorkspace: { sync() {} },
+  isDesktopBatchExportLocked: () => false, currentPhotoExact: () => true, loadGeneration: 1, isCurrentLoad: () => true,
+  processNegativeInFlight: null, processNegative: async () => {}, persistCurrentFileSettings() {},
+  pushUndo() { item.userEdited = true; }, goToStep: step => { state.currentStep = step; }
+});
+await context.runStudioAutoFrame(false);
+assert.equal(item.userEdited, true, 'the actual Studio wrapper marks its action edited');
+assert.equal(observed.at(-1), importType, 'the wrapper captures the own gate before its new edit lock');
+assert.deepEqual(JSON.parse(JSON.stringify(state.cropRegion)), JSON.parse(JSON.stringify(colourImport.cropRegion)));
+delete item.userEdited;
+await context.runStudioAutoFrame(true);
+assert.equal(requests.at(-1), importType, 'Selected on the open photo also uses its pre-action gate');
+delete item.userEdited;
+const [snapshot] = await context.startImportDetection(colour, groupedImport, { detectFrame: true, readEdge: false,
+  allowCrop: true, autoFrame: state.autoFrame, signal: new AbortController().signal, trace: { mark() {} }, item });
+assert.equal(requests.at(-1), importType, 'captured grouped snapshot uses the own verdict');
+assert.equal(snapshot.filmType, 'bw');
+assert.deepEqual(JSON.parse(JSON.stringify(snapshot.cropRegion)), JSON.parse(JSON.stringify(colourImport.cropRegion)));
+await context.settledImportSettings(fixture({ colour: true }), item, {
+  start: { snapshot: groupedImport, detectFrame: true, readEdge: false, autoFrame: state.autoFrame, fresh: false }
+}, { abort: new AbortController(), file: item.file, fileName: item.file.name });
+assert.equal(requests.at(-1), importType, 'full-decode snapshot settlement uses the own verdict');
 // If the import verdict is no longer retained, measure it from this decode.
 record.verdicts.delete(item);
 await context.applyAutoFrameToSelected();
@@ -181,10 +253,16 @@ for (const lock of [{ savedSettings: true }, { userEdited: true }, { filmTypeOve
   await context.applyAutoFrameToSelected();
   assert.equal(requests.at(-1), 'bw', 'saved, edited and overridden recipes keep their accepted type');
   assert.equal(item.settings.coreExposure, 73, 'Selected preserves user colour adjustments');
+  await context.applyAutoFrameToCurrent();
+  assert.equal(observed.at(-1), 'bw', 'Current also preserves accepted saved/edited/override types');
   for (const key of Object.keys(lock)) delete item[key];
 }
 item.settings = { ...item.settings, filmType: 'color', filmTypeSource: 'manual' };
+Object.assign(state, item.settings);
 await context.applyAutoFrameToSelected();
 assert.equal(requests.at(-1), 'color', 'manual type wins over an earlier automatic roll verdict');
+state.filmType = 'color';
+await context.applyAutoFrameToCurrent();
+assert.equal(observed.at(-1), 'color', 'Current preserves the accepted manual type');
 client.dispose();
-console.log('autoFrameSelectedFilmType: cast B&W, crop/export parity, own/roll disagreement and explicit choices');
+console.log('autoFrameSelectedFilmType: Current/Selected/import/RAW and snapshots, crop/8-16-bit/PNG16 parity, accepted choices');

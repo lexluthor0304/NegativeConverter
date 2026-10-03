@@ -362,10 +362,30 @@ await expectPreviewFallback('garbled output', { result: makeRawResult({ width: 6
     const page = await loadRawFile(makeContainer().buffer, 'frame.nef', options);
     assert.equal(page.__fullSize, undefined, `page: unmatched report ${metaWidth}x${metaHeight}`);
     assert.equal(page.__decodeScale, undefined);
+    assert.equal(page.__halfSizeUncertain, true, 'unknown shrinkage requests full-size recovery');
     assertPlanes(page, headPlanes(cloneRawResult(fixture), { suppress: false }), 'unshrunk pixels unchanged');
     reset({ result: cloneRawResult(fixture), metaWidth, metaHeight });
     const held = await loadRawFile(makeContainer().buffer, 'frame.nef', { ...options, postDecode: holding });
-    assert.deepEqual(held, { held: true, width: 64, height: 48 }, 'held: unmatched report');
+    assert.deepEqual(held, { held: true, width: 64, height: 48, halfSizeUncertain: true }, 'held: unmatched report requires recovery');
+  }
+  // Earlier full decoding is independent of absent or misleading metadata.
+  const knownFullSize = { width: 240, height: 160 };
+  for (const [width, height] of [[240, 160], [120, 80]]) for (const [metaWidth, metaHeight] of [[0, 0], [480, 320], [120, 80]]) {
+    const result = makeRawResult({ width, height, seed: 23, channels: 3, bits: 16 });
+    const options = { halfSize: true, outputBps: 16, suppressSensorDefects: false, knownFullSize };
+    reset({ result: cloneRawResult(result), metaWidth, metaHeight });
+    const page = await loadRawFile(makeContainer().buffer, 'remembered.nef', options);
+    assert.deepEqual(page.__fullSize, width === 120 ? knownFullSize : undefined, 'page uses the proven full/half match');
+    assert.equal(page.__decodeScale, width === 120 ? .5 : undefined);
+    assert.equal(page.__halfSizeUncertain, undefined);
+    const expected = headPlanes(cloneRawResult(result), { suppress: false });
+    assert.deepEqual([page.width, page.height], [width, height]);
+    assert.deepEqual(page.data, expected.rgba8, 'remembered-size inference preserves the 8-bit plane');
+    assert.deepEqual(page.__image16.data, expected.rgba16, 'remembered-size inference preserves every precision sample');
+    reset({ result: cloneRawResult(result), metaWidth, metaHeight });
+    const held = await loadRawFile(makeContainer().buffer, 'remembered.nef', { ...options, postDecode: holding });
+    assert.deepEqual(held, { held: true, width, height, ...(width === 120 ? { fullSize: knownFullSize } : {}) },
+      'held result uses the same authoritative match');
   }
   // A matching CFA header still proves a genuine half decode when the
   // metadata is missing or mismatched (active size vs raw sensor size).
@@ -376,7 +396,7 @@ await expectPreviewFallback('garbled output', { result: makeRawResult({ width: 6
     header.setUint16(offset, tag, true); header.setUint16(offset + 2, 4, true);
     header.setUint32(offset + 4, 1, true); header.setUint32(offset + 8, value, true);
   });
-  for (const [metaWidth, metaHeight] of [[0, 0], [130, 100]]) {
+  for (const [metaWidth, metaHeight] of [[0, 0], [130, 100], [64, 48], [256, 192]]) {
     reset({ result: cloneRawResult(fixture), metaWidth, metaHeight });
     const page = await loadRawFile(cfa.slice().buffer, 'frame.dng', { halfSize: true, outputBps: 16, suppressSensorDefects: false });
     assert.deepEqual(page.__fullSize, { width: 128, height: 96 });
@@ -385,6 +405,11 @@ await expectPreviewFallback('garbled output', { result: makeRawResult({ width: 6
     const held = await loadRawFile(cfa.slice().buffer, 'frame.dng', { halfSize: true, outputBps: 16, suppressSensorDefects: false, postDecode: holding });
     assert.deepEqual(held.fullSize, { width: 128, height: 96 }, 'held: header proves half size');
   }
+  const fullCfa = makeRawResult({ width: 128, height: 96, seed: 23, channels: 3, bits: 16 });
+  reset({ result: cloneRawResult(fullCfa), metaWidth: 256, metaHeight: 192 });
+  const pageCfa = await loadRawFile(cfa.slice().buffer, 'frame.dng', { halfSize: true });
+  assert.equal(pageCfa.__fullSize, undefined, 'CFA header proves unshrunk output despite doubled metadata');
+  assert.equal(pageCfa.__halfSizeUncertain, undefined);
 }
 {
   // A failed decode still reports the release (sequential stage 2 starts there).

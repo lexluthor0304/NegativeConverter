@@ -20,6 +20,9 @@ The #229 roll follow-up's regression contracts are documented in
 [memory-budget.md](memory-budget.md). The shared page-path roll-plane copy
 target (R1-097) remains in the worker-residency entry below; small-fixture
 checks do not establish desktop peak RSS or the original 60 MP timing targets.
+The supplemental caller regressions also cover remembered full dimensions
+through page/held/shared/reopened tiles, queued dust source downsizing, and
+Current/Selected detection parity across Studio's undo boundary.
 
 The #229/#230 supplemental harness review and its remaining large/native
 measurement limits are documented in [performance-benchmark.md](performance-benchmark.md).

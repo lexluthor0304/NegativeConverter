@@ -213,7 +213,7 @@ export function rememberImageDimensions(file, image) {
 
 // The size a full decode of `file` produced this session, or null.
 export function knownImageDimensions(file) {
-  const size = file ? dimensions.get(file) : null;
+  const size = file && decodedFiles.has(file) ? dimensions.get(file) : null;
   return size ? { width: size.width, height: size.height } : null;
 }
 
@@ -304,6 +304,10 @@ export async function importPixelsForRoll(files, { siblings = files } = {}) {
  */
 export function halfDecodeFullSize(width, height, metaWidth = 0, metaHeight = 0, { photometric = null } = {}) {
   if (photometric === PHOTOMETRIC_LINEAR_RAW) return { width, height };
+  return matchingHalfDecodeSize(width, height, metaWidth, metaHeight) || { width, height };
+}
+
+function matchingHalfDecodeSize(width, height, metaWidth, metaHeight) {
   if (valid(metaWidth, metaHeight)) {
     const near = (w, h) => Math.abs(width - w) <= 1 && Math.abs(height - h) <= 1;
     if (near(metaWidth, metaHeight) || near(metaHeight, metaWidth)) return { width, height };
@@ -311,5 +315,21 @@ export function halfDecodeFullSize(width, height, metaWidth = 0, metaHeight = 0,
     if (halves(metaWidth, metaHeight)) return { width: metaWidth, height: metaHeight };
     if (halves(metaHeight, metaWidth)) return { width: metaHeight, height: metaWidth };
   }
-  return { width, height };
+  return null;
+}
+
+// Unlike halfDecodeFullSize's geometry fallback, null means the request's
+// shrinkage is unknown and its caller must use a full decode. A previous
+// full decode takes precedence over metadata; raw-IFD evidence is checked
+// independently, so a matching CFA header cannot be hidden by metadata.
+export function resolveHalfDecodeFullSize(width, height, { knownFullSize = null, headerSize = null, metadataSize = null } = {}) {
+  if (valid(knownFullSize?.width, knownFullSize?.height)) {
+    return matchingHalfDecodeSize(width, height, knownFullSize.width, knownFullSize.height);
+  }
+  if (headerSize?.photometric === PHOTOMETRIC_LINEAR_RAW) return { width, height };
+  for (const report of [headerSize, metadataSize]) {
+    const full = matchingHalfDecodeSize(width, height, report?.width, report?.height);
+    if (full) return full;
+  }
+  return null;
 }

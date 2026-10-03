@@ -16,6 +16,8 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { createLaneFixture, flush, functionSource as laneFunctionSource } from './backgroundLanesHarness.mjs';
+import { isRawLikeFileName } from './imageFileLoaders.js';
+import { ROLL_MONOCHROME } from './rollFilmType.js';
 
 class TestImageData {
   constructor(data, width, height) { Object.assign(this, { data, width, height }); }
@@ -128,7 +130,8 @@ const tile1703835 = (base, geometry, maxDim = 288) => downsampleImageDataForMaxD
 
 const runtime = ['processFileWithSettings', 'renderPreviewFromWorkingImage', 'renderGeometryChain', 'removeFrameDust',
   'frameWantsAutoWhiteBalance', 'applyFrameAutoWhiteBalance', 'applyFrameExpiredAnalysis', 'tileAnalysisReference',
-  'resolveLensCorrection', 'lensCorrectionActive', 'tileRecipeSettled', 'perPhotoSettingsFallback', 'expiredImportKeepsFullFrame']
+  'resolveLensCorrection', 'lensCorrectionActive', 'tileRecipeSettled', 'perPhotoSettingsFallback', 'expiredImportKeepsFullFrame',
+  'autoFrameDetectionFilmType']
   .map(functionSource).join('\n');
 const noop = () => {};
 
@@ -145,6 +148,7 @@ function fixture(base, { frame, expired = true } = {}) {
     loadFileToImageData: async () => { throw new Error('the lane hands its base over'); },
     assertRepairCurrent: isCurrent => { if (!isCurrent()) throw new DOMException('stale', 'AbortError'); },
     markOwnedPlanes, planeBuffersOf, sharesPlaneBuffers,
+    isRawLikeFileName, ROLL_MONOCHROME,
     // A new frame: defaults, then auto-frame's straighten and crop.
     pendingGeometryEdits: () => null, withPendingEdits: (_item, settings) => settings,
     createDefaultSettings: () => ({ filmType: 'color', expiredEnabled: expired, wbR: 1, wbG: 1, wbB: 1,

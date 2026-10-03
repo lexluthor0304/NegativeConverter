@@ -44,7 +44,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { createSharedDecodes } from './sharedDecodes.js';
-import { rawDecodePlan } from './imageDimensions.js';
+import { rawDecodePlan, knownImageDimensions, rememberImageDimensions, resolveHalfDecodeFullSize } from './imageDimensions.js';
 import {
   TWO_STAGE_MIN_MP_DEFAULT, twoStageMinPixels, stageTwoStartMode, createExactGeometry, windowEdits, overlayWindowEdits,
   geometryEdits, hasWindowEdits, analysisAreaEdited, confirmedImageArea
@@ -132,7 +132,7 @@ function fixture({ search = '?twoStageMinMp=40&twoStageMode=sequential', settled
     showToast: message => toasts.push(message),
     getLocalizedText: (key, fallback) => fallback,
     safeStorageGet: () => null,
-    isRawLikeFileName: name => /\.(dng|nef)$/i.test(name), isTiffContainerRawName: () => false,
+    isRawLikeFileName: name => /\.(dng|nef)$/i.test(name), isTiffContainerRawName: () => false, ROLL_MONOCHROME,
     isPngFile: () => false, lowMemoryPhotoDevice: () => false,
     analyzeFrameInWorker: { abortReleases: 0 },
     warmUpAutoFrameWorker: () => Promise.resolve(true),
@@ -219,7 +219,7 @@ function fixture({ search = '?twoStageMinMp=40&twoStageMode=sequential', settled
     'createFullDecode', 'beginFullDecodeAttempt', 'noteFullDecodeChange', 'nextFullDecodeChange', 'failFullDecode', 'reportFullDecodeFailure',
     'retryFullDecode', 'beginProvisionalPhoto', 'abandonFullDecode', 'currentPhotoExact', 'ensureFullDecode',
     'ensureFullDecodeWithNotice', 'whenCropModeClosed', 'startProvisionalSettle', 'waitForProvisionalSwap',
-    'settledImportSettings', 'rebaseProvisionalHistory', 'windowFrameMetaOnFull', 'windowFrameIntent', 'recordProvisionalFrameEdit', 'frameMetaWithWindowIntent',
+    'settledImportSettings', 'autoFrameDetectionFilmType', 'rebaseProvisionalHistory', 'windowFrameMetaOnFull', 'windowFrameIntent', 'recordProvisionalFrameEdit', 'frameMetaWithWindowIntent',
     'resolvePendingFrameEdits', 'appliedCropDiagnostics', 'geometryFrameSize',
     'effectiveGeometryAngle', 'installFullDecode', 'settleProvisionalPhoto',
     'leaveProvisionalPhoto', 'withPendingEdits', 'pendingGeometryEdits', 'extractCurrentSettings', 'restoreSettings',
@@ -326,6 +326,47 @@ function fixture({ search = '?twoStageMinMp=40&twoStageMode=sequential', settled
 }
 
 // ---- crop units, the settle and the barrier --------------------------------------------
+// R1-080 foreground caller: an earlier full decode or a concurrent stage 2
+// disproves missing/misleading stand-in tags and the planning header. Tiny
+// dimensions only; this tests the actual loadFile/provisional orchestration.
+for (const scenario of ['unshrunk false tag', 'half missing tag', 'full finishes during preview', 'ambiguous preview']) {
+  const f = fixture({ search: '?twoStageMinMp=0.01&twoStageMode=concurrent' });
+  Object.assign(f.target, { knownImageDimensions, rememberImageDimensions, resolveHalfDecodeFullSize });
+  vm.runInContext(functionSource('reconcileHalfSizeImage'), f.context);
+  const full = { width: 240, height: 160 };
+  const file = f.file('tiny.nef', { width: 480, height: 320 });
+  const late = scenario === 'full finishes during preview';
+  if (!late) rememberImageDimensions(file, full);
+  const loading = f.context.loadFile(file, { autoConvert: false, quiet: true });
+  await flush();
+  assert.deepEqual(f.stage1[0].options.knownFullSize, late ? null : full, 'the foreground decoder receives its earlier full evidence');
+  assert.equal(f.stage2.length, 1);
+  if (late) { f.stage2[0].resolve(image(full)); await flush(); }
+  const half = scenario === 'half missing tag';
+  const ambiguous = scenario === 'ambiguous preview';
+  const standIn = image(half ? { width: 120, height: 80 } : ambiguous ? { width: 100, height: 70 } : full,
+    half || ambiguous ? {} : { __decodeScale: 0.5, __fullSize: { width: 480, height: 320 } });
+  f.stage1[0].resolve(standIn);
+  if (ambiguous) { await flush(); f.stage2[0].resolve(image(full)); }
+  assert.equal((await loading).status, 'loaded');
+  if (ambiguous) {
+    assert.equal(f.state.provisional, null, 'unknown shrinkage uses the already-running full decode');
+    assert.equal(f.state.rawDecodePending, false);
+    assert.equal(f.state.loadedBaseImageData.width, 240);
+  } else {
+    assert.deepEqual(JSON.parse(JSON.stringify(f.state.provisional.fullSize)), full, 'known full units survive both preview and planning metadata');
+    assert.equal(standIn.__decodeScale, half ? 0.5 : undefined, 'the unshrunk preview clears its false scale');
+    const crop = { left: 60, top: 40, width: 96, height: 64 };
+    f.context.restoreSettings({ filmType: 'positive', rotationAngle: 0, cropRegion: crop }, { refreshDisplay: false });
+    assert.deepEqual(f.state.cropRegion, half ? { left: 30, top: 20, width: 48, height: 32 } : crop,
+      'live crop uses the proven preview scale');
+    assert.deepEqual(f.context.extractCurrentSettings().cropRegion, crop, 'the persisted crop stays in full units');
+  }
+  assert.equal(f.stage2.length, 1, 'no duplicate full attempt is launched');
+  f.context.abandonFullDecode();
+  await flush();
+}
+
 async function loadedStandIn(f, { settled = null } = {}) {
   f.item.settings = settled;
   const loading = f.context.loadFile(f.file(), { autoConvert: false, quiet: true });
