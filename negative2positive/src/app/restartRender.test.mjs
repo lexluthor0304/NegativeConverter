@@ -659,6 +659,7 @@ function prepareFixture({ itemSettings = null, detectFrame = true, learned = 0 }
   vm.runInContext([
     ...DISPLAY_SESSION_HELPERS,
     'prepareStudioPhoto', 'startImportDetection', 'autoFrameDetectionFilmType', 'buildFinalImportSettings', 'importUserEdited', 'revealProvisionalPhoto',
+    'whiteBalanceMeasurementSettings', 'provisionalWhiteBalanceMeasurement', 'provisionalUnits', 'liveGeometry',
     'armSettledConversion', 'processNegative', 'scheduleFullResolutionRender', 'withPendingEditsOf',
   ].map(functionSource).join('\n'), context);
   const answer = async (index = conversions.length - 1) => {
