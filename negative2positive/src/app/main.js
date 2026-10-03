@@ -20130,9 +20130,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         next.reviewed = Boolean(item.settings?.reviewed);
         next.frameMetadata = sanitizeFrameMetadata(item.settings?.frameMetadata);
         next.filmEdge = item.settings?.filmEdge ? structuredClone(item.settings.filmEdge) : null;
-        // The roll analysis share (lock, offset, outlier flag) describes the
-        // receiving frame, not the reference, so each item keeps its own.
-        next.rollFrame = item.settings?.rollFrame ? structuredClone(item.settings.rollFrame) : null;
+        // Keep the receiving frame's roll share only after interpretation
+        // invalidation; its old histogram and density offset may be stale.
+        next.rollFrame = recipient?.rollFrame ? structuredClone(recipient.rollFrame) : null;
         if (!includeCrop) {
           next.autoFrameMeta = item.settings?.autoFrameMeta ? structuredClone(item.settings.autoFrameMeta) : null;
           const existingCrop = item.settings && item.settings.cropRegion ? { ...item.settings.cropRegion } : null;

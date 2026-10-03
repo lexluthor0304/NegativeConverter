@@ -91,6 +91,8 @@ export async function runInterpretationRoutesSmoke({ send, evaluate, waitFor, wa
     const donor = new ImageData(Uint8ClampedArray.from(image.data, (v, i) => i % 4 === 3 ? v : Math.round(v * .7)), width, height);
     donor.__image16 = { width, height, data: Uint16Array.from(data16, (v, i) => i % 4 === 3 ? v : Math.round(v * .7)) };
     window.__routeDonorFile = new File([encodePng16Blob(donor)], 'route-current.png', { type: 'image/png', lastModified: 1 });
+    window.__routeRollFiles = [window.__routeDonorFile, window.__routeOriginalFiles[1],
+      new File([encodePng16Blob(donor)], 'route-unopened.png', { type: 'image/png', lastModified: 1 })];
     const dt = new DataTransfer(); dt.items.add(window.__routeFiles[0]);
     const input = document.getElementById('fileInput'); input.files = dt.files; input.dispatchEvent(new Event('change', { bubbles: true }));
   })()`);
@@ -334,6 +336,132 @@ export async function runInterpretationRoutesSmoke({ send, evaluate, waitFor, wa
     const freshRecipient = await exports(label + ' fresh recipient reference');
     equalExports(recipientSingle, freshRecipient, label + ' fresh recipient reference');
   }
+  // Generate locked recipient records through the actual Analyse roll action.
+  // Two denser frames give the recipient a nonzero equalization offset.
+  const lockedRecipe = async (type, mode = 'correct') => {
+    await evaluate('window.__routeFiles = window.__routeRollFiles.slice()');
+    const recipe = { ...old, filmType: type, positiveMode: mode, semanticMap: null, expiredAnalysis: null,
+      filmBase: { r: 228, g: 194, b: 144, method: 'manual' }, wbUserOverride: true,
+      expiredBrightnessUserOverride: true, expiredContrastUserOverride: true };
+    await openProject([recipe, recipe, recipe]);
+    await waitFor(type + ' real roll action available', '!document.getElementById("analyzeRollBtn").disabled');
+    await evaluate(`(() => {
+      const equalize = document.getElementById('rollEqualizeExposure'); if (!equalize.checked) equalize.click();
+      document.getElementById('analyzeRollBtn').click();
+    })()`);
+    await waitFor(type + ' real roll ownership', `${ready} && window.__ncTwoStage.queuedRecipes().length === 3
+      && window.__ncTwoStage.queuedRecipes().every(item => item.settings?.rollFrame?.locked && item.settings.rollFrame.equalize)`, 120000);
+    const records = await evaluate('window.__ncTwoStage.queuedRecipes().map(item => item.settings)');
+    if (!(records[1].rollFrame.offsetStops > .5) || records[1].rollFrame.channelData?.length !== 3) fail(type + ': real histogram/density fixture is ineffective');
+    console.log(type + ' real locked recipient:', JSON.stringify(records[1].rollFrame));
+    await evaluate('window.__routeFiles = [window.__routeOriginalFiles[1]]');
+    await openProject([{ ...records[1], semanticMap: null, expiredAnalysis: null }], false);
+    const valid = await evaluate(settings);
+    if (JSON.stringify(valid.rollFrame) !== JSON.stringify(records[1].rollFrame)) fail(type + ': valid saved roll record lost on restoration');
+    return valid;
+  };
+  const lockedColor = await lockedRecipe('color');
+  const lockedPositive = await lockedRecipe('positive');
+  for (const action of ['applyToSelectedBtn', 'applyRollReferenceBtn']) for (const crossing of ['bw', 'positive', 'mode']) {
+    const label = 'locked ' + action + ' ' + crossing;
+    const original = crossing === 'mode' ? lockedPositive : lockedColor;
+    const donorRecipe = { ...original, filmType: crossing === 'bw' ? 'bw' : 'positive',
+      positiveMode: crossing === 'mode' ? 'edit' : 'correct', rollFrame: null, semanticMap: null, expiredAnalysis: null,
+      wbR: 1.23, wbG: 1, wbB: .91, wbUserOverride: true, expiredBrightness: 0, expiredContrast: 25,
+      expiredBrightnessUserOverride: true, expiredContrastUserOverride: true };
+    await evaluate('window.__routeFiles = [window.__routeDonorFile, ...window.__routeOriginalFiles.slice(1)]');
+    await openProject([donorRecipe, original, original]);
+    const donor = await measured(label + ' donor', donorRecipe.filmType, donorRecipe.positiveMode);
+    if (action === 'applyRollReferenceBtn') {
+      await openProject([{ ...lockedColor, expiredAnalysis: null }, original, original], true,
+        { enabled: true, settingsSnapshot: donor, applyLock: false, applyCrop: false });
+      await waitFor(label + ' real reference available', '!document.getElementById("applyRollReferenceBtn").disabled');
+    }
+    const before = await evaluate('window.__ncTwoStage.queuedRecipes().slice(1).map(item => item.settings)');
+    if (before.some(recipe => JSON.stringify(recipe.rollFrame) !== JSON.stringify(original.rollFrame))) fail(label + ': locked recipient setup lost ownership');
+    await evaluate(`document.getElementById('${action}').click()`);
+    await waitFor(label + ' interpretation applied', `window.__ncTwoStage.queuedRecipes().slice(1).every(item => item.settings?.filmType === '${donorRecipe.filmType}'
+      && item.settings.positiveMode === '${donorRecipe.positiveMode}')`, 120000);
+    const copied = await evaluate('window.__ncTwoStage.queuedRecipes().slice(1).map(item => item.settings)');
+    for (const recipe of copied) {
+      if (recipe.rollFrame || recipe.semanticMap) fail(label + ': stale per-frame roll/semantic analysis restored after invalidation');
+      for (const key of ['wbR', 'wbG', 'wbB', 'expiredBrightness', 'expiredContrast']) if (recipe[key] !== donorRecipe[key]) fail(label + ': explicit value lost: ' + key);
+    }
+    const batch = await exports(label + ' actual batch', true);
+    const savedProject = await saveProject(label);
+    await reopenSavedProject(label);
+    const recipient = savedProject.files[1].settings;
+    if (recipient.rollFrame || !recipient.expiredAnalysis || JSON.stringify(recipient.expiredAnalysis) === JSON.stringify(original.expiredAnalysis)) fail(label + ': new recipient measurement was not saved');
+    await evaluate('window.__routeFiles = [window.__routeOriginalFiles[1]]');
+    await openProject([recipient], false);
+    const single = await exports(label + ' saved current');
+    equalRecipient(batch, single, label + ' current/batch');
+    equalExports(single, await exports(label + ' consecutive current'), label + ' consecutive current');
+    await openProject([{ ...recipient, rollFrame: null, semanticMap: null, expiredAnalysis: null }], false);
+    equalExports(single, await exports(label + ' properly invalidated fresh reference'), label + ' fresh reference');
+  }
+  // A new file under import lock has no recipient roll ownership, even when
+  // the reference has genuine locked levels from the real roll action.
+  await evaluate('window.__routeFiles = window.__routeOriginalFiles.slice()');
+  await openProject([lockedColor], false, { enabled: true, settingsSnapshot: lockedColor, applyLock: false, applyCrop: false });
+  await waitFor('locked import reference available', '!document.getElementById("lockRollReference").disabled');
+  await evaluate(`(() => {
+    document.getElementById('lockRollReference').click();
+    const dt = new DataTransfer(); for (const file of window.__routeFiles.slice(1)) dt.items.add(file);
+    const click = HTMLInputElement.prototype.click;
+    HTMLInputElement.prototype.click = function () {
+      if (this.type === 'file' && this.onchange) { this.files = dt.files; this.dispatchEvent(new Event('change', { bubbles: true })); }
+      else click.call(this);
+    };
+    try { document.getElementById('addMoreFilesBtn').click(); } finally { HTMLInputElement.prototype.click = click; }
+  })()`);
+  await waitFor('locked import copied', 'window.__ncTwoStage.queuedRecipes().length === 3');
+  const imported = await evaluate('window.__ncTwoStage.queuedRecipes().slice(1).map(item => item.settings)');
+  if (imported.some(recipe => recipe.rollFrame)) fail('import lock copied donor roll ownership');
+  const lockedImport = await exports('locked donor import actual batch', true);
+  const importedProject = await saveProject('locked donor import');
+  await evaluate('window.__routeFiles = [window.__routeOriginalFiles[1]]');
+  await openProject([importedProject.files[1].settings], false);
+  const importedSingle = await exports('locked donor import saved current');
+  equalRecipient(lockedImport, importedSingle, 'locked donor import current/batch');
+  await openProject([{ ...importedProject.files[1].settings, rollFrame: null, semanticMap: null, expiredAnalysis: null }], false);
+  equalExports(importedSingle, await exports('locked donor import fresh reference'), 'locked donor import fresh reference');
+
+  // Matching roll analysis remains valid through copying, project restoration
+  // and a later interpretation change's Undo/Redo.
+  for (const action of ['applyToSelectedBtn', 'applyRollReferenceBtn']) {
+    const label = 'valid locked ' + action;
+    await evaluate('window.__routeFiles = window.__routeOriginalFiles.slice()');
+    const donor = { ...lockedColor, rollFrame: { ...lockedColor.rollFrame, rollId: 'different-donor', offsetStops: -.5 },
+      wbR: 1.23, expiredContrast: 0 };
+    await openProject([donor, lockedColor, lockedColor], true,
+      action === 'applyRollReferenceBtn' ? { enabled: true, settingsSnapshot: donor, applyLock: false, applyCrop: false } : null);
+    await evaluate(`document.getElementById('${action}').click()`);
+    await waitFor(label + ' explicit WB copied', 'window.__ncTwoStage.queuedRecipes().slice(1).every(item => item.settings?.wbR === 1.23)');
+    const recipes = await evaluate('window.__ncTwoStage.queuedRecipes().slice(1).map(item => item.settings)');
+    for (const recipe of recipes) if (JSON.stringify(recipe.rollFrame) !== JSON.stringify(lockedColor.rollFrame)
+      || JSON.stringify(recipe.expiredAnalysis) !== JSON.stringify(lockedColor.expiredAnalysis)) fail(label + ': valid recipient analysis discarded or donor roll adopted');
+    const batch = await exports(label + ' actual batch', true);
+    const savedProject = await saveProject(label);
+    await reopenSavedProject(label);
+    await evaluate('window.__routeFiles = [window.__routeOriginalFiles[1]]');
+    await openProject([savedProject.files[1].settings], false);
+    const before = await exports(label + ' saved current');
+    equalRecipient(batch, before, label + ' current/batch');
+    await applyRecipe({ filmType: 'bw' });
+    const changed = await measured(label + ' retyped', 'bw');
+    if (changed.rollFrame) fail(label + ': later retype retained locked levels');
+    const after = await exports(label + ' retyped');
+    await evaluate('document.getElementById("undoBtn").click()');
+    await waitFor(label + ' Undo', `${ready} && ${settings}.filmType === 'color' && ${settings}.rollFrame?.locked`);
+    if (JSON.stringify(await evaluate(`${settings}.rollFrame`)) !== JSON.stringify(lockedColor.rollFrame)) fail(label + ': Undo lost valid roll ownership');
+    equalExports(before, await exports(label + ' undone'), label + ' Undo');
+    await evaluate('document.getElementById("redoBtn").click()');
+    const redone = await measured(label + ' Redo', 'bw');
+    if (redone.rollFrame) fail(label + ': Redo reinstalled stale roll ownership');
+    equalExports(after, await exports(label + ' redone'), label + ' Redo');
+  }
+  console.log('ok: real Analyse roll locked recipients; both copy buttons invalidate type/mode histograms and density offsets; locked donor import excluded; valid recipient reuse/save/reopen/Undo/Redo and exact PNG8/TIFF16 current/batch/fresh exports preserved');
   // Save through the actual Studio command, read the downloaded project,
   // reopen through the file input, then retype without supplying strengths.
   for (const modeOnly of [false, true]) for (const defaults of [false, true]) {

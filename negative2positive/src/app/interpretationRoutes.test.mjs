@@ -11,7 +11,9 @@ import { mergeStudioColors } from './studioSettings.js';
 import { buildRollProject, serializeRollProject, parseRollProject } from './rollProject.js';
 const { deepCopySanitizedSettings } = await import(process.env.NC229_SNAPSHOT_SOURCE
   ? pathToFileURL(process.env.NC229_SNAPSHOT_SOURCE).href : './settingsSnapshot.js');
-import { convertFrameWithRouter } from '../pipeline/conversionRouter.js';
+import { convertFrameWithRouter, resolveConversionMode } from '../pipeline/conversionRouter.js';
+import { analyzeSilverCoreFrame } from '../pipeline/silverAdapter.js';
+import { aggregateRollAnalysis, measureNegativeMean, sanitizeRollFrameForSettings, rollFrameExposureUnits } from './rollAnalysis.js';
 import { applyPreparedAdjustmentsToBuffer, applyPreparedAdjustmentsToBuffer16 } from './adjustmentPipeline.js';
 import { resolveAnalysisRegion, analysisPixelBounds } from './analysisRegion.js';
 import { planeBuffersOf, sharesPlaneBuffers, markOwnedPlanes } from './planeRelease.js';
@@ -48,13 +50,14 @@ const functions = ['recipePatch', 'applyRecipeToCurrent', 'applyRecipeToSelected
   'sanitizeSettings', 'sanitizeNumeric', 'clampBetween', 'sanitizeCurveLut', 'sanitizeCurvePointChannel', 'buildCurveLutFromPoints',
   'makeLinearCurvePoints', 'makeLinearCurveLut', 'extractCurrentSettings', 'cloneSettings',
   'applySettingsToItems', 'applyCurrentSettingsToSelected', 'applyRollReferenceToSelected', 'addFilesToQueue',
-  'createQueueItemId', 'persistCurrentFileSettings', 'buildCurrentProject', 'sanitizeProjectSettings'];
+  'createQueueItemId', 'persistCurrentFileSettings', 'buildCurrentProject', 'sanitizeProjectSettings',
+  'getEffectiveFilmType', 'usesSilverCoreConversion', 'buildCoreConversionSettings', 'buildRouterSettings', 'localExposureGeometryFor'];
 const positiveMarker = "    document.getElementById('convertPositiveBtn').addEventListener('click', () => {";
 const positiveStart = source.indexOf(positiveMarker), positiveEnd = source.indexOf('\n    });', positiveStart);
 assert.ok(positiveStart >= 0 && positiveEnd > positiveStart);
 const positiveCaller = 'var convertPositive = () => {' + source.slice(positiveStart + positiveMarker.length, positiveEnd) + '\n    };';
 
-async function fixture({ type = 'positive', mode = 'correct', manual = false } = {}) {
+async function fixture({ type = 'positive', mode = 'correct', manual = false, roll = null } = {}) {
   const h = createHarness(base), { context: c, target, state } = h;
   Object.assign(state, EXPIRED_RESCUE_DEFAULTS, { filmType: type, positiveMode: mode, currentStep: 3,
     filmTypeSource: 'auto', expiredEnabled: true, semanticMap: structuredClone(map),
@@ -86,16 +89,14 @@ async function fixture({ type = 'positive', mode = 'correct', manual = false } =
     sanitizeCoreColorModel: (v, fallback) => v || fallback, sanitizeCoreEnhancedProfile: (v, fallback) => v || fallback,
     sanitizeFilmBase: (v, fallback) => structuredClone(v || fallback),
     sanitizeFilmEdgeForSettings: v => v ? { checked: true, ...structuredClone(v) } : null,
-    sanitizeRollFrameForSettings: v => v ? structuredClone(v) : null,
+    sanitizeRollFrameForSettings, rollFrameExposureUnits,
     sanitizeLensCorrection: v => ({ enabled: false, params: {}, modes: {}, ...v }),
     normalizePaperId: v => v || 'none', normalizeToningId: v => v || 'none',
     sanitizeRepairStrokes: v => v || [], sanitizeFrameMetadata: v => v || {},
     sanitizeLookForSettings: v => v || null, sanitizeLocalExposureForSettings: () => null,
-    usesSilverCoreConversion: () => true, requiresFilmBase: () => false,
+    requiresFilmBase: () => false,
     baseSizeSource: () => base, pendingGeometryEdits: () => null,
     createPerfTrace: () => ({ mark() {}, end() {} }),
-    buildRouterSettings: s => ({ filmType: s.filmType, positiveMode: s.positiveMode, filmBase: s.filmBase,
-      filmPreset: 'none', colorModel: 'standard', borderBuffer: 0, exposure: s.coreExposure }),
     getColorAnalysisSample: () => null,
     convertFrameOffMainThread: convertFrameWithRouter,
     renderGeometryChain: async image => image,
@@ -130,6 +131,15 @@ async function fixture({ type = 'positive', mode = 'correct', manual = false } =
   if (/^    function applyRecipeSettings\(/m.test(source)) vm.runInContext(fn('applyRecipeSettings'), c);
   const realAnalyze = target.analyzeExpiredFilm;
   target.analyzeExpiredFilm = (...args) => { measurements.push(args); return realAnalyze(...args); };
+  if (roll) {
+    const channelData = await analyzeSilverCoreFrame(base, target.buildCoreConversionSettings(state), resolveConversionMode(state));
+    const darker = new ImageData(Uint8ClampedArray.from(base.data, (v, i) => i % 4 === 3 ? v : Math.round(v * Math.pow(.5, 1 / 2.2))), width, height);
+    const measured = aggregateRollAnalysis([base, darker, darker].map((image, i) => ({ id: i,
+      filmBase: state.filmBase, channelData, negativeMean: measureNegativeMean(image, 0) })));
+    state.rollFrame = sanitizeRollFrameForSettings({ rollId: 'recipient-roll', channelData: measured.channelData,
+      ...measured.frames[0], locked: true, equalize: true, ...roll });
+    assert.ok(state.rollFrame.channelData && state.rollFrame.offsetStops > .9, 'real histogram/density aggregation produces a meaningful recipient offset');
+  }
   await target.flushScheduledCoreReprocess();
   c.runExpiredAnalysis();
   measurements.length = 0;
@@ -137,8 +147,129 @@ async function fixture({ type = 'positive', mode = 'correct', manual = false } =
   state.fileQueue[0].settings = structuredClone(old);
   return { ...h, file, timers, measurements, old, adjusted };
 }
-
 let cases = 0;
+// Both copy buttons must use the recipient after interpretation invalidation.
+// The locked levels and density offset reach the real router, conversion,
+// measurement and 8/16 adjustment kernels, rather than a simplified router.
+for (const route of ['locked-copy-current', 'locked-copy-reference', 'locked-copy-import']) {
+  if (selection !== 'all' && selection !== route) continue;
+  for (const crossing of ['bw', 'positive', 'mode']) {
+    if (process.env.NC229_LOCK_CROSSING && process.env.NC229_LOCK_CROSSING !== crossing) continue;
+    const f = await fixture({ type: crossing === 'mode' ? 'positive' : 'color', manual: true, roll: {} });
+    const { context: c, state, target, old } = f;
+    const donor = c.cloneSettings({ ...old, filmType: crossing === 'bw' ? 'bw' : 'positive',
+      positiveMode: crossing === 'mode' ? 'edit' : 'correct', wbR: 1.23, wbG: 1, wbB: .91,
+      expiredBrightness: old.expiredBrightness, expiredContrast: 0, expiredBrightnessUserOverride: true,
+      expiredContrastUserOverride: true, rollFrame: { ...old.rollFrame, rollId: 'donor-roll', offsetStops: -.5 } });
+    c.restoreSettings(donor, { refreshDisplay: false });
+    await target.flushScheduledCoreReprocess();
+    state.fileQueue[0].selected = false;
+    const file = { name: route + '-' + crossing + '.png', size: 1, type: 'image/png' };
+    let recipient;
+    if (route === 'locked-copy-import') {
+      state.rollReference = { settingsSnapshot: donor, applyLock: true, applyCrop: false };
+      [recipient] = c.addFilesToQueue([file], { automaticRoll: false });
+    } else {
+      recipient = { file, selected: true, settings: c.cloneSettings(old) };
+      state.fileQueue.push(recipient);
+      if (route === 'locked-copy-current') await c.applyCurrentSettingsToSelected();
+      else {
+        state.rollReference = { settingsSnapshot: donor, applyCrop: false };
+        c.applyRollReferenceToSelected();
+      }
+    }
+    const recipe = c.cloneSettings(recipient.settings), prior = c.cloneSettings(old);
+    const fresh = { ...recipe, rollFrame: null, semanticMap: null, expiredAnalysis: null };
+    const router = c.buildRouterSettings(recipe);
+    const comparisons = [];
+    let settled;
+    f.measurements.length = 0;
+    for (const depth of [8, 16]) {
+      const before = f.measurements.length;
+      const actual = await c.processFileWithSettings(file, recipe, { sourceImageData: base, bitDepth: depth,
+        onPreparedSettings: s => { settled ||= c.cloneSettings(s); } });
+      const count = f.measurements.length - before;
+      const reference = await c.processFileWithSettings(file, fresh, { sourceImageData: base, bitDepth: depth });
+      const samples = depth === 16 ? actual.__image16.data : actual.data;
+      const expected = depth === 16 ? reference.__image16.data : reference.data;
+      const differences = samples.reduce((n, v, i) => n + Number(v !== expected[i]), 0);
+      console.log(`${route} ${crossing} ${depth}-bit: recipient measurements=${count}, exposure=${router.exposure}, differing samples=${differences}`);
+      comparisons.push({ samples, expected, count, depth, differences });
+    }
+    for (const { samples, expected, count, depth, differences } of comparisons) {
+      assert.equal(count, 1, `${route}: changed recipient is remeasured at ${depth} bits`);
+      assert.equal(differences, 0, `${route} ${crossing}: exact fresh ${depth}-bit locked-roll samples`);
+      assert.deepEqual(Array.from(samples), Array.from(expected), `${route} ${crossing}: exact fresh ${depth}-bit locked-roll samples`);
+    }
+    assert.equal(recipe.rollFrame, null, `${route}: invalidated recipient/donor roll record excluded`);
+    assert.equal(router.analysisOverride, null, `${route}: old roll histogram does not reach conversion`);
+    assert.equal(router.exposure, recipe.coreExposure, `${route}: old density offset does not reach conversion`);
+    assert.equal(recipe.semanticMap, null, `${route}: old semantic analysis stays invalidated`);
+    assert.equal(recipe.expiredAnalysis, null, `${route}: old rescue stays invalidated`);
+    assert.deepEqual(canon(old), canon(prior), `${route}: invalidation does not mutate saved history`);
+    assert.deepEqual([settled.wbR, settled.wbG, settled.wbB, settled.expiredBrightness, settled.expiredContrast],
+      [1.23, 1, .91, old.expiredBrightness, 0], `${route}: explicit WB and strengths preserved`);
+    assert.ok(settled.expiredBrightnessUserOverride && settled.expiredContrastUserOverride);
+    assert.deepEqual(canon(settled.filmBase), canon(donor.filmBase), `${route}: manual base remains explicit`);
+    assert.deepEqual(canon(recipient.settings.expiredAnalysis), canon(settled.expiredAnalysis), `${route}: corresponding fresh measurement adopted`);
+    const count = f.measurements.length;
+    await c.processFileWithSettings(file, recipient.settings, { sourceImageData: base, bitDepth: 16 });
+    assert.equal(f.measurements.length, count, `${route}: valid new saved measurement reused`);
+    c.restoreSettings(settled, { refreshDisplay: false });
+    await target.flushScheduledCoreReprocess();
+    for (const { expected, depth } of comparisons) {
+      const live = f.adjusted(state.processedImageData, settled, depth);
+      assert.deepEqual(Array.from(depth === 16 ? live.__image16.data : live.data), Array.from(expected), `${route}: live conversion and real batch ${depth}-bit samples match`);
+    }
+    f.pool.dispose(); cases++;
+  }
+}
+if (selection === 'all' || selection === 'locked-preservation') {
+  for (const roll of [{}, { equalize: false }, { locked: false }, { locked: false, outlier: true, reasons: ['base-density'] }]) {
+    for (const route of ['current', 'reference']) {
+      const f = await fixture({ type: 'color', manual: true, roll }), { context: c, target, state, old } = f;
+      const recipient = { file: { name: 'valid-roll.png' }, selected: true, settings: c.cloneSettings(old) };
+      const donor = c.cloneSettings({ ...old, rollFrame: { ...old.rollFrame, rollId: 'donor-roll', offsetStops: -.5 },
+        wbR: 1.23, expiredContrast: 0 });
+      state.fileQueue[0].selected = false;
+      state.fileQueue.push(recipient);
+      c.restoreSettings(donor, { refreshDisplay: false });
+      if (route === 'current') await c.applyCurrentSettingsToSelected();
+      else {
+        state.rollReference = { settingsSnapshot: donor, applyCrop: true };
+        c.applyRollReferenceToSelected();
+      }
+      assert.deepEqual(canon(recipient.settings.rollFrame), canon(old.rollFrame), `${route}: matching recipient retains its own lock/density/outlier semantics`);
+      assert.notEqual(recipient.settings.rollFrame, old.rollFrame, 'roll record is cloned');
+      assert.deepEqual(canon(recipient.settings.semanticMap), canon(old.semanticMap), 'matching recipient anchors retained');
+      assert.deepEqual(canon(recipient.settings.expiredAnalysis), canon(old.expiredAnalysis), 'matching recipient rescue retained');
+      const router = c.buildRouterSettings(recipient.settings);
+      assert.deepEqual(canon(router.analysisOverride), old.rollFrame.locked ? canon(old.rollFrame.channelData) : null, 'only a locked record supplies histogram levels');
+      assert.equal(router.exposure, old.coreExposure + rollFrameExposureUnits(old.rollFrame), 'equalization and outlier policy preserved');
+      const count = f.measurements.length;
+      for (const depth of [8, 16]) {
+        const actual = await c.processFileWithSettings(recipient.file, recipient.settings, { sourceImageData: base, bitDepth: depth });
+        const reference = await c.processFileWithSettings(recipient.file, { ...old, wbR: 1.23, expiredContrast: 0 }, { sourceImageData: base, bitDepth: depth });
+        assert.deepEqual(Array.from(actual.data), Array.from(reference.data), 'valid locked-roll conversion reused exactly');
+        if (depth === 16) samePixels(actual, reference, 'valid locked-roll 16-bit precision');
+      }
+      assert.equal(f.measurements.length, count, 'valid matching recipient needs no rescue remeasurement');
+      c.restoreSettings(recipient.settings, { refreshDisplay: false });
+      const before = c.captureSnapshot('valid roll');
+      c.pushUndo('retype roll');
+      Object.assign(state, c.applyInterpretationPatch(state, { filmType: 'bw' }));
+      const after = c.captureSnapshot('retyped roll');
+      assert.equal(after.settings.rollFrame, null, 'history stores invalidated roll after retype');
+      await c.performUndo();
+      assert.deepEqual(canon(state.rollFrame), canon(old.rollFrame), 'Undo retains matching old roll analysis');
+      assert.deepEqual(canon(state.expiredAnalysis), canon(before.settings.expiredAnalysis), 'Undo retains matching old rescue');
+      await c.performRedo();
+      assert.equal(state.rollFrame, null, 'Redo restores invalidated new roll recipe');
+      f.pool.dispose(); cases++;
+    }
+  }
+}
+
 for (const route of ['current', 'selected', 'detected', 'reference', 'edge-text', 'edge-dx', 'positive-entry']) {
   if (selection !== 'all' && selection !== route) continue;
   for (const modeOnly of route === 'current' || route === 'selected' ? [false, true] : [false]) {

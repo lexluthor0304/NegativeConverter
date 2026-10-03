@@ -85,7 +85,11 @@ Now one driver (`runBatchExport` in `main.js`) runs the per-file pipeline
   exclude donor semantic/rescue measurements. Each recipient retains its own
   anchors only for matching geometry/interpretation, and its rescue only for
   matching measurement inputs; changed frames measure their new positive before
-  exact adjustment. Copied WB and brightness/contrast strengths are explicit,
+  exact adjustment. Recipient roll histograms and density offsets are taken from
+  the interpretation-invalidated recipe too: type/mode changes drop the old
+  record before conversion, while matching recipient roll locks, equalization
+  and outlier choices remain. Import lock never inherits the donor's roll record.
+  Copied WB and brightness/contrast strengths are explicit,
   including values equal to automatic measurements or defaults. Both strength
   ownership flags survive extraction, cloning, project save/reopen and history.
   A newly measured saved recipient adopts the analysis only while its recipe's
