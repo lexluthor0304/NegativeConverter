@@ -7,7 +7,7 @@ const filmType = await import(process.env.NC229_FILM_TYPE_SOURCE
   ? pathToFileURL(process.env.NC229_FILM_TYPE_SOURCE).href : './filmTypeOverride.js');
 import { encodeRecipe, decodeRecipe, RECIPE_KEYS } from './recipes.js';
 import { sanitizeSemanticMap } from './semanticAnchors.js';
-const { hasWindowEdits, overlayWindowEdits } = await import(process.env.NC229_PROVISIONAL_SOURCE
+const { hasWindowEdits, overlayWindowEdits, analysisAreaEdited, confirmedImageArea } = await import(process.env.NC229_PROVISIONAL_SOURCE
   ? pathToFileURL(process.env.NC229_PROVISIONAL_SOURCE).href : './provisionalPhoto.js');
 import { mergeStudioColors } from './studioSettings.js';
 import { buildRollProject, serializeRollProject, parseRollProject } from './rollProject.js';
@@ -55,7 +55,8 @@ const functions = ['recipePatch', 'applyRecipeToCurrent', 'applyRecipeToSelected
   'applySettingsToItems', 'applyCurrentSettingsToSelected', 'applyRollReferenceToSelected', 'addFilesToQueue',
   'createQueueItemId', 'persistCurrentFileSettings', 'buildCurrentProject', 'sanitizeProjectSettings',
   'getEffectiveFilmType', 'usesSilverCoreConversion', 'buildCoreConversionSettings', 'buildRouterSettings', 'localExposureGeometryFor',
-  'getCurrentQueueItem', 'markCurrentFileDirty', 'retypeImportItem', 'applyFilmTypeToRoll', 'applyImportPositives', 'withPendingEditsOf', 'photoSettingsKey'];
+  'getCurrentQueueItem', 'markCurrentFileDirty', 'retypeImportItem', 'applyFilmTypeToRoll', 'applyImportPositives', 'withPendingEditsOf', 'photoSettingsKey',
+  'resolvePendingFrameEdits', 'frameMetaWithWindowIntent', 'windowFrameIntent'];
 const positiveMarker = "    document.getElementById('convertPositiveBtn').addEventListener('click', () => {";
 const positiveStart = source.indexOf(positiveMarker), positiveEnd = source.indexOf('\n    });', positiveStart);
 assert.ok(positiveStart >= 0 && positiveEnd > positiveStart);
@@ -91,7 +92,7 @@ async function fixture({ type = 'positive', mode = 'correct', manual = false, ro
   Object.assign(target, filmType, { RECIPE_KEYS, EXPIRED_RESCUE_DEFAULTS, EXPIRED_RESCUE_KEYS,
     sanitizeSemanticMap, sanitizeExpiredAnalysis, sanitizeExpiredRescueParams, analyzeExpiredFilm, defaultExpiredRescueParams,
     resolveAnalysisRegion, analysisPixelBounds, downsampleImageDataForMaxPixels, downsampleImageDataForMaxDim,
-    hasWindowEdits, overlayWindowEdits, mergeStudioColors, planeBuffersOf, sharesPlaneBuffers, markOwnedPlanes,
+    hasWindowEdits, overlayWindowEdits, analysisAreaEdited, confirmedImageArea, mergeStudioColors, planeBuffersOf, sharesPlaneBuffers, markOwnedPlanes,
     deepCopySanitizedSettings, buildRollProject,
     decodedRecipe: null, expiredAnalysisKey: null, expiredTabPending: false,
     coreReprocessToken: 4, displayedFrameToken: 4, processNegativeInFlight: null,
@@ -185,7 +186,7 @@ for (const route of ['live-controls', 'live-recipe', 'live-detected', 'live-refe
     const item = c.getCurrentQueueItem(), unrelated = { id: 'other', file: { name: 'other.png' }, settings: c.cloneSettings(old) };
     const initialHistory = target.undoStack.length;
     if (route.startsWith('live-')) {
-      item.pendingFrameEdit = { baseline: c.cloneSettings(old) };
+      item.pendingFrameEdit = { intent: c.windowFrameIntent(old, old), baseline: c.cloneSettings(old) };
       item.pendingEdits = { filmType: old.filmType, positiveMode: old.positiveMode, coreExposure: 19 };
     }
     const originalKey = c.photoSettingsKey(item);
