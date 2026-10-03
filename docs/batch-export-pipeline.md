@@ -270,10 +270,11 @@ harness measures the per-lane peak. The decode-ahead ceiling is the memory
 budget's (`docs/memory-budget.md`, #258: 6.0 GiB at 16 GiB of RAM, 3.6 GiB
 at 8 GiB or unknown), the editor's bytes are its ledger's, and the budget's
 other holders count with their reservations (the batch's own lanes are
-counted by the rows above instead). A prepared decode takes no reservation
-of its own: a lane reserves before it claims a frame and then waits for that
-frame's prepare, so admission is a yes or no at once, and a refused frame is
-decoded by its lane inside the lane's reservation. Once decoded, a frame
+counted by the rows above instead). A prepared decode rechecks at the loader
+gate after asynchronous waits and reads, then takes a non-waiting reservation.
+It waits for foreground ownership to end, but never queues for bytes a lane
+holds while waiting for that prepare. A refused dispatch returns no base, and
+the frame is decoded by its lane inside the lane's reservation. Once decoded, a frame
 waiting for its lane is in the ledger (`heldJobFrames`) until a lane takes it
 or the batch drops it, so the budget's other requests see it.
 

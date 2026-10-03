@@ -143,6 +143,7 @@ export function createMemoryBudget({
   // Waiting user and background requests: every user request ahead of every
   // background one, FIFO within a priority.
   const queue = [];
+  const foregroundWaiters = new Set();
   let timer = null;
   let evaluating = false;
   let again = false;
@@ -170,6 +171,7 @@ export function createMemoryBudget({
         reserved[priority] -= handle.bytes;
         if (priority === 'foreground') foregroundCount -= 1;
         else jobCount -= 1;
+        if (!foregroundCount) for (const wake of [...foregroundWaiters]) wake();
         emit({ type: 'release', label, priority, bytes: handle.bytes, reserved: reservedTotal() });
         evaluate();
       },
@@ -268,6 +270,33 @@ export function createMemoryBudget({
   }
 
   return {
+    /** Wait only for foreground ownership, never behind a batch lane's bytes. */
+    whenForegroundIdle({ signal = null } = {}) {
+      if (signal?.aborted) return Promise.reject(abortError(signal));
+      if (!foregroundCount) return Promise.resolve();
+      return new Promise((resolve, reject) => {
+        const cleanup = () => { foregroundWaiters.delete(wake); signal?.removeEventListener('abort', abort); };
+        const wake = () => { cleanup(); resolve(); };
+        const abort = () => { cleanup(); reject(abortError(signal)); };
+        foregroundWaiters.add(wake);
+        signal?.addEventListener('abort', abort, { once: true });
+      });
+    },
+    /**
+     * Opportunistic decode admission: synchronously record a real handle or
+     * refuse, without pressure, a progress grant or a waiting request. The
+     * caller can credit only unused bytes of its own existing reservations;
+     * the new handle remains fully counted until released. This prevents a
+     * prepare from waiting on the lane that will consume its result.
+     */
+    tryReserve(bytes, { priority = 'user', signal = null, label = '', creditBytes = 0 } = {}) {
+      if (!['user', 'background'].includes(priority)) throw new TypeError(`Unknown opportunistic priority: ${priority}`);
+      if (signal?.aborted) throw abortError(signal);
+      const size = Math.max(0, Number(bytes) || 0);
+      const credit = Math.min(reserved.user + reserved.background, Math.max(0, Number(creditBytes) || 0));
+      if (foregroundCount || queue.length || reservedTotal() - credit + readRetained() + size > budget) return null;
+      return grant(size, priority, label, 'opportunistic');
+    },
     /**
      * Resolves with a handle once `bytes` may be used; release() it once the
      * memory is really gone (after the sink, when the frame is dropped). A

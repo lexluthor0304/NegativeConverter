@@ -8,6 +8,32 @@ import { createPhotoSessionCache } from './photoSessionCache.js';
 
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
+// A prepare's real reservation must never queue behind the lane waiting for
+// it. Only unused bytes of the caller's own lane can be credited; foreground
+// still blocks dispatch and the full new handle counts for everyone else.
+{
+  const budget = createMemoryBudget({ budgetBytes: 100, retainedBytes: () => 10 });
+  const lane = await budget.reserve(70, { priority: 'user' });
+  assert.equal(budget.tryReserve(40), null);
+  const ahead = budget.tryReserve(40, { creditBytes: 20 });
+  assert.ok(ahead);
+  assert.equal(budget.reserved, 110, 'credit does not hide the running reservation');
+  ahead.release();
+  const foreground = await budget.reserve(1, { priority: 'foreground' });
+  assert.equal(budget.tryReserve(1, { creditBytes: 70 }), null);
+  let woke = false;
+  const idle = budget.whenForegroundIdle().then(() => { woke = true; });
+  await tick(); assert.equal(woke, false);
+  const controller = new AbortController();
+  const withdrawn = budget.whenForegroundIdle({ signal: controller.signal });
+  controller.abort();
+  await assert.rejects(withdrawn, { name: 'AbortError' });
+  foreground.release(); await idle;
+  assert.equal(woke, true, 'foreground wait does not depend on lane-held bytes');
+  lane.release();
+  assert.equal(budget.idle, true);
+}
+
 function track(promise) {
   const box = { settled: false, value: undefined, error: undefined };
   promise.then(value => { box.settled = true; box.value = value; }, error => { box.settled = true; box.error = error; });

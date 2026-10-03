@@ -788,9 +788,10 @@ for (const [format, bitDepth] of [['jpeg', 8], ['png', 8], ['tiff', 16], ['png',
     f.context.loadFileToImageData = async (file, options) => {
       assert.ok(options.signal instanceof AbortSignal, 'a prepared decode can be aborted');
       assert.equal(options.filmStats, !fileSettings.get(file.name), 'the options the lane would decode with');
-      // Admitted at once against the memory budget's ceiling (#258); the
-      // decode reserves nothing a lane could be waiting on.
-      assert.equal(options.claim?.fixed, true, 'a prepared decode takes no reservation of its own');
+      assert.equal(options.claim?.fixed, false, 'a prepared decode rechecks actual dispatch admission');
+      await options.claim.atDecode({ width: W, height: H });
+      assert.ok(f.context.memoryBudget.snapshot().outstanding.some(handle => handle.label.startsWith('export prepare ')),
+        'the running prepare is accounted until the base enters the ledger');
       log.push(`decode-ahead:${file.name}${f.context.memoryBudget.foregroundOutstanding ? ':during-foreground' : ''}`);
       const base = makeProcessed(5);
       decoded.push(base);

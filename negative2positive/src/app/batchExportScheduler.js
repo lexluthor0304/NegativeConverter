@@ -842,10 +842,10 @@ export async function runBatchPipeline(jobs, {
     let entry;
     try {
       let taken = stage ? stage.take(index) : null;
-      const wasPrepared = Boolean(taken);
       let prepared;
-      if (taken) {
-        prepared = await taken;
+      if (taken) prepared = await taken;
+      const wasPrepared = Boolean(prepared);
+      if (wasPrepared) {
         noteBase();
       } else {
         decodingHere = true;

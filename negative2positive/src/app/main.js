@@ -21093,17 +21093,16 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // The ceiling is the memory budget's (#258), and the estimate counts its
     // ledger and its outstanding reservations other than the batch's own
     // lanes (`ownReservedBytes`; their frames and payloads are counted
-    // apart). The decode itself takes no reservation of its own: a lane
-    // reserves before it claims a frame and then waits for that frame's
-    // prepare, so a prepare waiting for memory the lane holds would never
-    // finish. Admission is a yes or no at once instead, and a frame it
-    // refuses is decoded by its lane inside the lane's reservation. It
+    // apart). The offer is provisional: after the idle wait and file read,
+    // the loader gate waits for foreground ownership and synchronously takes
+    // a non-waiting reservation. A prepare never queues for lane-held bytes:
+    // a refused dispatch returns no base and its lane decodes the file. It
     // refuses every frame on WebKit engines until the #230 harness has
     // measured a lane, and while a foreground reservation (a photo being
     // opened, ensureBase) is out. A decoded frame waiting for its lane is
     // counted by the ledger (heldJobFrames) until a lane takes it or the
     // batch drops it.
-    function batchDecodeAhead(mode, { pixelsPerFile, convertsInBands = () => false, ownReservedBytes = () => 0 }) {
+    function batchDecodeAhead(mode, { pixelsPerFile, convertsInBands = () => false, ownReservedBytes = () => 0, reservationCredit = () => 0 }) {
       if (mode === 'serial') return null;
       const decodesOffThread = (file) => isRawLikeFileName(String(file?.name || '').toLowerCase()) || isPngFile(file);
       const subStages = mode === 'substages';
@@ -21153,14 +21152,57 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           // foreground decode or conversion to end, at most 2 s. The batch's
           // own export lock never holds it (foregroundOnly).
           if (isTauriDesktop()) await backgroundGate.idle({ signal, maxWaitMs: BACKGROUND_STEP_WAIT_CAP_MS, foregroundOnly: true });
+          const headerPixels = await pixelsOf(job.file);
+          const controller = new AbortController();
+          const abort = () => controller.abort(signal.reason);
+          if (signal.aborted) abort();
+          else signal.addEventListener('abort', abort, { once: true });
+          let handle = null;
+          let refused = false;
+          const claim = {
+            fixed: false,
+            async atDecode({ kind = 'raw', width = 0, height = 0, estimatedBytes = null } = {}) {
+              // This runs after the actual loader's read/open/metadata waits,
+              // including every fallback dispatch. Foreground never depends
+              // on the lane's reservation, so waiting for it cannot deadlock.
+              while (memoryBudget.foregroundOutstanding) await memoryBudget.whenForegroundIdle({ signal: controller.signal });
+              if (controller.signal.aborted) throw controller.signal.reason;
+              const pixels = width * height || headerPixels;
+              const bytes = decodeReservationBytes({ pixels, decodeBytes: estimatedBytes, kind });
+              handle?.release();
+              handle = null;
+              const hidden = hiddenJobs.status();
+              const plan = planDecodeAhead({
+                candidatePixels: pixels, deviceMemory: navigator.deviceMemory, engine: memoryRuntime.engine,
+                hiddenLimited: hidden.safeMode || (hidden.hidden && hidden.limited), ceilingBytes: memoryBudget.budget
+              });
+              if (plan.admit) handle = memoryBudget.tryReserve(bytes, {
+                priority: 'user', label: `export prepare ${job.file.name}`, signal: controller.signal,
+                creditBytes: reservationCredit()
+              });
+              if (!handle) {
+                refused = true;
+                batchPipelineDiagnostics.decodeAhead.refused[plan.admit ? 'ceiling' : plan.reason] += 1;
+                controller.abort(new DOMException('Decode-ahead admission changed', 'AbortError'));
+                throw controller.signal.reason;
+              }
+            }
+          };
           running += 1;
           try {
             const base = markOwnedPlanes(await loadFileToImageData(job.file, {
-              filmStats: !job.settings, signal, claim: coveredMemoryClaim(), ...(subStages ? { onStage: stage } : {})
+              filmStats: !job.settings, signal: controller.signal, claim, ...(subStages ? { onStage: stage } : {})
             }));
             heldJobFrames.add(base);
             return base;
+          } catch (error) {
+            if (refused && !signal.aborted) return null;
+            throw error;
           } finally {
+            signal.removeEventListener('abort', abort);
+            // The base is now in the ledger, or the decoder has failed. A
+            // ready prepare holds no reservation its consuming lane needs.
+            handle?.release();
             running -= 1;
           }
         },
@@ -21170,6 +21212,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         },
         // A frame decoded ahead of a cancelled batch is never processed.
         disposePrepared: (base) => {
+          if (!base) return;
           if (heldJobFrames.delete(base)) memoryBudget.poke();
           releaseOwnedPlanes(base);
         }
@@ -21250,7 +21293,19 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const mode = batchPipelineMode();
       // `workers` (below) is read at each admission, once the batch runs.
       const decodeAhead = batchDecodeAhead(mode, {
-        pixelsPerFile, ownReservedBytes, convertsInBands: () => Boolean(workers.bandPool?.available)
+        pixelsPerFile, ownReservedBytes, convertsInBands: () => Boolean(workers.bandPool?.available),
+        // Only slack in full processing-lane reservations can be credited;
+        // early payload reservations still count in full. Use live handles
+        // at dispatch, since lanes can change during the idle/read waits.
+        reservationCredit: () => {
+          let credit = 0;
+          const processingBytes = planDecodeAhead({ candidatePixels: 0, processingPixels: [pixelsPerFile],
+            processingInBands: Boolean(workers.bandPool?.available) }).bytes - estimateRawDecodeBytes(0, 1);
+          for (const handle of laneHandles) {
+            if (!handle.released && handle.bytes === laneBytes) credit += Math.max(0, laneBytes - processingBytes);
+          }
+          return credit;
+        }
       });
       const workers = createBatchExportWorkers(lanes, { pixelsPerFile, exportInfo, mode, decodesInFlight: () => decodeAhead?.running() || 0 });
       const trace = createPerfTrace('batchExport', { files: jobs.length, lanes, mode });
