@@ -15,7 +15,9 @@ import { selectExportSamples, encodePng16Blob } from '../workers/imageEncoders.j
 import { convertFrameWithRouter } from '../pipeline/conversionRouter.js';
 import { cachedAutoDetectFilmBase, cachedDetectFilmType, carryFilmStats } from './filmStatsCache.js';
 import { detectedImportSettings } from './filmTypeDetection.js';
-import { sanitizeFilmTypeOverride } from './filmTypeOverride.js';
+import { sanitizeFilmTypeOverride, applyAutomaticFilmType } from './filmTypeOverride.js';
+import { decideRollFilmType, mergeRollDecision, ownFilmTypeVerdict, rollDecisionFrame, ROLL_MONOCHROME } from './rollFilmType.js';
+import { rollFrameFilmType } from '../workers/rollFrameTask.js';
 import { EXPIRED_RESCUE_DEFAULTS } from '../pipeline/expiredRescue.js';
 import { sanitizeFrameMetadata } from './analogMetadata.js';
 import { AUTO_FRAME_FORMAT_RATIOS, AUTO_FRAME_DEFAULT_120_FORMATS, canAutoApplyImportFrame } from './autoFrameFormats.js';
@@ -31,15 +33,16 @@ function functionSource(name) {
   assert.ok(match, `${name} exists`);
   return source.slice(match.index, source.indexOf('\n    }\n', match.index) + 6);
 }
-function fixture() {
+function fixture({ colour = false } = {}) {
   const width = 900, height = 600, data = new Uint8ClampedArray(width * height * 4);
   const data16 = new Uint16Array(data.length);
   const rad = 2 * Math.PI / 180;
   for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
     const dx = x - width / 2, dy = y - height / 2;
     const u = dx * Math.cos(rad) + dy * Math.sin(rad), v = -dx * Math.sin(rad) + dy * Math.cos(rad);
-    const grey = Math.abs(u) < 270 && Math.abs(v) < 180 ? 50 + ((x + y) % 100) : 200;
-    const rgb = [grey * 1.08, grey, grey * 1.23];
+    const inside = Math.abs(u) < 270 && Math.abs(v) < 180;
+    const grey = inside ? 50 + ((x + y) % 100) : 200;
+    const rgb = colour && inside ? [grey * (.7 + (x % 100) / 160), grey, grey * (.7 + (y % 100) / 160)] : [grey * 1.08, grey, grey * 1.23];
     const at = (y * width + x) * 4;
     for (let c = 0; c < 3; c++) { data16[at + c] = Math.round(rgb[c] * 257); data[at + c] = data16[at + c] >>> 8; }
     data[at + 3] = 255; data16[at + 3] = 65535;
@@ -67,7 +70,7 @@ let releases = 0;
 const context = vm.createContext({
   state, console, Worker: function Worker() {}, OffscreenCanvas: function OffscreenCanvas() {},
   Uint8Array, Uint8ClampedArray, Uint16Array, Date,
-  sanitizeFilmTypeOverride, cachedAutoDetectFilmBase, cachedDetectFilmType, detectedImportSettings, carryFilmStats,
+  sanitizeFilmTypeOverride, cachedAutoDetectFilmBase, cachedDetectFilmType, detectedImportSettings, carryFilmStats, ROLL_MONOCHROME,
   EXPIRED_RESCUE_DEFAULTS, sanitizeFrameMetadata, normalizeAngleDegrees, rotatedDimensions,
   AUTO_FRAME_MAX_SIDE: 1600, AUTO_FRAME_FORMAT_RATIOS, AUTO_FRAME_DEFAULT_120_FORMATS,
   AUTO_FRAME_SCORE_WEIGHTS: { area: .18, rectangularity: .20, orthogonality: .14, parallelism: .10, edgeSupport: .18, centerPrior: .08, aspect: .12 },
@@ -85,7 +88,7 @@ const context = vm.createContext({
 vm.runInContext(['getImageDataPixelCount', 'clampBetween', 'sanitizeNumeric', 'makeLinearCurveLut',
   'createDefaultLensCorrectionSettings', 'autoDetectFilmBase', 'defaultFilmBaseBuffer', 'defaultSettingsInputs', 'createDefaultSettings',
   'settleImportFilmType', 'autoFrameAnalyzerOptions', 'runImportDetections', 'autoFrameEffectiveAngle', 'rotate180CropRegion',
-  'analyzeStudioImportFrame', 'applyAutoFrameToSelected'].map(functionSource).join('\n'), context);
+  'analyzeStudioImportFrame', 'autoFrameSelectedFilmType', 'applyAutoFrameToSelected'].map(functionSource).join('\n'), context);
 const createDefaults = context.createDefaultSettings;
 context.createDefaultSettings = (...args) => {
   const value = createDefaults(...args); defaults.push(structuredClone(value)); return value;
@@ -126,5 +129,62 @@ assert.equal(sha(new Uint8Array(await encode(selectedExport))), sha(new Uint8Arr
 item.settings = { ...item.settings, filmType: 'positive', filmTypeSource: 'manual' };
 await context.applyAutoFrameToSelected();
 assert.equal(requests.at(-1), 'positive');
+
+// A noMask leader's own verdict is positive, but a real B&W majority types
+// its rendering recipe as B&W. Import, roll detection and Selected must
+// agree on the leader's own gate without erasing that grouping.
+const colour = fixture({ colour: true });
+const ownDefaults = createDefaults(colour, item);
+assert.equal(ownDefaults.filmType, 'positive');
+assert.equal(ownDefaults.filmTypeReason, 'noMask');
+const neighbours = [1, 2, 3].map(id => ({ id, selected: false, settings: createDefaults(original) }));
+item.id = 0; item.settings = null;
+state.fileQueue = [item, ...neighbours];
+const record = { items: state.fileQueue, verdicts: new Map([[item, ownFilmTypeVerdict(ownDefaults)],
+  ...neighbours.map(frame => [frame, ownFilmTypeVerdict(frame.settings)])]), typed: new Map(), final: true };
+Object.assign(context, { decideRollFilmType, mergeRollDecision, ownFilmTypeVerdict, rollDecisionFrame, ROLL_MONOCHROME,
+  applyAutomaticFilmType, importFilmTypeRoll: () => record, importFilmTypeActive: () => true,
+  scheduleImportFilmTypeUpdate() {}, importUserEdited: frame => Boolean(frame.userEdited),
+  loadFileToImageData: async () => fixture({ colour: true }) });
+vm.runInContext(['liveImportSettings', 'importFilmTypeLocked', 'refreshImportFilmTypeDecision'].map(functionSource).join('\n'), context);
+context.refreshImportFilmTypeDecision(record);
+assert.equal(record.typed.get(item).filmType, 'bw', 'the real roll majority retypes its leader');
+assert.equal(rollFrameFilmType({ automatic: true }, { filmType: cachedDetectFilmType(colour) }), ownDefaults.filmType,
+  'roll worker uses the same own verdict as defaults/import');
+const colourImport = await context.analyzeStudioImportFrame(colour, ownDefaults);
+assert.ok(colourImport.cropRegion, 'the coloured scene has a reliable border for import and Selected');
+const importType = requests.at(-1);
+assert.equal(importType, 'positive');
+for (const settings of [null, context.settleImportFilmType(item, ownDefaults)]) {
+  item.settings = settings;
+  await context.applyAutoFrameToSelected();
+  assert.equal(requests.at(-1), importType, 'unset and automatically retyped Selected use the import gate');
+  assert.equal(item.settings.filmType, 'bw', 'the rendering recipe keeps automatic roll grouping');
+  assert.deepEqual(JSON.parse(JSON.stringify(item.settings.cropRegion)), JSON.parse(JSON.stringify(colourImport.cropRegion)));
+  assert.equal(item.settings.rotationAngle, colourImport.rotationAngle);
+  const groupedImport = context.settleImportFilmType(item, colourImport);
+  const colourRender = settings => convertFrameWithRouter({ imageData: renderGeometry(colour, planGeometry(colour, settings)), settings });
+  const selected = await colourRender(item.settings), imported = await colourRender(groupedImport);
+  for (const bitDepth of [8, 16]) {
+    assert.equal(sha(selectExportSamples(selected, bitDepth).samples), sha(selectExportSamples(imported, bitDepth).samples),
+      `roll-retyped import/Selected export parity (${bitDepth}-bit)`);
+  }
+  assert.equal(sha(new Uint8Array(await encode(selected))), sha(new Uint8Array(await encode(imported))), 'roll-retyped PNG16 parity');
+}
+// If the import verdict is no longer retained, measure it from this decode.
+record.verdicts.delete(item);
+await context.applyAutoFrameToSelected();
+assert.equal(requests.at(-1), importType, 'recovered automatic grouping uses the decoded own verdict');
+for (const lock of [{ savedSettings: true }, { userEdited: true }, { filmTypeOverride: { filmType: 'bw' } }]) {
+  Object.assign(item, lock);
+  item.settings = { ...item.settings, coreExposure: 73 };
+  await context.applyAutoFrameToSelected();
+  assert.equal(requests.at(-1), 'bw', 'saved, edited and overridden recipes keep their accepted type');
+  assert.equal(item.settings.coreExposure, 73, 'Selected preserves user colour adjustments');
+  for (const key of Object.keys(lock)) delete item[key];
+}
+item.settings = { ...item.settings, filmType: 'color', filmTypeSource: 'manual' };
+await context.applyAutoFrameToSelected();
+assert.equal(requests.at(-1), 'color', 'manual type wins over an earlier automatic roll verdict');
 client.dispose();
-console.log('autoFrameSelectedFilmType: cast B&W defaults, bw-film gate, crop/export parity and saved type');
+console.log('autoFrameSelectedFilmType: cast B&W, crop/export parity, own/roll disagreement and explicit choices');

@@ -1516,4 +1516,42 @@ function gatedDemosaics(f, load = f.context.loadFileToImageData) {
   assert.equal(f.timers.size, 0, 'no further attempt');
 }
 
+for (const failedStep of ['detectionError', 'edgeError', 'incomplete']) {
+  // A half-size worker must not silently turn an OpenCV failure into an
+  // absent crop/edge. Two failures take the full page path, with its recipe.
+  const f = fixture();
+  f.context.safeStorageGet = key => (key === 'nc_roll_analysis_half_v1' ? 'on' : null);
+  const { heldFrames, pageReads } = workerRoll(f, {
+    analysisFor: id => id === 2 ? (failedStep === 'incomplete' ? { complete: false } : { [failedStep]: 'OpenCV failed' }) : {}
+  });
+  const load = f.context.loadFileToImageData;
+  f.context.loadFileToImageData = async (file, options) => {
+    const out = await load(file, options);
+    return out?.held ? { ...out, fullSize: { width: 20, height: 20 } } : out;
+  };
+  const crop = { left: 1, top: 2, width: 5, height: 4 }, edge = { found: true, checked: true };
+  f.context.runImportDetections = async (image, options) => {
+    f.importRequests.push(options);
+    return { image, detection: { result: { angle: 2, cropRegion: crop } }, read: { result: edge } };
+  };
+  f.context.analyzeStudioImportFrame = async (_image, settings, { detection }) => ({ ...settings,
+    cropRegion: detection?.result?.cropRegion || null, rotationAngle: detection?.result?.angle || 0 });
+  f.context.mergeImportFilmEdge = async (_image, settings, read) => ({ settings: { ...settings, filmEdge: read?.result || null } });
+  const warn = console.warn; console.warn = () => {};
+  try {
+    f.context.scheduleAutomaticRollImport(f.items);
+    await f.fire(1200);
+    for (let round = 0; round < 3 && f.timers.size; round++) await f.fire(750);
+  } finally { console.warn = warn; }
+  assert.equal(f.decoded.filter(id => id === 2).length, 3, `${failedStep}: twice in the worker, then full page decode`);
+  assert.deepEqual(pageReads, [2]);
+  assert.equal(f.items[2].settings.rotationAngle, 2, 'page recovery retains the measured angle');
+  assert.deepEqual(f.items[2].settings.cropRegion, crop, 'page recovery retains the measured crop');
+  assert.deepEqual(f.items[2].settings.filmEdge, edge, 'page recovery retains the edge read');
+  assert.ok(heldFrames.filter(held => held.id === 2).every(held => held.released && !held.samples.length), 'failed partial recipes are never sampled');
+  assert.equal(f.timers.size, 0, 'recovery finishes without retrying forever');
+  assert.equal(f.context.workerResidents.size, 0, 'recovery releases every roll realm');
+  assert.equal(f.context.memoryBudget.snapshot().reserved, 0, 'recovery releases all frame claims');
+}
+
 console.log('automaticRollImport tests passed');

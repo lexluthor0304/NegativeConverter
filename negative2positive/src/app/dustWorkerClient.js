@@ -27,8 +27,9 @@ function abortError() {
  *
  * While dust editing is active the page pins the worker: it is then never
  * released for idleness and keeps the clean source (both planes) and the
- * current mask, so a brush stroke sends only its points. `pinned` is the
- * reservation a memory ledger can see; unpinning restores the idle release.
+ * current mask, so a brush stroke sends only its points. `pinned` protects
+ * work from eviction; `alive` tracks residency even after a reuse tag clears
+ * or the page unpins. Unpinning restores the idle release.
  */
 export function createDustWorkerClient({
   workerFactory = () => new Worker(new URL('../workers/dustWorker.js', import.meta.url), { type: 'module' }),
@@ -316,6 +317,8 @@ export function createDustWorkerClient({
       armIdleRelease();
     },
     dispose: () => release(abortError()),
+    // Reuse tags may be cleared while the worker still retains its planes.
+    get alive() { return worker !== null; },
     get pinned() { return pinned; },
     get maskTag() { return maskTag; },
     get pendingCount() { return pending.size; }

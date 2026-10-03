@@ -14,6 +14,13 @@ verified stale claims removed here are accounted for in
 distinguishes completed local changes from pending browser/release validation.
 Remaining performance proposals below are not claims of completed work.
 
+The #229 roll follow-up's regression contracts are documented in
+[auto-frame-regression.md](auto-frame-regression.md),
+[batch-export-pipeline.md](batch-export-pipeline.md) and
+[memory-budget.md](memory-budget.md). The shared page-path roll-plane copy
+target (R1-097) remains in the worker-residency entry below; small-fixture
+checks do not establish desktop peak RSS or the original 60 MP timing targets.
+
 ## Auto frame detection
 
 - **medium/ux** — Non-sprocket density templates are capped at 0.68 < highConfidence 0.72, so 'high' confidence and the 'Auto-apply high confidence' setting are unreachable for 120 film and most single 135 frames _(verified)_  

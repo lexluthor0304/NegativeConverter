@@ -154,8 +154,13 @@ consumer that holds it:
    first reply, or for a main-thread session). The dust worker's private
    clean-source planes and mask count too, plus a 150 MiB OpenCV estimate;
    a shared 16-bit view is already counted with its page owner. Unpinning
-   keeps those bytes until the client releases its source/mask or the idle
-   check disposes it. Pinned or pending dust work is never evicted.
+   keeps those bytes until the worker terminates or the idle check disposes
+   it. Residency follows the client's `alive` lifetime independently of
+   `maskTag`: a tagless detect on a new source, or a cleared reuse tag, still
+   retains planes and the estimated heap after the reply, pinned or unpinned.
+   Pinned or pending dust work is never evicted. `workerResidentsLedger.test.mjs`
+   covers seeded → tagless request → reply → unpin → termination on small
+   copied and shared planes; shared 16-bit views remain counted with their page owner.
    Roll-frame and page-path analyzer pools register their idle realms
    between frames and during import retries, and remove the registration at
    `finish()`. Acquired workers are covered by the frame's lane claim.

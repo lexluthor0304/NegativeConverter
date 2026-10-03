@@ -79,6 +79,32 @@ dust.unpin();
 context.runMemoryIdleCheck();
 assert.equal(context.workerResidentBytes(), 0);
 
+// A tagless request on another source clears the reuse tag, but leaves the
+// worker's full-plane cache alive. Test the seeded -> request -> reply
+// sequence both pinned and unpinned, then every termination path.
+for (const pinned of [true, false]) for (const shared16 of [false, true]) {
+  const first = image(), next = image();
+  if (shared16) next.__image16.data = new Uint16Array(new SharedArrayBuffer(next.__image16.data.byteLength));
+  context.noteDustWorkerMemory(first, mask);
+  await dust.pin(first, { mask, tag: 9 });
+  if (!pinned) dust.unpin();
+  context.noteDustWorkerMemory(next);
+  const reply = dust.detect(next);
+  assert.ok(context.workerResidentBytes() >= next.data.byteLength + mask.byteLength + ROLL_OPENCV_REALM_BYTES, 'pending request keeps its reservation');
+  await reply; await tick();
+  assert.equal(dust.maskTag, null);
+  assert.equal(dust.pinned, pinned);
+  assert.ok(context.workerResidentBytes() >= next.data.byteLength + mask.byteLength + ROLL_OPENCV_REALM_BYTES,
+    `tagless reply retains the planes and heap (pinned=${pinned}, shared16=${shared16})`);
+  if (pinned) {
+    assert.equal(context.runMemoryIdleCheck().released.length, 0, 'tagless pinned work is protected');
+    dust.unpin();
+    assert.ok(context.workerResidentBytes() > 0, 'unpin does not release the worker');
+  }
+  context.runMemoryIdleCheck();
+  assert.equal(context.workerResidentBytes(), 0, 'termination clears tagless residency');
+}
+
 // Roll realms are retained between frames/retries. While a frame is held,
 // its lane claim covers that worker, so only the other idle realm is counted.
 const rollHeap = ROLL_OPENCV_REALM_BYTES + 1024;

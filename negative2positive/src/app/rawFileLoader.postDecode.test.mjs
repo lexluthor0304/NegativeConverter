@@ -343,8 +343,8 @@ await expectPreviewFallback('garbled output', { result: makeRawResult({ width: 6
     async run(result) { return { garbled: false, held: true, width: result.width, height: result.height }; },
     terminate() {}
   };
-  for (const [metaWidth, metaHeight] of [[240, 160], [0, 0]]) {
-    const label = metaWidth ? 'LibRaw\'s size' : 'the header\'s size';
+  for (const [metaWidth, metaHeight] of [[240, 160], [0, 0], [242, 162], [480, 320]]) {
+    const label = `LinearRaw with metadata ${metaWidth}x${metaHeight}`;
     reset({ result: cloneRawResult(unshrunk), metaWidth, metaHeight });
     const imageData = await loadRawFile(dng.slice().buffer, 'scan.dng', { halfSize: true, outputBps: 16, suppressSensorDefects: false });
     assert.equal(scene.openOptions.halfSize, true);
@@ -355,12 +355,36 @@ await expectPreviewFallback('garbled output', { result: makeRawResult({ width: 6
     const held = await loadRawFile(dng.slice().buffer, 'scan.dng', { postDecode: holding, halfSize: true, outputBps: 16, suppressSensorDefects: false });
     assert.deepEqual(held, { held: true, width: 240, height: 160 }, `${label}: a held frame without a fullSize`);
   }
-  // A RAW with neither (no TIFF header, no size in LibRaw's metadata) is
-  // still taken as halved: LibRaw halves the mosaic data most RAWs carry.
-  reset({ result: cloneRawResult(fixture), metaWidth: 0, metaHeight: 0 });
-  const mosaic = await loadRawFile(makeContainer().buffer, 'frame.nef', { halfSize: true, outputBps: 16, suppressSensorDefects: false });
-  assert.deepEqual(mosaic.__fullSize, { width: 128, height: 96 });
-  assert.equal(mosaic.__decodeScale, 0.5);
+  // A request flag alone is not evidence: non-TIFF RAWs can be unshrunk too.
+  for (const [metaWidth, metaHeight] of [[0, 0], [66, 50], [640, 480]]) {
+    const options = { halfSize: true, outputBps: 16, suppressSensorDefects: false };
+    reset({ result: cloneRawResult(fixture), metaWidth, metaHeight });
+    const page = await loadRawFile(makeContainer().buffer, 'frame.nef', options);
+    assert.equal(page.__fullSize, undefined, `page: unmatched report ${metaWidth}x${metaHeight}`);
+    assert.equal(page.__decodeScale, undefined);
+    assertPlanes(page, headPlanes(cloneRawResult(fixture), { suppress: false }), 'unshrunk pixels unchanged');
+    reset({ result: cloneRawResult(fixture), metaWidth, metaHeight });
+    const held = await loadRawFile(makeContainer().buffer, 'frame.nef', { ...options, postDecode: holding });
+    assert.deepEqual(held, { held: true, width: 64, height: 48 }, 'held: unmatched report');
+  }
+  // A matching CFA header still proves a genuine half decode when the
+  // metadata is missing or mismatched (active size vs raw sensor size).
+  const cfa = new Uint8Array(50), header = new DataView(cfa.buffer);
+  header.setUint16(0, 0x4949); header.setUint16(2, 42, true); header.setUint32(4, 8, true); header.setUint16(8, 3, true);
+  [[256, 128], [257, 96], [262, 32803]].forEach(([tag, value], i) => {
+    const offset = 10 + i * 12;
+    header.setUint16(offset, tag, true); header.setUint16(offset + 2, 4, true);
+    header.setUint32(offset + 4, 1, true); header.setUint32(offset + 8, value, true);
+  });
+  for (const [metaWidth, metaHeight] of [[0, 0], [130, 100]]) {
+    reset({ result: cloneRawResult(fixture), metaWidth, metaHeight });
+    const page = await loadRawFile(cfa.slice().buffer, 'frame.dng', { halfSize: true, outputBps: 16, suppressSensorDefects: false });
+    assert.deepEqual(page.__fullSize, { width: 128, height: 96 });
+    assert.equal(page.__decodeScale, 0.5);
+    reset({ result: cloneRawResult(fixture), metaWidth, metaHeight });
+    const held = await loadRawFile(cfa.slice().buffer, 'frame.dng', { halfSize: true, outputBps: 16, suppressSensorDefects: false, postDecode: holding });
+    assert.deepEqual(held.fullSize, { width: 128, height: 96 }, 'held: header proves half size');
+  }
 }
 {
   // A failed decode still reports the release (sequential stage 2 starts there).

@@ -20,6 +20,18 @@
 //    the window reads) and from the same planes in shared memory (views:
 //    nothing copied on the page) equals the level of the whole output.
 export async function runRollFrameSmoke({ evaluate, fail }) {
+  // Reproduce the late-full-smoke resource history without a full smoke or
+  // large inputs: the document-start buffer must retain > the default 250.
+  if (process.env.NC_ROLL_RESOURCE_PREFILL === '1') {
+    const count = await evaluate(`(async () => {
+      for (let n = 0; n < 300; n++) {
+        await (await fetch('/test-fixtures/autoFramePreviewGolden.mjs?nc-roll-prefill=' + n)).arrayBuffer();
+      }
+      return performance.getEntriesByType('resource').filter(entry => entry.name.includes('nc-roll-prefill=')).length;
+    })()`);
+    if (count !== 300) fail('the document-start resource buffer lost the prefilled history: ' + count);
+    console.log('ok: resource timing retains 300 prefilled entries before the roll-frame checks');
+  }
   const result = await evaluate(`(async () => {
     const { createAutoFrameWorkerClient, analyzeFrameInWorker, warmUpAutoFrameWorker } = await import('/src/app/autoFrameWorkerClient.js');
     const { createRollFramePool, imageFromRollPlanes } = await import('/src/app/rollFrameWorkerClient.js');

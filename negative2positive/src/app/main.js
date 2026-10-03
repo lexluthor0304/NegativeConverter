@@ -11631,7 +11631,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       release: () => analyzeFrameInWorker.releaseIdle()
     });
     workerResidents.set('dust', {
-      residentBytes: () => dustWorker.pendingCount || dustWorker.maskTag != null
+      residentBytes: () => dustWorker.alive
         ? dustWorkerPlaneBytes + ROLL_OPENCV_REALM_BYTES : 0,
       idle: () => !dustWorker.pinned && dustWorker.pendingCount === 0,
       release: () => { disposeDustWorker(); dustWorkerPlaneBytes = 0; }
@@ -16778,6 +16778,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       }
     }
 
+    // Automatic roll grouping changes the rendering type, not this frame's
+    // detection verdict. Saved recipes and explicit choices keep their type.
+    function autoFrameSelectedFilmType(image, item, settings) {
+      if (settings.filmTypeReason !== ROLL_MONOCHROME.reason || importFilmTypeLocked(item)) return settings.filmType;
+      return importFilmTypeRoll(item)?.verdicts.get(item)?.filmType || createDefaultSettings(image, item).filmType;
+    }
+
     async function applyAutoFrameToSelected() {
       if (state.currentStep !== 1) return;
       const selectedItems = state.fileQueue.filter(item => item.selected);
@@ -16809,9 +16816,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
             // a copy and comes back; only the rotated frame's size is read
             // (#251).
             const decoded = await decode();
-            const defaults = item.settings || settleImportFilmType(item, createDefaultSettings(decoded, item));
+            const defaults = item.settings || createDefaultSettings(decoded, item);
             const analysed = await runImportDetections(decoded, {
-              owned: true, reload: decode, frameFilmType: defaults.filmType
+              owned: true, reload: decode, frameFilmType: autoFrameSelectedFilmType(decoded, item, defaults)
             });
             const imageData = analysed.image;
             if (!imageData) throw analysed.detection?.error || new Error('The frame could not be decoded again');
@@ -29781,6 +29788,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
             const full = decoded.fullSize || (own ? { width: own.width, height: own.height } : null);
             if (rollFrameOptionsKey(rollFrameOptions(item)) !== decoded.optionsKey) return null;
             if (!full) return workerFailed(item, 'no frame');
+            if (worker && (!worker.complete || worker.detectionError || worker.edgeError)) {
+              return workerFailed(item, worker.detectionError || worker.edgeError || 'incomplete half-size analysis');
+            }
             let detection = worker?.complete && !worker.detectionError ? worker.detection : null;
             let read = worker?.complete && !worker.edgeError ? { result: worker.edge } : null;
             let filmStats = worker?.filmStats || null;

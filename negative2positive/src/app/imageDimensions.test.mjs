@@ -5,10 +5,11 @@ import {
 } from './imageDimensions.js';
 import { planBatchParallelism } from './batchExportScheduler.js';
 import { buildLinearDngParts } from './linearDng.js';
+import { createThumbnailSourceCache } from './thumbnailSources.js';
 globalThis.ImageData ||= class ImageData {
   constructor(data, width, height) { this.data = data; this.width = width; this.height = height; }
 };
-const { reducedTileGeometry, renderReducedGeometry } = await import('./reducedGeometry.js');
+const { reducedTileGeometry, renderReducedGeometry, tileGeometryKey } = await import('./reducedGeometry.js');
 const png = new Uint8Array(24);
 const pv = new DataView(png.buffer);
 pv.setUint32(0, 0x89504e47); pv.setUint32(4, 0x0d0a1a0a);
@@ -62,7 +63,11 @@ assert.deepEqual(halfDecodeFullSize(4000, 6000, 6000, 4000), { width: 4000, heig
 assert.deepEqual(halfDecodeFullSize(6001, 3999, 6000, 4000), { width: 6001, height: 3999 }, 'within a pixel');
 assert.deepEqual(halfDecodeFullSize(3000, 2000, 6000, 4000), { width: 6000, height: 4000 }, 'halved');
 assert.deepEqual(halfDecodeFullSize(2000, 3000, 6000, 4000), { width: 4000, height: 6000 }, 'halved, the report the other way round');
-assert.deepEqual(halfDecodeFullSize(3000, 2000), { width: 6000, height: 4000 }, 'no report: taken as halved');
+assert.deepEqual(halfDecodeFullSize(3000, 2000), { width: 3000, height: 2000 }, 'no report cannot prove a half-size result');
+assert.deepEqual(halfDecodeFullSize(240, 160, 242, 162), { width: 240, height: 160 }, 'mismatched full report cannot prove shrinking');
+for (const report of [[NaN, Infinity], [Infinity, 320], [480, NaN]]) {
+  assert.deepEqual(halfDecodeFullSize(240, 160, ...report), { width: 240, height: 160 }, 'non-finite reports cannot change geometry');
+}
 assert.deepEqual(halfDecodeFullSize(240, 160, 0, 0, { photometric: PHOTOMETRIC_LINEAR_RAW }), { width: 240, height: 160 }, 'a LinearRaw IFD is never halved');
 assert.deepEqual(halfDecodeFullSize(120, 80, 240, 160, { photometric: PHOTOMETRIC_CFA }), { width: 240, height: 160 }, 'a CFA IFD is');
 
@@ -106,7 +111,10 @@ assert.deepEqual(halfDecodeFullSize(120, 80, 240, 160, { photometric: PHOTOMETRI
   };
   for (const [label, full] of [
     ['LibRaw\'s size', halfDecodeFullSize(width, height, width, height)],
-    ['the header\'s size', halfDecodeFullSize(width, height, header.width, header.height, { photometric: header.photometric })]
+    ['the header\'s size', halfDecodeFullSize(width, height, header.width, header.height, { photometric: header.photometric })],
+    ['missing report', halfDecodeFullSize(width, height)],
+    ['mismatched report', halfDecodeFullSize(width, height, width + 2, height + 2)],
+    ['misleading half report with LinearRaw evidence', halfDecodeFullSize(width, height, width * 2, height * 2, { photometric: header.photometric })]
   ]) {
     assert.deepEqual(full, { width, height }, `${label}: the decode is the full frame`);
     const tile = tileOf(full);
@@ -115,6 +123,12 @@ assert.deepEqual(halfDecodeFullSize(120, 80, 240, 160, { photometric: PHOTOMETRI
       const i = (y * tile.width + x) * 4;
       assert.deepEqual([tile.__image16.data[i], tile.__image16.data[i + 1]], [(60 + x) * 256, (40 + y) * 256], `${label}: tile pixel ${x},${y}`);
     }
+    const cache = createThumbnailSourceCache(), item = {};
+    assert.equal(cache.put(item, { working: tile, baseSize: full, geometryKey: tileGeometryKey(recipe, full) }), true);
+    const changedColours = { ...recipe, coreContrast: 17 };
+    const retained = cache.lookup(item, size => tileGeometryKey(changedColours, size));
+    assert.deepEqual(retained.baseSize, { width, height }, `${label}: a retained tile never stores doubled geometry`);
+    assert.deepEqual(retained.working.__image16.data, tile.__image16.data, `${label}: colour changes reuse the correctly framed pixels`);
   }
   const doubled = tileOf({ width: width * 2, height: height * 2 });
   assert.deepEqual([doubled.width, doubled.height], [48, 32], 'a doubled base size frames half the crop');

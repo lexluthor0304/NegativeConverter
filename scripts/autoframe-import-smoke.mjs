@@ -10,6 +10,7 @@
 //   frame comes back from the worker.
 import { createRequire } from 'node:module';
 import { encodePng16Blob } from '../negative2positive/src/workers/imageEncoders.js';
+import { runAutoFrameSelectedSmoke } from './autoframe-selected-smoke.mjs';
 
 export async function runAutoFrameImportSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port }) {
   // Exercise the non-shared copy path too (WKWebView). Shared 16-bit views
@@ -120,4 +121,5 @@ export async function runAutoFrameImportSmoke({ send, evaluate, waitFor, wait, f
   }
   if (replies.some(reply => reply.rotated)) fail('the import received rotated frames from the auto-frame worker: ' + JSON.stringify(replies));
   console.log(`ok: ${posts.length} import requests, one per frame on 8-bit copies, 16-bit plane omitted, ${replies.length} replies without rotated frames`);
+  await runAutoFrameSelectedSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port });
 }

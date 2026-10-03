@@ -505,7 +505,13 @@ Roll analysis has its own lane plan and its own per-frame worker (#252):
   sample for the full size; such a decode is never adopted by the
   foreground, prefetched or retained. A RAW LibRaw does not halve
   (LinearRaw, monochrome DNGs, sRAW) comes back at its full size and is
-  measured as its own full frame, its crop as detected. Half size changes
+  measured as its own full frame, its crop as detected. Full-size inference
+  requires a matching finite metadata or raw-IFD size (also allowing swapped
+  axes and odd sides). Missing or mismatched reports use the decoded size;
+  the request flag never doubles it. A LinearRaw header remains authoritative
+  even with misleading metadata. Detection/edge errors or an incomplete
+  half-size worker result count as failures before any recipe or sample is
+  committed: two failures take the full-resolution page fallback. Half size changes
   the automatic film base (up to 23 levels in the reviewers' check) and the
   900 px sample grid, and through the roll median, the outliers and
   `channelData` the exported pixels, permanently. It may be offered only

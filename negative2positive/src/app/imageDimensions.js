@@ -299,17 +299,17 @@ export async function importPixelsForRoll(files, { siblings = files } = {}) {
  * round), or a file header's raw IFD when the metadata has none, with that
  * IFD's `photometric`. A decode at the reported size, or of a LinearRaw IFD,
  * is its own full size (#229 review R1-080: never doubled); one at half the
- * reported size has that size; without a matching report the size is twice
- * the decode's (within one pixel).
+ * reported size has that size. Without a matching finite report, use the
+ * decoded size: a half-size request alone cannot prove LibRaw shrank it.
  */
 export function halfDecodeFullSize(width, height, metaWidth = 0, metaHeight = 0, { photometric = null } = {}) {
   if (photometric === PHOTOMETRIC_LINEAR_RAW) return { width, height };
-  if (metaWidth > 0 && metaHeight > 0) {
+  if (valid(metaWidth, metaHeight)) {
     const near = (w, h) => Math.abs(width - w) <= 1 && Math.abs(height - h) <= 1;
     if (near(metaWidth, metaHeight) || near(metaHeight, metaWidth)) return { width, height };
     const halves = (w, h) => Math.abs(width - Math.ceil(w / 2)) <= 1 && Math.abs(height - Math.ceil(h / 2)) <= 1;
     if (halves(metaWidth, metaHeight)) return { width: metaWidth, height: metaHeight };
     if (halves(metaHeight, metaWidth)) return { width: metaHeight, height: metaWidth };
   }
-  return { width: width * 2, height: height * 2 };
+  return { width, height };
 }

@@ -233,7 +233,7 @@ for (const [width, height] of [[1980, 1320], [1320, 1980]]) {
 assert.deepEqual(halfDecodeFullSize(4768, 3168, 9536, 6336), { width: 9536, height: 6336 });
 assert.deepEqual(halfDecodeFullSize(3168, 4768, 9536, 6336), { width: 6336, height: 9536 }, 'oriented metadata the other way round');
 assert.deepEqual(halfDecodeFullSize(2001, 1336, 4001, 2671), { width: 4001, height: 2671 }, 'odd sides round up');
-assert.deepEqual(halfDecodeFullSize(100, 50, 0, 0), { width: 200, height: 100 });
-assert.deepEqual(halfDecodeFullSize(100, 50, 640, 480), { width: 200, height: 100 }, 'a report of another size is ignored');
+assert.deepEqual(halfDecodeFullSize(100, 50, 0, 0), { width: 100, height: 50 }, 'no evidence of shrinking');
+assert.deepEqual(halfDecodeFullSize(100, 50, 640, 480), { width: 100, height: 50 }, 'a report of another size cannot prove shrinking');
 
 console.log('reducedGeometry tests passed');

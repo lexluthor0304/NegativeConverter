@@ -501,9 +501,18 @@ export async function loadRawFile(buffer, fileName, options = {}) {
     // half-size result that really was halved; null for one LibRaw returned
     // unshrunk (LibRaw shrinks only mosaic data).
     const halvedFullSize = (width, height) => {
-      const report = metaWidth > 0 && metaHeight > 0 ? { width: metaWidth, height: metaHeight } : headerSize || {};
-      const full = halfDecodeFullSize(width, height, report.width || 0, report.height || 0, { photometric: report.photometric ?? null });
-      return full.width !== width || full.height !== height ? full : null;
+      // Keep the header's LinearRaw evidence even when metadata has a size.
+      // An unmatched metadata size may describe the raw sensor margins;
+      // the raw IFD can still prove a genuine half-size output.
+      const photometric = headerSize?.photometric ?? null;
+      for (const report of [{ width: metaWidth, height: metaHeight }, headerSize]) {
+        if (!report) continue;
+        const full = halfDecodeFullSize(width, height, report.width, report.height, { photometric });
+        if (full.width !== width || full.height !== height) return full;
+        const near = (w, h) => Math.abs(width - w) <= 1 && Math.abs(height - h) <= 1;
+        if (near(report.width, report.height) || near(report.height, report.width)) return null;
+      }
+      return null;
     };
     if (metaWidth > 0 && metaHeight > 0) {
       const scale = useHalfSize ? 0.5 : 1;
