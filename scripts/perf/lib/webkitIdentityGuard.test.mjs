@@ -168,7 +168,7 @@ for (const guard of ['swap', 'disk']) {
 // The actual Tauri launcher/caller writes the grant only after a valid sample.
 // A tiny fake child supplies bootstrap, a completed partial report and exit.
 for (const outcome of ['success', 'initial-timeout', 'midrun-loss', 'launcher-error', 'scenario-timeout', 'grant-io-error']) {
-  const out = mkdtempSync('/private/tmp/nc229-codex-handoff/native-identity-guard-unit-');
+  const out = mkdtempSync(process.env.NC_PERF_TEST_TMP_PREFIX || '/private/tmp/nc229-codex-handoff/native-identity-guard-unit-');
   const resultsDir = join(out, 'results'); mkdirSync(resultsDir);
   const { state, memory } = await world({ automatic: true, pending: true });
   let files, admitted = false, runner, interval, metrics = {};

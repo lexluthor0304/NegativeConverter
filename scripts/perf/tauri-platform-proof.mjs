@@ -48,7 +48,7 @@ const server = createServer(async (request, response) => {
     let body = '';
     for await (const part of request) body += part;
     const probe = JSON.parse(body);
-    if (active && probe.guard === active.guard) active.nativeProbe = probe;
+    if (active && probe.guard === active.guard) { active.nativeProbe = probe; active.bootstrapReplyAt = Date.now(); }
     response.end('ok');
   } else if (request.url === '/workload-start') {
     if (active) active.workloadStartedAt = Date.now();
@@ -94,7 +94,8 @@ try {
     const previousCaches = new Set(readdirSync(out).filter(name => name.startsWith('tauri-cache-')));
     const ownership = owner(guard);
     const state = { guard, nativeProbe: null, association: null, triggerAt: null, abortAt: null, crossing: false,
-      workloadStartedAt: null, ownedHostGoneAt: null, ownedEndpointsGoneAt: null, revoked: false };
+      workloadStartedAt: null, ownedHostGoneAt: null, ownedEndpointsGoneAt: null, revoked: false,
+      bootstrapReplyAt: null, bootstrapWaitStartedAt: null, firstFootprintAt: null };
     active = state;
     // Only this metadata/policy input is synthetic. Footprints and every
     // native-ancestry cleanup request still go to the real OS reader.
@@ -118,11 +119,14 @@ try {
       // IPC reply arrives. Complete that read-only proof prerequisite first;
       // workload admission still waits for the guarded real footprint sample.
       if (guard === 'memory-ceiling') {
+        state.bootstrapWaitStartedAt ??= Date.now();
         const deadline = Date.now() + 1500;
         while (!state.nativeProbe && Date.now() < deadline) await sleep(25);
         assert.ok(state.nativeProbe, 'bounded native bootstrap reply before synthetic ceiling');
       }
-      return footprints.read(pids);
+      const values = await footprints.read(pids);
+      state.firstFootprintAt ??= Date.now();
+      return values;
     } };
     const memory = await webkitMemory({ label: guard, port, outDir: out, args: {}, ownership, swapAtStart: 0,
       reader,
@@ -175,7 +179,12 @@ try {
         assert.ok(pendingError, 'the production scenario caller must reject automatic guard aborts');
         assert.equal(memory.verdict?.reason, guard === 'identity-revocation' ? 'error' : 'memory-ceiling');
         assert.match(memory.verdict.detail, guard === 'identity-revocation' ? /identity|attribution/ : guard === 'swap-growth' ? /swap grew/ : guard === 'low-disk' ? /free disk fell/ : /browser footprint/);
-        if (guard === 'memory-ceiling') state.triggerAt = measured.t;
+        if (guard === 'memory-ceiling') {
+          state.triggerAt = measured.t;
+          assert.ok(state.bootstrapReplyAt <= state.firstFootprintAt && state.firstFootprintAt <= state.triggerAt,
+            'read-only bootstrap reply precedes the real footprint and synthetic policy trigger');
+          assert.equal(state.workloadStartedAt, null, 'the bootstrap prerequisite cannot admit the workload');
+        }
         assert.ok(state.abortAt - state.triggerAt >= 0 && state.abortAt - state.triggerAt < 1500, 'observed guard response must be bounded');
         const host = state.association.owner;
         if (!state.ownedHostGoneAt && !sameProcess(host, processMetadata([host.pid])[host.pid])) state.ownedHostGoneAt = Date.now();
@@ -211,6 +220,10 @@ try {
         ownedHostTerminationMs: state.ownedHostGoneAt === null ? null : state.ownedHostGoneAt - state.triggerAt,
         ownedWorkloadEndpointsTerminationMs: state.ownedEndpointsGoneAt === null ? null : state.ownedEndpointsGoneAt - state.triggerAt,
         attributionRevocationSynthetic: guard === 'identity-revocation',
+        bootstrapPolicy: { prerequisite: guard === 'memory-ceiling' ? 'read-only native IPC reply before first footprint' : null,
+          maxWaitMs: guard === 'memory-ceiling' ? 1500 : null,
+          waitMs: state.bootstrapWaitStartedAt === null ? null : Math.max(0, state.bootstrapReplyAt - state.bootstrapWaitStartedAt),
+          replyBeforeFirstFootprint: state.bootstrapReplyAt <= state.firstFootprintAt },
         cleanupAttempts: ownership.cleanupAttempts, root: ownership.root, cacheRoot, metrics, notes, unrelated: outsider.association,
         automaticSampler: true, manualProofTicks: 0, policyInputsSynthetic: true, pageSynthetic: true, nativeFootprintsReal: true });
     } finally { memory.stop(); }

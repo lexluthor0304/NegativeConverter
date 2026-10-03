@@ -37,6 +37,10 @@ footprints; acquired scope loss or sampling failure automatically stops the
 verified native host and launcher. Changed endpoints remain excluded from
 signals, partial metrics survive, and the tiny controlled-revocation proof
 measures real host disappearance separately from callback latency.
+Admission drains earlier in-flight sampling and requires a new guarded sample;
+native identity is checked after asynchronous guards and immediately before
+the grant write against the exact renderer/GPU readings. Late failure retains
+genuine partial observations and denies workload admission.
 Safari's exclusive GPU association
 remains unavailable and is refused before navigation; tiny native attribution
 proof does not establish the unmeasured performance targets.

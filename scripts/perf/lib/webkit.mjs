@@ -141,12 +141,14 @@ export async function webkitMemory({ label, port, outDir, args, swapAtStart, fre
   const scopeIdentity = groups => ownership ? JSON.stringify(ownership.association) : JSON.stringify(groups);
   const registrations = new Map();
   const waiters = new Set();
-  const finishWaiters = error => {
+  const guardedSamples = new WeakSet();
+  const finishWaiters = (error, sample) => {
     for (const waiter of waiters) {
+      if (!error && !waiter.ready) continue;
       clearTimeout(waiter.timer);
-      if (error) waiter.reject(error); else waiter.resolve();
+      if (error) waiter.reject(error); else waiter.resolve({ sample, tick: sampler.inFlight });
+      waiters.delete(waiter);
     }
-    waiters.clear();
   };
   const guard = async browserBytes => evaluateRunGuards({ browserBytes, ceilingBytes,
     swapUsed: (await readSwap()).used, swapUsedAtStart: swapAtStart,
@@ -159,6 +161,24 @@ export async function webkitMemory({ label, port, outDir, args, swapAtStart, fre
     for (const [pid, entry] of registrations) scope.kill(pid, entry.endpoint);
     if (ownedProcess) ownership?.killOwnedProcess();
     await onAbort?.(reason);
+  };
+  const assertSampleIdentity = sample => {
+    if (ownership && (!ownership.resolve() || ownership.failure || scopeIdentity() !== sample.scopeIdentity)) {
+      throw new Error('WebKit attribution changed during guarded footprint sampling');
+    }
+  };
+  const assertAdmissionScope = sample => {
+    try {
+      if (verdict || stopped) throw new Error(verdict?.detail || 'WebKit memory monitoring stopped');
+      if (!guardedSamples.has(sample) || sample.scopeIdentity !== acquiredIdentity) {
+        throw new Error('fresh guarded WebKit renderer/GPU footprints are required before workload admission');
+      }
+      // No await separates this native identity check from the grant write.
+      assertSampleIdentity(sample);
+    } catch (error) {
+      if (!stopped) void abort({ reason: 'error', detail: error.message });
+      throw error;
+    }
   };
   const sampler = new MemorySampler({
     reader, intervalMs, timeoutMs: sampleTimeoutMs,
@@ -217,7 +237,11 @@ export async function webkitMemory({ label, port, outDir, args, swapAtStart, fre
       const reason = await guard(sample.totalBytes);
       if (reason) await abort(reason);
       else if (sample.scopeValid && !verdict && !stopped) {
-        acquired = true; acquiredIdentity = sample.scopeIdentity; finishWaiters();
+        // Swap sampling awaits after footprint validation. Recheck the exact
+        // identities whose positive readings support this completed sample.
+        assertSampleIdentity(sample);
+        guardedSamples.add(sample);
+        acquired = true; acquiredIdentity = sample.scopeIdentity; finishWaiters(null, sample);
       }
     },
     onError: error => stopped ? undefined : abort({ reason: 'error', detail: error.message })
@@ -237,21 +261,26 @@ export async function webkitMemory({ label, port, outDir, args, swapAtStart, fre
       registrations.clear();
     },
     assertScope: async () => { pids = await scope.resolve(); scope.assert(); },
+    assertAdmissionScope,
     waitForScope: ({ timeoutMs = 30_000 } = {}) => {
       if (!ownership) return Promise.reject(new Error('exclusive native workload ownership is unavailable'));
       if (verdict || stopped) return Promise.reject(new Error(verdict?.detail || 'WebKit memory monitoring stopped'));
       return new Promise((resolve, reject) => {
-        const waiter = { resolve, reject };
+        const waiter = { resolve, reject, ready: false };
         waiter.timer = setTimeout(() => { void abort({ reason: 'error', detail: 'initial WebKit renderer/GPU attribution timed out before workload admission' }); }, timeoutMs);
         waiters.add(waiter);
-        // A page can request admission after a previously valid sample has
-        // been revoked. Require a fresh guarded sample even after acquisition.
-        void sampler.tick();
-      }).then(async () => {
-        // Readiness is published from onSample; drain that same tick before
-        // a caller can admit work or request another fresh sample.
-        await sampler.inFlight;
-        if (verdict || stopped) throw new Error(verdict?.detail || 'WebKit memory monitoring stopped');
+        // An in-flight sample predates this request. Drain it without letting
+        // it resolve this waiter, then start a sample for the request.
+        void (async () => {
+          await sampler.inFlight;
+          if (verdict || stopped) return;
+          waiter.ready = true;
+          await sampler.tick();
+        })().catch(error => abort({ reason: 'error', detail: error.message }));
+      }).then(async ({ sample, tick }) => {
+        await tick;
+        assertAdmissionScope(sample);
+        return sample;
       });
     },
     get scopeAcquired() { return acquired; },
@@ -539,8 +568,9 @@ export async function tauriScenario(id, { ref, fixtureNames, record, note, log, 
       if (!admissionWait && existsSync(admissionFiles.request)) {
         // Cargo startup has its own deadline. The page's first gate request
         // starts the shorter attribution deadline; no fixture has run yet.
-        admissionWait = memory.waitForScope({ timeoutMs: scopeTimeoutMs }).then(() => {
-          if (closed || memory.verdict) return;
+        admissionWait = memory.waitForScope({ timeoutMs: scopeTimeoutMs }).then(sample => {
+          if (closed) return;
+          memory.assertAdmissionScope(sample);
           writeFileSync(admissionFiles.grant, JSON.stringify({ state: 'admitted' }), { mode: 0o600 });
           admitted = true;
         }).catch(error => { admissionError = error; });
