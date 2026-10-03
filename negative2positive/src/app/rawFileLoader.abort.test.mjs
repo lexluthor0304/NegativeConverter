@@ -246,3 +246,20 @@ console.log('rawFileLoader.abort.test.mjs passed');
   assert.equal(bitmapDecodes, 0, 'aborted JPEG work never falls back on the main thread');
 }
 console.log('rawFileLoader: embedded JPEG fallback receives the activation abort signal');
+
+// The multi-shot Cancel button must actually reach this loader's workers.
+const { mergeHarness } = await import('./multiShotUi.fixture.mjs');
+for (const stage of ['imageData', 'process']) {
+  reset({ hold: stage });
+  const h = mergeHarness({ decode: (_file, { signal }) => loadRawFile(container().buffer, 'frame.dng', { signal }) });
+  const pending = h.run();
+  await flush();
+  assert.equal(scene.held?.stage, stage);
+  h.cancel();
+  assert.equal(workersOf('libraw')[0].terminated, true, 'merge Cancel disposes LibRaw');
+  assert.equal(workersOf('post')[0].terminated, true, 'merge Cancel terminates post-decode worker');
+  await pending;
+  assert.equal(h.alerts.length, 0);
+  assert.equal(h.memoryBudget.snapshot().reserved, 0);
+}
+console.log('multi-shot Cancel reaches RAW and post-decode workers');

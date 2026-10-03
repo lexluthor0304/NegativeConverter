@@ -245,3 +245,50 @@ console.log('liveLoupe: one conversion per presented camera frame, newest after 
   assert.equal(h.frames.length, 1);
 }
 console.log('liveLoupe: display-frame pacing at the camera rate when video-frame callbacks are missing');
+
+// Opening in the persisted raw view announces Live without grabbing pixels.
+// Its visible-video callbacks cannot satisfy the later opacity-0 watchdog.
+{
+  const h = harness();
+  h.peek().liveLoupe.view = 'raw';
+  h.elements.loupeStatus.textContent = 'Starting camera…';
+  h.context.startLoupeFrames();
+  await h.present(1);
+  assert.match(h.elements.loupeStatus.textContent, /^Live · 1280×720 · recipe: automatic$/);
+  assert.equal(h.grabs.length, 0);
+  h.timers[0].callback();
+  assert.equal(h.peek().loupeDebugCounters.pacing, 'video-frame');
+  h.peek().liveLoupe.view = 'converted';
+  h.peek().liveLoupe.wake();
+  assert.equal(h.timers.at(-1).ms, 200);
+  h.timers.at(-1).callback();
+  assert.equal(h.peek().loupeDebugCounters.pacing, 'display', 'raw callbacks do not hide a frozen converted view');
+  await h.reply();
+}
+{
+  const h = harness();
+  h.context.startLoupeFrames();
+  await h.present(1); await h.reply();
+  h.peek().liveLoupe.view = 'converted';
+  h.peek().liveLoupe.wake();
+  await h.present(2); await h.reply();
+  h.timers.at(-1).callback();
+  assert.equal(h.peek().loupeDebugCounters.pacing, 'video-frame', 'a new callback satisfies the re-armed watchdog');
+}
+
+// The smoke can pause the periodic refresh to prove edit-revision invalidation.
+{
+  const h = harness();
+  Object.assign(h.context.state, { currentStep: 3, originalImageData: {}, loadedFile: { name: 'photo.png' }, cyan: 0 });
+  vm.runInContext('loupeRecipeRefreshPaused = true;', h.context);
+  h.context.startLoupeFrames();
+  await h.present(1); await h.reply();
+  const recipe = h.requests.at(-1).request.recipe;
+  h.advance(2000);
+  await h.present(2); await h.reply();
+  assert.equal(h.requests.at(-1).request.recipe, recipe, 'periodic refresh cannot satisfy the smoke edit check');
+  h.context.state.cyan = 7;
+  h.context.manualEditRevision++;
+  await h.present(3); await h.reply();
+  assert.equal(h.requests.at(-1).request.recipe.adjust.cyan, 7);
+}

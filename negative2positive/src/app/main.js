@@ -74,7 +74,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     import { alignmentSide, sampleAlignmentGray } from './imageAlignment.js';
     import { collectPairs, fitLook, sanitizeLookForSettings } from './labMatch.js';
     import { toImage16 } from './multiShot.js';
-    import { createMultiShotMergeJob, createMultiShotProgress, multiShotFitsBudget } from './multiShotWorkerClient.js';
+    import { createMultiShotMergeJob, createMultiShotProgress, multiShotFitsBudget, estimateMultiShotWorkerBytes } from './multiShotWorkerClient.js';
     import { MultiShotError, describeMultiShotError } from './multiShotErrors.js';
     import { sanitizeRollMetadata, sanitizeFrameMetadata, buildExportMetadata, frameNumberFor } from './analogMetadata.js';
     import { attachMetadataToBlob } from './exportMetadata.js';
@@ -27752,11 +27752,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // ===========================================
     const MULTI_SHOT_MAX = 5;
 
-    // Renderer-wide memory budget for a merge's worker, in bytes. #258 supplies
-    // it; until then every selection is attempted and an allocation failure
-    // is reported when it happens.
+    // Space left for the complete merge, including planes held by its worker.
     function multiShotBudgetBytes() {
-      return Infinity;
+      return Math.max(0, memoryBudget.budget - memoryLedger.retained());
     }
 
     function setBatchProgressCancel(onCancel) {
@@ -27784,58 +27782,62 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       studioAutoFrameRunning = true;
       document.body.dataset.studioBusy = 'true';
       studioWorkspace?.sync();
+      const abort = new AbortController();
+      let job = null;
+      let reservation = null;
       let uiOpen = true;
       const closeUi = () => {
         if (!uiOpen) return;
         uiOpen = false;
+        abort.abort();
         setBatchProgressCancel(null);
         showBatchProgress(false);
         studioAutoFrameRunning = false;
         delete document.body.dataset.studioBusy;
         studioWorkspace?.sync();
       };
-      // The worker holds every frame at 16 bits plus its OpenCV heap: refuse a
-      // selection the budget cannot hold before anything is decoded.
-      const budgetBytes = multiShotBudgetBytes();
-      if (Number.isFinite(budgetBytes)) {
-        const pixels = await Promise.all(selectedItems.map((item) => imagePixelsForBatch(item.file)));
-        if (!multiShotFitsBudget(pixels, budgetBytes)) {
-          closeUi();
-          void appAlert(memoryText());
-          return;
-        }
-      }
-      const names = selectedItems.map((item) => item.file.name);
-      const progress = createMultiShotProgress(selectedItems.length);
-      const job = createMultiShotMergeJob({
-        mode,
-        onProgress: (event) => { if (uiOpen) showMultiShotProgress(progress.update(event), names); },
-        // Used only when the module worker cannot start: the same pipeline on
-        // this thread with the page's OpenCV, yielding between merge bands.
-        createInlineProcessor: async ({ post, signal }) => {
-          if (!(await ensureOpenCvReady())) return null;
-          const { createMultiShotWorkerProcessor } = await import('../workers/multiShotWorkerProcessor.js');
-          return createMultiShotWorkerProcessor({ post, signal, pause: () => new Promise((resolve) => setTimeout(resolve, 0)) });
-        }
-      });
-      // Cancel ends the merge at once: the worker is terminated and the UI is
-      // released; a decode still running finishes unobserved and is dropped.
-      setBatchProgressCancel(() => { job.cancel(); closeUi(); });
+      // Cancel also withdraws a queued reservation and aborts the current RAW
+      // decode (both LibRaw and its post-decode worker), before releasing UI.
+      setBatchProgressCancel(() => { job?.cancel(); closeUi(); });
       showBatchProgress(true);
       let result = null; let decodeSkipped = 0; let failure = null;
       try {
+        // Refuse before the first decode; keep one claim for all worker planes,
+        // warps and encoding until disposal, even after each frame is posted.
+        const pixels = await Promise.all(selectedItems.map((item) => imagePixelsForBatch(item.file)));
+        abort.signal.throwIfAborted();
+        if (!multiShotFitsBudget(pixels, multiShotBudgetBytes())) throw new MultiShotError('memory', memoryText());
+        reservation = await memoryBudget.reserve(estimateMultiShotWorkerBytes(pixels), {
+          priority: 'user', signal: abort.signal, label: 'multi-shot merge'
+        });
+        abort.signal.throwIfAborted();
+        const names = selectedItems.map((item) => item.file.name);
+        const progress = createMultiShotProgress(selectedItems.length);
+        job = createMultiShotMergeJob({
+          mode,
+          onProgress: (event) => { if (uiOpen) showMultiShotProgress(progress.update(event), names); },
+          // Only when the module worker cannot start: the same pipeline on
+          // this thread, yielding between merge bands.
+          createInlineProcessor: async ({ post, signal }) => {
+            if (!(await ensureOpenCvReady())) return null;
+            const { createMultiShotWorkerProcessor } = await import('../workers/multiShotWorkerProcessor.js');
+            return createMultiShotWorkerProcessor({ post, signal, pause: () => new Promise((resolve) => setTimeout(resolve, 0)) });
+          }
+        });
         persistCurrentFileSettings({ silent: true, force: true });
         for (let i = 0; i < selectedItems.length; i++) {
           const item = selectedItems[i];
           if (uiOpen) showMultiShotProgress(progress.update({ stage: 'decode', index: i }), names);
-          // One frame's memory at a time (#258), until the merge worker has it.
-          const memoryClaim = createFrameClaim(item.file, { priority: 'user', label: `multi-shot ${item.file.name}` });
+          // The merge reservation covers the loader too; no nested claim may
+          // wait on memory held by this same merge.
+          const memoryClaim = coveredMemoryClaim();
           try {
             const decoded = await Promise.race([
-              loadFileToImageData(item.file, { claim: memoryClaim }).then((imageData) => ({ imageData }), (error) => ({ error })),
+              loadFileToImageData(item.file, { claim: memoryClaim, signal: abort.signal }).then((imageData) => ({ imageData }), (error) => ({ error })),
               job.failed
             ]);
             if (decoded.error) {
+              if (decoded.error.name === 'AbortError') throw decoded.error;
               console.warn('Multi-shot decode failed for', item.file.name, decoded.error);
               decodeSkipped++;
               continue;
@@ -27852,12 +27854,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       } catch (error) {
         failure = error;
       } finally {
-        job.dispose();
+        job?.dispose();
+        reservation?.release();
         closeUi();
       }
       if (failure) {
         const { code, message } = failure instanceof MultiShotError ? failure : describeMultiShotError(failure);
-        if (code === 'cancelled') return;
+        if (code === 'cancelled' || failure.name === 'AbortError') return;
         if (code === 'memory') {
           console.warn('Multi-shot merge ran out of memory:', message);
           void appAlert(memoryText());
@@ -27908,6 +27911,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // An infrastructure failure of the loupe worker moves the loupe to the
     // main thread for the rest of the session.
     let loupeWorkerFailed = false;
+    let loupeRecipeRefreshPaused = false;
 
     function loupeElement(id) {
       return document.getElementById(id);
@@ -27953,7 +27957,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         : [frame.width, frame.height];
       const now = performance.now();
       const cached = liveLoupe.recipe;
-      if (cached && cached.photo === photo && now - cached.builtAt < LOUPE_RECIPE_REFRESH_MS
+      if (cached && cached.photo === photo && (loupeRecipeRefreshPaused || now - cached.builtAt < LOUPE_RECIPE_REFRESH_MS)
         && cached.key.every((value, index) => value === key[index])) return cached;
       let settings;
       if (photo) {
@@ -28037,6 +28041,17 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       let inFlight = false;
       let pacing = '';
 
+      let liveAnnounced = false;
+      const announceLive = () => {
+        if (liveAnnounced || !(video.readyState >= 2 && video.videoWidth > 0)) return;
+        liveAnnounced = true;
+        const recipe = liveLoupe.recipe?.name || (state.currentStep >= 3 && state.originalImageData
+          ? state.loadedFile?.name || '' : getLocalizedText('loupeRecipeAuto', 'automatic'));
+        setLoupeStatus(getInterpolatedText('loupeLive', {
+          width: String(video.videoWidth), height: String(video.videoHeight), recipe
+        }, `Live · ${video.videoWidth}×${video.videoHeight} · recipe: ${recipe}`));
+      };
+
       const convertNewest = async () => {
         if (!alive() || inFlight || liveLoupe.view === 'raw' || presented === converted) return;
         if (!(video.readyState >= 2 && video.videoWidth > 0)) return;
@@ -28095,6 +28110,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           if (now - last < interval - 2) return;
           last = now;
           presented++;
+          announceLive();
           convertNewest();
         };
         requestAnimationFrame(tick);
@@ -28111,14 +28127,23 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         video.requestVideoFrameCallback(onVideoFrame);
         presented = Number.isFinite(metadata?.presentedFrames) ? metadata.presentedFrames : presented + 1;
         callbacks++;
+        announceLive();
         convertNewest();
       };
       video.requestVideoFrameCallback(onVideoFrame);
       // Some engines send no callbacks for a video kept at opacity 0 (the
       // converted view): give them LOUPE_FRAME_CALLBACK_WAIT_MS once it plays.
-      const armWatchdog = () => setTimeout(() => {
-        if (alive() && pacing === 'video-frame' && callbacks === 0) paceByDisplay();
-      }, LOUPE_FRAME_CALLBACK_WAIT_MS);
+      const armWatchdog = () => {
+        const previous = callbacks;
+        setTimeout(() => {
+          if (alive() && pacing === 'video-frame' && callbacks === previous) paceByDisplay();
+        }, LOUPE_FRAME_CALLBACK_WAIT_MS);
+      };
+      liveLoupe.wake = () => {
+        if (!alive()) return;
+        convertNewest();
+        if (liveLoupe.view === 'converted') armWatchdog();
+      };
       if (video.readyState >= 2) armWatchdog();
       else video.addEventListener('loadeddata', armWatchdog, { once: true });
     }
@@ -30019,6 +30044,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // the layout and loupe call counts to the smoke tests (#261).
       if (new URLSearchParams(window.location.search).get('debugCounters') === '1') {
         window.__ncDebug = {
+          pauseLoupeRecipeRefresh: (paused) => { loupeRecipeRefreshPaused = Boolean(paused); },
           counters: () => ({ ...uiDebugCounters, sync: studioWorkspace.debugCounters(), loupe: { ...loupeDebugCounters } }),
           sync: () => studioWorkspace.sync(),
           // Drops the retained photo sessions, previews and prefetch slot, so

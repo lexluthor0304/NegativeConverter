@@ -247,3 +247,57 @@ for (const count of [2, 3, 4, 5]) {
 }
 
 console.log('multiShot.test.mjs passed');
+
+// #229 release review: run the real UI entry point, not just the estimator.
+const { mergeHarness } = await import('./multiShotUi.fixture.mjs');
+const { estimateMultiShotWorkerBytes } = await import('./multiShotWorkerClient.js');
+{
+  const h = mergeHarness({ budget: 1000 });
+  assert.equal(h.context.multiShotBudgetBytes(), 872, 'finite budget minus resident planes');
+  await h.run();
+  assert.ok(h.alerts.some(text => /too large/.test(text)));
+  assert.equal(h.events.filter(([stage]) => stage === 'decode').length, 0, 'refused before the first decode');
+  assert.equal(h.memoryBudget.snapshot().reserved, 0);
+  assert.equal(h.body.dataset.studioBusy, undefined);
+}
+{
+  const bytes = estimateMultiShotWorkerBytes([64 * 48, 64 * 48]);
+  const h = mergeHarness({ merge: async budget => {
+    assert.equal(budget.snapshot().user, bytes, 'all planes still counted during merge');
+    return null;
+  } });
+  await h.run();
+  for (const [stage, , reserved] of h.events.filter(([stage]) => ['decode', 'posted'].includes(stage))) {
+    assert.equal(reserved, bytes, `${stage}: entire merge reservation remains held`);
+  }
+  assert.deepEqual(h.events.find(([stage]) => stage === 'dispose'), ['dispose', bytes], 'dispose before releasing the planes');
+  assert.equal(h.memoryBudget.snapshot().reserved, 0, 'released on completion');
+}
+{
+  let signal;
+  const h = mergeHarness({ decode: (_file, options) => {
+    signal = options.signal;
+    return new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
+  } });
+  const pending = h.run();
+  while (!signal) await new Promise(setImmediate);
+  h.cancel();
+  assert.equal(signal.aborted, true, 'Cancel aborts the loader in the same task');
+  await pending;
+  assert.equal(h.alerts.length, 0, 'AbortError is cancellation, not a failed merge');
+  assert.equal(h.memoryBudget.snapshot().reserved, 0);
+}
+console.log('multiShot UI: finite refusal before decode, aggregate reservation through disposal, Cancel aborts loader');
+{
+  const h = mergeHarness();
+  const foreground = await h.memoryBudget.reserve(100, { priority: 'foreground', label: 'open photo' });
+  const pending = h.run();
+  while (!h.memoryBudget.snapshot().waiting.length) await new Promise(setImmediate);
+  h.cancel();
+  await pending;
+  assert.equal(h.memoryBudget.snapshot().waiting.length, 0, 'Cancel withdraws a merge still waiting for foreground memory');
+  assert.equal(h.memoryBudget.snapshot().user, 0);
+  assert.equal(h.alerts.length, 0);
+  assert.ok(!h.events.some(([stage]) => stage === 'decode'));
+  foreground.release();
+}

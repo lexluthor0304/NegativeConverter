@@ -233,17 +233,17 @@ async function runMultiShotScenario({ send, evaluate, waitFor, wait, fail, insta
   await evaluate(`(() => {
     const probe = window.__multiShot = { workers: [], labels: [], dialogs: [], rejections: [], fault: null };
     const heap = () => { if (!window.cv?.Mat) return null; const m = new cv.Mat(1, 1, cv.CV_8UC1); const bytes = m.data.buffer.byteLength; m.delete(); return bytes; };
-    probe.heap = heap;
+    probe.pageState = () => ({ cv: typeof window.cv, heap: heap(), loader: !!document.querySelector('script[data-opencv-loader]') });
     const Original = window.Worker;
     window.Worker = class extends Original {
       constructor(url, options) {
         super(url, options);
         if (!/multiShotWorker/.test(String(url))) return;
-        const record = { terminated: false, cvBefore: typeof window.cv, heapBefore: heap() };
+        const record = { terminated: false, before: probe.pageState() };
         probe.workers.push(record);
         const terminate = this.terminate.bind(this);
         this.terminate = () => {
-          if (!record.terminated) Object.assign(record, { terminated: true, cvAfter: typeof window.cv, heapAfter: heap() });
+          record.terminated = true;
           terminate();
         };
         const post = this.postMessage.bind(this);
@@ -316,11 +316,11 @@ async function runMultiShotScenario({ send, evaluate, waitFor, wait, fail, insta
   const merged = await grain();
   console.log('camera multi-shot grain:', JSON.stringify({ single, merged }));
   if (!(merged < single * 0.8)) fail(`averaging three shots did not reduce grain: ${single} -> ${merged}`);
-  const averageRun = await evaluate(`JSON.stringify({ workers: window.__multiShot.workers, labels: window.__multiShot.labels })`).then(JSON.parse);
+  const averageRun = await evaluate(`JSON.stringify({ workers: window.__multiShot.workers, labels: window.__multiShot.labels, after: window.__multiShot.pageState() })`).then(JSON.parse);
   console.log('camera multi-shot worker:', JSON.stringify(averageRun.workers), 'labels:', JSON.stringify([...new Set(averageRun.labels)]));
   if (averageRun.workers.length !== 1 || !averageRun.workers[0].terminated) fail('the average merge should run in one worker, terminated afterwards: ' + JSON.stringify(averageRun.workers));
-  const pageOpenCvUnchanged = (w) => w.cvAfter === w.cvBefore && w.heapAfter === w.heapBefore;
-  if (!pageOpenCvUnchanged(averageRun.workers[0])) fail('the merge changed the page OpenCV state: ' + JSON.stringify(averageRun.workers[0]));
+  const pageOpenCvUnchanged = (before, after) => before.cv === after.cv && before.heap === after.heap && before.loader === after.loader;
+  if (!pageOpenCvUnchanged(averageRun.workers[0].before, averageRun.after)) fail('the merge changed the page OpenCV state: ' + JSON.stringify(averageRun));
   for (const label of [/^Decoding \d \/ 3$/, /^Aligning \d \/ 3$/, /^Merging \d+ %$/, /^Encoding…$/]) {
     if (!averageRun.labels.some((text) => label.test(text))) fail(`progress label ${label} never shown: ${JSON.stringify(averageRun.labels)}`);
   }
@@ -331,8 +331,8 @@ async function runMultiShotScenario({ send, evaluate, waitFor, wait, fail, insta
   await waitFor('hdr merge finished', `${ready} && /^merged-hdr-/.test(document.getElementById('studioFilename').textContent)`, 180_000);
   const hdrToast = await evaluate(`(window.__cameraToasts || []).filter((t) => /Merged \\d+ shots/.test(t)).pop() || ''`);
   if (!/^Merged 2 shots into merged-hdr-/.test(hdrToast)) fail('hdr merge toast wrong: ' + hdrToast);
-  const hdrWorker = await evaluate(`JSON.stringify(window.__multiShot.workers[1] || null)`).then(JSON.parse);
-  if (!hdrWorker?.terminated || !pageOpenCvUnchanged(hdrWorker)) fail('the hdr merge worker was not terminated cleanly: ' + JSON.stringify(hdrWorker));
+  const hdrRun = await evaluate(`JSON.stringify({ worker: window.__multiShot.workers[1], after: window.__multiShot.pageState() })`).then(JSON.parse);
+  if (!hdrRun.worker?.terminated || !pageOpenCvUnchanged(hdrRun.worker.before, hdrRun.after)) fail('the hdr merge changed page OpenCV or did not terminate: ' + JSON.stringify(hdrRun));
 
   // A forced OpenCV allocation failure in the warp (the 60 MP failure mode)
   // shows the memory alert, releases the UI and terminates the worker.
@@ -515,6 +515,8 @@ async function runLoupeScenario({ send, evaluate, waitFor, wait, fail, installDi
   // key and Cmd/Ctrl+Z each rebuild its recipe within two camera frames.
   await evaluate(`(() => { window.__loupeWorkers.workers = []; document.getElementById('studioLoupe').click(); })()`);
   await waitFor('loupe over the converted photo', `Number(document.getElementById('loupeOverlay').dataset.frames) >= 3 && /recipe: loupe-/.test(document.getElementById('loupeStatus').textContent)`, 30_000);
+  const photoStart = await evaluate(`window.__ncDebug.counters().loupe`);
+  await evaluate(`window.__ncDebug.pauseLoupeRecipeRefresh(true)`);
   const edits = [];
   for (const [label, init] of [['C', { key: 'c' }], ['undo', { key: 'z', ctrlKey: true }]]) {
     edits.push(await evaluate(`new Promise(resolve => {
@@ -532,6 +534,9 @@ async function runLoupeScenario({ send, evaluate, waitFor, wait, fail, installDi
   }
   console.log('camera loupe edits:', JSON.stringify(edits));
   if (!edits.every(edit => edit.framesUntilRebuild !== null && edit.framesUntilRebuild <= 2)) fail('the loupe did not follow the photo\'s edits within two frames: ' + JSON.stringify(edits));
+  await evaluate(`window.__ncDebug.pauseLoupeRecipeRefresh(false)`);
+  const photoEnd = await evaluate(`window.__ncDebug.counters().loupe`);
+  if (photoEnd.mainConversions !== 0 || photoEnd.workerConversions <= photoStart.workerConversions) fail('photo loupe must convert in its worker: ' + JSON.stringify({ photoStart, photoEnd }));
   const closed = await evaluate(`(() => {
     const tracks = document.getElementById('loupeVideo').srcObject.getTracks();
     document.getElementById('loupeCloseBtn').click();

@@ -111,14 +111,18 @@ which Emscripten never shrinks:
    above about 44 MP. 8-bit sources keep the 8-bit warp and ×257 widening.
 3. **Worker, merge and encode:** `coverageRect`, then `mergeRows` in 64-row
    bands with a progress message per band, then the export worker's
-   `encodePng16Blob(data, w, h, pako.deflate)`. The Blob crosses back
+   `encodePng16Blob(out, rect.width, rect.height, pako)`. The #257 band encoder
+   takes the pako module: decoded samples are unchanged, but compressed bytes
+   differ from the pre-band encoder at 1703835. The Blob crosses back
    without a copy; the page adds the sRGB iCCP chunk with
    `attachMetadataToBlob` and queues the file.
 
 The worker posts progress after each stage (align, warp, exposure, each
 merge band, encode); the progress modal shows the stage and a fraction and
 has a **Cancel** button, which terminates the worker and releases the Studio
-at once (a decode still running finishes unobserved and is dropped). The
+at once. It also aborts the current decode through its signal, disposing the
+LibRaw and post-decode workers, or withdraws a reservation still waiting for
+memory. The
 worker is terminated after the result, on any failure and on Cancel, which
 releases its heap and planes.
 
@@ -135,8 +139,9 @@ thread with the page's OpenCV, yielding between merge bands.
 Memory at 60.4 MP (estimate): each stored frame is a 483 MB plane, plus the
 output and the worker's idle heap — about 3.0 GB for 3 frames, 4.0 GB for 5
 (`estimateMultiShotWorkerBytes`). A merge is refused up front when that does
-not fit the renderer's memory budget (#258 supplies the budget; until then
-the failure is reported when it happens).
+not fit the renderer's memory budget minus retained bytes. One user
+reservation covers the entire estimate from before the first decode through
+worker disposal; posting a frame does not release its accounting.
 
 Test hook: a `fault: 'warp-memory'` field in the worker's `start` message
 makes the next warp request an over-cap Mat, a genuine OpenCV `StsNoMem`
@@ -162,7 +167,9 @@ How it runs (#261):
   conversion ends, the newest frame converts at once and the ones in
   between are dropped. Without the API, or without a callback within
   200 ms of a playable video, display frames thinned to the track's frame
-  rate (30 if unknown) drive it instead.
+  rate (30 if unknown) drive it instead. Switching from raw to converted
+  re-arms the 200 ms check, since hiding the video can stop callbacks in
+  some engines. The first presented frame announces Live in either view.
 - **Off the main thread.** The loupe has its own conversion worker
   (created when it opens, released when it closes, so the editor's
   preview worker keeps its cached source). The worker runs the router and
