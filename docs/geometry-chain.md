@@ -80,6 +80,8 @@ In `main.js` the scalars change synchronously and the planes follow:
   WB event. It leaves the measurements saved entries own intact; an obsolete
   finalizer cannot clear the next operation's binding. A settings replacement
   cancels an owned restore even when its geometry key matches a pending job.
+  A geometry/analysis edit captures its outgoing history entry first, then
+  cancels that owner, including Confirm when the planes do not change.
 - Rotate 90° and mirror turn or flip the current display with CSS at once
   (UI only; composed when edits follow each other); the first paint of the
   new planes removes it, on the GL display or on `#canvas`, with the film

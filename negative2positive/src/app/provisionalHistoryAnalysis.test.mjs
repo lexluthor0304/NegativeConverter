@@ -86,7 +86,7 @@ function fixture(staged, manualWb = false) {
     'installFullDecode', 'restoreAutoFrameDiagnostics', 'automaticWhiteBalanceResult', 'maybeAutoWhiteBalance', 'analysisRegionSample',
     'whiteBalanceMeasurementSettings', 'provisionalWhiteBalanceMeasurement', 'promoteWhiteBalanceMeasurement', 'restorePromotedWhiteBalance',
     'restoreColdSnapshotPixels', 'hasPendingCropDetection', 'settlePendingCropDetection',
-    'cancelGeometryJob', 'restoreSettings',
+    'cancelGeometryJob', 'restoreSettings', 'pushUndo',
     'waitForProvisionalSwap', 'startCropDetection', 'applyCropDetectionOutcome', 'resolvePendingFrameEdits', 'cloneSettings', 'renderGeometryChain',
     'buildAdjustmentSettings', 'processNegative', 'captureSnapshot', 'restoreSnapshot'].map(fn).join('\n'), c);
   c.restoreAutoFrameDiagnostics(staged ? standInMeta : fullMeta);
@@ -817,7 +817,8 @@ if (selected === 'all' || selected === 'ownership-geometry-settings') {
   assert.equal(event.measurement.settings.coreExposure, 15, 'the saved old dispatch remains valid for its entries');
   h.pool.dispose(); reference.pool.dispose(); cases++;
 }
-if (selected === 'all' || selected === 'ownership-swap-completion') {
+for (const history of [false, true]) {
+  if (selected !== 'all' && selected !== 'ownership-swap-completion') continue;
   const h = fixture(true), reference = fixture(false), { context: c, state, target } = h;
   const baseline = target.extractCurrentSettings();
   const record = { file: { name: 'ownership.dng' }, decodedImage: full, status: 'decoded', urgent: true, decoded: async () => full };
@@ -855,7 +856,7 @@ if (selected === 'all' || selected === 'ownership-swap-completion') {
   for (const item of [h, reference]) {
     await item.context.processNegative({ automatic: false });
     await apply(item, null, { analysisOnly: true, selectedArea: area(.2, .25, .8, .75) });
-    await item.context.performUndo(); await item.context.performRedo();
+    if (history) { await item.context.performUndo(); await item.context.performRedo(); }
   }
   const wb = [state.wbR, state.wbG, state.wbB];
   c.pushUndo('after-swap-history'); reference.context.pushUndo('after-swap-history');
@@ -873,6 +874,31 @@ if (selected === 'all' || selected === 'ownership-swap-completion') {
     }
     await c.processNegative({ automatic: false }); await reference.context.processNegative({ automatic: false });
     for (const depth of [8, 16]) assert.deepEqual(samples(h, depth), samples(reference, depth), `swap completion/${action}: strict ${depth}-bit samples`);
+  }
+  h.pool.dispose(); reference.pool.dispose(); cases++;
+}
+if (selected === 'all' || selected === 'ownership-cold-confirm') {
+  const { h, reference, event } = await ownershipFixture(), { context: c, state, target } = h;
+  for (const item of [h, reference]) await item.context.performUndo();
+  target.holdConversion = ({ live }) => !live;
+  const obsolete = c.performUndo(), reply = await waitReply(h, false, 'analysis-only replacement');
+  await reference.context.performUndo();
+  for (const item of [h, reference]) {
+    await apply(item, null, { analysisOnly: true, selectedArea: area(.25, .15, .75, .85) });
+    assert.equal(Boolean(item.state.fullBaseHistoryPending), false, 'new Confirm supersedes history WB without changing geometry');
+    item.context.pushUndo('after-new-confirm'); item.state.coreExposure = 0;
+  }
+  const wb = [state.wbR, state.wbG, state.wbB];
+  target.holdConversion = null;
+  releaseReply(h, reply); await obsolete; await c.settlePendingCropDetection();
+  assert.deepEqual([state.wbR, state.wbG, state.wbB], wb, 'old history WB cannot overwrite new Confirm');
+  assert.equal(event.measurement.settings.coreExposure, 15, 'old saved event remains available for legitimately owning entries');
+  for (const action of ['live', 'Undo', 'Redo', 'Undo', 'Redo']) {
+    if (action !== 'live') {
+      await c[`perform${action}`](); await c.settlePendingCropDetection(); await reference.context[`perform${action}`]();
+    }
+    await c.processNegative({ automatic: false }); await reference.context.processNegative({ automatic: false });
+    for (const depth of [8, 16]) assert.deepEqual(samples(h, depth), samples(reference, depth), `cold Confirm/${action}: strict ${depth}-bit samples`);
   }
   h.pool.dispose(); reference.pool.dispose(); cases++;
 }

@@ -3503,8 +3503,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const entry = commitUndoSnapshot(captureSnapshot(label));
       if (['crop', 'rotation', 'mirror', 'autoFrame', 'restoreFullFrame'].includes(label)) {
         state.semanticMap = null;
-        // A new frame (or a second Apply) ends a pending crop-area detection.
+        // Capture first, then replace the old geometry/analysis owner even
+        // for Confirm, which can leave the geometry planes unchanged.
         cancelCropDetection();
+        cancelGeometryJob();
       }
       return entry;
     }

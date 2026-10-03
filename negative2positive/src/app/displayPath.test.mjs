@@ -88,7 +88,7 @@ for (const failure of ['null', 'throw']) {
   const context = vm.createContext({
     // #249: no photo here takes a display form.
     ...displaySessionStubs(),
-    state, console: { error: noop }, loadGeneration: 1, coreReprocessGeneration: 0, processNegativeInFlight: null,
+    state, console: { error: noop }, loadGeneration: 1, coreReprocessGeneration: 0, geometryToken: 0, processNegativeInFlight: null,
     whenGeometrySettled: async () => true, isCurrentLoad: generation => generation === 1,
     createPerfTrace: () => ({ mark: noop, end: noop }), getImageDataPixelCount: () => 16,
     quietLoadingOverlay: { show: async () => {}, updateProgress: noop, hide: noop },

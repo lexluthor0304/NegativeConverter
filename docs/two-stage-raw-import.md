@@ -196,6 +196,8 @@ instead (step 4 runs it on the full base). It then swaps in one task:
    That binding belongs only to the current restore operation. A hot or cold
    restore, saved-settings replacement, new geometry or photo activation
    invalidates the superseded live binding through geometry cancellation.
+   Apply/Confirm captures the outgoing entry before cancellation, including
+   analysis-only Confirm with unchanged geometry planes.
    Saved entries retain their completed measurements and intent. The old
    finalizer compares its promise identity and cannot clear a newer restore.
    Conversion replies also compare the operation token after geometry/source
