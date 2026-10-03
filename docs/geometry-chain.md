@@ -82,6 +82,8 @@ In `main.js` the scalars change synchronously and the planes follow:
   cancels an owned restore even when its geometry key matches a pending job.
   A geometry/analysis edit captures its outgoing history entry first, then
   cancels that owner, including Confirm when the planes do not change.
+  Intent cancellation keeps the interim display so consecutive turns/mirrors
+  still compose until the replacement planes are installed.
   Reset all adjustments likewise captures before cancellation. If geometry
   is still pending, it rebuilds the requested frame and converts the reset
   recipe after that build; it never adopts the superseded planes.

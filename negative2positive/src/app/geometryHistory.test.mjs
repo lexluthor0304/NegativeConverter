@@ -16,6 +16,7 @@ const crop = (left, top) => ({ left, top, width: 40, height: 26 });
   const installed = h.state.croppedImageData;
   const installedFrame = h.state.originalImageData;
   h.state.currentStep = 3;
+  h.state.processedImageData = installed;
 
   // Rotate, then undo before the pool is done: the undo restores the planes
   // at once (a reference swap) and the late result is dropped.

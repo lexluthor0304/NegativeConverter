@@ -3509,7 +3509,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         // Capture first, then replace the old geometry/analysis owner even
         // for Confirm, which can leave the geometry planes unchanged.
         cancelCropDetection();
-        cancelGeometryJob();
+        cancelGeometryJob({ keepInterim: true });
       }
       return entry;
     }
