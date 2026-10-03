@@ -3325,7 +3325,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         if (detection) await detection.settled;
         if (!isCurrent()) return false;
         if (step >= 3) {
-          await convertAfterGeometryEdit(isCurrent, { quiet: true, automatic: Boolean(promoted?.automatic && !promoted.whiteBalance) });
+          await convertAfterGeometryEdit(isCurrent, { quiet: true, automatic: Boolean(promoted?.automatic) });
           if (promoted?.whiteBalance) await restorePromotedWhiteBalance(promoted.whiteBalance, isCurrent);
         } else {
           const sourceData = state.croppedImageData || state.originalImageData;

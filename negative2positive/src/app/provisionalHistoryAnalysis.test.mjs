@@ -8,6 +8,7 @@ import { workingPointsToBase, buildCropDetectionInput, isSameAnalysisFrame } fro
 import { estimateAutoWhiteBalance } from './autoWhiteBalance.js';
 import { applyPreparedAdjustmentsToBuffer, applyPreparedAdjustmentsToBuffer16 } from './adjustmentPipeline.js';
 import { convertColorWithSilverCore } from '../pipeline/silverAdapter.js';
+import { analyzeExpiredFilm, defaultExpiredRescueParams, EXPIRED_RESCUE_DEFAULTS, EXPIRED_RESCUE_KEYS } from '../pipeline/expiredRescue.js';
 
 // Real history capture, source installation, restore, undo/redo, geometry,
 // Silver conversion, automatic WB and 8/16 adjustment samples. Detection is a leaf.
@@ -195,4 +196,27 @@ if (selected === 'all') for (const timing of ['pending-hit', 'completed-hit']) {
   }
   h.pool.dispose(); reference.pool.dispose(); cases++;
 }
-console.log(`provisionalHistoryAnalysis: ${cases} pending/completed hits and confirmations on undo/redo stacks promote full-base recipe/diagnostics/WB at the original measurement event; manual WB/base and exact Silver/8/16 samples preserved`);
+if (selected === 'all' || selected === 'automatic-rescue') {
+  // A WB event from before the user enabled rescue must not suppress the
+  // other automatic measurements of a promoted cold entry's new full source.
+  const h = fixture(false), { context: c, target, state } = h;
+  Object.assign(state, EXPIRED_RESCUE_DEFAULTS, { expiredEnabled: true, expiredBrightness: 17,
+    expiredContrast: 23, expiredNeutralize: 61, expiredAnalysis: null });
+  Object.assign(target, { analyzeExpiredFilm, defaultExpiredRescueParams, EXPIRED_RESCUE_DEFAULTS, EXPIRED_RESCUE_KEYS,
+    expiredAnalysisKey: 'stand-in', expiredTabPending: false, expiredSourceKey: () => 'full-history-source',
+    expiredAnalysisSample: image => ({ image, options: {}, placement: { left: 0, top: 0, width: 1, height: 1 } }),
+    runExpiredSpatialAnalysis: () => Promise.resolve(false) });
+  vm.runInContext('SNAPSHOT_SCALAR_KEYS.push(...EXPIRED_RESCUE_KEYS)', c);
+  vm.runInContext(['applyExpiredAnalysisDefaults', 'runExpiredAnalysis', 'maybeAnalyzeExpiredRescue'].map(fn).join('\n'), c);
+  const snapshot = c.captureSnapshot('expired-core');
+  snapshot.refs = { cold: true };
+  snapshot.settings.fullBaseFrameEdit = { detect: false, automatic: true,
+    whiteBalance: { settings: { filmType: 'color', expiredEnabled: false } } };
+  await c.restoreSnapshot(snapshot);
+  assert.ok(state.expiredAnalysis, 'promoted WB restoration also measures expired rescue on the full source');
+  assert.deepEqual(state.expiredAnalysis, analyzeExpiredFilm(state.processedImageData,
+    { anchors: null, placement: { left: 0, top: 0, width: 1, height: 1 } }), 'equals a fresh full-source rescue measurement');
+  assert.deepEqual([state.expiredBrightness, state.expiredContrast, state.expiredNeutralize], [17, 23, 61], 'user rescue strengths survive');
+  h.pool.dispose(); cases++;
+}
+console.log(`provisionalHistoryAnalysis: ${cases} history/rescue cases; pending/completed hits and confirmations promote full-base recipe/diagnostics/WB at the original event; manual WB/base, rescue strengths and exact Silver/8/16 samples preserved`);
