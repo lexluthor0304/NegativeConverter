@@ -24,7 +24,7 @@ export function pickStudioColors(settings) {
 export function mergeStudioColors(target, source) {
   // Unopened-photo recipes also carry film mode and explicit WB. Colour sync
   // still picks only STUDIO_COLOR_KEYS, so it never copies those fields.
-  const keys = [...STUDIO_COLOR_KEYS, 'filmType', 'positiveMode',
+  const keys = ['filmType', 'positiveMode',
     'wbR', 'wbG', 'wbB', 'wbUserOverride', 'grayPointSampled', 'wbAutoConfidence', 'wbSemanticApplied'];
   const patch = pickStudioColors(source);
   const recipe = source.recipe && typeof source.recipe === 'object' ? source.recipe : null;

@@ -135,7 +135,7 @@ for (const route of ['current', 'selected', 'detected', 'reference', 'edge-text'
       const f = await fixture({ manual, type: route === 'positive-entry' ? 'bw' : 'positive' }), { context: c, state, target, old } = f;
       const patch = modeOnly ? { positiveMode: 'edit' } : { filmType: 'bw' };
       Object.assign(patch, { wbR: 1.23, wbG: 1, wbB: .91, wbUserOverride: true,
-        expiredBrightness: old.expiredBrightness, expiredContrast: 0 });
+        expiredBrightness: old.expiredBrightness, expiredContrast: 0, coreExposure: 19 });
       target.decodedRecipe = decodeRecipe(encodeRecipe(patch));
       let saved;
       if (route === 'current') c.applyRecipeToCurrent();
@@ -156,6 +156,10 @@ for (const route of ['current', 'selected', 'detected', 'reference', 'edge-text'
           const roundTrip = parseRollProject(serializeRollProject(buildRollProject({ files: [{ name: unopened.file.name, studioColors: unopened.studioColors, filmTypeOverride: unopened.filmTypeOverride }] })));
           const restored = mergeStudioColors({ filmType: 'color', positiveMode: 'correct', wbR: 1, wbB: 1 }, roundTrip.files[0].studioColors);
           assert.deepEqual([restored.filmType, restored.positiveMode, restored.wbR, restored.wbB, restored.expiredContrast], [modeOnly ? 'color' : 'bw', modeOnly ? 'edit' : 'correct', 1.23, .91, 0], 'saved unopened recipe retains mode/WB/strengths without relying on unsaved pending edits');
+          const synced = mergeStudioColors({ filmType: 'color', positiveMode: 'correct' }, { ...unopened.studioColors, coreExposure: 4,
+            expiredContrast: 12, expiredContrastUserOverride: false });
+          assert.deepEqual([synced.coreExposure, synced.expiredContrast, synced.expiredContrastUserOverride], [4, 12, false], 'later color sync wins over stored recipe colors and strengths');
+          assert.equal(synced.wbR, 1.23, 'later color sync retains explicit recipient recipe WB');
           f.measurements.length = 0;
         }
       }

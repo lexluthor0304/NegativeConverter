@@ -28472,7 +28472,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           // Keep the explicit recipe over those defaults, including film mode
           // and WB (neither is part of the colour-sync subset).
           item.pendingEdits = applyRecipeSettings(item.pendingEdits || {}, structuredClone(patch));
-          item.studioColors = { ...(item.studioColors || {}), ...structuredClone(patch),
+          item.studioColors = { ...applyRecipeSettings(item.studioColors || {}, structuredClone(patch)),
             recipe: applyRecipeSettings(item.studioColors?.recipe || {}, structuredClone(patch)) };
         }
         if (item.pendingFrameEdit) {

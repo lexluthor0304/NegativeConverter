@@ -161,7 +161,13 @@ export async function runInterpretationRoutesSmoke({ send, evaluate, waitFor, wa
   await applyRecipe(patch, true);
   const queued = await evaluate('window.__ncTwoStage.queuedRecipes()');
   for (const item of queued.slice(1)) {
-    if (item.settings?.semanticMap || item.settings?.expiredAnalysis || (item.settings?.filmType !== 'bw' && item.pendingEdits?.filmType !== 'bw')) fail('selected recipe retained old analysis or lost interpretation: ' + JSON.stringify(item));
+    // The thumbnail lane may already have measured this new interpretation.
+    // Require no old anchors/measurement, then verify its real batch pixels.
+    const stale = item.settings?.expiredAnalysis && JSON.stringify(item.settings.expiredAnalysis) === JSON.stringify(old.expiredAnalysis);
+    if (item.settings?.semanticMap || stale || (item.settings?.filmType !== 'bw' && item.pendingEdits?.filmType !== 'bw')) {
+      fail('selected recipe retained old analysis or lost interpretation: ' + JSON.stringify({ name: item.name,
+        filmType: item.settings?.filmType, pendingType: item.pendingEdits?.filmType, anchors: Boolean(item.settings?.semanticMap), stale }));
+    }
   }
   const batch = await exports('selected recipe batch', true);
   equalExports(first, batch, 'current single vs real batch', false);
