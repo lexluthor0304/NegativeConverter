@@ -10,11 +10,11 @@
 // Step 3 on bands (with the expired spatial map) against the whole frame.
 // Run with: node negative2positive/src/pipeline/silverBands.parity.test.mjs
 import assert from 'node:assert/strict';
-import { sha } from './oracle/adapterParity.mjs';
+import { sha, oracle } from './oracle/adapterParity.mjs';
 import { convertFrameWithRouter } from './conversionRouter.js';
 import { invalidateSilverCoreCache } from './silverAdapter.js';
 import {
-  convertInBands, planConversionBands, bandsSupported, copyBandRows, haloFor, sharpenSilverCoreBand, adjustBand
+  convertInBands, planConversionBands, bandsSupported, copyBandRows, haloFor, sharpenSilverCoreBand, adjustBand, planSilverCoreBands, prepareSilverCoreBand, buildBandTables, applySilverCoreBand
 } from './silverBands.js';
 import { applyUnsharpMask, unsharpMaskHaloRows } from '../silvercore/engine/Sharpening.js';
 import { PAPER_IDS, TONING_IDS, paperProfiles } from '../silvercore/engine/PaperProfiles.js';
@@ -80,7 +80,9 @@ function frame(plane) {
 
 async function wholeFrame(plane, settings, options) {
   invalidateSilverCoreCache();
-  const result = await convertFrameWithRouter({ imageData: frame(plane), settings: structuredClone(settings), options: { forceFullProcess: true, ...options } });
+  const result = settings.filmType === 'positive'
+    ? await oracle.convertPositiveWithSilverCore(frame(plane), structuredClone(settings), { forceFullProcess: true, ...options })
+    : await convertFrameWithRouter({ imageData: frame(plane), settings: structuredClone(settings), options: { forceFullProcess: true, ...options } });
   return {
     image16: sha(result.__image16.data), image8: sha(result.data),
     analysisPreview: result.__analysisPreview ? sha(result.__analysisPreview.data) : null
@@ -291,3 +293,30 @@ for (const radius of [0.5, 1, 3]) {
 }
 
 console.log(`silverBands parity: ${checks} banded results match the whole frame`);
+
+// D5 on the real band apply path: no tile memory in untouched bands. This
+// small frame preserves relative brush geometry; scale bytes to 60 MP rather
+// than allocating a 60 MP source. Both colour and grey must stay bit-exact.
+{
+  const width = 3000, height = 2000;
+  const small = negative(11, width, height);
+  const exposure = { localExposure: { strokes: [{ stops: 0.8, size: 0.07, feather: 0.5,
+    points: [{ x: 0.3, y: 0.25, p: 1 }, { x: 0.6, y: 0.4, p: 0.7 }] }] },
+    localExposureGeometry: { baseWidth: width, baseHeight: height, rotatedWidth: width, rotatedHeight: height,
+      rotationAngle: 0, mirrored: false, cropRegion: null } };
+  for (const filmType of ['color', 'bw']) {
+    const settings = { filmType, ...exposure };
+    await expectSame(`7 percent stroke ${filmType}`, small, settings, {}, [6]);
+    const job = await planSilverCoreBands({ settings, width, height, includeAnalysisPreview: false });
+    const bands = planConversionBands(height, 6).map(({ y0, y1 }) => ({ y0,
+      band: { width, height: y1 - y0, data: copyBandRows(small.data, width, 0, y0, y1) } }));
+    const partials = bands.map(({ band, y0 }) => prepareSilverCoreBand(job.plan, band, y0));
+    const tables = buildBandTables(job, partials);
+    for (const { band, y0 } of bands) applySilverCoreBand(job.plan, tables, band, y0);
+    const bytes = bands.reduce((sum, { band }) => sum + band.stopsBytes, 0);
+    assert.equal(bands.at(-1).band.stopsBytes, 0, 'untouched band allocates no stops tiles');
+    const scaled = bytes * 60_000_000 / (width * height);
+    assert.ok(scaled <= 40_000_000, `concurrent band stops scaled to 60 MP: ${scaled}`);
+    console.log(`band stops ${filmType}: ${bytes} B, 60 MP scaled ${scaled} B`);
+  }
+}

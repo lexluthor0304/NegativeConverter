@@ -55,7 +55,7 @@ import { applyUnsharpMaskBand, unsharpMaskHaloRows } from '../silvercore/engine/
 import { toImageData8, cloneImage16 } from '../silvercore/util/image16.js';
 import { packGreyTable, convertGreyFromSource, greyHistogramFromSource } from '../silvercore/util/greyPlane.js';
 import { applyFlatFieldToImage16 } from '../app/flatField.js';
-import { rasterizeExposureStops } from '../app/localExposure.js';
+import { rasterizeExposureStopsTiled, exposureStopsBytes } from '../app/localExposure.js';
 import { applyFilmBaseCompensationToBuffer } from './filmBaseCompensation.js';
 import { resolveConversionMode } from './conversionRouter.js';
 import {
@@ -344,12 +344,13 @@ export function applySilverCoreBand(plan, tables, band, y0) {
   const { params } = plan;
   const { width, height: rows, data } = band;
   const stops = plan.exposure
-    ? rasterizeExposureStops(plan.exposure.localExposure, { ...plan.exposure.geometry, window: { x: 0, y: y0, width, height: rows } })
+    ? rasterizeExposureStopsTiled(plan.exposure.localExposure, { ...plan.exposure.geometry, window: { x: 0, y: y0, width, height: rows } })
     : null;
+  band.stopsBytes = exposureStopsBytes(stops);
   if (tables.kind === 'grey') {
     // convertGreyFromSource reads each pixel before it writes it.
     band.data8 = new Uint8ClampedArray(data.length);
-    convertGreyFromSource(data, greyWeights(params), stops ? tables.preSatRamp : null, stops, tables.packed, data, band.data8);
+    convertGreyFromSource(data, greyWeights(params), stops ? tables.preSatRamp : null, stops, tables.packed, data, band.data8, undefined, width);
     return data;
   }
   // An engine seeded with worker 0's state: no analysis, no curve build, and

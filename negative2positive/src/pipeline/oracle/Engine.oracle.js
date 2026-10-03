@@ -6,7 +6,7 @@
  * Coordinates image analysis, curve generation, and LUT application.
  */
 
-import { analyzePositive, applyPositiveAnalysis, identityPositiveChannels } from '../../silvercore/engine/PositiveProcessing.js'
+import { analyzePositive, applyPositiveAnalysis, identityPositiveChannels } from './PositiveProcessing.oracle.js'
 import { analyzeImage, applyLUT, adjustSaturation, applyHSLAdjustments } from './ImageProcessor.oracle.js'
 import { generateCurves } from '../../silvercore/engine/CurveEngine.js'
 import { computeAutoColor } from '../../silvercore/engine/WhiteBalance.js'

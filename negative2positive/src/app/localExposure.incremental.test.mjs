@@ -138,7 +138,17 @@ for (let n = 0; n < 60; n++) {
     assertSameBits(denseOfTiled(tiled), expected, `tiled ${tileSize} set ${n}`);
     // Tiles exist only where a stroke's coverage is above zero.
     for (let t = 0; t < tiled.tiles.length; t++) {
-      if (tiled.tiles[t]) assert.ok(tiled.tiles[t].some((v, i) => v !== 0 || i < 0) || true);
+      if (!tiled.tiles[t]) continue;
+      const tx = (t % tiled.columns) * tileSize, ty = Math.floor(t / tiled.columns) * tileSize;
+      const covered = visits.some(({ bx0, by0, bw, bh, coverage }) => {
+        for (let y = Math.max(ty, by0); y < Math.min(ty + tileSize, by0 + bh); y++) {
+          for (let x = Math.max(tx, bx0); x < Math.min(tx + tileSize, bx0 + bw); x++) {
+            if (coverage[(y - by0) * bw + x - bx0] > 0) return true;
+          }
+        }
+        return false;
+      });
+      assert.ok(covered, `allocated tile ${t} has real coverage (size ${tileSize}, set ${n})`);
     }
     const image = randomImage(geometry.width, geometry.height);
     const viaTiles = { ...image, data: new Uint16Array(image.data) };

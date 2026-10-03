@@ -343,7 +343,9 @@ or the batch drops it, so the budget's other requests see it.
   (parameters, the loaded 3D profile, the reference sample's analysis) and
   builds the tables once from the bands' merged analysis (256-bin
   histograms, or the positive analysis's strided sample in frame order);
-  the bands apply the engine's per-pixel tail with their own rows of the
+  the bands apply the engine's per-pixel tail with sparse 256x256 local-exposure
+  tiles allocated only where stroke coverage is positive (untouched bands hold
+  no stops tiles), bit-identical on colour and grey paths. They use their own rows of the
   flat field and the stop map, and exchange unsharpened edge rows before
   sharpening, clamped at the frame's edges. Step 3 runs on bands with the
   frame's size and each band's start row (`createBandedExportBridge` wraps
