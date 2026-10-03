@@ -583,6 +583,14 @@ hides come last. No job starts on a file another lane is working on.
   the finished frame), and a worker that lost them is answered with a fresh
   decode of the file; a held frame nobody adopts is dropped in the worker
   with the entry.
+- **Foreground fallback.** `ensureBase` and an activation adopting a lane's
+  held frame carry their foreground memory claim and `priority: 'user'`.
+  If the worker cannot return its planes, the replacement decode reuses that
+  claim at the loader gate instead of waiting behind its own reservation.
+  Releasing or aborting the adopting lease stops the replacement decode,
+  including an HE NEF embedded-JPEG worker. A lane still holding the original
+  shared decode does not keep that replacement worker alive (#229 review
+  R2-009, R2-040, R1-032).
 - **In-flight decodes.** With the desktop session budget, a cold activation
   lets a lane's decode finish (it would have to be redone); on low-memory
   devices the activation aborts the lanes' decodes, except the target's own.

@@ -255,3 +255,47 @@ function heldFrame(planes = { ...base, id: 'planes' }) {
 
 await flush();
 console.log('sharedDecodes tests passed');
+
+// A lost held frame must not queue a background reservation behind the
+// adopter's outstanding foreground reservation (R2-040 / R2-055).
+const { createMemoryBudget, createMemoryClaim } = await import('./memoryBudget.js');
+for (const cancel of [null, 'release', 'signal']) {
+  const budget = createMemoryBudget({ budgetBytes: 10000, retainedBytes: () => 0 });
+  const controller = new AbortController();
+  const claim = createMemoryClaim(budget, { priority: 'foreground', signal: controller.signal, bytesFor: () => 1000 });
+  await claim.atDecode({ width: 4, height: 4 });
+  let received, finishFallback, fallbackStarted;
+  const started = new Promise(resolve => { fallbackStarted = resolve; });
+  const shared = createSharedDecodes({ decode: async (file, options) => {
+    received = options;
+    assert.equal(options.context.claim, claim);
+    assert.equal(options.context.priority, 'user');
+    await options.context.claim.atDecode({ width: 4, height: 4 });
+    assert.equal(budget.foregroundOutstanding, 1, 'loader gate reuses the held claim');
+    fallbackStarted();
+    if (cancel) await new Promise((resolve, reject) => {
+      finishFallback = resolve;
+      options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true });
+    });
+    return { base, rawMetadata: meta };
+  } });
+  let resolveLane;
+  const lane = shared.open(fileA, { decode: () => new Promise(resolve => { resolveLane = resolve; }) });
+  const adopted = shared.adopt(fileA, { signal: controller.signal, context: { claim, priority: 'user' } });
+  resolveLane({ held: { takePlanes: async () => { throw Error('worker lost'); }, release() {} } });
+  await started;
+  if (cancel) {
+    if (cancel === 'release') adopted.release(); else controller.abort();
+    await assert.rejects(adopted.result, { name: 'AbortError' });
+    assert.equal(received.signal.aborted, true, 'the adopting lease cancels its replacement worker even with a lane alive');
+    finishFallback();
+  } else {
+    assert.equal((await adopted.result).base, base, 'resolves before releasing the foreground claim');
+    assert.equal(claim.held, true);
+    adopted.release();
+  }
+  lane.release(); claim.release();
+  assert.equal(shared.size, 0);
+  assert.equal(budget.idle, true);
+}
+console.log('sharedDecodes: adopter context, idempotent foreground admission and fallback cancellation passed');

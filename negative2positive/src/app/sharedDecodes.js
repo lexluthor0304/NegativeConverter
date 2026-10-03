@@ -66,18 +66,26 @@ export function createSharedDecodes({ decode }) {
   // A held frame's base, fetched once for every lease that needs it. A worker
   // that lost the frame is answered with a decode of the file (the shared
   // decode function, today's options), so an adopter never fails for it.
-  function takeHeldBase(entry) {
+  async function takeHeldBase(entry, lease) {
     const held = entry.value?.held;
-    if (!held) return Promise.resolve(entry.value);
+    if (!held) return entry.value;
+    // Share the worker transfer, but a failed transfer's replacement decode
+    // belongs to the adopter: its claim, CPU priority and cancellation.
     entry.taking ||= Promise.resolve().then(() => held.takePlanes()).then((base) => {
       if (!base) throw new Error('The held frame came back empty');
       entry.value = { ...entry.value, base, held: null };
       return entry.value;
-    }).catch(() => Promise.resolve(decode(entry.file, { signal: entry.controller.signal })).then((value) => {
+    });
+    try {
+      return await entry.taking;
+    } catch {
+      const signal = lease.controller.signal;
+      if (signal.aborted) throw abortError(signal);
+      const value = await decode(entry.file, { signal, context: lease.context });
+      if (signal.aborted) throw abortError(signal);
       entry.value = { ...value, held: null };
       return entry.value;
-    }));
-    return entry.taking;
+    }
   }
 
   // A lease finished (released, aborted or failed): stop the decode nobody
@@ -89,53 +97,44 @@ export function createSharedDecodes({ decode }) {
       entry.controller.abort(new DOMException('Shared decode was released', 'AbortError'));
     }
     // Nobody took the held planes: drop them in the worker.
-    if (entry.settled && entry.value?.held && !entry.taking) entry.value.held.release?.();
+    if (entry.settled && entry.value?.held) entry.value.held.release?.();
   }
 
-  function createLease(entry, signal, role) {
-    const lease = { file: entry.file, role, state: 'waiting', entry };
+  function createLease(entry, signal, role, context = null) {
+    const lease = { file: entry.file, role, context, state: 'waiting', entry, controller: new AbortController() };
     let resolveResult, rejectResult;
     lease.result = new Promise((resolve, reject) => { resolveResult = resolve; rejectResult = reject; });
     // Nobody is obliged to await it (a released lease, a detached adopter).
     lease.result.catch(() => {});
-    const onAbort = () => {
-      if (lease.state !== 'waiting') return;
+    const finish = (error) => {
+      if (lease.state === 'done') return;
+      signal?.removeEventListener?.('abort', onAbort);
+      const pending = lease.state === 'waiting' || lease.state === 'taking';
       lease.state = 'done';
       entry.leases.delete(lease);
-      rejectResult(abortError(signal));
+      lease.controller.abort(error);
+      if (pending) rejectResult(error);
       reconsider(entry);
+    };
+    const onAbort = () => finish(abortError(signal));
+    const deliverValue = (value) => {
+      if (lease.state === 'done') return;
+      lease.state = 'holding';
+      resolveResult(value);
     };
     lease.deliver = () => {
       if (lease.state !== 'waiting') return;
-      signal?.removeEventListener?.('abort', onAbort);
-      if (entry.error) {
-        lease.state = 'done';
-        entry.leases.delete(lease);
-        rejectResult(entry.error);
-        return;
-      }
-      lease.state = 'holding';
-      // The foreground needs the base itself, not a frame held in a worker.
+      if (entry.error) { finish(entry.error); return; }
+      // Keep the abort listener until release, including the worker transfer
+      // and any fallback. A settled lane result is not a settled adoption.
       if (role === 'foreground' && !entry.value?.base && entry.value?.held) {
-        takeHeldBase(entry).then(resolveResult, (error) => {
-          lease.state = 'done';
-          entry.leases.delete(lease);
-          rejectResult(error);
-          reconsider(entry);
-        });
+        lease.state = 'taking';
+        takeHeldBase(entry, lease).then(deliverValue, finish);
         return;
       }
-      resolveResult(entry.value);
+      deliverValue(entry.value);
     };
-    lease.release = () => {
-      if (lease.state === 'done') return;
-      signal?.removeEventListener?.('abort', onAbort);
-      const wasWaiting = lease.state === 'waiting';
-      lease.state = 'done';
-      entry.leases.delete(lease);
-      if (wasWaiting) rejectResult(new DOMException('Shared decode lease was released', 'AbortError'));
-      reconsider(entry);
-    };
+    lease.release = () => finish(new DOMException('Shared decode lease was released', 'AbortError'));
     entry.leases.add(lease);
     if (signal?.aborted) { onAbort(); return lease; }
     signal?.addEventListener?.('abort', onAbort, { once: true });
@@ -185,10 +184,10 @@ export function createSharedDecodes({ decode }) {
      */
     open(file, { signal = null, context = null, decode: decodeFile = null, adoptable = true } = {}) {
       const entry = entries.get(file) || start(file, context, decodeFile || decode, adoptable);
-      return createLease(entry, signal, 'lane');
+      return createLease(entry, signal, 'lane', context);
     },
-    /** The foreground's lease on a decode a lane started, or null. */
-    adopt(file, { signal = null } = {}) {
+    /** The foreground's lease; context covers a failed held-frame transfer's fallback. */
+    adopt(file, { signal = null, context = null } = {}) {
       const entry = entries.get(file);
       // A decode the foreground cannot use (a flagged half-size analysis
       // decode, #252 part 6) is never adopted.
@@ -196,7 +195,7 @@ export function createSharedDecodes({ decode }) {
       // A finished decode whose frame is neither on the page nor held is gone.
       if (entry.settled && !entry.value?.base && !entry.value?.held) return null;
       wantPlanes(entry);
-      return createLease(entry, signal, 'foreground');
+      return createLease(entry, signal, 'foreground', context);
     },
     has: (file) => entries.has(file),
     inFlight: (file) => Boolean(entries.get(file) && !entries.get(file).settled),

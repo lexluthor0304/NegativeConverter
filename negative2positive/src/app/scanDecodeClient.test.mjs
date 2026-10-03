@@ -354,3 +354,26 @@ class StackWorker {
 }
 
 console.log('scanDecodeClient tests passed: real worker PNG/TIFF precision, transfer and lifecycle; jpeg capability handshake; preview pool');
+
+// JPEG cancellation preserves bytes before dispatch, terminates the worker
+// after dispatch, and never starts the NEF main-thread fallback.
+for (const phase of ['before', 'handshake', 'decode']) {
+  const controller = new AbortController();
+  const stash = { jpegBytes: new Uint8Array([255, 216, 255, 217]) };
+  let worker, dispatched = 0, terminated = 0;
+  if (phase === 'before') controller.abort();
+  const pending = decodeNefPreviewJpeg(stash, {
+    signal: controller.signal,
+    decodeInWorker: (input, options) => decodeJpegInWorker(input, { ...options, workerFactory: () => (worker = {
+      terminate() { terminated++; },
+      postMessage(message, transfers) { dispatched++; structuredClone(message, { transfer: transfers }); }
+    }) })
+  });
+  if (phase === 'decode') worker.onmessage({ data: { ready: true, canDecodeImages: true } });
+  controller.abort();
+  await assert.rejects(pending, { name: 'AbortError' });
+  assert.equal(dispatched, phase === 'decode' ? 1 : 0);
+  assert.equal(terminated, phase === 'before' ? 0 : 1);
+  assert.equal(stash.jpegBytes.byteLength, phase === 'decode' ? 0 : 4);
+}
+console.log('scanDecodeClient: NEF JPEG cancellation before dispatch and during decode passed');

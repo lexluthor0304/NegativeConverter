@@ -12436,7 +12436,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         }
       };
       const decoding = (async () => {
-        const lease = sharedDecodes.adopt(file, { signal }) || sharedDecodes.open(file, { signal, context: { claim } });
+        const lease = sharedDecodes.adopt(file, { signal, context: { claim, priority: 'user' } })
+          || sharedDecodes.open(file, { signal, context: { claim, priority: 'user' } });
         try {
           const decoded = await lease.result;
           if (!isCurrentLoad(generation) || state.baseDescriptor !== descriptor || state.loadedFile !== file) return null;
@@ -22829,7 +22830,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     function adoptSharedDecode(file, { signal = null } = {}) {
-      return sharedDecodes.adopt(file, { signal });
+      if (!sharedDecodes.has(file)) return null;
+      return sharedDecodes.adopt(file, { signal, context: { claim: claimForActivation(signal, file), priority: 'user' } });
     }
 
     function sharedDecodeInFlight(file) {
@@ -22850,7 +22852,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       let rawMetadata = null;
       const base = await loadFileToImageData(file, {
         filmStats: context?.filmStats !== false, signal, onMetadata: meta => { rawMetadata = meta; },
-        claim: context?.claim || null, priority: 'background',
+        claim: context?.claim || null, priority: context?.priority || 'background',
         // Adopted, prefetched or analysed for the editor: shared where it can be (#264).
         sharedPlanes: true
       });
@@ -22883,7 +22885,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // The lane's memory claim (#258) covers this decode.
       return loadFileToImageData(file, {
         filmStats: true, signal, onMetadata: meta => { rawMetadata = meta; }, postDecode: adapter, decodeSlot: slots,
-        claim: context?.claim || null, priority: 'background',
+        claim: context?.claim || null, priority: context?.priority || 'background',
         ...(half ? { halfSize: true } : {})
       }).then((image) => {
         // Packed: the lane's claim keeps the frame's analysis bytes.

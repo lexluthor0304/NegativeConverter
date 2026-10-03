@@ -318,6 +318,13 @@ function assertPlanes(imageData, label) {
   assert.deepEqual(scene.threads, [2]);
 }
 
+// Explicit foreground priority, as supplied by shared adoption and ensureBase.
+{
+  reset();
+  assertPlanes(await loadRawFile(makeContainer().buffer, 'frame.nef', { priority: 'user' }), 'foreground');
+  assert.deepEqual(scene.threads, [0], 'native foreground uses the full pool');
+}
+
 // --- LibRaw cannot decode the file (HE NEF): embedded preview, no WASM retry ------
 {
   reset({ process: 'librawError' });
@@ -421,7 +428,7 @@ function isolate(on) {
   try {
     reset();
     librawTest.constructed = [];
-    assertPlanes(await loadRawFile(makeContainer().buffer, 'frame.nef'), 'threaded WASM');
+    assertPlanes(await loadRawFile(makeContainer().buffer, 'frame.nef', { priority: 'user' }), 'threaded WASM');
     assert.deepEqual(librawTest.constructed, [{ threads: foregroundThreads }], 'the foreground decode asks for every core');
     assert.equal(workersOf('libraw').length, 1);
     librawTest.constructed = [];

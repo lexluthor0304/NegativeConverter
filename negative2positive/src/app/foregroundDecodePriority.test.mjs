@@ -1,0 +1,24 @@
+import assert from 'node:assert/strict';
+import vm from 'node:vm';
+import { createHarness, makeBase, functionSource } from './geometryTestHarness.mjs';
+import { createSharedDecodes } from './sharedDecodes.js';
+import { planLibRawThreads } from './librawRuntime.js';
+
+const base = makeBase(4, 4);
+const h = createHarness(base);
+const { target: t, context: c, state } = h;
+const file = { name: 'frame.dng' };
+state.loadedFile = file;
+state.baseDescriptor = c.describeBase(base, file);
+state.loadedBaseImageData = null;
+let loaded;
+t.loadFileToImageData = async (input, options) => { loaded = options; return base; };
+vm.runInContext(functionSource('decodeForBackground'), c);
+t.sharedDecodes = createSharedDecodes({ decode: (input, { signal, context }) => c.decodeForBackground(input, signal, context) });
+assert.equal(await c.ensureBase(), base);
+assert.equal(loaded.priority, 'user', 'ensureBase reaches the actual shared loader at user priority');
+assert.equal(loaded.claim, t.frameClaims[0]);
+assert.equal(t.frameClaims[0].priority, 'foreground');
+assert.equal(t.frameClaims[0].released, true);
+assert.equal(planLibRawThreads({ isolated: true, hardwareConcurrency: 8, background: loaded.priority === 'background' }), 8);
+console.log('foregroundDecodePriority: ensureBase carries its foreground claim and full-pool CPU priority through sharedDecodes');

@@ -36,12 +36,13 @@ const scene = { hold: null, workers: [], held: null, onReply: null, postDecode: 
 class FakeWorker {
   constructor(url) {
     this.url = String(url);
-    this.kind = /rawPostDecodeWorker/.test(this.url) ? 'post' : /libraw-wasm/.test(this.url) ? 'libraw' : 'other';
+    this.kind = /rawPostDecodeWorker/.test(this.url) ? 'post' : /libraw-wasm/.test(this.url) ? 'libraw' : /scanDecodeWorker/.test(this.url) ? 'jpeg' : 'other';
     if (this.kind === 'post' && scene.postDecode === 'blocked') throw new Error('blocked');
     this.terminated = false;
     this.terminatedAt = null;
     this.received = [];
     scene.workers.push(this);
+    if (this.kind === 'jpeg') queueMicrotask(() => this.onmessage?.({ data: { ready: true, canDecodeImages: true } }));
   }
 
   deliver(data, transfer = []) {
@@ -225,3 +226,23 @@ for (const stage of ['open', 'metadata', 'imageData']) {
 }
 
 console.log('rawFileLoader.abort.test.mjs passed');
+
+// A LibRaw failure falls back to an embedded JPEG; superseding the photo
+// during that worker decode must terminate it, with no main-thread retry.
+{
+  reset({ result: null, hold: 'jpeg' });
+  const bytes = container();
+  const app0 = [255, 224, 0, 16, 74, 70, 73, 70, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0];
+  const sof0 = [255, 192, 0, 17, 8, 1080 >> 8, 1080 & 255, 1620 >> 8, 1620 & 255, 3,
+    1, 34, 0, 2, 17, 1, 3, 17, 1];
+  bytes.set([255, 216, ...app0, ...sof0], 4096);
+  const controller = new AbortController();
+  const pending = loadRawFile(bytes.buffer, 'frame.nef', { signal: controller.signal });
+  await flush();
+  assert.equal(scene.held?.stage, 'jpeg', 'the loader reached the JPEG worker');
+  controller.abort(superseded());
+  await assert.rejects(pending, { name: 'AbortError' });
+  assert.equal(workersOf('jpeg')[0].terminated, true);
+  assert.equal(bitmapDecodes, 0, 'aborted JPEG work never falls back on the main thread');
+}
+console.log('rawFileLoader: embedded JPEG fallback receives the activation abort signal');

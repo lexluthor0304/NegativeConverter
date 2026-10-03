@@ -84,24 +84,30 @@ export async function decodeScanInWorker(buffer, format, {
  */
 export async function decodeJpegInWorker(extracted, {
   workerFactory = defaultWorkerFactory,
-  timeoutMs = 60000
+  timeoutMs = 60000,
+  signal = null
 } = {}) {
+  if (signal?.aborted) throw abortError(signal);
   const input = extracted?.jpegBytes;
   if (!workerFactory || !input || input.byteLength < 4) return null;
   let worker;
   try { worker = workerFactory(); } catch { return null; }
-  return new Promise(resolve => {
+  return new Promise((resolve, reject) => {
     let finished = false;
     let dispatched = false;
-    const finish = result => {
+    const onAbort = () => finish(null, abortError(signal));
+    const finish = (result, error = null) => {
       if (finished) return;
       finished = true;
       clearTimeout(timer);
+      signal?.removeEventListener?.('abort', onAbort);
       worker.terminate();
       worker.onmessage = worker.onerror = worker.onmessageerror = null;
-      resolve(result);
+      if (error) reject(error); else resolve(result);
     };
     const timer = setTimeout(() => finish(null), timeoutMs);
+    signal?.addEventListener?.('abort', onAbort, { once: true });
+    if (signal?.aborted) { onAbort(); return; }
     worker.onerror = () => finish(null);
     worker.onmessageerror = () => finish(null);
     worker.onmessage = ({ data }) => {

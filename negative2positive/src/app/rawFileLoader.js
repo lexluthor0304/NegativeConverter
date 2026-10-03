@@ -403,7 +403,11 @@ export async function loadRawFile(buffer, fileName, options = {}) {
   };
   signal?.addEventListener?.('abort', abortDecode, { once: true });
 
-  const decodeEmbeddedPreview = async () => decodeNefPreviewJpeg(await previewSource.read());
+  const decodeEmbeddedPreview = async () => {
+    const image = await decodeNefPreviewJpeg(await previewSource.read(), { signal });
+    throwIfAborted(signal);
+    return image;
+  };
 
   const handleTimeoutFallback = async () => {
     // Every caller checks the signal first; this is the last line.

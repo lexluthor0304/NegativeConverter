@@ -251,10 +251,18 @@ export async function tryNefJpegPreview(arrayBuffer) {
  * @param {{ decodeInWorker?: Function | null }} [options]
  * @returns {Promise<ImageData | null>}
  */
-export async function decodeNefPreviewJpeg(extracted, { decodeInWorker = decodeJpegInWorker } = {}) {
+export async function decodeNefPreviewJpeg(extracted, { decodeInWorker = decodeJpegInWorker, signal = null } = {}) {
+  const check = () => {
+    if (signal?.aborted) throw new DOMException('NEF preview decode was aborted', 'AbortError');
+  };
+  check();
   if (!extracted || !extracted.jpegBytes || extracted.jpegBytes.byteLength < 4) return null;
   if (decodeInWorker) {
-    const decoded = await decodeInWorker(extracted).catch(() => null);
+    const decoded = await decodeInWorker(extracted, { signal }).catch(error => {
+      if (error?.name === 'AbortError') throw error;
+      return null;
+    });
+    check();
     if (decoded) return decoded;
     if (!extracted.jpegBytes || extracted.jpegBytes.byteLength < 4) return null;
   }
@@ -277,6 +285,7 @@ export async function decodeNefPreviewJpeg(extracted, { decodeInWorker = decodeJ
   }
 
   try {
+    check();
     const w = bitmap.width || width;
     const h = bitmap.height || height;
     const canvas = document.createElement('canvas');
@@ -286,6 +295,7 @@ export async function decodeNefPreviewJpeg(extracted, { decodeInWorker = decodeJ
     ctx.drawImage(bitmap, 0, 0);
     return ctx.getImageData(0, 0, w, h);
   } catch (err) {
+    if (err?.name === 'AbortError') throw err;
     console.warn('[NEF fallback] canvas paint/getImageData failed:', err);
     return null;
   } finally {
