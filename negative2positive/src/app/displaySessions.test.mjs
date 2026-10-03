@@ -17,7 +17,15 @@ globalThis.ImageData = class ImageData {
 };
 const { createHarness, makeBase, samePixels, exportChain, settle, createPhotoSessionCache, backingBuffers, functionSource } = await import('./geometryTestHarness.mjs');
 const { buildDisplayLevel, displayLevelGeometry, isDisplayTarget, displayPreviewSize } = await import('./displayPreview.js');
-const { createDisplayProxySpill, createDisplayProxyPort, createDisplayProxyWorkerCore, createDisplayProxyStore, displayProxyFileKey, sha256Hex } = await import('./displayProxyStore.js');
+const { createDisplayProxySpill, createDisplayProxyPort, createDisplayProxyWorkerCore, createDisplayProxyStore: createStore, displayProxyFileKey, sha256Hex } = await import('./displayProxyStore.js');
+// The Node harness supplies the browser's shared-cache serialization primitive.
+let storeLockTail = Promise.resolve();
+const storeLocks = { request(_name, _options, callback) {
+  const result = storeLockTail.then(callback);
+  storeLockTail = result.catch(() => {});
+  return result;
+} };
+const createDisplayProxyStore = options => createStore({ locks: storeLocks, ...options });
 const { decodeDisplayProxyRecord } = await import('./displayProxy.js');
 
 const settingsFor = state => ({ rotationAngle: state.rotationAngle, mirrored: state.mirrored, cropRegion: state.cropRegion ? { ...state.cropRegion } : null });
