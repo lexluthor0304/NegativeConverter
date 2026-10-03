@@ -227,6 +227,9 @@ export async function runInterpretationRoutesSmoke({ send, evaluate, waitFor, wa
   await openProject([{ ...unopened, expiredAnalysis: null }], false);
   const unopenedFresh = await evaluate(settings);
   if (JSON.stringify(unopenedFresh.expiredAnalysis) !== JSON.stringify(current.expiredAnalysis)) fail('unopened fresh full-source remeasurement differs from current recipe');
-  equalExports(first, await exports('unopened fresh full-source reference'), 'unopened fresh full-source reference');
+  // The unopened photo has its own edge/detection metadata embedded in the
+  // files. Decoded PNG8/TIFF16 samples must match; corresponding consecutive
+  // exports above also require identical complete encoded files.
+  equalExports(first, await exports('unopened fresh full-source reference'), 'unopened fresh full-source reference', false);
   console.log('ok: actual current/selected/mode recipes and detected-film action invalidate completed analysis; PNG8/TIFF16 consecutive, saved-selected single/batch and fresh full-source reference samples exact; unopened corresponding measurement, saved restoration and Undo/Redo preserved');
 }
