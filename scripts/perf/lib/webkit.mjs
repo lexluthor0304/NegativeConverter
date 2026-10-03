@@ -33,7 +33,7 @@ import { git } from './worktree.mjs';
 import { S2_SLIDERS } from '../scenarios/s2-sliders.mjs';
 import { SINGLE_EXPORTS, ZIP_EXPORTS, PARALLEL_EXPORTS, exportStageMetrics } from '../scenarios/s9-export.mjs';
 
-import { sleep } from '../scenarios/common.mjs';
+import { sleep, foregroundRequest, routeLabel } from '../scenarios/common.mjs';
 
 export const WEBKIT_SCENARIOS = { safari: ['s1', 's2', 's4', 's7'], tauri: ['s1', 's2', 's7', 's9', 's9-parallel'] };
 
@@ -72,6 +72,14 @@ export function metricsFromSelfDriven(report, { record } = {}) {
   for (const part of report.parts || []) {
     const events = (part.events || []).slice().sort((a, b) => a.t - b.t);
     const window = part.window || { frames: [], ticks: [] };
+    if (part.name === 'import' || /^(switch|route):/.test(part.name)) {
+      const index = part.name === 'import' ? 0 : part.index;
+      if (Number.isInteger(index)) {
+        const req = foregroundRequest(events, { from: part.keyT ?? part.before ?? -Infinity });
+        put(`${scenario}.photo${index}.filmType`, req?.ft || part.snapshot?.filmType);
+        put(`${scenario}.photo${index}.route`, routeLabel(req));
+      }
+    }
     if (part.name === 'import') {
       const changeT = byKind(events, 'input').find(event => event.type === 'change' && event.id === 'fileInput')?.t ?? part.before;
       const m = importMetrics(events, { changeT });
@@ -107,9 +115,9 @@ export function metricsFromSelfDriven(report, { record } = {}) {
 }
 
 export async function webkitMemory({ label, port, outDir, args, swapAtStart, freeDiskAtStart, onAbort,
-  reader = new FootprintReader(), list = listProcesses, connected, readSwap = readSwapUsage, readDisk = freeDiskBytes,
+  reader = new FootprintReader(), list = listProcesses, connected, associatedGpu, readSwap = readSwapUsage, readDisk = freeDiskBytes,
   ceilingBytes = memoryCeilingBytes(), start = true }) {
-  const scope = webkitProcessScope({ before: await list(), port, list, connected });
+  const scope = webkitProcessScope({ before: await list(), port, list, connected, associatedGpu });
   await reader.start();
   let verdict = null, pids = {}, ownedProcess = null, stopped = false;
   const registrations = new Map();
@@ -137,6 +145,10 @@ export async function webkitMemory({ label, port, outDir, args, swapAtStart, fre
         }
         return pids;
       } catch (error) {
+        if (error.ownedRenderer) {
+          pids = { renderer: [error.ownedRenderer], gpu: [], other: [] };
+          if (!registrations.has(error.ownedRenderer)) registrations.set(error.ownedRenderer, registerProcess({ pid: error.ownedRenderer }, { detached: false }));
+        }
         await abort({ reason: 'error', detail: error.message });
         return { renderer: [], gpu: [], other: [] };
       }
@@ -151,7 +163,11 @@ export async function webkitMemory({ label, port, outDir, args, swapAtStart, fre
   });
   if (start) sampler.start();
   return {
-    summary: () => sampler.summary(),
+    summary: () => {
+      const summary = sampler.summary();
+      if (summary && !sampler.samples.some(sample => sample.gpu.length)) summary.gpuPeakMB = null;
+      return summary;
+    },
     stop: () => {
       stopped = true;
       sampler.stop(); reader.stop();
@@ -231,6 +247,25 @@ async function safariImport(wd, names, events) {
   return { metrics: importMetrics(events, { changeT, until: settled ?? Infinity }), window, changeT };
 }
 
+async function safariRoute(wd, events, prefix, record, from = -Infinity) {
+  await safariDrain(wd, events);
+  const snapshot = await wd.execute('return globalThis.__ncPerf.snapshot()');
+  const req = foregroundRequest(events, { from });
+  record(`${prefix}.filmType`, req?.ft || snapshot?.filmType);
+  record(`${prefix}.route`, routeLabel(req));
+}
+
+async function safariRemainingRoutes(wd, events, roll, seen, record) {
+  for (const [index, photo] of roll.entries()) {
+    if (seen.has(index)) continue;
+    const from = await wd.execute('return performance.now()');
+    await wd.execute(`document.querySelector('.file-list-name[data-index="' + arguments[0] + '"]').click(); return true;`, [index]);
+    await safariPoll(wd, `return ${READY_EXPR} && document.getElementById('studioFilename')?.textContent === ${JSON.stringify(photo.name)};`);
+    await sleep(1500);
+    await safariRoute(wd, events, `s7.photo${index}`, record, from);
+  }
+}
+
 async function safariDrag(wd, events, id, prefix, record) {
   const info = await wd.execute(REVEAL, [id]);
   if (!info) { record(`${prefix}.missing`, 1); return; }
@@ -263,18 +298,21 @@ export async function safariScenario(id, { wd, origin, fixture, roll, record, no
   await safariBoot(wd, origin);
   const dpr = Math.round(await wd.execute('return devicePixelRatio'));
   if (id === 's1') {
-    const { metrics, window } = await safariImport(wd, [fixture.name], events);
+    const { metrics, window, changeT } = await safariImport(wd, [fixture.name], events);
     for (const key of ['firstPixelsDrawnMs', 'firstPhotoVisibleMs', 'firstPositiveVisibleMs', 'readyMs', 'settledMs', 'librawDecodes', 'changeToLibrawOpenMs']) record(`s1.${key}`, metrics[key]);
     for (const [key, value] of Object.entries(webkitWindowMetrics(window))) record(`s1.${key}`, value);
+    await safariRoute(wd, events, 's1.photo0', record, changeT);
     return;
   }
   if (id === 's2') {
-    await safariImport(wd, [fixture.name], events);
+    const { changeT } = await safariImport(wd, [fixture.name], events);
+    await safariRoute(wd, events, 's2.photo0', record, changeT);
     for (const slider of S2_SLIDERS) await safariDrag(wd, events, slider, `s2.${slider}.dpr${dpr}`, record);
     return;
   }
   if (id === 's4') {
-    await safariImport(wd, [fixture.name], events);
+    const { changeT } = await safariImport(wd, [fixture.name], events);
+    await safariRoute(wd, events, 's4.photo0', record, changeT);
     const rect = await wd.execute(`const r = document.getElementById('canvasContainer').getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height };`);
     const cx = rect.x + rect.width / 2, cy = rect.y + rect.height / 2;
     await safariDrain(wd, events);
@@ -318,7 +356,9 @@ export async function safariScenario(id, { wd, origin, fixture, roll, record, no
     return;
   }
   if (id === 's7') {
-    await safariImport(wd, roll.map(entry => entry.name), events);
+    const { changeT } = await safariImport(wd, roll.map(entry => entry.name), events);
+    await safariRoute(wd, events, 's7.photo0', record, changeT);
+    const seen = new Set([0]);
     const plan = [{ to: 1, cls: 'coldUnanalysed' }, { to: 0, cls: 'warm1Back' }, { wait: true }, { to: 2, cls: 'coldAnalysed' }, { to: 0, cls: 'warm1Back' }];
     const samples = {};
     for (const step of plan) {
@@ -338,13 +378,17 @@ export async function safariScenario(id, { wd, origin, fixture, roll, record, no
       const keyT = byKind(events, 'input').find(event => event.type === 'keydown' && event.key === 'Enter' && event.t >= before)?.t ?? before;
       const m = { ...switchMetrics(events, { keyT, target, until: window.end }), ...webkitWindowMetrics(window) };
       (samples[step.cls] ||= []).push(m);
-    }
-    for (const [cls, list] of Object.entries(samples)) {
-      for (const key of ['firstPixelsMs', 'firstDisplayPositiveMs', 'readyMs', 'librawDecodes', 'timerGapCount', 'maxTimerGapMs', 'mainBusyPct']) {
-        const values = list.map(entry => entry[key]).filter(Number.isFinite);
-        if (values.length) record(`s7.${cls}.${key}`, round(median(values)));
+      // Publish before any later browser call can fail, including metadata.
+      for (const [cls, list] of Object.entries(samples)) {
+        for (const key of ['firstPixelsMs', 'firstDisplayPositiveMs', 'readyMs', 'librawDecodes', 'timerGapCount', 'maxTimerGapMs', 'mainBusyPct']) {
+          const values = list.map(entry => entry[key]).filter(Number.isFinite);
+          if (values.length) record(`s7.${cls}.${key}`, round(median(values)));
+        }
       }
+      await safariRoute(wd, events, `s7.photo${step.to}`, record, keyT);
+      seen.add(step.to);
     }
+    await safariRemainingRoutes(wd, events, roll, seen, record);
   }
 }
 
@@ -413,7 +457,7 @@ export async function runWebKit({ args, repo, outBase, noisy, log, prepareRef, p
   const { findChrome } = await import('./chrome.mjs');
   const scenarios = ids.map(id => ({ id, fixtureGroup: id === 's9-parallel' ? 'export-parallel' : id === 's9' ? 'export'
     : id === 's7' ? 'roll' : id === 's1' ? 'singles' : 'interactive' }));
-  const groups = await prepareFixtures({ args, scenarios, repo, chromeBin: findChrome() });
+  const groups = await prepareFixtures({ args, scenarios, repo, chromeBin: findChrome(), freeDiskAtStart });
   const fixtureMap = Object.fromEntries(Object.values(groups).flat().filter(Boolean).map(entry => [entry.name, entry.path]));
   const refSpecs = args.mode === 'compare'
     ? [{ label: 'base', ref: args.compare[0] }, { label: 'head', ref: args.compare[1] }]
@@ -486,6 +530,7 @@ export async function runWebKit({ args, repo, outBase, noisy, log, prepareRef, p
                 record(`${scenario.id}.memory.webContentPeakMB`, summary.rendererPeakMB);
                 record(`${scenario.id}.memory.webContentLifetimePeakMB`, summary.rendererLifetimePeakMB);
                 record(`${scenario.id}.memory.webkitGpuPeakMB`, summary.gpuPeakMB);
+                if (summary.gpuPeakMB === null) note('WebKit GPU footprint unavailable: no exclusively attributed GPU was sampled');
               }
               record(`${scenario.id}.fixtureImport`, 'memory-backed File via /__perf/fixtures (adds the file size to WebContent)');
             }

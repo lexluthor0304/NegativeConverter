@@ -27,7 +27,7 @@ import {
   buildTiffParts, asciiEntry, shortEntry, longEntry, bytesEntry, rationalEntry, srationalEntry, TIFF_TAGS, TIFF_TYPES
 } from '../../negative2positive/src/workers/tiffWriter.js';
 import { DNG_TAGS, XYZ_TO_LINEAR_SRGB } from '../../negative2positive/src/app/linearDng.js';
-import { freeDiskBytes, MIN_FREE_DISK_BYTES, GiB } from './lib/guards.mjs';
+import { freeDiskBytes, GiB, evaluateRunGuards } from './lib/guards.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 export const GENERATOR_VERSION = 1;
@@ -413,7 +413,8 @@ export function readManifest(dir) {
  * Generate the named fixtures that are missing (or stale) in `dir`.
  * `encodeJpeg` renders previews (Chrome in the harness, a stub in tests).
  */
-export async function ensureFixtures({ dir, specs, encodeJpeg = null, encoderLabel = 'none', force = false, log = () => {}, checkDisk = true }) {
+export async function ensureFixtures({ dir, specs, encodeJpeg = null, encoderLabel = 'none', force = false, log = () => {}, checkDisk = true,
+  diskPolicy = {}, readDisk = freeDiskBytes }) {
   mkdirSync(dir, { recursive: true });
   const manifest = readManifest(dir);
   const todo = specs.filter(spec => force || !existsSync(join(dir, spec.name))
@@ -421,9 +422,11 @@ export async function ensureFixtures({ dir, specs, encodeJpeg = null, encoderLab
     || (spec.format === 'dng' && manifest.fixtures[spec.name]?.encoder !== encoderLabel));
   const needed = todo.reduce((total, spec) => total + (spec.format === 'dng' ? estimateDngBytes(spec) : tiffStripBytes(spec)), 0);
   if (checkDisk && todo.length) {
-    const free = freeDiskBytes(dir);
-    if (Number.isFinite(free) && free - needed < MIN_FREE_DISK_BYTES) {
-      throw new Error(`generating ${todo.length} fixtures needs ${(needed / GiB).toFixed(1)} GB; free disk ${(free / GiB).toFixed(1)} GB would fall below ${(MIN_FREE_DISK_BYTES / GiB).toFixed(0)} GB`);
+    const free = readDisk(dir);
+    const verdict = evaluateRunGuards({ force: diskPolicy.force, freeDiskAtStart: diskPolicy.freeDiskAtStart,
+      freeDisk: free - needed });
+    if (verdict) {
+      throw new Error(`generating ${todo.length} fixtures needs ${(needed / GiB).toFixed(1)} GB; ${verdict.detail}`);
     }
   }
   for (const spec of todo) {

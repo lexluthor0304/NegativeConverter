@@ -21,6 +21,11 @@ The #229 roll follow-up's regression contracts are documented in
 target (R1-097) remains in the worker-residency entry below; small-fixture
 checks do not establish desktop peak RSS or the original 60 MP timing targets.
 
+The #229/#230 supplemental harness review and its remaining large/native
+measurement limits are documented in [performance-benchmark.md](performance-benchmark.md).
+Caller regressions cover retained WebKit metrics, per-photo metadata, safe
+process attribution, probe/control comparisons and fixture disk policy.
+
 ## Auto frame detection
 
 - **medium/ux** — Non-sprocket density templates are capped at 0.68 < highConfidence 0.72, so 'high' confidence and the 'Auto-apply high confidence' setting are unreachable for 120 film and most single 135 frames _(verified)_  

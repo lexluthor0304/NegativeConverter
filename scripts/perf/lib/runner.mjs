@@ -224,12 +224,14 @@ async function prepareRef({ label, ref, headWorktree, repo, tmpRoot, port, cdpPo
   return { label, ref, sha, dirty, worktree, dist, preview, origin: preview.origin, port, cdpPort, exportDir, resultsDir };
 }
 
-async function prepareFixtures({ args, scenarios, repo, chromeBin }) {
+async function prepareFixtures({ args, scenarios, repo, chromeBin, freeDiskAtStart }, deps = {}) {
+  const specsFor = deps.syntheticFixtureSpecs || syntheticFixtureSpecs;
+  const ensure = deps.ensureFixtures || ensureFixtures;
   const groups = [...new Set(scenarios.map(scenario => scenario.fixtureGroup))];
   let synthetic = {};
   if (args.fixtures === 'synthetic' || groups.includes('hang')) {
     const names = new Set(syntheticNamesFor(groups.filter(group => args.fixtures === 'synthetic' || group === 'hang'), { rollSize: args.rollSize, exportCount: args.exportCount, quick: args.quick }));
-    const specs = syntheticFixtureSpecs({ rollSize: Math.max(12, args.rollSize, args.exportCount) }).filter(spec => names.has(spec.name));
+    const specs = specsFor({ rollSize: Math.max(12, args.rollSize, args.exportCount) }).filter(spec => names.has(spec.name));
     if (specs.length) {
       const { openJpegEncoderBrowser } = await import('./fixture-browser.mjs');
       let encoder = null;
@@ -237,7 +239,8 @@ async function prepareFixtures({ args, scenarios, repo, chromeBin }) {
         if (chromeBin) encoder = await openJpegEncoderBrowser({ port: args.cdpPort + 10, log });
         else log('no Chrome for the DNG previews: they are stub JPEGs (labelled "stub" in fixtures.json)');
         const { stubJpegEncoder } = await import('../fixtures.mjs');
-        synthetic = await ensureFixtures({ dir: fixtureDir(repo), specs, encodeJpeg: encoder ? encoder.encodeJpeg : stubJpegEncoder, encoderLabel: encoder ? encoder.encoderLabel : 'stub', log });
+        synthetic = await ensure({ dir: fixtureDir(repo), specs, encodeJpeg: encoder ? encoder.encodeJpeg : stubJpegEncoder, encoderLabel: encoder ? encoder.encoderLabel : 'stub', log,
+          diskPolicy: { force: args.force, freeDiskAtStart } });
       } finally {
         await encoder?.close();
       }
@@ -361,7 +364,7 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
       refs.push(await d.prepareRef({ ...refSpecs[i], repo, tmpRoot, port: args.port + i, cdpPort: args.cdpPort + i }));
     }
     const scenarios = selectScenarios(args.scenarios, { injectHang: args.injectHang });
-    const groups = await d.prepareFixtures({ args, scenarios, repo, chromeBin });
+    const groups = await d.prepareFixtures({ args, scenarios, repo, chromeBin, freeDiskAtStart });
     const collector = { groups, gpu: null, chromeVersion: null, fixtureInfo: await fixtureConditions(groups) };
     await d.probeGpu({ ref: refs[0], args, chromeBin, collector, freeDiskAtStart, swapAtStart: swapStart });
     const ceilingBytes = memoryCeilingBytes();
@@ -438,10 +441,15 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
     }
 
     if (args.mode === 'compare' || args.mode === 'against') {
-      const before = args.mode === 'compare' ? results.runs[0] : pickSavedRun(JSON.parse(readFileSync(resolve(args.against), 'utf8')));
+      const saved = args.mode === 'against' ? JSON.parse(readFileSync(resolve(args.against), 'utf8')) : null;
+      const before = args.mode === 'compare' ? results.runs[0] : pickSavedRun(saved);
       const after = args.mode === 'compare' ? results.runs[1] : results.runs[0];
       const budgets = JSON.parse(readFileSync(d.budgetsPath, 'utf8'));
-      const compare = compareRuns({ budgets, before: collectRunSummaries(before), after: collectRunSummaries(after), allowPixelChange: args.allowPixelChange });
+      const crossProbeControl = saved && typeof saved.conditions?.probe === 'boolean' && saved.conditions.probe !== args.probe;
+      const comparable = run => Object.fromEntries(Object.entries(collectRunSummaries(run))
+        .filter(([key]) => !crossProbeControl || key.includes('.control.') || /\.status(?:@|$)/.test(key)));
+      const compare = compareRuns({ budgets, before: comparable(before), after: comparable(after), allowPixelChange: args.allowPixelChange });
+      if (crossProbeControl) compare.scope = 'probe/control: control.* metrics and scenario statuses';
       compare.baseLabel = args.mode === 'compare' ? args.compare[0] : `${before.sha?.slice(0, 7)} (saved)`;
       compare.headLabel = args.mode === 'compare' ? args.compare[1] : after.sha?.slice(0, 7);
       results.compare = compare;
@@ -504,4 +512,4 @@ async function probeGpu({ ref, args, chromeBin, collector, freeDiskAtStart, swap
   }
 }
 
-export { fixtureConditions, labelThreads, summarizeGroup, pickSavedRun, prepareRef, writeOutputs, runRepetition };
+export { fixtureConditions, labelThreads, summarizeGroup, pickSavedRun, prepareRef, prepareFixtures, writeOutputs, runRepetition };

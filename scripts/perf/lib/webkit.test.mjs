@@ -16,7 +16,8 @@ const { GiB } = await import('./guards.mjs');
   const reads = [], aborted = [];
   const memory = await webkitMemory({ label: 'fake', port: 1, outDir: '.', args: { force: true },
     freeDiskAtStart: 4.5 * GiB, swapAtStart: 0, ceilingBytes: GiB, start: false,
-    list: async () => processList, connected: async () => [], readSwap: async () => ({ used: 0 }), readDisk: () => 4.5 * GiB,
+    list: async () => processList, connected: async () => [900000003], associatedGpu: async () => [900000004],
+    readSwap: async () => ({ used: 0 }), readDisk: () => 4.5 * GiB,
     reader: { start: async () => {}, stop() {}, read: async pids => {
       reads.push(pids); return Object.fromEntries(pids.map(pid => [pid, { footprint: 0.6 * GiB }]));
     } }, onAbort: verdict => aborted.push(verdict)

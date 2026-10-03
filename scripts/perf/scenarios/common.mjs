@@ -66,22 +66,27 @@ export function routeLabel(req) {
   return req.ft || 'color';
 }
 
+/** Request attributed to the displayed foreground, shared by Chrome/WebKit. */
+export function foregroundRequest(events, { from = -Infinity } = {}) {
+  // Full-resolution foreground workers are uncached too. A hash ties their
+  // result to displayed pixels; order-only fallback requires the foreground
+  // preview cache so a background reply cannot acquire the current photo.
+  const shown = allPictures(events).filter(pic => pic.res && pic.t >= from && pic.contentT !== null
+    && (pic.res.cache || pic.matchedBy === 'hash' || pic.kind !== 'draw')).at(-1);
+  const candidates = byKind(events, 'req').filter(event => /^(convert|prepare|analyze)$/.test(event.cls) && event.cache && event.t >= from);
+  const displayed = shown && byKind(events, 'req').find(event => event.wid === shown.res.wid && event.id === shown.res.id);
+  // GPU rendering uses prepare/analyze on the preview client, without an
+  // RGBA8 reply to hash. Those cached requests belong to the foreground.
+  const cached = candidates.at(-1);
+  return displayed && (!cached || displayed.t > cached.t) ? displayed : cached;
+}
+
 /** Film type and conversion route of the current photo. */
 export async function recordRoute(ctx, prefix, photo, { from = -Infinity } = {}) {
   await ctx.session.drain();
   const snapshot = await ctx.session.evaluate('globalThis.__ncPerf ? globalThis.__ncPerf.snapshot() : null');
   const name = photo || snapshot?.filename || '?';
-  // Full-resolution foreground workers are uncached too. A hash ties their
-  // result to displayed pixels; order-only fallback requires the foreground
-  // preview cache so a background reply cannot acquire the current photo.
-  const shown = allPictures(ctx.session.events).filter(pic => pic.res && pic.t >= from && pic.contentT !== null
-    && (pic.res.cache || pic.matchedBy === 'hash' || pic.kind !== 'draw')).at(-1);
-  const candidates = byKind(ctx.session.events, 'req').filter(event => /^(convert|prepare|analyze)$/.test(event.cls) && event.cache && event.t >= from);
-  const displayed = shown && byKind(ctx.session.events, 'req').find(event => event.wid === shown.res.wid && event.id === shown.res.id);
-  // GPU rendering uses prepare/analyze on the preview client, without an
-  // RGBA8 reply to hash. Those cached requests belong to the foreground.
-  const cached = candidates.at(-1);
-  const req = displayed && (!cached || displayed.t > cached.t) ? displayed : cached;
+  const req = foregroundRequest(ctx.session.events, { from });
   const prior = ctx.routes.find(entry => entry.photo === name);
   const entry = { photo: name, filmType: req?.ft || prior?.filmType || snapshot?.filmType || null,
     route: routeLabel(req) || prior?.route || null, status: snapshot?.filmTypeStatus || null,

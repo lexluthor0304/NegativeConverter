@@ -830,6 +830,7 @@
       return sleepMs(2500);
     }).then(function () {
       part.events = drain().events;
+      part.snapshot = snapshot();
       element.value = initial;
       element.dispatchEvent(new Event('input', { bubbles: true }));
       element.dispatchEvent(new Event('change', { bubbles: true }));
@@ -839,7 +840,7 @@
   function driveSwitch(index, cls, target) {
     var part = { name: 'switch:' + cls, cls: cls, index: index, target: target };
     var button = document.querySelector('.file-list-name[data-index="' + index + '"]');
-    if (!button) return Promise.resolve(Object.assign(part, { error: 'no tile ' + index }));
+    if (!button) return Promise.reject(new Error('no tile ' + index));
     drain();
     beginWindow('switch:' + cls);
     part.keyT = now();
@@ -849,6 +850,7 @@
     }, 600000).then(function () { return sleepMs(1500); }).then(function () {
       part.window = endWindow();
       part.events = drain().events;
+      part.snapshot = snapshot();
       return part;
     });
   }
@@ -902,11 +904,11 @@
         report.bootMs = now();
         drain();
         beginWindow('import');
-        var part = { name: 'import', before: now() };
+        var part = { name: 'import', before: now(), index: 0, target: spec.fixtures[0] };
         report.parts.push(part);
         return importFixtures(spec.fixtures).then(function () { return waitUntil(studioReady, 600000); })
           .then(function () { return sleepMs(3000); })
-          .then(function () { part.window = endWindow(); part.events = drain().events; });
+          .then(function () { part.window = endWindow(); part.events = drain().events; part.snapshot = snapshot(); });
       })
       .then(function () {
         if (spec.scenario !== 's2') return null;
@@ -937,7 +939,19 @@
             return chain;
           });
       })
-      .catch(function (error) { report.error = String(error && error.message || error); })
+      .then(function () {
+        // Extra visits follow every measured window, including exports.
+        var seen = new Set([0]);
+        report.parts.forEach(function (part) { if (part.name.indexOf('switch:') === 0) seen.add(part.index); });
+        var chain = Promise.resolve();
+        spec.fixtures.forEach(function (target, index) {
+          if (seen.has(index)) return;
+          chain = chain.then(function () { return driveSwitch(index, 'route', target); })
+            .then(function (part) { part.name = 'route:' + index; report.parts.push(part); });
+        });
+        return chain;
+      })
+      .catch(function (error) { endWindow(); report.error = String(error && error.message || error); })
       .then(function () {
         report.snapshot = snapshot();
         report.counters = Object.assign({}, counters);

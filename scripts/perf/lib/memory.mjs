@@ -88,16 +88,16 @@ export async function findWebKitProcesses({ pids = [], list = listProcesses } = 
   };
 }
 
-/** Resolve the WebContent created for navigation and its newly created GPU.
- * Existing/shared GPU processes are excluded: their footprint is not ours.
- * Ambiguous navigation is refused rather than sampling or killing Mail.
+/** Require origin evidence for WebContent and instance evidence for its GPU.
+ * Process freshness alone proves neither relationship. Existing/shared GPUs
+ * are excluded; an unproven new GPU makes measurement fail closed.
  */
 export function webkitProcessScope({ before, port, list = listProcesses, connected = async () => {
   try {
     const { stdout } = await run('lsof', ['-t', `-iTCP:${port}`, '-sTCP:ESTABLISHED'], { timeout: 2000 });
     return stdout.trim().split(/\s+/).map(Number);
   } catch { return []; }
-} }) {
+}, associatedGpu = async () => [] }) {
   const existing = new Set(before.map(p => p.pid));
   let renderer = null, gpu = null;
   return {
@@ -108,15 +108,21 @@ export function webkitProcessScope({ before, port, list = listProcesses, connect
       if (gpu && !all.some(p => p.pid === gpu && /com\.apple\.WebKit\.GPU/.test(p.command))) gpu = null;
       if (!renderer) {
         const links = new Set(await connected());
-        const serving = all.filter(p => /com\.apple\.WebKit\.WebContent/.test(p.command) && links.has(p.pid));
-        const candidates = serving.length ? serving : fresh.filter(p => /com\.apple\.WebKit\.WebContent/.test(p.command));
+        const candidates = fresh.filter(p => /com\.apple\.WebKit\.WebContent/.test(p.command) && links.has(p.pid));
         if (candidates.length > 1) throw new Error('ambiguous harness WebContent PIDs; refusing unscoped WebKit measurement');
         renderer = candidates[0]?.pid || null;
       }
       if (renderer && !gpu) {
-        const candidates = fresh.filter(p => /com\.apple\.WebKit\.GPU/.test(p.command));
+        const associated = new Set(await associatedGpu(renderer, all));
+        const freshGpu = fresh.filter(p => /com\.apple\.WebKit\.GPU/.test(p.command));
+        const candidates = freshGpu.filter(p => associated.has(p.pid));
         if (candidates.length > 1) throw new Error('ambiguous harness WebKit GPU PIDs');
         gpu = candidates[0]?.pid || null;
+        if (!gpu && freshGpu.length) {
+          const error = new Error('could not prove harness WebKit GPU ownership; refusing unscoped measurement');
+          error.ownedRenderer = renderer;
+          throw error;
+        }
       }
       const found = await findWebKitProcesses({ pids: [renderer, gpu].filter(Boolean), list: async () => all });
       return { renderer: found.webContent, gpu: found.gpu, other: [] };
