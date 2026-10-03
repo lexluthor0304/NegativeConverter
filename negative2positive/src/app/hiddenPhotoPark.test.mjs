@@ -14,6 +14,7 @@ import { createDustWorkerClient } from './dustWorkerClient.js';
 import { createHiddenJobGate } from './hiddenJobGate.js';
 import { ROLL_OPENCV_REALM_BYTES } from './batchExportScheduler.js';
 import { isSharedPlane } from './crossOriginIsolation.js';
+import { createConversionWorkerClient } from './conversionWorkerClient.js';
 import { createHarness, makeBase, samePixels } from './geometryTestHarness.mjs';
 import { encodeTiffBlob } from './exportImageEncoders.js';
 
@@ -76,6 +77,7 @@ function fixture({ enabled = true, hidden = true, brush = true, geometry = null 
     invalidatePhotoActivation: () => { calls.push('invalidate'); c.parkedPhoto = null; },
     supersedeActivation: () => {}, beginActivation: () => {},
     unpinDustWorker: () => {}, disposeDustWorker: () => {}, noteDustReplaced: () => {}, carryRestoredRepairStamp: () => {},
+    convertPreviewFrameInWorker: { dispose() {} },
     updatePreview: () => calls.push('preview'), syncDustWorkerPin: () => {}, rememberRepairMasks: () => {},
     repairStamps: { recipeOf: () => null }, coreReprocessToken: 0,
     clearRepairedPreview() {}, previewRepairWorker: { dispose() {} }, dustRefreshRepairMask: null,
@@ -296,6 +298,52 @@ for (const change of ['visible', 'edit', 'plane']) {
   assert.equal(f.c.memoryBudget.idle, true);
   assert.equal(f.db.records.size, 0);
 }
+// The cached conversion client is another owner outside the parked graph.
+// Release it only after successful archival and exact-plane settlement; a
+// restored source starts a new worker and keeps its genuine low sample bits.
+{
+  const f = fixture(), workers = [];
+  const client = createConversionWorkerClient({ cacheInput: true, workerFactory: () => {
+    const worker = {
+      source: null, terminated: false,
+      postMessage(message, transfers) {
+        this.source = structuredClone(message, { transfer: transfers });
+        queueMicrotask(() => this.onmessage?.({ data: { id: message.id, type: 'analyzed', key: message.key } }));
+      },
+      terminate() { this.terminated = true; this.source = null; }
+    };
+    workers.push(worker);
+    return worker;
+  } });
+  const outgoing = f.state.conversionSourceImageData;
+  outgoing.__image16 = { width: 2, height: 2, data: new Uint16Array(16).fill(7723) };
+  f.c.convertPreviewFrameInWorker = client;
+  await client.analyze({ imageData: outgoing, settings: {} });
+  assert.equal(client.holds(outgoing), true);
+  assert.ok(workers[0].source, 'the real client has dispatched and cached the photo');
+  f.c.coreReprocessBusy = () => true;
+  assert.equal(await f.c.parkOpenPhotoForHiddenJob(), false, 'an unsettled exact plane cannot be parked');
+  assert.equal(client.holds(outgoing), true);
+  f.c.coreReprocessBusy = () => false;
+  f.db.failures.write = true;
+  assert.equal(await f.c.parkOpenPhotoForHiddenJob(), false);
+  assert.equal(client.holds(outgoing), true, 'failed archival retains the live conversion source');
+  assert.equal(workers[0].terminated, false);
+  f.db.failures.write = false;
+  assert.equal(await f.c.parkOpenPhotoForHiddenJob(), true);
+  assert.equal(client.holds(outgoing), false, 'committed parking releases the cached conversion source');
+  assert.equal(workers[0].terminated, true, 'the unused preview worker is actually terminated');
+  assert.equal(workers[0].source, null);
+  f.c.document.visibilityState = 'visible';
+  await f.c.unparkOpenPhoto();
+  const restored = f.state.conversionSourceImageData;
+  assert.deepEqual([...restored.__image16.data], [...outgoing.__image16.data]);
+  await client.analyze({ imageData: restored, settings: {} });
+  assert.equal(workers.length, 2, 'restoration lazily starts a fresh preview worker');
+  assert.equal(client.holds(restored), true);
+  client.dispose();
+}
+
 // The combined background/display/roll contract: no tag or pending request
 // is needed for a live worker's bytes to remain counted. A failed archive
 // keeps that ownership. Only actual worker and plane release lets the held
