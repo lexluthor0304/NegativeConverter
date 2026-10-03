@@ -251,7 +251,8 @@ console.log('rawFileLoader: embedded JPEG fallback receives the activation abort
 const { mergeHarness } = await import('./multiShotUi.fixture.mjs');
 for (const stage of ['imageData', 'process']) {
   reset({ hold: stage });
-  const h = mergeHarness({ decode: (_file, { signal }) => loadRawFile(container().buffer, 'frame.dng', { signal }) });
+  let decode;
+  const h = mergeHarness({ decode: (_file, { signal }) => (decode = loadRawFile(container().buffer, 'frame.dng', { signal })) });
   const pending = h.run();
   await flush();
   assert.equal(scene.held?.stage, stage);
@@ -260,6 +261,9 @@ for (const stage of ['imageData', 'process']) {
   assert.equal(workersOf('post')[0].terminated, true, 'merge Cancel terminates post-decode worker');
   await pending;
   assert.equal(h.alerts.length, 0);
+  // UI cancellation may win its race before the loader's rejection unwinds.
+  // The claim follows decoder completion, not the earlier UI completion.
+  await assert.rejects(decode, { name: 'AbortError' });
   assert.equal(h.memoryBudget.snapshot().reserved, 0);
 }
 console.log('multi-shot Cancel reaches RAW and post-decode workers');
