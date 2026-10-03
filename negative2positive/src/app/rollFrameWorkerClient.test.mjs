@@ -30,11 +30,11 @@ const postOptions = { suppressSensorDefects: true, filmStats: { borderBufferPct:
 
 // A worker stand-in running the real task: structured clone with transfer
 // both ways, a macrotask per message.
-function taskWorkers({ silent = false, crashOn = null, detect = () => ({ angle: 0, cropRegion: null, confidence: 0 }) } = {}) {
+function taskWorkers({ silent = false, ignore = () => false, loadCv = async () => {}, crashOn = null, detect = () => ({ angle: 0, cropRegion: null, confidence: 0 }) } = {}) {
   const created = [];
   const factory = () => {
     const task = createRollFrameTask({
-      loadCv: async () => {}, detect, rotate: image => image, readEdge: async image => ({ found: false, width: image.width }),
+      loadCv, detect, rotate: image => image, readEdge: async image => ({ found: false, width: image.width }),
       yieldTask: () => new Promise(setImmediate)
     });
     const worker = {
@@ -43,7 +43,7 @@ function taskWorkers({ silent = false, crashOn = null, detect = () => ({ angle: 
       postMessage(message, transfers = []) {
         const received = structuredClone(message, { transfer: transfers });
         worker.messages.push(received.type);
-        if (worker.terminated || silent) return;
+        if (worker.terminated || silent || ignore(received)) return;
         setTimeout(() => {
           if (worker.terminated) return;
           if (crashOn?.(received)) { worker.onerror?.({ message: 'crash', preventDefault() {} }); return; }
@@ -237,3 +237,56 @@ async function loaderRun(adapter, input, options = postOptions, signal = null) {
   await flush();
 }
 console.log('rollFrameWorkerClient: held frames, samples, planes, fallbacks and worker reuse');
+
+// A live worker that answers its ping but loses any frame request is killed.
+// Progress never extends the deadline; sample/release replies are bounded too.
+for (const type of ['process', 'sample', 'release']) {
+  const { factory, created } = taskWorkers({ ignore: msg => msg.type === type });
+  const pool = createRollFramePool({ workerFactory: factory, timeoutMs: 50 });
+  const adapter = pool.frame();
+  if (type === 'process') {
+    await assert.rejects(loaderRun(adapter, result()), err => err.code === 'RAW_POST_DECODE_LOST' && /timed out \(process\)/.test(err.message));
+    assert.match(adapter.analysis.workerError, /timed out \(process\)/, 'a recovered preview must not become a measured full-frame recipe');
+    adapter.done();
+  } else {
+    await loaderRun(adapter, result());
+    await assert.rejects(type === 'sample' ? adapter.held.sample({}) : adapter.held.takePlanes(),
+      err => err.code === 'RAW_POST_DECODE_LOST' && err.message.includes(`timed out (${type})`));
+  }
+  assert.equal(created[0].terminated, true, type);
+  assert.equal(pool.alive, 0, 'a timed-out worker cannot be reused');
+  pool.dispose();
+}
+// done()'s fire-and-forget release still has a deadline and kills a silent worker.
+{
+  const { factory, created } = taskWorkers({ ignore: msg => msg.type === 'release' });
+  const pool = createRollFramePool({ workerFactory: factory, timeoutMs: 50 });
+  const adapter = pool.frame();
+  await loaderRun(adapter, result());
+  adapter.held.release();
+  await new Promise(resolve => setTimeout(resolve, 80));
+  assert.equal(created[0].terminated, true);
+  assert.equal(pool.alive, 0);
+  pool.dispose();
+}
+// The adapter may already own the warming worker when that warm-up fails.
+{
+  let rejectWarm;
+  let loads = 0;
+  const { factory, created } = taskWorkers({ loadCv: () => ++loads === 1
+    ? new Promise((_, reject) => { rejectWarm = reject; }) : Promise.resolve() });
+  const pool = createRollFramePool({ workerFactory: factory, timeoutMs: 500 });
+  pool.warm();
+  const adapter = pool.frame({ options: { frame: { settings: {} } } });
+  const running = loaderRun(adapter, result());
+  while (!rejectWarm) await new Promise(resolve => setTimeout(resolve, 0));
+  rejectWarm(new Error('OpenCV offline'));
+  assert.equal((await running).held, true, 'the frame completes in a fresh realm');
+  assert.equal(created[0].terminated, true);
+  assert.equal(created.length, 2);
+  assert.equal(pool.alive, 1);
+  assert.equal(created[0].messages.includes('process'), false, 'the failed factory is never asked for a frame');
+  adapter.held.release();
+  pool.dispose();
+}
+console.log('rollFrameWorkerClient: reply deadlines and failed warm-up replacement');

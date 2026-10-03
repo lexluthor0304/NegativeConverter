@@ -56,7 +56,7 @@ export function createRollFrameTask({
   const planesWanted = new Set();
 
   function reply(send, message, transfers) {
-    send(message, [...transfers]);
+    send({ ...message, opencv: realmStats() }, [...transfers]);
   }
 
   async function process(msg, send) {

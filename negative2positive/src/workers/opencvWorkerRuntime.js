@@ -39,5 +39,6 @@ export async function loadOpenCv() {
 // and how long it took from the script's first statement.
 export function openCvRealmStats() {
   const { sharedModule, ownCompiles, readyMs, sinceScriptMs } = loader.stats;
-  return { sharedModule, ownCompiles, readyMs, sinceScriptMs: sinceScriptMs ?? null };
+  return { sharedModule, ownCompiles, readyMs, sinceScriptMs: sinceScriptMs ?? null,
+    heapBytes: globalThis.cv?.HEAPU8?.buffer?.byteLength || 0 };
 }

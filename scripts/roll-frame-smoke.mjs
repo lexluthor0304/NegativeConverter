@@ -3,7 +3,7 @@
 // 1. OpenCV compiled once (part 5): the app's auto-frame worker instantiated
 //    the page's compiled WebAssembly.Module; a fresh worker realm reports its
 //    time to cv.Mat from its script's first statement; the page fetched the
-//    split wasm at most once and never the 13 MB package script itself.
+//    split wasm exactly once and never the 13 MB package script itself.
 // 2. The roll-frame worker (part 2) against the lane sequence it replaces,
 //    on a synthetic LibRaw result: the #232 post-decode steps on the page,
 //    then one #251 import request on a copy of the 8-bit plane in an
@@ -159,8 +159,8 @@ export async function runRollFrameSmoke({ evaluate, fail }) {
   console.log('roll frame / OpenCV:', JSON.stringify(result));
   const { opencv, roll, parallel } = result;
   if (!opencv.shared?.sharedModule || !opencv.fresh?.sharedModule) fail('an OpenCV worker compiled the wasm itself instead of instantiating the page\'s module: ' + JSON.stringify(opencv));
-  if (opencv.wasmFetches > 1) fail('the page fetched the OpenCV wasm more than once: ' + JSON.stringify(opencv));
-  if (opencv.packageScript) fail('the app requested the 13 MB opencv.js: ' + JSON.stringify(opencv));
+  if (opencv.wasmFetches !== 1) fail('expected exactly one page OpenCV wasm fetch: ' + JSON.stringify(opencv));
+  if (opencv.packageScript !== 0) fail('the app requested the 13 MB opencv.js: ' + JSON.stringify(opencv));
   if (!roll.found) fail('the roll-frame smoke frame has no window: ' + JSON.stringify(roll));
   if (!(roll.held && roll.moved && roll.filmStats && roll.detection && roll.edge && roll.sample && roll.tile && roll.reference)) {
     fail('roll-frame worker differs from the lane sequence: ' + JSON.stringify(roll));

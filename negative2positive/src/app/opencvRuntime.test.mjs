@@ -123,17 +123,28 @@ for (const offered of [null, 'broken']) {
   assert.equal(loader.stats.sharedModule, false);
   assert.equal(loader.stats.ownCompiles, 1);
 }
-// Both failing rejects instead of hanging, and the next load retries.
+// An ES-module glue evaluates once per realm. A failed factory never
+// restarts on another import: every later load must reject promptly too.
 {
   const global = {};
-  let attempts = 0;
+  let attempts = 0, evaluations = 0;
+  const glue = fakeGlue(global);
   const loader = createOpenCvRealmLoader({
     glueUrl: '/glue.js', getModule: async () => null,
-    compileOwn: async () => { attempts++; if (attempts === 1) throw new Error('offline'); return WebAssembly.compile(EMPTY); },
-    importGlue: fakeGlue(global), global
+    compileOwn: async () => { attempts++; throw new Error('offline'); },
+    importGlue: async () => { if (!evaluations++) await glue(); }, global
   });
-  await assert.rejects(loader.load(), /offline/);
-  assert.ok((await loader.load()).Mat);
+  const first = loader.load();
+  await assert.rejects(first, /offline/);
+  let timer;
+  try {
+    await assert.rejects(Promise.race([loader.load(), new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error('second load hung')), 100);
+    })]), /offline/);
+  } finally { clearTimeout(timer); }
+  assert.equal(loader.load(), first, 'the first rejection stays cached');
+  assert.equal(attempts, 1, 'only a fresh realm may compile again');
+  assert.equal(evaluations, 1, 'the glue was imported once');
 }
 
 // The page answers a worker's request with the Module, or null when it

@@ -394,6 +394,9 @@ async function previewLuminance() {
 }
 
 await send('Page.enable');
+// Keep the compile-once OpenCV check observable even after the full run's
+// imports and worker loads have filled the default Resource Timing buffer.
+await send('Page.addScriptToEvaluateOnNewDocument', { source: 'performance.setResourceTimingBufferSize(100000);' });
 await send('Runtime.enable');
 await send('Inspector.enable');
 await send('Audits.enable');
@@ -404,6 +407,14 @@ await send('Page.navigate', { url: `http://127.0.0.1:${PORT}/?lang=en` });
 await waitFor('app boot', `!!document.getElementById('studioImportAutoCrop')`);
 await installDialogAutoAccept();
 await wait(1500); // let main.js finish wiring
+
+// This scenario navigates and imports its own small fixtures. Exit here so
+// --auto-crop-only cannot continue through the unrelated camera/roll suites.
+if (process.argv.includes('--auto-crop-only')) {
+  await runStudioAutoCropSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS'); process.exit(0);
+}
 await evaluate(`document.getElementById('studioImportAutoCrop').click()`);
 
 if (process.argv.includes('--isolation-only')) {

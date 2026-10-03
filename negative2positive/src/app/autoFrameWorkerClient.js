@@ -1,5 +1,6 @@
 import { answerOpenCvWorker } from './opencvRuntime.js';
 import { isSharedPlane, hasDerivedEightBit, guardSharedPlanes } from './crossOriginIsolation.js';
+import { ROLL_OPENCV_REALM_BYTES } from './batchExportScheduler.js';
 
 const abortError = () => new DOMException('Auto-frame request was superseded', 'AbortError');
 
@@ -411,6 +412,13 @@ export function createAutoFrameWorkerPool({ size = 2, workerFactory } = {}) {
   const analyze = (image, analyzeOptions, type = 'analyze-frame') => onLane(client => client(image, analyzeOptions, type));
   return {
     size: laneCount,
+    // In-flight requests are covered by their lane claims; idle OpenCV
+    // heaps remain resident until the pool is disposed or its clients idle.
+    // Some OpenCV builds do not expose HEAPU8; never count a live realm as 0.
+    get idleResidentBytes() {
+      return lanes.reduce((bytes, lane) => bytes + (!lane.inFlight && lane.analyze.alive
+        ? Math.max(ROLL_OPENCV_REALM_BYTES, lane.analyze.residentBytes) : 0), 0);
+    },
     analyze,
     // Frame and film edge of one frame on one lane's worker, one buffer.
     analyzeImport: (image, importOptions) => onLane(client => client.analyzeImport(image, importOptions)),

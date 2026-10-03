@@ -70,6 +70,8 @@ export function createOpenCvModuleCache({ compile, wasm = globalThis.WebAssembly
  * compiled Module (or null); `compileOwn()` compiles one here. Resolves the
  * ready `cv` (also set as `global.cv`). `stats` reports whether the shared
  * Module was used, the realm's own compile count and the time to ready.
+ * A failure stays rejected: importing the cached glue again cannot restart
+ * its factory. A fresh worker realm can retry.
  */
 export function createOpenCvRealmLoader({ glueUrl, getModule, compileOwn, importGlue, global = globalThis, wasm = globalThis.WebAssembly, now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now()) }) {
   let ready = null;
@@ -115,10 +117,7 @@ export function createOpenCvRealmLoader({ glueUrl, getModule, compileOwn, import
       } finally {
         delete global.__opencvModuleArg;
       }
-    })().catch((error) => {
-      ready = null;
-      throw error;
-    });
+    })();
     return ready;
   }
   return { load, stats };

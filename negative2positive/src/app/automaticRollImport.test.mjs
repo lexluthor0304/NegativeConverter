@@ -97,7 +97,7 @@ function fixture({ count = 4, prepared = false, realRoll = false, verdicts = nul
   let timerId = 0;
   const noop = () => {};
   const context = vm.createContext({
-    ...memoryGlobals(),
+    ...memoryGlobals(), workerResidents: new Map(),
     // #249: no photo here takes a display form.
     ...displaySessionStubs(),
     state, console, Map, Set, AbortController, structuredClone,
@@ -349,6 +349,7 @@ function fixture({ count = 4, prepared = false, realRoll = false, verdicts = nul
   assert.equal(f.timers.size, 0, 'no resume timer');
   assert.ok(f.stores.every(store => store.cleared), 'sample storage is disposed after completion');
   assert.equal(f.marker(), null, 'the marker is deleted when the analysis ends');
+  assert.equal(f.context.workerResidents.size, 0, 'finish drops the roll worker resident');
 }
 
 // A manual edit / removed item is excluded, not retried forever or overwritten.
@@ -1335,6 +1336,42 @@ function gatedDemosaics(f, load = f.context.loadFileToImageData) {
   assert.ok(f.items.every(item => item.settings), 'every frame ends with its recipe');
   assert.ok(heldFrames.filter(held => held.id === 2).every(held => held.released && !held.samples.length), 'failed frames are dropped in the worker');
   assert.equal(f.importRequests.length, 2, 'the page path detects frames 2 and 4');
+}
+
+{
+  // A lost process reply can make the RAW loader recover an embedded
+  // preview. The failure marker prevents that preview from becoming the
+  // frame's recipe: two worker failures lead to a full page decode.
+  const f = fixture();
+  const { pageReads, heldFrames } = workerRoll(f, {
+    analysisFor: id => id === 2 ? { complete: false, workerError: 'Roll-frame worker timed out (process)' } : {}
+  });
+  const load = f.context.loadFileToImageData;
+  f.context.loadFileToImageData = async (file, options) => {
+    const out = await load(file, options);
+    if (options?.postDecode?.analysis?.workerError) {
+      options.postDecode.held = null;
+      return { width: 2, height: 2, id: 2, embeddedPreview: true };
+    }
+    return out;
+  };
+  const defaults = f.context.createDefaultSettings;
+  f.context.createDefaultSettings = (image, item) => {
+    assert.ok(!image.embeddedPreview, 'a recovered preview is never measured as the full frame');
+    return defaults(image, item);
+  };
+  const warn = console.warn; console.warn = () => {};
+  try {
+    f.context.scheduleAutomaticRollImport(f.items);
+    await f.fire(1200);
+  } finally { console.warn = warn; }
+  assert.equal(f.decoded.filter(id => id === 2).length, 3, 'two lost replies then a full page decode');
+  assert.deepEqual(pageReads, [2]);
+  assert.ok(f.items.every(item => item.settings), 'a lost process reply does not strand the roll');
+  assert.ok(heldFrames.filter(held => held.id === 2).every(held => !held.samples.length));
+  assert.equal(f.timers.size, 0);
+  assert.equal(f.context.workerResidents.size, 0, 'finished roll realms leave the ledger');
+  assert.equal(f.context.memoryBudget.snapshot().reserved, 0, 'the lane claim is released');
 }
 
 {

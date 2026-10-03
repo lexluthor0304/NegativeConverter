@@ -39,6 +39,7 @@ export function createAutoFrameHelperTask({
     if (!live(msg.det)) { send({ id: msg.id, cancelled: true, final: true }); return; }
     try {
       await loadCv();
+      if (!live(msg.det)) { send({ id: msg.id, cancelled: true, final: true }); return; }
       const { preview } = current;
       const src = globalThis.cv.matFromImageData(preview);
       try {
@@ -80,6 +81,7 @@ export function createAutoFrameHelperTask({
     let result;
     try {
       await loadCv();
+      if (!live(msg.det)) { send({ id: msg.id, cancelled: true, final: true }); return; }
       const started = now();
       result = fallbackPreviewStage(current.preview, current.context);
       current.fallback = result;

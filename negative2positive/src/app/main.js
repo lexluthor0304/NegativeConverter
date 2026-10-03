@@ -93,7 +93,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     import {
       planBatchParallelism, planPng16BandWorkers, runBatchPipeline, planGeometryBandsInFlight, LANE_BYTES_PER_PIXEL,
       createLearningBarrier, planDecodeAhead, EXPORT_MAX_UNWRITTEN_BYTES, planRollAnalysis, createDecodeSlots, ROLL_ANALYSIS_MIN_RAM_BYTES,
-      rollAnalysisFootprint
+      rollAnalysisFootprint, ROLL_OPENCV_REALM_BYTES
     } from './batchExportScheduler.js';
     import {
       displayPreviewSize, resizeDisplayPreview, resizeDisplayPreviewInBands, updateDisplayPreviewRect, noteDisplayFilter,
@@ -160,7 +160,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     import { buildRollAnalysisSample as buildRollAnalysisSampleOf, buildRollSample as buildRollSampleOf, rollSampleSettings } from './rollSample.js';
     import {
       createDustWorkerClient, detectDustInWorker, inpaintDustInWorker, strokeDustInWorker, followDustMaskInWorker,
-      pinDustWorker, unpinDustWorker, disposeDustWorker, dustMaskInfo, forgetDustMaskInfo
+      pinDustWorker, unpinDustWorker, disposeDustWorker, dustWorker, dustMaskInfo, forgetDustMaskInfo
     } from './dustWorkerClient.js';
     import { applyStrokePatch, applyDustDelta, amendDustDelta, copyImageRect, pasteImageRect, sameFramePixels } from './dustStrokeHistory.js';
     import { loadLocalLensfunAssets } from './lensfunLoader.js';
@@ -9663,6 +9663,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const source = dust.cleanSource;
       if (!source || !dust.mask || dust.processing || state.processedImageDataIsPreview) return;
       if (source.width * source.height !== dust.mask.length) return;
+      noteDustWorkerMemory(source, dust.mask);
       void prepareDustPrivateBuffer();
       if (dust.maskTag == null) dust.maskTag = nextDustMaskTag();
       pinDustWorker(source, { mask: dust.mask, tag: dust.maskTag }).catch(() => {});
@@ -9703,6 +9704,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
     async function detectDustOffMainThread(source, options, previous = null, isCurrent = () => true, worker = null) {
       assertRepairCurrent(isCurrent);
+      if (!worker) noteDustWorkerMemory(source);
       try { return await (worker?.detect || detectDustInWorker)(source, options); }
       catch (error) {
         assertRepairCurrent(isCurrent);
@@ -9717,6 +9719,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
     async function inpaintDustOffMainThread(source, mask, isCurrent = () => true, worker = null) {
       assertRepairCurrent(isCurrent);
+      if (!worker) noteDustWorkerMemory(source, mask);
       try { return await (worker?.inpaint || inpaintDustInWorker)(source, mask, 3); }
       catch (error) {
         assertRepairCurrent(isCurrent);
@@ -11369,8 +11372,19 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     const heldJobFrames = new Set();
     const liveSampleStores = new Set();
     // Long-lived workers: { residentBytes(), idle(), release() }. Workers a
-    // lane owns (batch pools, lane analysers) are inside its reservation.
+    // lane owns are inside its reservation while a frame is in flight;
+    // roll workers retained between frames are registered separately.
     const workerResidents = new Map();
+    let dustWorkerPlaneBytes = 0;
+
+    // Opaque copies in the dust worker, without keeping the page's source
+    // alive here. Shared 16-bit views are already counted by their owner.
+    function noteDustWorkerMemory(source, mask = null) {
+      const plane16 = source?.__image16?.data;
+      dustWorkerPlaneBytes = (source?.data?.byteLength || 0)
+        + (isSharedPlane(plane16) ? 0 : plane16?.byteLength || 0)
+        + (mask?.byteLength || (source?.width || 0) * (source?.height || 0));
+    }
 
     // The open photo: history's live roots (its planes), the display
     // buffers, a parked photo's base, and a two-stage import's full decode
@@ -11429,6 +11443,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       residentBytes: () => analyzeFrameInWorker.residentBytes,
       idle: () => analyzeFrameInWorker.alive && !analyzeFrameInWorker.busy && !analyzeFrameInWorker.held,
       release: () => analyzeFrameInWorker.releaseIdle()
+    });
+    workerResidents.set('dust', {
+      residentBytes: () => dustWorker.pendingCount || dustWorker.maskTag != null
+        ? dustWorkerPlaneBytes + ROLL_OPENCV_REALM_BYTES : 0,
+      idle: () => !dustWorker.pinned && dustWorker.pendingCount === 0,
+      release: () => { disposeDustWorker(); dustWorkerPlaneBytes = 0; }
     });
     workerResidents.set('aiRepair', {
       residentBytes: () => {
@@ -20757,6 +20777,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const analyzers = createAutoFrameWorkerPool({ size: workerFrames ? 1 : plan.framesInFlight });
       const releaseIdleHold = analyzeFrameInWorker.holdIdle();
       let disposed = false;
+      // A lane claim covers an acquired worker. Its idle realm stays alive
+      // between frames and during import retries, when no claim covers it.
+      workerResidents.set(frames, {
+        residentBytes: () => frames.idleResidentBytes + analyzers.idleResidentBytes,
+        idle: () => false,
+        release: () => {}
+      });
       // Such a roll starts its workers (and OpenCV) ahead of the first frame.
       if (workerFrames) frames.warm(plan.framesInFlight);
       return {
@@ -20768,6 +20795,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         dispose() {
           if (disposed) return;
           disposed = true;
+          workerResidents.delete(frames);
           frames.dispose();
           analyzers.dispose();
           releaseIdleHold();
@@ -29389,6 +29417,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
                     try {
                       if (!itemValid()) return null;
                       const filmType = frameFilmType ?? state.filmType;
+                      if (worker?.workerError) return workerFailed(item, worker.workerError);
                       // Half-size analysis (#252 part 6, flagged): measured
                       // from the smaller planes, mapped onto the full frame.
                       if (decoded?.half) return await analyzeHalfSizeRollFrame(item, decoded, { filmType, itemValid, key });

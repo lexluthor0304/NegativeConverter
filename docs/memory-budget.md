@@ -148,11 +148,30 @@ consumer that holds it:
    MI-GAN session (its worker's `WebAssembly.Memory` bytes, which
    `workers/wasmHeap.js` tracks from before ONNX Runtime loads and each reply
    carries; an estimate of 0.7 GB on WASM or 0.25 GB on WebGPU until the
-   first reply, or for a main-thread session). Workers a lane owns are inside
-   its reservation.
+   first reply, or for a main-thread session). The dust worker's private
+   clean-source planes and mask count too, plus a 150 MiB OpenCV estimate;
+   a shared 16-bit view is already counted with its page owner. Unpinning
+   keeps those bytes until the client releases its source/mask or the idle
+   check disposes it. Pinned or pending dust work is never evicted.
+   Roll-frame and page-path analyzer pools register their idle realms
+   between frames and during import retries, and remove the registration at
+   `finish()`. Acquired workers are covered by the frame's lane claim.
+   Roll-frame idle realms use at least 150 MiB each, or their reported
+   `cv.HEAPU8` size if larger. Idle roll analyzers use the same 150 MiB floor
+   or their reported size if larger: some OpenCV builds keep the heap private,
+   so a zero report cannot mean that a live realm occupies no memory.
 
 It is computed on demand, at an admission and at an idle check, never per
 frame.
+
+An OpenCV realm keeps its first load rejection: an ES-module glue import
+cannot restart the cached factory. A failed roll-frame warm-up terminates
+that worker; the next request can start a fresh realm. Warm-up, process,
+sample and release replies have a 120 s deadline that terminates a silent
+worker and rejects its pending requests. Roll analysis then uses its existing
+worker-failure/page fallback and releases the frame's claim instead of
+keeping it for the rest of the session. `workerResidentsLedger.test.mjs`
+exercises the real registrations, pinned dust and pool clients on small planes.
 
 A 16-bit plane in shared memory (#264, `docs/cross-origin-isolation.md`) is a
 `SharedArrayBuffer` the ledger counts like an `ArrayBuffer`: once, for the

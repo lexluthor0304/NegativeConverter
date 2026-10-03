@@ -100,6 +100,24 @@ const optionsFor = (variant, rotatedOutput, deferFullResolution) => ({
   maxSide: 400, rotatedOutput, deferFullResolution, frameFilmType: variant.frameFilmType, rotateImageData: applyRotationToImageData
 });
 
+// A new detection can load while the helper's first OpenCV load is pending.
+// Det 1 must be cancelled before any stage reads det 2's preview/context.
+for (const type of ['fallback', 'units']) {
+  let ready;
+  const replies = [];
+  const task = createAutoFrameHelperTask({ loadCv: () => new Promise(resolve => { ready = resolve; }),
+    rotate: applyRotationToImageData, yieldTask: () => new Promise(setImmediate) });
+  const load = det => task.handle({ type: 'load', det, preview: images[det === 1 ? 'outline' : 'tilted'],
+    options: helperAnalyzerOptions(optionsFor({}, 'none', false)) }, reply => replies.push(reply));
+  await load(1);
+  const request = task.handle({ type, det: 1, id: 101, stride: 3, offset: 2, channels: [0], order: [0] }, reply => replies.push(reply));
+  await load(2);
+  ready();
+  await request;
+  assert.deepEqual(replies, [{ id: 101, cancelled: true, final: true }], `${type}: never answers det 1 with det 2's stages`);
+  assert.equal(task.detection, 2);
+}
+
 const b = helper(), c = helper();
 const helpers = { b: b.link, c: c.link };
 const branches = new Set();

@@ -28,8 +28,10 @@ import {
 import { answerOpenCvWorker } from './opencvRuntime.js';
 import { restoreRollSample } from './rollSample.js';
 import { primeFilmStats } from './filmStatsCache.js';
+import { ROLL_OPENCV_REALM_BYTES } from './batchExportScheduler.js';
 
 const READY_TIMEOUT_MS = 5000;
+const REPLY_TIMEOUT_MS = 120000;
 
 function lostError(message) {
   const err = new Error(message);
@@ -55,12 +57,14 @@ export function imageFromRollPlanes({ width, height, rgba8, rgba16, filmStats = 
  * @param {number} [config.size] frames in flight (workers kept)
  * @param {() => Worker} [config.workerFactory]
  * @param {number} [config.readyTimeoutMs]
+ * @param {number} [config.timeoutMs] maximum time for a warm-up or frame reply
  * @param {(data, w, h) => object} [config.makeImage]
  */
 export function createRollFramePool({
   size = 1,
   workerFactory = () => new Worker(new URL('../workers/rollFrameWorker.js', import.meta.url), { type: 'module' }),
   readyTimeoutMs = READY_TIMEOUT_MS,
+  timeoutMs = REPLY_TIMEOUT_MS,
   makeImage
 } = {}) {
   let keep = Math.max(1, Math.floor(size) || 1);
@@ -79,7 +83,7 @@ export function createRollFramePool({
     slot.worker.onmessage = slot.worker.onerror = slot.worker.onmessageerror = null;
     try { slot.worker.terminate(); } catch {}
     slot.settleReady(false);
-    for (const entry of slot.pending.values()) entry.reject(error);
+    for (const entry of slot.pending.values()) { clearTimeout(entry.timer); entry.reject(error); }
     slot.pending.clear();
   }
 
@@ -105,6 +109,8 @@ export function createRollFramePool({
         return;
       }
       slot.pending.delete(data.id);
+      clearTimeout(entry.timer);
+      if (data.opencv) slot.opencv = data.opencv;
       entry.resolve(data);
     };
     const crashed = (event) => {
@@ -122,9 +128,10 @@ export function createRollFramePool({
   function send(slot, message, transfers = [], onProgress = null) {
     return new Promise((resolve, reject) => {
       if (!slot?.alive) { reject(lostError('Roll-frame worker is gone')); return; }
-      slot.pending.set(message.id, { resolve, reject, onProgress });
+      const timer = setTimeout(() => kill(slot, lostError(`Roll-frame worker timed out (${message.type})`)), timeoutMs);
+      slot.pending.set(message.id, { resolve, reject, onProgress, timer });
       try { slot.worker.postMessage(message, transfers); }
-      catch (error) { slot.pending.delete(message.id); reject(error); }
+      catch (error) { clearTimeout(timer); slot.pending.delete(message.id); reject(error); }
     });
   }
 
@@ -184,6 +191,9 @@ export function createRollFramePool({
         if (signal?.aborted) throw abortError(signal);
         const data = result?.data;
         const postOptions = { suppressSensorDefects: loaderOptions.suppressSensorDefects, filmStats: loaderOptions.filmStats || null };
+        // A warm-up can fail after this adapter acquired its worker. Retry
+        // in a fresh realm, never with that realm's rejected OpenCV factory.
+        while (slot?.warming && !(await slot.warming)) slot = acquire();
         if (slot && isTransferableRawData(data) && !(await ready(slot))) {
           // A worker that does not answer is not asked again.
           kill(slot, lostError('Roll-frame worker did not answer'));
@@ -193,6 +203,7 @@ export function createRollFramePool({
           if (signal?.aborted) throw abortError(signal);
           return runRawPostDecode(result, postOptions);
         }
+        if (signal?.aborted) throw abortError(signal);
         const shape = { width: result.width, height: result.height, bits: result.bits, colors: result.colors };
         const input = describeView(data);
         id = nextId++;
@@ -208,6 +219,10 @@ export function createRollFramePool({
         } catch (err) {
           if (signal?.aborted) throw abortError(signal);
           if (input.buffer.byteLength > 0) return runRawPostDecode({ ...shape, data }, postOptions);
+          // The RAW loader may recover an embedded preview. That is not a
+          // full frame to measure: the roll counts this worker failure and
+          // decodes again, then takes its page path after two failures.
+          adapter.analysis = { complete: false, workerError: err?.message || String(err) };
           throw err?.code === 'RAW_POST_DECODE_LOST' ? err : lostError(err?.message || String(err));
         } finally {
           running = false;
@@ -324,7 +339,11 @@ export function createRollFramePool({
       for (const slot of [...slots]) {
         if (slot.warmed) continue;
         slot.warmed = true;
-        send(slot, { type: 'warm-up', id: nextId++ }).then((reply) => { slot.opencv = reply?.opencv || null; }, () => {});
+        slot.warming = send(slot, { type: 'warm-up', id: nextId++ }).then((reply) => {
+          if (reply.type === 'ready') return true;
+          kill(slot, lostError(reply.message || 'Roll-frame worker warm-up failed'));
+          return false;
+        }, (error) => { kill(slot, error); return false; });
       }
       return started.length;
     },
@@ -343,6 +362,9 @@ export function createRollFramePool({
     // its time to cv.Mat (#252 acceptance; read by the harness).
     get realms() { return [...slots].map(slot => slot.opencv || null); },
     get alive() { return slots.size; },
+    // Acquired workers belong to a frame's lane claim. Between frames their
+    // realms stay in the renderer's retained ledger, including heap growth.
+    get idleResidentBytes() { return idle.reduce((bytes, slot) => bytes + Math.max(ROLL_OPENCV_REALM_BYTES, slot.opencv?.heapBytes || 0), 0); },
     get size() { return keep; }
   };
 }
