@@ -138,6 +138,9 @@ consumer that holds it:
    in between, and its own reservation ends with the decode);
 2. **sessions**, then **previews** (`photoSessionCache.js`);
 3. **history**: only what nothing above holds (#244's exclusive count);
+   hidden parking keeps dust history as a committed IndexedDB record, with
+   no full target, clean-source, mask or patch buffers in the live entries.
+   Storage failure keeps the real buffers and their ledger charge;
 4. **stores**: the prefetch slot, tile sources, watch-folder roll samples and
    the roll-analysis sample stores in use;
 5. **jobs**: frames a job keeps between its items, and an Export All frame

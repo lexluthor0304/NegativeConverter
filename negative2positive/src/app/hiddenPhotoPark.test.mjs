@@ -1,11 +1,15 @@
 // #241 part 2e: parking the open photo while a hidden job is held back
 // (opt-in). Runs the real main.js functions with the editor stubbed: parking
-// keeps only the decoded base and the undo history (as cold entries, #229
-// review R1-136), and showing the window rebuilds the planes through the cold
-// photo-switch path without a decode.
+// keeps only the decoded base and cold/persisted undo history (#229 review
+// R1-136). Showing restores exact archived brush planes or rebuilds ordinary
+// cold planes through the photo-switch path, without decoding.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
+import { createDustHistoryArchive } from './dustHistoryArchive.js';
+import { archiveDatabaseFixture } from './dustHistoryArchiveHarness.mjs';
+import { applyStrokePatch, applyDustDelta } from './dustStrokeHistory.js';
+import { createMemoryBudget } from './memoryBudget.js';
 
 const source = readFileSync(new URL('./main.js', import.meta.url), 'utf8');
 function functionSource(name) {
@@ -17,7 +21,7 @@ function functionSource(name) {
 const refKeys = /const SNAPSHOT_REF_KEYS = (\[[^\]]+\]);/.exec(source)[1];
 const plane = (tag) => ({ tag, data: new Uint8ClampedArray(16), width: 2, height: 2 });
 
-function fixture({ enabled = true, hidden = true } = {}) {
+function fixture({ enabled = true, hidden = true, brush = true } = {}) {
   const base = plane('base');
   const file = { name: 'L1009967.dng' };
   const item = { file, settings: null, isDirty: true };
@@ -33,20 +37,36 @@ function fixture({ enabled = true, hidden = true } = {}) {
     dustRemoval: { processing: false, mask: new Uint8Array(4), inpaintedImageData: plane('dust'), cleanSource: plane('clean'), _state: {} },
     zoomLevel: 2, panX: 5, panY: 6
   };
-  const stroke = { label: 'dustBrushStroke', dustDelta: { target: state.dustRemoval.inpaintedImageData } };
-  const undoStack = [{ label: 'rotate', refs: { originalImageData: state.originalImageData } }, stroke];
-  const redoStack = [{ label: 'exposure', refs: { processedImageData: state.processedImageData } }];
+  const db = archiveDatabaseFixture();
+  const archive = createDustHistoryArchive({ indexedDB: db.indexedDB });
+  const target = state.dustRemoval.inpaintedImageData;
+  state.processedImageData = target;
+  const rect = { x: 0, y: 0, width: 1, height: 1 };
+  const stroke = { label: 'dustBrushStroke', dustDelta: applyStrokePatch(target, state.dustRemoval.mask, {
+    rect, maskRect: rect, rgba8: Uint8ClampedArray.of(41, 42, 43, 255), maskBytes: Uint8Array.of(255), particleCount: 1
+  }, { cleanSource: state.dustRemoval.cleanSource, countBefore: 0, tagBefore: 0, tagAfter: 1 }) };
+  if (!brush) { state.dustRemoval.mask = state.dustRemoval.inpaintedImageData = state.dustRemoval.cleanSource = null; }
+
+  const undoStack = [{ label: 'rotate', refs: { originalImageData: state.originalImageData } }, ...(brush ? [stroke] : [])];
+  const redoStack = [{ label: 'exposure', refs: { processedImageData: state.processedImageData, dustInpaintedImageData: state.dustRemoval.inpaintedImageData } }];
   const c = vm.createContext({
     state, undoStack, redoStack, SNAPSHOT_REF_KEYS: vm.runInNewContext(refKeys),
     document: { visibilityState: hidden ? 'hidden' : 'visible', body: { dataset: {} } },
-    parkedPhoto: null, loadGeneration: 4, processNegativeInFlight: null, coreReprocessTimer: null,
+    parkedPhoto: null, parkingPhoto: false, manualEditRevision: 0, dustHistoryArchive: archive,
+    memoryBudget: createMemoryBudget({ budgetBytes: 10000 }), loadGeneration: 4, processNegativeInFlight: null, coreReprocessTimer: null,
     dustDetectionTimer: null, pendingBrushRepairs: 0, dustDrawing: false,
     safeStorageGet: key => storage.get(key) ?? null,
     getCurrentQueueItem: () => state.fileQueue[state.currentFileIndex],
     coreReprocessBusy: () => false,
     persistCurrentFileSettings: () => { calls.push('persist'); item.settings = { rotationAngle: 1.5, mirrored: true, cropRegion: { left: 1 } }; item.isDirty = false; },
     invalidatePhotoActivation: () => { calls.push('invalidate'); c.parkedPhoto = null; },
-    supersedeActivation: () => {},
+    supersedeActivation: () => {}, beginActivation: () => {},
+    unpinDustWorker: () => {}, disposeDustWorker: () => {}, noteDustReplaced: () => {}, carryRestoredRepairStamp: () => {},
+    updatePreview: () => calls.push('preview'), syncDustWorkerPin: () => {}, rememberRepairMasks: () => {},
+    repairStamps: { recipeOf: () => null }, coreReprocessToken: 0,
+    clearRepairedPreview() {}, previewRepairWorker: { dispose() {} }, dustRefreshRepairMask: null,
+    dustTint: { mask: state.dustRemoval.mask, image: null, building: null }, displayOverlayState: { tint: null },
+    settledAdjustedBuffer: null, previewAdjustedBuffer: null,
     isCurrentLoad: generation => generation === c.loadGeneration,
     loadFile: async (loaded, options) => {
       calls.push(['loadFile', loaded === file, options.decoded?.base === base, options.autoConvert, options.quiet]);
@@ -66,34 +86,34 @@ function fixture({ enabled = true, hidden = true } = {}) {
     gpuPreview: { prepared: { tag: 'open photo' } },
     webglState: { renderer2: { dropPrepared: () => calls.push('dropPrepared') } }
   });
-  vm.runInContext(['hiddenParkEnabled', 'parkOpenPhotoForHiddenJob', 'unparkOpenPhoto'].map(functionSource).join('\n'), c);
-  return { c, state, item, base, file, calls, undoStack, redoStack, stroke };
+  vm.runInContext(['hiddenParkEnabled', 'parkOpenPhotoForHiddenJob', 'unparkOpenPhoto', 'performUndo', 'performRedo'].map(functionSource).join('\n'), c);
+  return { c, state, item, base, file, calls, undoStack, redoStack, stroke, db, target };
 }
 
 // Off by default: nothing is parked until the measurement run turns it on.
 {
   const f = fixture({ enabled: false });
-  assert.equal(f.c.parkOpenPhotoForHiddenJob(), false);
+  assert.equal(await f.c.parkOpenPhotoForHiddenJob(), false);
   assert.ok(f.state.processedImageData);
 }
 // Only a hidden window with a settled editor is parked.
 {
   const f = fixture({ hidden: false });
-  assert.equal(f.c.parkOpenPhotoForHiddenJob(), false);
+  assert.equal(await f.c.parkOpenPhotoForHiddenJob(), false);
   const busy = fixture();
   busy.c.processNegativeInFlight = Promise.resolve();
-  assert.equal(busy.c.parkOpenPhotoForHiddenJob(), false, 'never while a conversion runs');
+  assert.equal(await busy.c.parkOpenPhotoForHiddenJob(), false, 'never while a conversion runs');
   const decoding = fixture();
   decoding.state.rawDecodePending = true;
-  assert.equal(decoding.c.parkOpenPhotoForHiddenJob(), false, 'never while the full-resolution decode is pending');
+  assert.equal(await decoding.c.parkOpenPhotoForHiddenJob(), false, 'never while the full-resolution decode is pending');
 }
 
-// Park: recipe persisted, only the base and the history kept; show: rebuilt
-// from that base through the cold switch path, history restored as it was.
+// Park: persist exact brush history and current pixels, keeping only the base
+// live. Show: restore their shared references and bytes without a decode.
 {
   const f = fixture();
   const undo = f.undoStack.slice(), redo = f.redoStack.slice();
-  assert.equal(f.c.parkOpenPhotoForHiddenJob(), true);
+  assert.equal(await f.c.parkOpenPhotoForHiddenJob(), true);
   assert.deepEqual(f.calls.slice(0, 2), ['persist', 'invalidate'], 'the recipe is saved before the planes go');
   for (const key of ['originalImageData', 'croppedImageData', 'processedImageData', 'conversionSourceImageData',
     'conversionPreviewImageData', 'previewSourceImageData', 'histogramSourceImageData', 'webglSourceImageData', 'displayImageData']) {
@@ -104,25 +124,33 @@ function fixture({ enabled = true, hidden = true } = {}) {
   assert.ok(f.calls.includes('dropPrepared'), 'and its texture');
   assert.equal(f.state.loadedBaseImageData, f.base, 'the decoded base stays');
   assert.equal(f.undoStack.length, 2, 'the undo history is never dropped');
-  // A hot entry would pin the planes just dropped: every step goes cold,
-  // except a dust-brush stroke, which cannot and stays as it is.
+  // Ordinary steps go cold; the stroke releases its actual full planes
+  // only after their exact, aliased graph is committed to storage.
   assert.equal(f.undoStack[0].refs.cold, true);
   assert.equal(f.redoStack[0].refs.cold, true);
   assert.equal(f.undoStack[1], f.stroke);
-  assert.equal(f.stroke.dustDelta.target.tag, 'dust');
-  assert.equal(f.c.parkOpenPhotoForHiddenJob(), false, 'parked once');
+  assert.equal(f.stroke.dustDelta.cold, true);
+  assert.equal(f.stroke.dustDelta.target, undefined, 'the target is no longer retained');
+  assert.ok(f.c.parkedPhoto.dustHistoryKey);
+  f.c.performUndo(); f.c.performRedo();
+  assert.deepEqual(f.undoStack, undo, 'cold brush entries cannot be consumed before restoration');
+  assert.deepEqual(f.redoStack, redo);
+  assert.equal(await f.c.parkOpenPhotoForHiddenJob(), false, 'parked once');
   f.calls.length = 0;
   f.c.document.visibilityState = 'visible';
   await f.c.unparkOpenPhoto();
   assert.equal(f.c.parkedPhoto, null);
-  assert.deepEqual(JSON.parse(JSON.stringify(f.calls)), [
-    ['loadFile', true, true, false, true],
-    'resetZoomPan',
-    ['restoreSettings', true, false],
-    ['prepare', true, true, true],
-    'buttons'
-  ], 'rebuilt from the kept base (no decode), with the persisted recipe');
-  assert.equal(f.state.processedImageData.tag, 'rebuilt');
+  assert.deepEqual(f.calls, ['resetZoomPan', 'preview', 'buttons'], 'the exact saved repair is restored without decode or re-detection');
+  assert.deepEqual([...f.state.processedImageData.data], [...f.target.data]);
+  assert.equal(f.state.processedImageData, f.stroke.dustDelta.target);
+  assert.equal(f.state.dustRemoval.mask, f.stroke.dustDelta.mask);
+  assert.equal(f.redoStack[0].refs.processedImageData, f.stroke.dustDelta.target, 'snapshot/stroke aliases survive');
+  applyDustDelta(f.stroke.dustDelta, 'undo');
+  assert.deepEqual([...f.state.processedImageData.data], new Array(16).fill(0));
+  assert.deepEqual([...f.state.dustRemoval.mask], [0, 0, 0, 0]);
+  applyDustDelta(f.stroke.dustDelta, 'redo');
+  assert.deepEqual([...f.state.processedImageData.data], [...f.target.data]);
+  assert.equal(f.db.records.size, 0, 'the archive is removed after restoration');
   assert.deepEqual(f.undoStack, undo, 'undo history restored');
   assert.deepEqual(f.redoStack, redo, 'redo history restored');
   assert.equal(f.item.isDirty, false);
@@ -131,11 +159,75 @@ function fixture({ enabled = true, hidden = true } = {}) {
 // A queue that moved on while hidden is not re-activated by a stale park.
 {
   const f = fixture();
-  assert.equal(f.c.parkOpenPhotoForHiddenJob(), true);
+  assert.equal(await f.c.parkOpenPhotoForHiddenJob(), true);
   f.state.currentFileIndex = 0;
   f.calls.length = 0;
   await f.c.unparkOpenPhoto();
   assert.deepEqual(f.calls, []);
 }
 
-console.log('hiddenPhotoPark tests passed');
+// Without a brush, ordinary cold history still rebuilds from the retained base.
+{
+  const f = fixture({ brush: false });
+  assert.equal(await f.c.parkOpenPhotoForHiddenJob(), true);
+  f.calls.length = 0;
+  f.c.document.visibilityState = 'visible';
+  await f.c.unparkOpenPhoto();
+  assert.equal(f.state.processedImageData.tag, 'rebuilt');
+  assert.equal(f.calls[0][0], 'loadFile');
+}
+for (const failure of ['open', 'write']) {
+  const f = fixture(); f.db.failures[failure] = true;
+  const delta = f.stroke.dustDelta, refs = f.undoStack[0].refs;
+  assert.equal(await f.c.parkOpenPhotoForHiddenJob(), false);
+  assert.equal(f.stroke.dustDelta, delta);
+  assert.equal(f.undoStack[0].refs, refs);
+  assert.equal(f.state.processedImageData, f.target, 'storage failure preserves actual live planes and history');
+  assert.equal(f.c.parkedPhoto, null);
+}
+{
+  const f = fixture();
+  assert.equal(await f.c.parkOpenPhotoForHiddenJob(), true);
+  const parked = f.c.parkedPhoto;
+  f.c.document.visibilityState = 'visible'; f.db.failures.read = true;
+  await assert.rejects(f.c.unparkOpenPhoto(), /Storage read failed/);
+  assert.equal(f.c.parkedPhoto, parked);
+  assert.equal(f.stroke.dustDelta.cold, true, 'the stored history remains available for retry');
+  f.db.failures.read = false;
+  await f.c.unparkOpenPhoto();
+  assert.deepEqual([...f.state.processedImageData.data], [...f.target.data]);
+}
+for (const change of ['visible', 'edit', 'plane']) {
+  const f = fixture();
+  const save = f.c.dustHistoryArchive.save;
+  let finish;
+  const wait = new Promise(resolve => { finish = resolve; });
+  f.c.dustHistoryArchive.save = async (...args) => { await wait; return save(...args); };
+  const delta = f.stroke.dustDelta;
+  const parking = f.c.parkOpenPhotoForHiddenJob();
+  if (change === 'visible') f.c.document.visibilityState = 'visible';
+  if (change === 'edit') f.c.manualEditRevision++;
+  if (change === 'plane') f.state.processedImageData = plane('newer');
+  finish();
+  assert.equal(await parking, false, `a ${change} change during storage invalidates the park`);
+  assert.equal(f.stroke.dustDelta, delta, 'history was never made cold');
+  assert.equal(f.db.records.size, 0, 'an unused committed record is removed');
+}
+{
+  const f = fixture();
+  assert.equal(await f.c.parkOpenPhotoForHiddenJob(), true);
+  f.c.document.visibilityState = 'visible';
+  const load = f.c.dustHistoryArchive.load;
+  let finish, reads = 0;
+  const wait = new Promise(resolve => { finish = resolve; });
+  f.c.dustHistoryArchive.load = async (...args) => { reads++; await wait; return load(...args); };
+  const one = f.c.unparkOpenPhoto(), two = f.c.unparkOpenPhoto();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(reads, 1, 'a switch and visibility restore share one read');
+  assert.equal(f.c.memoryBudget.foregroundOutstanding, 1, 'archive allocation owns foreground memory too');
+  assert.equal(f.c.memoryBudget.tryReserve(1), null, 'new jobs wait while stored planes are restored');
+  finish(); await Promise.all([one, two]);
+  assert.equal(f.c.memoryBudget.idle, true);
+  assert.equal(f.db.records.size, 0);
+}
+console.log('hiddenPhotoPark: exact brush restoration, ordinary cold history, storage races/failures and shared foreground restoration passed');

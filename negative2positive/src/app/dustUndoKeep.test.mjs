@@ -167,6 +167,7 @@ function fixture({ width = 160, height = 120, specks = 24, ai = false } = {}) {
     setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout,
     // History.
     undoStack: [], redoStack: [], MAX_UNDO: 30, HISTORY_MEMORY_BUDGET_BYTES: 768 * 1024 * 1024, manualEditRevision: 0,
+    parkedPhoto: null, parkingPhoto: false,
     previewTierKept: null, reducedDisplayImages: new WeakSet(), backingBuffers, isLargeImage, restoredFrameFlags,
     createSprocketEdgeSettings: value => value, sanitizeRepairStrokes: strokes => strokes || [],
     sanitizeFrameMetadata: value => value, getUndoLabel: label => label, getLocalizedText: (key, fallback) => fallback,

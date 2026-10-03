@@ -21,6 +21,9 @@ import vm from 'node:vm';
 import { createLaneFixture, functionSource, deferred, flush } from './backgroundLanesHarness.mjs';
 import { createHiddenJobGate, HIDDEN_GRACE_MS } from './hiddenJobGate.js';
 import { createRetainedLedger } from './memoryBudget.js';
+import { createDustHistoryArchive } from './dustHistoryArchive.js';
+import { archiveDatabaseFixture } from './dustHistoryArchiveHarness.mjs';
+import { applyStrokePatch } from './dustStrokeHistory.js';
 
 const source = readFileSync(new URL('./main.js', import.meta.url), 'utf8');
 // A generator of main.js (functionSource reads plain and async functions).
@@ -53,7 +56,10 @@ function hiddenWindow(f, { budgetBytes = 1e15, itemBytes = 0, park = false } = {
   const events = [];
   const workers = { exportAlive: false, exportBytes: 0, terminated: 0 };
   Object.assign(c, {
-    activeLongJobs: 0, automaticRollAnalysisRunning: false, hiddenJobSeen: false, parkedPhoto: null,
+    activeLongJobs: 0, automaticRollAnalysisRunning: false, hiddenJobSeen: false, parkedPhoto: null, parkingPhoto: false, manualEditRevision: 0,
+    dustHistoryArchive: createDustHistoryArchive({ indexedDB: archiveDatabaseFixture().indexedDB }),
+    repairStamps: { recipeOf: () => null }, clearRepairedPreview() {}, previewRepairWorker: { dispose() {} },
+    dustRefreshRepairMask: null, dustTint: {}, displayOverlayState: {}, unpinDustWorker() {}, disposeDustWorker() {}, noteDustReplaced() {},
     undoStack: [], redoStack: [], settledAdjustedBuffer: null, previewAdjustedBuffer: null, workerResidents: new Map(),
     exportWorkerPendingCount: () => 0,
     terminateExportWorker: () => {
@@ -280,25 +286,38 @@ async function drain(f, rounds = 40) {
     conversionSourceImageData: plane(1000, 'source'), processedImageData: plane(1000, 'processed')
   };
   Object.assign(f.state, { loadedBaseImageData: base, ...live });
-  // Undo: a rotation (the frame before it), a slider step on the planes on
-  // screen, then a dust-brush stroke, which cannot go cold.
+  // The stroke shares the full live repaired target, clean source and mask.
+  // A retained delta would keep the hidden item paused after ordinary refs go cold.
   const beforeRotation = { originalImageData: plane(1500, 'unrotated'), croppedImageData: plane(1000, 'unrotated crop') };
-  const stroke = { label: 'dustBrushStroke', pushed: 3, dustDelta: { target: plane(400, 'repaired'), bytes: new Uint8Array(100) } };
+  const target = { width: 25, height: 25, data: new Uint8ClampedArray(2500) };
+  const cleanSource = { width: 25, height: 25, data: new Uint8ClampedArray(2500) };
+  const mask = new Uint8Array(625), rect = { x: 1, y: 1, width: 1, height: 1 };
+  f.state.processedImageData = live.processedImageData = target;
+  f.state.conversionSourceImageData = live.conversionSourceImageData = cleanSource;
+  Object.assign(f.state.dustRemoval, { mask, inpaintedImageData: target, cleanSource });
+  const stroke = { label: 'dustBrushStroke', pushed: 3, dustDelta: applyStrokePatch(target, mask, {
+    rect, maskRect: rect, rgba8: Uint8ClampedArray.of(91, 92, 93, 255), maskBytes: Uint8Array.of(255), particleCount: 1
+  }, { cleanSource, countBefore: 0, tagBefore: 0, tagAfter: 1 }) };
   c.undoStack.push({ label: 'rotation', pushed: 1, refs: beforeRotation }, { label: 'exposure', pushed: 2, refs: { ...live } }, stroke);
-  const snapshotBytes = 1500 + 1000 + 1000 + 1000 + 1500 + 1000;
+  const snapshotBytes = 1500 + 1000 + 2500 + 2500 + 625 + 1500 + 1000 + 10;
   const before = c.hiddenResidentBytes();
-  assert.equal(before, 2000 + snapshotBytes + 500);
+  assert.equal(before, 2000 + snapshotBytes);
   w.setHidden(true);
   await f.clock.advance(HIDDEN_GRACE_MS);
-  // The tile job of photo 1: 9500 + 3000 do not fit 10 000, even after the
-  // shed. The held item parks the open photo: 2500 + 3000 do.
+  // The tile job does not fit until the full shared brush planes are
+  // persisted and released. Base + item alone is 2000 + 3000.
   c.kickBackgroundPhotoWork();
   await f.clock.advance(250);
   assert.ok(c.parkedPhoto, 'the held item parked the open photo');
   assert.equal(c.hiddenResidentBytes(), before - snapshotBytes, 'parking frees what the history pinned, not only the state');
   assert.deepEqual(JSON.parse(JSON.stringify(c.undoStack.map(entry => (entry.dustDelta ? 'stroke' : entry.refs)))),
-    [{ cold: true }, { cold: true }, 'stroke'], 'every step is kept, as scalars where it can be');
-  assert.equal(c.undoStack[2], stroke, 'the stroke as it was');
+    [{ cold: true }, { cold: true }, 'stroke'], 'every step is kept, with persisted brush pixels');
+  assert.equal(c.undoStack[2], stroke, 'the stroke step is kept');
+  assert.equal(stroke.dustDelta.cold, true);
+  assert.equal(stroke.dustDelta.target, undefined);
+  assert.equal(stroke.dustDelta.mask, undefined);
+  assert.equal(stroke.dustDelta.cleanSource, undefined);
+  assert.ok(c.parkedPhoto.dustHistoryKey);
   assert.deepEqual(c.parkedPhoto.undo, c.undoStack, 'the parked history is the same');
   assert.deepEqual(w.events, ['shed', 'paused', 'resumed'], 'held, then admitted once the photo was parked');
   assert.deepEqual(f.started(), ['1.dng']);
@@ -317,7 +336,7 @@ function switchHarness(f) {
   for (const item of f.items) item.file.arrayBuffer = async () => { reads.push(item.file.name); return new ArrayBuffer(8); };
   f.state.autoFrame = { enabled: false };
   const target = {
-    loadGeneration: 0, photoActivation: null, rewarmAutoFrameWorker: false, corePreviewRetained: null, corePreviewCommit: null,
+    loadGeneration: 0, photoActivation: null, parkedPhoto: null, rewarmAutoFrameWorker: false, corePreviewRetained: null, corePreviewCommit: null,
     studioWorkspace: null, lensMapCache: new Map(), webglState: { gl: null }, DEFAULT_FILM_BASE: { r: 1, g: 1, b: 1 },
     quietLoadingOverlay: { show: async () => {}, updateProgress() {}, hide() {} },
     i18n: { en: {} }, currentLang: 'en',

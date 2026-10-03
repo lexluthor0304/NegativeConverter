@@ -125,8 +125,20 @@ and the undo history are kept, and showing the window rebuilds the planes from
 that base through the cold photo-switch path, without a decode. Every history
 step stays, as a cold entry (#244: its pixels are rebuilt from the base on
 restore): a hot one pins the very planes parking drops, so the held item would
-stay held. A dust-brush stroke (#259) cannot go cold and is kept as it is. It
-is off until a visible 60 MP desktop export's WebKit "Current memory
+stay held. Dust-brush history (#259) and the current repair are persisted
+losslessly to IndexedDB before their target, clean-source and mask references
+are dropped. Shared image/array identities, 8-bit and 16-bit pixels, stroke
+patches and ordinary snapshots around those strokes are restored together;
+no undo or redo step is removed. Writes use chunks of at most 8 MiB, so
+storage never clones a full plane in one request. The dust worker, tint and
+repair-preview aliases are released too. Showing the window reads that exact
+repair instead of detecting dust again. A failed write keeps the live photo
+and history; a failed read keeps the parked record and blocks edits until a
+later show retries. Restoration holds a foreground reservation sized from
+the stored planes; a simultaneous photo switch joins the same read. Records
+are removed after successful restoration or when
+the owning photo is discarded; they are not subject to cache eviction.
+Parking is off until a visible 60 MP desktop export's WebKit "Current memory
 footprint" shows whether it is needed (#244's lazy planes make it cheaper).
 
 For QA, `localStorage nc_hidden_job_limits_v1 = 'force'` applies the WebKit
@@ -206,7 +218,7 @@ state, cache bytes, live workers, the MI-GAN session and `aiRepair.revision`.
   version-1 markers, lock and heartbeat owners, reported once, the boot
   sentence in zh/en/ja), `hiddenHandOver` (the lanes in a hidden window: no
   base kept, no prefetch, what counts as a running job; the shed before an
-  item is held for its bytes; parking frees what hot history pinned; a switch
+  item is held for its bytes; parking frees shared brush planes as well as hot history; a switch
   keeps a lane's decode from its first task), `interruptedJobResume`
   (main.js's export, boot and resume functions: a desktop folder job killed
   after frame 1 resumes with its options while the controls keep their

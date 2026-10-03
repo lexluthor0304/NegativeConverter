@@ -16,7 +16,7 @@ const detected = `/^Detected [0-9]+ dust particles$/.test(document.getElementByI
 
 export async function runDustUndoSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port, root }) {
   const fixture = join(root, 'negative2positive', 'test-fixtures', 'negative-sample.jpg');
-  await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en` });
+  await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en&debug=1` });
   await waitFor('dust undo: boot', `!!document.getElementById('studioImportAutoCrop')`);
   await installDialogAutoAccept();
   await evaluate(`(() => {
@@ -114,6 +114,36 @@ export async function runDustUndoSmoke({ send, evaluate, waitFor, wait, fail, in
   await waitFor('dust undo: stroke settled', `${ready} && ${detected}`, 60_000);
   const before = await probe();
   const exportedBefore = await exportBoth('before the drag');
+
+  // A real IndexedDB park after a brush stroke must release its shared full
+  // planes, restore identical exports, and keep that stroke undoable.
+  await resetProbe();
+  const parked = await evaluate(`(async () => {
+    localStorage.setItem('nc_hidden_park_v1', 'on');
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' });
+    document.dispatchEvent(new Event('visibilitychange'));
+    const before = window.__ncHiddenJobs.status().residentBytes;
+    const parked = await window.__ncHiddenJobs.parkOpenPhoto();
+    const after = window.__ncHiddenJobs.status().residentBytes;
+    delete document.visibilityState;
+    document.dispatchEvent(new Event('visibilitychange'));
+    localStorage.removeItem('nc_hidden_park_v1');
+    return { parked, before, after };
+  })()`);
+  if (!parked.parked || parked.after >= parked.before) fail('brush parking did not release retained planes: ' + JSON.stringify(parked));
+  await waitFor('dust undo: parked brush restored', `${ready} && ${detected} && document.body.dataset.photoSwitching !== 'true'`, 60_000);
+  const exportedRestored = await exportBoth('after brush parking');
+  if (JSON.stringify(exportedRestored) !== JSON.stringify(exportedBefore)) fail('parking changed repaired exports: ' + JSON.stringify({ exportedBefore, exportedRestored }));
+  await evaluate(`document.getElementById('undoBtn').click()`);
+  await wait(500);
+  await waitFor('dust undo: parked stroke undo', `${ready} && ${detected}`, 60_000);
+  await exportFile('parked stroke undo', 'png', 8);
+  await evaluate(`document.getElementById('redoBtn').click()`);
+  await wait(500);
+  await waitFor('dust undo: parked stroke redo', `${ready} && ${detected}`, 60_000);
+  const exportedRedone = await exportBoth('parked stroke redo');
+  if (JSON.stringify(exportedRedone) !== JSON.stringify(exportedBefore)) fail('parked stroke redo changed repaired exports: ' + JSON.stringify({ exportedBefore, exportedRedone }));
+  console.log('ok: persisted brush parking releases planes and preserves PNG8/TIFF16 exports and stroke undo/redo', JSON.stringify(parked));
 
   // An Exposure drag: its undo entry is taken on pointerdown, committed on change.
   await resetProbe();

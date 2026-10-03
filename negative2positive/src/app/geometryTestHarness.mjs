@@ -238,7 +238,7 @@ export function createHarness(base, { historyBudget = 768 * 1024 * 1024, session
     lensCorrectionActive: () => false, isRawLikeFileName: name => /\.(dng|nef|cr2|arw|rw2)$/.test(name),
     usesSilverCoreConversion: () => true, hasFrameRepairs: () => false, isAiBrushEnabled: () => false,
     requiresFilmBase: () => true, isLargeImage: image => Number(image?.width) * Number(image?.height) > target.largeImagePixels,
-    largeImagePixels: 16_000_000, photoActivation: null,
+    largeImagePixels: 16_000_000, photoActivation: null, parkedPhoto: null, parkingPhoto: false,
     // The frame the Step-3 display stands for (displayCanvas.js).
     step3FrameReference,
     // A memory claim (#258) that records how it was taken and released.

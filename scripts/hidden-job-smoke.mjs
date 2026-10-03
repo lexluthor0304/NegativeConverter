@@ -148,28 +148,26 @@ export async function runHiddenJobSmoke({ send, evaluate, waitFor, wait, fail, i
     await evaluate(`(() => { localStorage.setItem('nc_hidden_park_v1', 'on'); (${installExportCapture.toString()})();
       document.getElementById('exportSingleBtn').click(); })()`);
     await waitFor('export before parking', `window.__hjExports.hashes.length === 1 && !document.getElementById('exportSingleBtn').disabled`, 120_000);
-    const parked = await evaluate(`(() => {
+    const parked = await evaluate(`(async () => {
       Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' });
       document.dispatchEvent(new Event('visibilitychange'));
-      const parked = window.__ncHiddenJobs.parkOpenPhoto();
+      const parked = await window.__ncHiddenJobs.parkOpenPhoto();
       const residentBytes = window.__ncHiddenJobs.status().residentBytes;
       window.__hjExports.watch = '${FIXTURES[0]}';
       delete document.visibilityState;
       document.dispatchEvent(new Event('visibilitychange'));
       return { parked, residentBytes };
     })()`);
-    const parkWarnings = [];
-    if (!parked.parked) parkWarnings.push('the settled open photo could not be parked');
+    if (!parked.parked) fail('the settled open photo could not be parked');
     await waitFor('parked photo rebuilt', `${ready} && document.getElementById('studioFilename').textContent === '${FIXTURES[0]}'`, 60_000);
     await wait(1500);
     await evaluate(`document.getElementById('exportSingleBtn').click()`);
     await waitFor('export after parking', `window.__hjExports.hashes.length === 2 && !document.getElementById('exportSingleBtn').disabled`, 120_000);
     const park = await evaluate(`(() => { const p = window.__hjExports; p.stop(); localStorage.removeItem('nc_hidden_park_v1'); return { hashes: p.hashes, reads: p.reads }; })()`);
     console.log('hidden-job park:', JSON.stringify({ ...park, residentBytes: parked.residentBytes }));
-    if (park.hashes[0]?.name !== park.hashes[1]?.name || park.hashes[0]?.hash !== park.hashes[1]?.hash) parkWarnings.push('the rebuilt photo does not export byte-identically: ' + JSON.stringify(park.hashes));
-    if (park.reads !== 0) parkWarnings.push('rebuilding decoded the file again: ' + park.reads + ' read(s)');
-    if (parkWarnings.length) console.log('WARN hidden-job park (opt-in part 2e, keep nc_hidden_park_v1 off): ' + parkWarnings.join('; '));
-    else console.log('ok: parking the open photo keeps only its base, and the rebuilt photo exports byte-identically without a decode');
+    if (park.hashes[0]?.name !== park.hashes[1]?.name || park.hashes[0]?.hash !== park.hashes[1]?.hash) fail('the rebuilt photo does not export byte-identically: ' + JSON.stringify(park.hashes));
+    if (park.reads !== 0) fail('rebuilding decoded the file again: ' + park.reads + ' read(s)');
+    console.log('ok: parking the open photo keeps only its base, and the rebuilt photo exports byte-identically without a decode');
 
     // ---- 1. Hidden desktop batch with a never-analysed frame ----
     // A photo switch fills the session and preview caches first.

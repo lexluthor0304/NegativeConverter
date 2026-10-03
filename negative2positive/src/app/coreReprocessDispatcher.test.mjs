@@ -656,7 +656,7 @@ for (const earlyPost of [false, true]) {
   Object.assign(f.state, { fileQueue: [leaving, target], currentFileIndex: 0, loadedFile: 'a' });
   let exitedCrop = 0;
   Object.assign(f.context, { studioAutoFrameRunning: false, singleExportActive: false,
-    isDesktopBatchExportLocked: () => false, exitCropMode: () => { exitedCrop++; } });
+    isDesktopBatchExportLocked: () => false, exitCropMode: () => { exitedCrop++; }, parkedPhoto: null });
   f.state.cropping = true;
   vm.runInContext(functionSource('switchToFile'), f.context);
   let switched = false;

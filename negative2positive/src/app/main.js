@@ -163,6 +163,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       pinDustWorker, unpinDustWorker, disposeDustWorker, dustWorker, dustMaskInfo, forgetDustMaskInfo
     } from './dustWorkerClient.js';
     import { applyStrokePatch, applyDustDelta, amendDustDelta, copyImageRect, pasteImageRect, sameFramePixels } from './dustStrokeHistory.js';
+    import { createDustHistoryArchive } from './dustHistoryArchive.js';
     import { loadLocalLensfunAssets } from './lensfunLoader.js';
     import { createOpenCvLoader } from './opencvLoader.js';
     import {
@@ -386,6 +387,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     };
     // The open photo while it is parked in a hidden window (#241 part 2e).
     let parkedPhoto = null;
+    let parkingPhoto = false;
+    const dustHistoryArchive = createDustHistoryArchive();
     // Every long job asks this gate before an item starts, so a hidden macOS
     // window stays under WebKit's inactive memory limit (#241; the callbacks
     // live under "Hidden-window jobs" below).
@@ -3458,7 +3461,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     function performUndo() {
-      if (document.body.dataset.photoSwitching === 'true') return;
+      if (parkedPhoto || parkingPhoto || document.body.dataset.photoSwitching === 'true') return;
       if (undoStack.length === 0) {
         showToast(getLocalizedText('nothingToUndo', 'Nothing to undo'));
         return;
@@ -3489,7 +3492,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     function performRedo() {
-      if (document.body.dataset.photoSwitching === 'true') return;
+      if (parkedPhoto || parkingPhoto || document.body.dataset.photoSwitching === 'true') return;
       if (redoStack.length === 0) {
         showToast(getLocalizedText('nothingToRedo', 'Nothing to redo'));
         return;
@@ -11186,7 +11189,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         hiddenJobSeen = false;
         // Waiting items were released above; the thumbnail lane restarts if
         // it stopped. Caches refill on use and workers respawn lazily.
-        if (parkedPhoto) void unparkOpenPhoto().catch(error => console.warn('Rebuilding the parked photo failed:', error));
+        if (parkedPhoto) void unparkOpenPhoto().catch(error => {
+          console.warn('Rebuilding the parked photo failed:', error);
+          showToast(getLocalizedText('parkedPhotoRestoreFailed', 'The parked photo could not be restored. Show the window again to retry.'), 6000);
+        });
         if (state.fileQueue.length) kickBackgroundPhotoWork();
         reloadAiRepairForArmedBrush();
       }
@@ -11203,42 +11209,79 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         photoSessionBytes: photoSessions.bytes, photoPreviewBytes: photoPreviews.bytes,
         undoSnapshots: undoStack.length + redoStack.length, hiddenForMs: status.hiddenForMs
       });
-      if (parkOpenPhotoForHiddenJob()) queueMicrotask(() => hiddenJobs.recheck());
+      void parkOpenPhotoForHiddenJob().then(parked => { if (parked) hiddenJobs.recheck(); })
+        .catch(error => console.warn('Parking the hidden photo failed:', error));
     }
 
     // Part 2e, opt-in until the footprint is measured (localStorage
     // nc_hidden_park_v1 = 'on'): while an item is held back, park the open
     // photo: persist its recipe, keep only the decoded base (and the undo
-    // history, which is never dropped, as scalars) and drop the derived
-    // planes. Showing the window rebuilds them from the base through the cold
-    // photo-switch path (base -> rotation -> mirror -> crop, then conversion)
-    // without a re-decode.
+    // history, as cold steps or a lossless brush archive) and drop the derived
+    // planes. Showing the window restores archived brush pixels, or rebuilds
+    // ordinary cold planes from the base through the photo-switch path
+    // (base -> rotation -> mirror -> crop, then conversion), without a decode.
     function hiddenParkEnabled() {
       return safeStorageGet('nc_hidden_park_v1') === 'on';
     }
 
-    function parkOpenPhotoForHiddenJob() {
-      if (parkedPhoto || !hiddenParkEnabled() || document.visibilityState !== 'hidden') return false;
+    async function parkOpenPhotoForHiddenJob() {
+      if (parkedPhoto || parkingPhoto || !hiddenParkEnabled() || document.visibilityState !== 'hidden') return false;
       const item = getCurrentQueueItem();
       if (!item || item.file !== state.loadedFile || !state.loadedBaseImageData || state.rawDecodePending || state.provisional
         || state.currentStep < 3 || state.cropping || document.body.dataset.studioBusy || document.body.dataset.photoSwitching
         || processNegativeInFlight || coreReprocessBusy() || coreReprocessTimer || state.dustRemoval.processing
         || dustDetectionTimer || pendingBrushRepairs || dustDrawing) return false;
       persistCurrentFileSettings({ silent: true, force: true });
+      const entries = [...undoStack, ...redoStack];
+      let dustHistoryKey = null;
+      const hasDust = entries.some(entry => entry.dustDelta) || state.dustRemoval.mask;
+      if (hasDust) {
+        parkingPhoto = true;
+        const generation = loadGeneration, editRevision = manualEditRevision, dustRevision = state.dustRemoval.revision;
+        try {
+          const refs = Object.fromEntries(SNAPSHOT_REF_KEYS.map(key => [key, state[key]]));
+          refs.displayImageData = state.displayImageData;
+          const dust = state.dustRemoval;
+          const current = { refs, dust: { mask: dust.mask, maskTag: dust.maskTag, inpaintedImageData: dust.inpaintedImageData,
+            cleanSource: dust.cleanSource, _state: dust._state, particleCount: dust.particleCount },
+            repairRecipe: repairStamps.recipeOf(dust.inpaintedImageData) };
+          dustHistoryKey = await dustHistoryArchive.save({
+            entries: entries.map(entry => ({ refs: entry.refs || null, dustDelta: entry.dustDelta || null })), current
+          }, { base: state.loadedBaseImageData });
+          // Showing, switching or editing during storage keeps the live
+          // history. Nothing can be dropped until the complete record commits
+          // and this is still the same settled, hidden photo.
+          if (document.visibilityState !== 'hidden' || loadGeneration !== generation || manualEditRevision !== editRevision
+            || state.dustRemoval.revision !== dustRevision || getCurrentQueueItem() !== item
+            || Object.entries(refs).some(([key, value]) => state[key] !== value)
+            || Object.entries(current.dust).some(([key, value]) => dust[key] !== value)
+            || entries.length !== undoStack.length + redoStack.length
+            || entries.some((entry, index) => entry !== [...undoStack, ...redoStack][index])) {
+            await dustHistoryArchive.remove(dustHistoryKey).catch(() => {});
+            return false;
+          }
+        } catch (error) {
+          console.warn('Dust history storage failed; keeping the open photo:', error);
+          return false;
+        } finally {
+          parkingPhoto = false;
+        }
+      }
       ++loadGeneration;
       supersedeActivation();
       invalidatePhotoActivation();
       // Every step stays, as a cold entry (#244: its pixels are rebuilt from
       // the base on restore). A hot one pins the very planes dropped below,
       // so parking would free next to nothing and the held item would stay
-      // paused (R1-136). A dust-stroke entry (#259) patches the objects it
-      // holds and cannot go cold: it is kept as it is.
-      for (const entry of [...undoStack, ...redoStack]) {
-        if (!entry.dustDelta && !entry.refs?.cold) entry.refs = { cold: true };
+      // paused (R1-136). Brush histories use committed, chunked storage:
+      // neither the full mutable planes nor their patch bytes remain live.
+      for (const entry of entries) {
+        if (entry.dustDelta) entry.dustDelta = { cold: true, patches: [] };
+        else if (!entry.refs?.cold) entry.refs = { cold: true };
       }
       parkedPhoto = {
         item, file: item.file, base: state.loadedBaseImageData, rawMetadata: state.rawMetadata,
-        undo: undoStack.slice(), redo: redoStack.slice(), isDirty: item.isDirty
+        undo: undoStack.slice(), redo: redoStack.slice(), isDirty: item.isDirty, dustHistoryKey
       };
       for (const key of SNAPSHOT_REF_KEYS) state[key] = null;
       state.displayImageData = null;
@@ -11246,6 +11289,15 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       state.dustRemoval.inpaintedImageData = null;
       state.dustRemoval.cleanSource = null;
       state.dustRemoval._state = null;
+      noteDustReplaced();
+      clearRepairedPreview();
+      previewRepairWorker.dispose();
+      dustRefreshRepairMask = null;
+      dustTint.mask = dustTint.image = dustTint.building = null;
+      displayOverlayState.tint = null;
+      settledAdjustedBuffer = previewAdjustedBuffer = null;
+      unpinDustWorker();
+      disposeDustWorker();
       // The GPU preview's copy of the photo (#239) goes too; it is prepared again
       // with the next exact frame.
       gpuPreview.prepared = null;
@@ -11255,9 +11307,64 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
     async function unparkOpenPhoto() {
       const parked = parkedPhoto;
-      parkedPhoto = null;
       const item = parked?.item;
-      if (!item || state.fileQueue[state.currentFileIndex] !== item || state.loadedFile !== parked.file) return;
+      if (!item || state.fileQueue[state.currentFileIndex] !== item || state.loadedFile !== parked.file) {
+        if (parkedPhoto === parked) parkedPhoto = null;
+        if (parked?.dustHistoryKey) await dustHistoryArchive.remove(parked.dustHistoryKey).catch(() => {});
+        return;
+      }
+      if (parked.dustHistoryKey) {
+        if (parked.restoring) return parked.restoring;
+        const restoring = (async () => {
+          const reservation = await memoryBudget.reserve(0, { priority: 'foreground', label: 'restore parked brush history' });
+          try {
+            // A failed read leaves the parked record and every history step
+            // intact for another visibility-change retry. Never replace it with
+            // a re-detection, which would discard the user's brush pixels.
+            const generation = loadGeneration;
+            document.body.dataset.photoSwitching = 'true';
+            studioWorkspace?.sync();
+            const stored = await dustHistoryArchive.load(parked.dustHistoryKey, {
+              base: parked.base, onBytes: bytes => reservation.resize(bytes)
+            });
+            if (parkedPhoto !== parked || !isCurrentLoad(generation) || getCurrentQueueItem() !== item) return;
+            const entries = [...parked.undo, ...parked.redo];
+            if (stored.entries?.length !== entries.length || !stored.current?.refs || !stored.current?.dust) throw Error('Incomplete parked photo history');
+            for (let i = 0; i < entries.length; i++) {
+              if (stored.entries[i].dustDelta) entries[i].dustDelta = stored.entries[i].dustDelta;
+              else entries[i].refs = stored.entries[i].refs;
+            }
+            Object.assign(state, stored.current.refs);
+            Object.assign(state.dustRemoval, stored.current.dust);
+            undoStack.splice(0, undoStack.length, ...parked.undo);
+            redoStack.splice(0, redoStack.length, ...parked.redo);
+            parkedPhoto = null;
+            delete document.body.dataset.photoSwitching;
+            beginActivation(parked.file);
+            noteDustReplaced();
+            if (stored.current.repairRecipe) repairStamps.stamp(state.dustRemoval.inpaintedImageData, {
+              ...stored.current.repairRecipe, token: coreReprocessToken, strokes: state.repairStrokes,
+              dustRevision: stored.current.repairRecipe.dustEnabled ? state.dustRemoval.revision : null
+            });
+            carryRestoredRepairStamp();
+            resetZoomPan();
+            updatePreview();
+            syncDustWorkerPin();
+            rememberRepairMasks(state.dustRemoval.cleanSource);
+            updateUndoRedoButtons();
+            updateFileListUI();
+            studioWorkspace?.sync();
+            await dustHistoryArchive.remove(parked.dustHistoryKey).catch(error => console.warn('Removing restored dust history failed:', error));
+          } finally {
+            // Restored buffers now belong to state/history in the ledger.
+            reservation.release();
+          }
+        })();
+        parked.restoring = restoring;
+        try { return await restoring; }
+        finally { parked.restoring = null; }
+      }
+      parkedPhoto = null;
       const loading = loadFile(parked.file, { autoConvert: false, decoded: parked, quiet: true });
       const generation = loadGeneration;
       const result = await loading;
@@ -13087,6 +13194,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
     function invalidatePhotoActivation() {
       // A newer activation supersedes a photo parked while hidden (#241).
+      if (parkedPhoto?.dustHistoryKey) void dustHistoryArchive.remove(parkedPhoto.dustHistoryKey).catch(() => {});
       parkedPhoto = null;
       pendingImportRotation = null;
       cancelGeometryJob();
@@ -21901,6 +22009,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (studioAutoFrameRunning || isDesktopBatchExportLocked() || singleExportActive) return;
       if (index < 0 || index >= state.fileQueue.length) return;
       if (index === state.currentFileIndex && state.fileQueue[index].file === state.loadedFile) return;
+      if (parkedPhoto) {
+        await unparkOpenPhoto();
+        if (parkedPhoto) return;
+        return switchToFile(index);
+      }
       // A GPU frame ahead of its exact frame (#239): that frame leaves now,
       // and the photo being left is remembered once it and its plane have
       // landed, as on the worker path (#229 review R1-048).
