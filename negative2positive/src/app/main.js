@@ -7695,7 +7695,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // retaining any provisional pixels or recursively capturing history.
     function whiteBalanceMeasurementSettings(settings) {
       const recipe = extractCurrentSettings();
-      for (const key of ['wbR', 'wbG', 'wbB', 'wbAutoConfidence', 'filmType', 'expiredEnabled',
+      for (const key of ['wbR', 'wbG', 'wbB', 'wbAutoConfidence', 'filmType', 'positiveMode', 'expiredEnabled',
         'grayPointSampled', 'wbUserOverride', 'wbSemanticApplied']) recipe[key] = settings[key];
       delete recipe.provisionalWhiteBalanceMeasurement;
       delete recipe.cropDetectionToken;
@@ -7726,7 +7726,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       geometry.restore(measurement.geometry, measurement.live);
       const edits = windowEdits(provisional.settledSnapshot, measurement.settings);
       if ('cropRegion' in edits) Object.assign(edits, geometry.rebase(base, measurement.live));
-      const settings = overlayWindowEdits(settled, edits);
+      // An event keeps the interpretation it measured, even when the full
+      // import or a later window edit has chosen another one.
+      const settings = overlayWindowEdits(settled, { ...edits,
+        filmType: measurement.settings.filmType, positiveMode: measurement.settings.positiveMode });
       return { settings, intent: measurement.intent, settled };
     }
 
@@ -7738,7 +7741,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       while (measurement?.pending) measurement = measurement.measurement || measurement.previous;
       if (!measurement) return;
       if (!isCurrent() || state.wbUserOverride || state.grayPointSampled || state.wbSemanticApplied
-        || state.filmType !== measurement.settings.filmType || state.expiredEnabled !== measurement.settings.expiredEnabled) return;
+        || filmInterpretationChanged(state, measurement.settings) || state.expiredEnabled !== measurement.settings.expiredEnabled) return;
       const base = state.loadedBaseImageData;
       if (!base) return;
       const sameFrame = effectiveGeometryAngle(state.rotationAngle) === effectiveGeometryAngle(measurement.settings.rotationAngle)
@@ -7761,7 +7764,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
             wbSample: { fromSource: true, geometry: { sourceWidth: source.width, sourceHeight: source.height, k: 1 } } });
         }
         if (!isCurrent() || state.wbUserOverride || state.grayPointSampled || state.wbSemanticApplied
-          || state.filmType !== measurement.settings.filmType || state.expiredEnabled !== measurement.settings.expiredEnabled) return;
+          || filmInterpretationChanged(state, measurement.settings) || state.expiredEnabled !== measurement.settings.expiredEnabled) return;
         const result = automaticWhiteBalanceResult(processed, settings, {
           meta: settings.autoFrameMeta, base, wbSample: processed?.__wbSample
         });
@@ -14324,7 +14327,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
               s.autoFrameMeta = applied.meta;
               delete s.cropDetectionToken;
               const automatic = !s.wbUserOverride && !s.grayPointSampled && !s.wbSemanticApplied;
-              if (automatic) {
+              if (automatic && !filmInterpretationChanged(settled, s)) {
                 for (const key of ['wbR', 'wbG', 'wbB', 'wbAutoConfidence']) s[key] = settled[key];
               }
               s.fullBaseFrameEdit = { detect: applied.detect, automatic,
@@ -18669,7 +18672,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         // of such an entry applies it (restoreSnapshot). It holds no pixels,
         // so history keeps no image alive through it.
         token: { hit: null },
-        whiteBalance: Object.fromEntries(['wbR', 'wbG', 'wbB', 'wbAutoConfidence', 'filmType', 'expiredEnabled',
+        whiteBalance: Object.fromEntries(['wbR', 'wbG', 'wbB', 'wbAutoConfidence', 'filmType', 'positiveMode', 'expiredEnabled',
           'grayPointSampled', 'wbUserOverride', 'wbSemanticApplied'].map(key => [key, state[key]])),
         // Whether the state, or a history entry's settings, has this frame.
         isFrame: s => effectiveGeometryAngle(s.rotationAngle) === effectiveGeometryAngle(geometry.rotationAngle)

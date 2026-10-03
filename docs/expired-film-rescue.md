@@ -184,6 +184,13 @@ retain their corresponding records; explicit WB/base and strength ownership
 survive a crossing. Other photos and the global roll analysis are untouched by
 the live invalidation.
 
+Full-decode promotion keeps this ownership in cold Undo/Redo entries too.
+WB from the full import belongs to its type/mode and cannot overwrite a
+retyped entry's reset gains. An automatic WB measurement keeps its original
+interpretation through promotion and asynchronous replay. The new frame
+measures rescue using its own interpretation; matching saved analysis,
+manual/gray-point WB, manual film bases and explicit strengths remain paired.
+
 The same rule applies to recipes on the current/selected photos, detected-film
 application, film-edge import merges, the Step-2 roll reference and the positive
 conversion entry. These are changes to the interpretation of existing pixels;

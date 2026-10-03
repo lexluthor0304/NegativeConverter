@@ -8,6 +8,7 @@ import { resolveAnalysisRegion, imageAreaFromWorkingRect } from './analysisRegio
 import { workingPointsToBase, buildCropDetectionInput, isSameAnalysisFrame } from './cropColorAnalysis.js';
 import { estimateAutoWhiteBalance } from './autoWhiteBalance.js';
 import { deepCopySanitizedSettings } from './settingsSnapshot.js';
+import { filmInterpretationChanged } from './filmTypeOverride.js';
 import { applyPreparedAdjustmentsToBuffer, applyPreparedAdjustmentsToBuffer16, stripLegacyToneSettingsForSilverCore } from './adjustmentPipeline.js';
 import { convertColorWithSilverCore } from '../pipeline/silverAdapter.js';
 import { analyzeExpiredFilm, defaultExpiredRescueParams, EXPIRED_RESCUE_DEFAULTS, EXPIRED_RESCUE_KEYS } from '../pipeline/expiredRescue.js';
@@ -49,7 +50,7 @@ function fixture(staged, manualWb = false) {
   const detections = [], held = [], conversionReplies = [], dispatched = [];
   Object.assign(target, { createExactGeometry, windowEdits, overlayWindowEdits, analysisAreaEdited, confirmedImageArea,
     resolveAnalysisRegion, imageAreaFromWorkingRect, workingPointsToBase, buildCropDetectionInput, isSameAnalysisFrame,
-    estimateAutoWhiteBalance, deepCopySanitizedSettings, stripLegacyToneSettingsForSilverCore, cropHitHold: false,
+    estimateAutoWhiteBalance, deepCopySanitizedSettings, stripLegacyToneSettingsForSilverCore, filmInterpretationChanged, cropHitHold: false,
     usesSilverCoreConversion: () => true,
     // Use real geometry pixels and WB sampling; no display-sized stand-in.
     convertFromCurrentSource: async (settings = state) => {

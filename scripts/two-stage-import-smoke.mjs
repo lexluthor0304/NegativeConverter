@@ -142,6 +142,7 @@ const CAPTURE = `(() => {
     const strips = tags[273].map((offset, k) => u8.subarray(offset, offset + tags[279][k]));
     return { width: tags[256][0], height: tags[257][0], bits: tags[258], photometric: tags[262]?.[0], strips };
   };
+  const u8Tiff = bytes => { const u8 = new Uint8Array(bytes); return u8[0] === 73 && u8[1] === 73 && u8[2] === 42; };
   // Width, height and bit depth as the file states them.
   window.__twoStageLayout = bytes => {
     const u8 = new Uint8Array(bytes);
@@ -184,7 +185,15 @@ const CAPTURE = `(() => {
     pending.add(href);
     window.__twoStageDownloads.push(fetch(href).then(r => r.arrayBuffer()).then(async bytes => {
       pending.delete(href); revoke(href);
-      return { name, size: bytes.byteLength, sha256: await hex(bytes), decoded: await window.__twoStageDecoded(bytes), layout: window.__twoStageLayout(bytes) };
+      let lowBits = null;
+      if (u8Tiff(bytes)) {
+        const tiff = tiffStrips(new Uint8Array(bytes));
+        if (tiff.bits.every(bits => bits === 16)) {
+          lowBits = 0;
+          for (const strip of tiff.strips) for (let i = 0; i + 1 < strip.length; i += 2) if ((strip[i] + strip[i + 1] * 256) % 257) lowBits++;
+        }
+      }
+      return { name, size: bytes.byteLength, sha256: await hex(bytes), decoded: await window.__twoStageDecoded(bytes), layout: window.__twoStageLayout(bytes), lowBits };
     }));
   };
   window.__twoStageBusy = [];
@@ -948,6 +957,100 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
             staged: staged[action].exports, single: single[action].exports }));
         }
         console.log(`ok: ${label} ${timing}: full-swap Undo/Redo diagnostics, WB and PNG8/TIFF16 samples/bytes equal one stage`);
+      }
+    }
+
+    // R1-017: an old automatic WB belongs to the saved interpretation.
+    // Real project restoration supplies a nonunit derived recipe, then the
+    // real controls, exposure history and full RAW swap must invalidate it.
+    if (runs('interpretation-history')) {
+      const historyFormats = [FORMATS[0], FORMATS[2]];
+      const edit = value => evaluate(`(() => {
+        const el = document.getElementById('coreExposure');
+        el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true })); el.value = '${value}';
+        el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true }));
+      })()`);
+      const openSaved = async (query, recipe, held = false) => {
+        await boot(query);
+        await evaluate(`(() => {
+          for (const id of ['studioImportAutoCrop', 'importFilmTypeAuto', 'autoRollOnImport']) {
+            const el = document.getElementById(id); if (el.checked) el.click();
+          }
+        })()`);
+        if (held) await evaluate('window.__ncTwoStage.holdFullDecodes()');
+        const text = await evaluate(`(async () => {
+          const { buildRollProject, serializeRollProject } = await import('/src/app/rollProject.js');
+          return serializeRollProject(buildRollProject({ files: [{ name: ${JSON.stringify(nameA)},
+            size: ${readFileSync(a).byteLength}, selected: true, settings: ${JSON.stringify(recipe)} }] }));
+        })()`);
+        const project = join(dir, 'interpretation-history.ncroll.json');
+        writeFileSync(project, text);
+        const doc = await send('DOM.getDocument');
+        const input = await send('DOM.querySelector', { nodeId: doc.result.root.nodeId, selector: '#projectInput' });
+        await send('DOM.setFileInputFiles', { files: [project, a], nodeId: input.result.nodeId });
+        await waitFor('interpretation history saved source', `${ready} && ${filename(nameA)}
+          && ${status}.settings?.expiredAnalysis?.spatial && ${held ? `${status}.pending && !${status}.swapped` : exact}`, 150_000);
+        const queued = await evaluate('window.__ncTwoStage.queuedRecipes().map(item => item.name)');
+        same('history fixture original identity', queued, [nameA]);
+      };
+      const choices = [
+        { before: ['color', 'correct'], after: ['bw', 'correct'] },
+        { before: ['color', 'correct'], after: ['positive', 'correct'] },
+        { before: ['positive', 'correct'], after: ['bw', 'correct'] },
+        { before: ['positive', 'correct'], after: ['positive', 'edit'] }
+      ];
+      for (const { before, after } of choices) {
+        const scene = `${label} interpretation history ${before.join('/')} -> ${after.join('/')}`;
+        const seed = { ...reference.recipe, filmType: before[0], positiveMode: before[1], filmTypeSource: 'manual',
+          wbR: 1.17, wbG: 1, wbB: .86, wbAutoConfidence: 'high', wbUserOverride: false, grayPointSampled: false, wbSemanticApplied: false,
+          semanticMap: null, expiredAnalysis: null, rollFrame: null, coreExposure: 19, expiredEnabled: true,
+          filmBase: { ...reference.recipe.filmBase, method: 'manual' }, filmBaseSet: true,
+          expiredBrightness: 17, expiredContrast: 23, expiredBrightnessUserOverride: true, expiredContrastUserOverride: true };
+        await openSaved(two, seed, true);
+        const initial = await evaluate(`${status}.settings`);
+        same(scene + ': saved automatic WB', [initial.wbR, initial.wbG, initial.wbB], [1.17, 1, .86]);
+        if (initial.wbUserOverride || initial.grayPointSampled) fail(scene + ': fixture became user-owned WB');
+        await evaluate(`(() => {
+          document.querySelector('.film-type-btn[data-type="${after[0]}"]').click();
+          const mode = document.getElementById('positiveModeSelect'); mode.value = '${after[1]}';
+          if (${JSON.stringify(before[1])} !== '${after[1]}') mode.dispatchEvent(new Event('change', { bubbles: true }));
+        })()`);
+        await waitFor(scene + ': changed interpretation measured', `${ready} && ${status}.settings.filmType === '${after[0]}'
+          && ${status}.settings.positiveMode === '${after[1]}' && ${status}.settings.expiredAnalysis?.spatial`, 120_000);
+        await edit(23);
+        if (!(await evaluate(`${status}.pending && !${status}.swapped`))) fail(scene + ': full decode arrived before window history');
+        await evaluate('window.__ncTwoStage.releaseFullDecodes()');
+        await waitFor(scene + ': full swap', `${ready} && ${exact} && ${status}.settings.expiredAnalysis?.spatial`, 150_000);
+        const results = {};
+        for (const phase of ['live', 'undo', 'redo']) {
+          if (phase !== 'live') {
+            await evaluate(`document.getElementById('${phase}Btn').click(); window.__ncAnalysis.settle()`);
+            await waitFor(scene + ': ' + phase, `${ready} && !window.__ncAnalysis.converting()
+              && ${status}.settings.coreExposure === ${phase === 'undo' ? 19 : 23}
+              && ${status}.settings.expiredAnalysis?.spatial`, 120_000);
+          }
+          const recipe = await evaluate(`${status}.settings`);
+          const single = await exportFormats(scene + ' ' + phase, historyFormats);
+          const all = await exportAllFormats(1, scene + ' ' + phase + ' batch', historyFormats);
+          const batch = Object.fromEntries(Object.entries(all).map(([key, entries]) => [key, Object.values(entries)[0]]));
+          sameExports(scene + ' ' + phase + ' actual single/batch', single, batch);
+          same(scene + ' ' + phase + ' interpretation', [recipe.filmType, recipe.positiveMode], after);
+          same(scene + ' ' + phase + ' automatic WB', [recipe.wbR, recipe.wbG, recipe.wbB], [1, 1, 1]);
+          same(scene + ' ' + phase + ' explicit strengths', [recipe.expiredBrightness, recipe.expiredContrast], [17, 23]);
+          if (recipe.semanticMap || recipe.rollFrame) fail(scene + ': retained old interpretation analysis');
+          if (single.png8.layout?.bits?.[0] !== 8 || single.tiff16.layout?.bits?.[0] !== 16
+            || !single.tiff16.lowBits) fail(scene + ': missing exact PNG8/true TIFF16 plane');
+          results[phase] = { recipe, single, batch };
+        }
+        for (const [phase, result] of Object.entries(results)) {
+          await openSaved(one, { ...result.recipe, expiredAnalysis: null, semanticMap: null,
+            wbR: 1, wbG: 1, wbB: 1, wbAutoConfidence: null });
+          const fresh = await exportFormats(scene + ' ' + phase + ' fresh full interpretation', historyFormats);
+          sameExports(scene + ' ' + phase + ' exact fresh full samples/files', result.single, fresh);
+          result.fresh = fresh;
+        }
+        console.log('interpretation full-swap history receipt:', JSON.stringify({ scene, before, after, results }));
+        console.log(`ok: ${scene}: real saved automatic WB, RAW window/full install, Undo/Redo and exact current/batch/fresh PNG8/TIFF16`);
       }
     }
 

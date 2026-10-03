@@ -211,6 +211,11 @@ instead (step 4 runs it on the full base). It then swaps in one task:
    superseding history, it no longer supplies snapshots or automatic WB, and
    its obsolete replay cannot overwrite the newer recipe. The full decode
    still completes admission; the immutable saved measurement remains valid.
+   The event also keeps its film type and positive mode. Full-import WB may
+   seed a promoted entry only when that interpretation matches; an old event
+   cannot be relabelled by promotion or replayed into a different mode.
+   Replay checks the interpretation and user ownership both before and after
+   awaiting conversion. Pending crop-WB events carry the same provenance.
    Other automatic conversion measurements, including expired-film analysis,
    still run before that WB replay, preserving user rescue strengths.
    Pending restoration joins the crop-analysis barrier, so exports and saved

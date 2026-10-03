@@ -755,3 +755,4 @@ if (selection === 'all' || selection === 'copy-adoption') {
   f.pool.dispose(); cases++;
 }
 console.log(`interpretationRoutes: ${cases} tiny real-caller/conversion/rescue/batch cases; explicit WB/strengths, saved same-type analysis and history preserved; exact 8/16 samples`);
+export { fixture, fn, base };
