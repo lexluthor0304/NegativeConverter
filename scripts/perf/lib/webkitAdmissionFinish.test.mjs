@@ -83,10 +83,10 @@ for (const boundary of ['footprint', 'validation', 'swap']) for (const acquired 
     let tick;
     if (request === 'inflight') tick = memory.sampler.tick();
     let waiting = request === 'before-tick' ? memory.waitForScope({ timeoutMs: 200 }) : null;
-    let checked = waiting && assert.rejects(waiting, /identity|attribution/);
+    let checked = waiting && assert.rejects(waiting, /identit|attribution/);
     await state.entered.promise;
     change(state, loss);
-    if (!waiting) { waiting = memory.waitForScope({ timeoutMs: 200 }); checked = assert.rejects(waiting, /identity|attribution/); }
+    if (!waiting) { waiting = memory.waitForScope({ timeoutMs: 200 }); checked = assert.rejects(waiting, /identit|attribution/); }
     state.release.resolve();
     await checked; if (tick) await tick;
     checkDenied(state, memory, loss);
@@ -95,7 +95,7 @@ for (const boundary of ['footprint', 'validation', 'swap']) for (const acquired 
       assert.ok(memory.summary().rendererPeakMB > 0 && memory.summary().gpuPeakMB > 0, 'genuine readings survive late guard failure');
       assert.ok(memory.summary().samples >= (before?.samples || 0));
     }
-    await assert.rejects(memory.waitForScope(), /identity|attribution/);
+    await assert.rejects(memory.waitForScope(), /identit|attribution/);
   } finally { memory.stop(); }
 }
 // After admission, the sampler must abort its own pending guard read even
@@ -121,7 +121,7 @@ for (const loss of ['gpu-version', 'revoked', 'ambiguous']) {
     state.afterResolve = () => {
       if (guardRead && !changed) { changed = true; queueMicrotask(() => change(state, loss)); }
     };
-    await assert.rejects(memory.waitForScope({ timeoutMs: 200 }), /identity|attribution/);
+    await assert.rejects(memory.waitForScope({ timeoutMs: 200 }), /identit|attribution/);
     assert.equal(changed, true);
     checkDenied(state, memory, loss);
   } finally { memory.stop(); }
@@ -218,12 +218,14 @@ for (const acquired of [false, true]) for (const boundary of ['swap', 'after-wai
         }, 1);
         return child;
       } });
-    const checked = assert.rejects(scenario, loss === 'valid' ? /controlled later interruption/ : /identity|attribution/);
+    let scenarioError;
+    const checked = scenario.then(() => assert.fail('the controlled scenario must reject'), error => { scenarioError = error; });
     await requested;
     if (boundary === 'swap') { if (loss !== 'valid') change(state, loss); state.release.resolve(); await tick; }
     await checked;
     assert.equal(grants, loss === 'valid' ? 1 : 0, 'no bad schedule may publish a workload grant');
     assert.equal(grantStates.includes('admitted'), loss === 'valid', 'assert every grant write, including transient writes');
+    assert.match(scenarioError.message, loss === 'valid' ? /controlled later interruption/ : /identit|attribution/);
     assert.equal(JSON.parse(readFileSync(files.grant)).state, 'aborted');
     if (loss === 'valid') {
       assert.equal(metrics['s1.librawDecodes'], 1, 'readable genuine partial metrics survive later report failure');
