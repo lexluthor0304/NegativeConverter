@@ -126,7 +126,7 @@ const cases = {
       assert.equal(memory.verdict?.reason, 'error', 'unproven GPU ownership must fail closed');
       assert.match(memory.verdict.detail, /GPU ownership/);
     } finally { memory.stop(); process.kill = kill; }
-    assert.ok(killed.includes(content), 'the positively attributed renderer is cleaned on refusal');
+    assert.ok(!killed.includes(content), 'origin evidence alone cannot authorize process cleanup without an exclusive instance');
     assert.ok(!killed.includes(unrelatedGpu) && !killed.includes(unrelatedContent) && !killed.includes(oldGpu),
       'abort and normal cleanup must preserve all unrelated/shared PIDs');
     const { webkitProcessScope } = await import('./memory.mjs');
@@ -142,7 +142,8 @@ const cases = {
     try {
       rendererList = [...rendererList, { pid: content, command: 'com.apple.WebKit.WebContent' }];
       await rendererOnly.sampler.tick();
-      rendererOnly.assertScope();
+      await assert.rejects(rendererOnly.assertScope(), /GPU ownership.*incomplete/,
+        'renderer-only data cannot pass the renderer-plus-GPU requirement');
       assert.equal(rendererOnly.summary().rendererPeakMB, 8);
       assert.equal(rendererOnly.summary().gpuPeakMB, null, 'unmeasured shared GPU must not be reported as zero footprint');
     } finally { rendererOnly.stop(); }

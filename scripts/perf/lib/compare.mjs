@@ -172,6 +172,10 @@ function formatDelta(pct) {
 export function renderCompareMarkdown(result, { baseLabel = 'before', headLabel = 'after', title = null } = {}) {
   const lines = [];
   if (title) lines.push(`### ${title}`, '');
+  if (result.scope?.type === 'probe/control') {
+    lines.push(`Probe/control comparison: intended common scenarios ${result.scope.scenarios.join(', ') || 'none'}, DPR ${result.scope.dprs.join(', ') || 'none'}; control.* metrics and scenario statuses only.`, '');
+  }
+  if (result.scopeError) lines.push(`Comparison refused: ${result.scopeError}.`, '');
   lines.push(`| metric | target | ${baseLabel} median (min–max) | ${headLabel} median (min–max) | Δ % | status | export pixels |`);
   lines.push('|---|---|---|---|---|---|---|');
   for (const row of result.rows) {
@@ -217,6 +221,50 @@ export function collectRunSummaries(run) {
     }
   }
   return out;
+}
+
+/** Record intent before any repetition, including fixtures that fail to report. */
+export function comparisonSelection(scenarios, groups, dprs) {
+  return { scenarios: scenarios.map(scenario => scenario.id), dprs,
+    fixtures: Object.fromEntries(scenarios.map(scenario => {
+      const list = groups[scenario.fixtureGroup] || [];
+      const grouped = scenario.fixtureGroup === 'roll' || scenario.fixtureGroup.startsWith('export');
+      return [scenario.id, grouped ? (list.length ? [`${scenario.fixtureGroup} (${list.length} files)`] : [])
+        : list.map(fixture => fixture.label || fixture.name)];
+    })) };
+}
+
+/** Only documented saved probe/control comparisons intersect intended scopes.
+ * Never intersect measured metric keys: missing measurements inside this
+ * scope still have to reach compareRuns and its failure gates.
+ */
+export function probeControlSummaries({ before, after, saved, selection }) {
+  const prior = saved.selection || {
+    scenarios: Object.keys(before?.scenarios || {}), dprs: saved.conditions?.dprs,
+    fixtures: Object.fromEntries(Object.entries(before?.scenarios || {}).map(([id, scenario]) => [id,
+      Object.keys(scenario.fixtures || {})]))
+  };
+  const intersect = (a, b) => a.filter(value => b.includes(value));
+  const scenarios = intersect(prior.scenarios, selection.scenarios);
+  const fixtures = Object.fromEntries(scenarios.map(id => [id, intersect(prior.fixtures[id] || [], selection.fixtures[id] || [])]));
+  const dprs = prior.dprs ? intersect(prior.dprs, selection.dprs) : selection.dprs;
+  const select = run => {
+    const out = Object.fromEntries(Object.entries(collectRunSummaries(run)).filter(([key]) => {
+      const id = key.split('.')[0];
+      if (!scenarios.includes(id)) return false;
+      if (/\.status$/.test(key)) return true;
+      if (!key.includes('.control.')) return false;
+      const at = key.indexOf('@');
+      if (at < 0 || !fixtures[id].includes(key.slice(at + 1))) return false;
+      const dpr = /\.dpr(\d+)(?:\.|@)/.exec(key);
+      return !dpr || dprs.includes(Number(dpr[1]));
+    }));
+    for (const id of scenarios) if (!run?.scenarios?.[id]) out[`${id}.status`] = { value: 'missing', n: 1 };
+    return out;
+  };
+  return { before: select(before), after: select(after),
+    scope: { type: 'probe/control', metrics: 'control.* and scenario statuses', scenarios, fixtures, dprs },
+    compatible: dprs.length > 0 && scenarios.some(id => fixtures[id].length > 0) };
 }
 
 /** Pick a baseline from budgets.json for a fixture and route. */

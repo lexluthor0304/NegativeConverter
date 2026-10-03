@@ -27,7 +27,11 @@ Current/Selected detection parity across Studio's undo boundary.
 The #229/#230 supplemental harness review and its remaining large/native
 measurement limits are documented in [performance-benchmark.md](performance-benchmark.md).
 Caller regressions cover retained WebKit metrics, per-photo metadata, safe
-process attribution, probe/control comparisons and fixture disk policy.
+process attribution, saved full-probe/subset-control comparisons and fixture disk policy.
+The developer Tauri harness now has a native view/XPC association provider and
+revalidates PID identity before cleanup. Safari's exclusive GPU association
+remains unavailable and is refused before navigation; tiny native attribution
+proof does not establish the unmeasured performance targets.
 
 ## Auto frame detection
 

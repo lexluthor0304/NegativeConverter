@@ -92,7 +92,7 @@ export async function findWebKitProcesses({ pids = [], list = listProcesses } = 
  * Process freshness alone proves neither relationship. Existing/shared GPUs
  * are excluded; an unproven new GPU makes measurement fail closed.
  */
-export function webkitProcessScope({ before, port, list = listProcesses, connected = async () => {
+export function webkitProcessScope({ before, port, ownership, list = listProcesses, connected = async () => {
   try {
     const { stdout } = await run('lsof', ['-t', `-iTCP:${port}`, '-sTCP:ESTABLISHED'], { timeout: 2000 });
     return stdout.trim().split(/\s+/).map(Number);
@@ -103,6 +103,20 @@ export function webkitProcessScope({ before, port, list = listProcesses, connect
   return {
     async resolve() {
       const all = await list();
+      if (ownership) {
+        const association = ownership.resolve();
+        renderer = association?.renderer.identity.pid || null;
+        gpu = association?.gpu.identity.pid || null;
+        if ([renderer, gpu].some(pid => pid && existing.has(pid))) {
+          renderer = gpu = null;
+          throw new Error('pre-existing/shared WebKit endpoint; refusing exclusive ownership');
+        }
+        if (renderer && gpu && ![renderer, gpu].every(pid => all.some(p => p.pid === pid))) {
+          renderer = gpu = null;
+          throw new Error('WebKit endpoint identity vanished during attribution');
+        }
+        return { renderer: renderer ? [renderer] : [], gpu: gpu ? [gpu] : [], other: [] };
+      }
       const fresh = all.filter(p => !existing.has(p.pid));
       if (renderer && !all.some(p => p.pid === renderer && /com\.apple\.WebKit\.WebContent/.test(p.command))) renderer = null;
       if (gpu && !all.some(p => p.pid === gpu && /com\.apple\.WebKit\.GPU/.test(p.command))) gpu = null;
@@ -127,7 +141,11 @@ export function webkitProcessScope({ before, port, list = listProcesses, connect
       const found = await findWebKitProcesses({ pids: [renderer, gpu].filter(Boolean), list: async () => all });
       return { renderer: found.webContent, gpu: found.gpu, other: [] };
     },
-    assert() { if (!renderer) throw new Error('could not attribute a WebContent PID to harness navigation'); }
+    assert() {
+      if (!renderer) throw new Error('could not attribute a WebContent PID to harness navigation');
+      if (!gpu) throw new Error('could not prove exclusive WebKit GPU ownership; renderer-only data is incomplete');
+    },
+    kill(pid) { return ownership?.kill(pid) === true; }
   };
 }
 

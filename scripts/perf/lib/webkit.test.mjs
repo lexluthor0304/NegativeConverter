@@ -27,7 +27,7 @@ const { GiB } = await import('./guards.mjs');
   assert.deepEqual(reads, [[900000003, 900000004]]);
   assert.equal(aborted.length, 1);
   assert.equal(aborted[0].reason, 'memory-ceiling');
-  memory.assertScope();
+  await memory.assertScope();
   memory.stop();
 }
 

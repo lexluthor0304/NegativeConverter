@@ -21,6 +21,7 @@ import { loadavg, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WebDriverSession, startSafariDriver, KEY } from './webdriver.mjs';
 import { FootprintReader, MemorySampler, listProcesses, webkitProcessScope } from './memory.mjs';
+import { buildWebKitObserver, WebKitOwnership } from './webkit-ownership.mjs';
 import {
   byKind, dragMetrics, importMetrics, switchMetrics, zoomStepMetrics, panMetrics, busyFromTimerTicks, timerGapSummary,
   rafGapSummary, eventTimingP95, settledAt
@@ -51,12 +52,18 @@ const READY = `return ${READY_EXPR};`;
 
 /** WebKit long-task proxies from a probe window. */
 export function webkitWindowMetrics(window) {
-  const gaps = timerGapSummary(window.ticks);
-  const frames = rafGapSummary(window.frames);
-  return {
-    timerGapCount: gaps.n, maxTimerGapMs: gaps.maxMs, rafGapsOver50: frames.gapsOver, rafFps: frames.fps,
-    mainBusyPct: busyFromTimerTicks(window.ticks, { start: window.start, end: window.end })
-  };
+  if (!window || !Number.isFinite(window.start) || !Number.isFinite(window.end) || window.end < window.start) return {};
+  const metrics = {};
+  if (Array.isArray(window.ticks)) {
+    const gaps = timerGapSummary(window.ticks);
+    Object.assign(metrics, { timerGapCount: gaps.n, maxTimerGapMs: gaps.maxMs,
+      mainBusyPct: busyFromTimerTicks(window.ticks, { start: window.start, end: window.end }) });
+  }
+  if (Array.isArray(window.frames)) {
+    const frames = rafGapSummary(window.frames);
+    Object.assign(metrics, { rafGapsOver50: frames.gapsOver, rafFps: frames.fps });
+  }
+  return metrics;
 }
 
 /** Metrics of a self-driven (Tauri) report, keyed like the Chrome scenarios. */
@@ -69,9 +76,10 @@ export function metricsFromSelfDriven(report, { record } = {}) {
     }
   };
   const scenario = report.scenario;
-  for (const part of report.parts || []) {
+  for (const [sampleIndex, part] of (report.parts || []).entries()) {
     const events = (part.events || []).slice().sort((a, b) => a.t - b.t);
-    const window = part.window || { frames: [], ticks: [] };
+    const window = part.window;
+    const observedWindow = Number.isFinite(window?.start) && Number.isFinite(window?.end) && window.end >= window.start;
     if (part.name === 'import' || /^(switch|route):/.test(part.name)) {
       const index = part.name === 'import' ? 0 : part.index;
       if (Number.isInteger(index)) {
@@ -81,17 +89,24 @@ export function metricsFromSelfDriven(report, { record } = {}) {
       }
     }
     if (part.name === 'import') {
+      if (!events.length && !window) continue;
       const changeT = byKind(events, 'input').find(event => event.type === 'change' && event.id === 'fileInput')?.t ?? part.before;
       const m = importMetrics(events, { changeT });
-      for (const key of ['firstPixelsDrawnMs', 'firstPhotoVisibleMs', 'firstPositiveVisibleMs', 'readyMs', 'librawDecodes']) put(`${scenario}.${key}`, m[key]);
+      for (const key of ['firstPixelsDrawnMs', 'firstPhotoVisibleMs', 'firstPositiveVisibleMs', 'readyMs', 'librawDecodes']) {
+        if (key !== 'librawDecodes' || (Array.isArray(part.events) && (observedWindow || m[key] > 0))) put(`${scenario}.${key}`, m[key]);
+      }
       for (const [key, value] of Object.entries(webkitWindowMetrics(window))) put(`${scenario}.${key}`, value);
     } else if (part.name.startsWith('drag:')) {
+      if (!window) continue;
       const dpr = Math.round(report.dpr || 2);
       const m = dragMetrics(events, { targetId: part.id, window: { start: part.start, release: part.release, end: part.release + 3000 }, initialValue: part.initial, frameTimes: window.frames, allowUntrusted: true });
       for (const [key, value] of Object.entries({ ...m, ...webkitWindowMetrics(window) })) put(`s2.${part.id}.dpr${dpr}.${key}`, value);
     } else if (part.name.startsWith('switch:')) {
-      const m = switchMetrics(events, { keyT: part.keyT, target: part.target, until: Infinity });
-      for (const key of ['firstPixelsMs', 'firstDisplayPositiveMs', 'readyMs', 'librawDecodes']) put(`s7.${part.cls}.${key}#${part.index}`, m[key]);
+      if (!events.length && !window) continue;
+      const m = switchMetrics(events, { keyT: part.keyT, target: part.target, until: window?.end ?? Infinity });
+      for (const key of ['firstPixelsMs', 'firstDisplayPositiveMs', 'readyMs', 'librawDecodes']) {
+        if (key !== 'librawDecodes' || (Array.isArray(part.events) && (observedWindow || m[key] > 0))) put(`s7.${part.cls}.${key}#${sampleIndex}`, m[key]);
+      }
     } else if (part.name.startsWith('export:')) {
       const prefix = `s9.${part.spec.id}`;
       const stages = exportStageMetrics(events, { start: part.start, end: window.end, spec: part.spec });
@@ -115,9 +130,9 @@ export function metricsFromSelfDriven(report, { record } = {}) {
 }
 
 export async function webkitMemory({ label, port, outDir, args, swapAtStart, freeDiskAtStart, onAbort,
-  reader = new FootprintReader(), list = listProcesses, connected, associatedGpu, readSwap = readSwapUsage, readDisk = freeDiskBytes,
+  ownership, reader = new FootprintReader(), list = listProcesses, connected, associatedGpu, readSwap = readSwapUsage, readDisk = freeDiskBytes,
   ceilingBytes = memoryCeilingBytes(), start = true }) {
-  const scope = webkitProcessScope({ before: await list(), port, list, connected, associatedGpu });
+  const scope = webkitProcessScope({ before: await list(), port, list, connected, associatedGpu, ownership });
   await reader.start();
   let verdict = null, pids = {}, ownedProcess = null, stopped = false;
   const registrations = new Map();
@@ -125,10 +140,11 @@ export async function webkitMemory({ label, port, outDir, args, swapAtStart, fre
     if (verdict) return;
     verdict = reason;
     // WebContent may be an XPC service outside the driver's process group.
-    for (const pid of [...(pids.renderer || []), ...(pids.gpu || [])]) {
-      try { process.kill(pid, 'SIGKILL'); } catch {}
+    for (const pid of [...(pids.renderer || []), ...(pids.gpu || [])]) scope.kill(pid);
+    if (ownedProcess) {
+      if (ownership) ownership.killOwnedProcess();
+      else killProcess(ownedProcess);
     }
-    if (ownedProcess) killProcess(ownedProcess);
     await onAbort?.(reason);
   };
   const sampler = new MemorySampler({
@@ -141,13 +157,14 @@ export async function webkitMemory({ label, port, outDir, args, swapAtStart, fre
         const current = new Set([...pids.renderer, ...pids.gpu]);
         for (const [pid, unregister] of registrations) if (!current.has(pid)) { unregister(); registrations.delete(pid); }
         for (const pid of [...pids.renderer, ...pids.gpu]) {
-          if (!registrations.has(pid)) registrations.set(pid, registerProcess({ pid }, { detached: false }));
+          if (!registrations.has(pid)) registrations.set(pid, registerProcess({ pid }, { detached: false, cleanup: () => scope.kill(pid) }));
         }
         return pids;
       } catch (error) {
         if (error.ownedRenderer) {
           pids = { renderer: [error.ownedRenderer], gpu: [], other: [] };
-          if (!registrations.has(error.ownedRenderer)) registrations.set(error.ownedRenderer, registerProcess({ pid: error.ownedRenderer }, { detached: false }));
+          if (!registrations.has(error.ownedRenderer)) registrations.set(error.ownedRenderer,
+            registerProcess({ pid: error.ownedRenderer }, { detached: false, cleanup: () => scope.kill(error.ownedRenderer) }));
         }
         await abort({ reason: 'error', detail: error.message });
         return { renderer: [], gpu: [], other: [] };
@@ -171,12 +188,14 @@ export async function webkitMemory({ label, port, outDir, args, swapAtStart, fre
     stop: () => {
       stopped = true;
       sampler.stop(); reader.stop();
-      for (const [pid, unregister] of registrations) { killProcess({ pid }, { detached: false }); unregister(); }
+      for (const [pid, unregister] of registrations) { scope.kill(pid); unregister(); }
       registrations.clear();
     },
-    assertScope: () => scope.assert(),
+    assertScope: async () => { pids = await scope.resolve(); scope.assert(); },
     processIds: () => pids,
-    bindProcess: child => { ownedProcess = child; },
+    processEnv: () => ownership?.environment() || {},
+    bindProcess: child => { ownedProcess = child; ownership?.bindProcess(child); },
+    stopOwnedProcess: signal => ownership ? ownership.killOwnedProcess(signal) : killProcess(ownedProcess),
     get verdict() { return verdict; },
     sampler, label
   };
@@ -399,17 +418,23 @@ export function tauriDevArgs({ port, scenario, fixtures, sliders = S2_SLIDERS, e
   return ['dev', '--release', '--no-watch', '--config', JSON.stringify({ build: { beforeDevCommand: '', devUrl: url } })];
 }
 
+export function launchWebKitProcess(bin, argv, { memory, cwd, spawnProcess = spawn } = {}) {
+  const child = spawnProcess(bin, argv, {
+    cwd, stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32', env: { ...process.env, ...memory.processEnv() }
+  });
+  memory.bindProcess(child);
+  const unregister = registerProcess(child, { cleanup: () => memory.stopOwnedProcess('SIGKILL') });
+  return { child, unregister };
+}
+
 async function tauriScenario(id, { ref, fixtureNames, record, note, log, outDir, label, memory }) {
   const bin = join(ref.worktree.path, 'node_modules', '.bin', process.platform === 'win32' ? 'tauri.cmd' : 'tauri');
   const before = new Set(existsSync(ref.resultsDir) ? readdirSync(ref.resultsDir) : []);
   const exports = id === 's9-parallel' ? PARALLEL_EXPORTS.map(spec => ({ ...spec, id: `zip.${spec.id}`, zip: true }))
     : id === 's9' ? [...SINGLE_EXPORTS.map(spec => ({ ...spec, id: `single.${spec.id}.imported` })),
       ...ZIP_EXPORTS.map(spec => ({ ...spec, id: `zip.${spec.id}`, zip: true }))] : [];
-  const child = spawn(bin, tauriDevArgs({ port: ref.port, scenario: id, fixtures: fixtureNames, exports }), {
-    cwd: ref.worktree.path, stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32', env: process.env
-  });
-  const unregister = registerProcess(child);
-  memory.bindProcess(child);
+  const { child, unregister } = launchWebKitProcess(bin, tauriDevArgs({ port: ref.port, scenario: id, fixtures: fixtureNames, exports }),
+    { cwd: ref.worktree.path, memory });
   let output = '';
   child.stdout.on('data', chunk => { output = (output + chunk).slice(-8000); });
   child.stderr.on('data', chunk => { output = (output + chunk).slice(-8000); });
@@ -429,6 +454,13 @@ async function tauriScenario(id, { ref, fixtureNames, record, note, log, outDir,
         const report = JSON.parse(readFileSync(join(ref.resultsDir, fresh.sort().at(-1)), 'utf8'));
         metricsFromSelfDriven(report, { record });
         if (report.error) throw new Error(`self-drive: ${report.error}`);
+        // The native host must still be alive while ownership is rechecked.
+        // finally stops it, so this barrier belongs before that cleanup.
+        await memory.assertScope();
+        await memory.sampler.tick();
+        if (memory.verdict) throw new Error(memory.verdict.detail);
+        const measured = memory.summary();
+        if (!(measured?.rendererPeakMB > 0 && measured?.gpuPeakMB > 0)) throw new Error('owned WebKit renderer/GPU footprints were not both measured');
         record(`${id}.inputMode`, 'synthetic');
         return report;
       }
@@ -437,9 +469,9 @@ async function tauriScenario(id, { ref, fixtureNames, record, note, log, outDir,
     throw new Error(`tauri dev produced no result${exited !== null ? ` (exited ${exited})` : ''}: ${output.slice(-1500)}`);
   } finally {
     stopHeartbeats();
-    try { process.kill(process.platform === 'win32' ? child.pid : -child.pid, 'SIGTERM'); } catch {}
+    memory.stopOwnedProcess('SIGTERM');
     await sleep(1000);
-    try { process.kill(process.platform === 'win32' ? child.pid : -child.pid, 'SIGKILL'); } catch {}
+    memory.stopOwnedProcess('SIGKILL');
     unregister();
     log(`${label}: tauri dev stopped`);
   }
@@ -447,6 +479,7 @@ async function tauriScenario(id, { ref, fixtureNames, record, note, log, outDir,
 
 export async function runWebKit({ args, repo, outBase, noisy, log, prepareRef, prepareFixtures, writeOutputs, fixtureConditions, freeDiskAtStart }) {
   if (process.platform !== 'darwin') throw new Error(`--browser ${args.browser} needs macOS (WKWebView)`);
+  if (args.browser === 'safari') throw new Error('Safari GPU ownership cannot be proved for the shared system host; refusing renderer-only WebKit measurement before fixtures or navigation');
   const ids = [...new Set(args.scenarios.flatMap(id => id === 's9' ? ['s9', 's9-parallel'] : [id]))]
     .filter(id => WEBKIT_SCENARIOS[args.browser].includes(id));
   if (!ids.length) { console.error(`--browser ${args.browser} runs ${WEBKIT_SCENARIOS[args.browser].join(', ')}`); return 2; }
@@ -471,6 +504,7 @@ export async function runWebKit({ args, repo, outBase, noisy, log, prepareRef, p
   let driver = null;
   let exitCode = 0;
   try {
+    const ownershipLibrary = args.browser === 'tauri' ? await buildWebKitObserver(outDir) : null;
     for (let i = 0; i < refSpecs.length; i++) {
       refs.push(await prepareRef({ ...refSpecs[i], repo, tmpRoot, port: args.port + i, cdpPort: args.cdpPort + i,
         previewEnv: { NC_PERF_WEBKIT: '1', NC_PERF_FIXTURES: JSON.stringify(fixtureMap) } }));
@@ -495,7 +529,9 @@ export async function runWebKit({ args, repo, outBase, noisy, log, prepareRef, p
             const result = { label, status: 'ok', metrics: {}, notes: [] };
             const record = (key, value) => { if (value !== null && value !== undefined && !(typeof value === 'number' && !Number.isFinite(value))) result.metrics[key] = value; };
             const note = text => { result.notes.push(text); log(`${label}: ${text}`); };
-            const memory = await webkitMemory({ label, port: ref.port, outDir, args, swapAtStart: swapStart, freeDiskAtStart,
+            const ownership = ownershipLibrary ? new WebKitOwnership({ library: ownershipLibrary, port: ref.port,
+              file: join(outDir, `ownership-${label}.jsonl`) }) : null;
+            const memory = await webkitMemory({ label, port: ref.port, outDir, args, ownership, swapAtStart: swapStart, freeDiskAtStart,
               onAbort: verdict => { result.status = verdict.reason; result.detail = verdict.detail; driver?.stop(); } });
             log(`${label}`);
             try {
@@ -517,7 +553,7 @@ export async function runWebKit({ args, repo, outBase, noisy, log, prepareRef, p
                 const names = fixture ? [fixture.name] : groups[scenario.fixtureGroup].map(entry => entry.name);
                 await tauriScenario(scenario.id, { ref, fixtureNames: names, record, note, log, outDir, label, memory });
               }
-              memory.assertScope();
+              if (args.browser === 'safari') await memory.assertScope();
               if (memory.verdict) throw new Error(memory.verdict.detail);
             } catch (error) {
               result.status = result.status === 'ok' ? 'error' : result.status;

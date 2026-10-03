@@ -5,8 +5,8 @@ import { execFileSync } from 'node:child_process';
 const processes = new Set();
 const worktrees = new Set();
 
-export function registerProcess(child, { detached = process.platform !== 'win32' } = {}) {
-  const entry = { child, detached };
+export function registerProcess(child, { detached = process.platform !== 'win32', cleanup } = {}) {
+  const entry = { child, detached, cleanup };
   processes.add(entry);
   return () => processes.delete(entry);
 }
@@ -26,7 +26,10 @@ export function killProcess(child, { detached = process.platform !== 'win32' } =
 }
 
 export function cleanupResources({ removeWorktrees = true } = {}) {
-  for (const { child, detached } of processes) killProcess(child, { detached });
+  for (const { child, detached, cleanup } of processes) {
+    if (cleanup) cleanup();
+    else killProcess(child, { detached });
+  }
   processes.clear();
   const errors = [];
   for (const entry of worktrees) {

@@ -22,7 +22,7 @@ import { createSourceMapper } from './sourcemap.mjs';
 import { createTraceAnalyzer, createTraceFileWriter, recordTrace } from './trace.mjs';
 import { summarizeRepetitions } from './stats.mjs';
 import { loafAttribution, workerTimingSummary } from './metrics.mjs';
-import { compareRuns, collectRunSummaries, renderCompareMarkdown, findMetricDef } from './compare.mjs';
+import { compareRuns, collectRunSummaries, renderCompareMarkdown, findMetricDef, comparisonSelection, probeControlSummaries } from './compare.mjs';
 import { renderReport } from './report.mjs';
 import { resolveFixtureGroups, syntheticNamesFor, sha256File } from './fixture-sets.mjs';
 import { selectScenarios } from '../scenarios/index.mjs';
@@ -365,6 +365,7 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
     }
     const scenarios = selectScenarios(args.scenarios, { injectHang: args.injectHang });
     const groups = await d.prepareFixtures({ args, scenarios, repo, chromeBin, freeDiskAtStart });
+    results.selection = comparisonSelection(scenarios, groups, args.dprs);
     const collector = { groups, gpu: null, chromeVersion: null, fixtureInfo: await fixtureConditions(groups) };
     await d.probeGpu({ ref: refs[0], args, chromeBin, collector, freeDiskAtStart, swapAtStart: swapStart });
     const ceilingBytes = memoryCeilingBytes();
@@ -445,11 +446,18 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
       const before = args.mode === 'compare' ? results.runs[0] : pickSavedRun(saved);
       const after = args.mode === 'compare' ? results.runs[1] : results.runs[0];
       const budgets = JSON.parse(readFileSync(d.budgetsPath, 'utf8'));
-      const crossProbeControl = saved && typeof saved.conditions?.probe === 'boolean' && saved.conditions.probe !== args.probe;
-      const comparable = run => Object.fromEntries(Object.entries(collectRunSummaries(run))
-        .filter(([key]) => !crossProbeControl || key.includes('.control.') || /\.status(?:@|$)/.test(key)));
-      const compare = compareRuns({ budgets, before: comparable(before), after: comparable(after), allowPixelChange: args.allowPixelChange });
-      if (crossProbeControl) compare.scope = 'probe/control: control.* metrics and scenario statuses';
+      const crossProbeControl = saved?.browser === 'chrome' && typeof saved.conditions?.probe === 'boolean' && saved.conditions.probe !== args.probe;
+      const summaries = crossProbeControl
+        ? probeControlSummaries({ before, after, saved, selection: results.selection })
+        : { before: collectRunSummaries(before), after: collectRunSummaries(after) };
+      const compare = compareRuns({ budgets, ...summaries, allowPixelChange: args.allowPixelChange });
+      if (crossProbeControl) {
+        compare.scope = summaries.scope;
+        if (!summaries.compatible) {
+          compare.exitCode = 1;
+          compare.scopeError = 'no common intended scenario, fixture and DPR scope';
+        }
+      }
       compare.baseLabel = args.mode === 'compare' ? args.compare[0] : `${before.sha?.slice(0, 7)} (saved)`;
       compare.headLabel = args.mode === 'compare' ? args.compare[1] : after.sha?.slice(0, 7);
       results.compare = compare;
