@@ -225,8 +225,10 @@ function releasedFixture() {
   f.c.inpaintManualBrush = () => assert.fail('no stroke pass without the model');
   await assert.rejects(f.c.renderCurrentImageDataForExport({ format: 'png', bitDepth: 8 }),
     /AI repair model could not be loaded \(Failed to fetch\), so nothing was exported/);
-  assert.equal(f.loadRequests.length, 1);
-  assert.equal(f.dustPasses.length, 0, 'no TELEA pass in its place');
+  await assert.rejects(f.c.renderCurrentImageDataForExport({ format: 'png', bitDepth: 8 }),
+    /AI repair model could not be loaded/, 'a second export after failure must not silently use TELEA');
+  assert.equal(f.loadRequests.length, 1, 'failed models require an explicit reload, not repeated fetches');
+  assert.equal(f.dustPasses.length, 0, 'no TELEA pass in either attempt');
   assert.deepEqual([f.commits.length, f.exportReads.length], [0, 0], 'nothing committed or encoded');
   assert.equal(f.state.dustRemoval.inpaintedImageData, patched);
 }
@@ -248,18 +250,16 @@ function releasedFixture() {
   }
 }
 
-// A model that had failed before the export (status 'error', TELEA on
-// screen) is not loaded for the dust: TELEA is that repair, run from scratch
-// over a copy of the mask instead of encoding the patched image.
+// An already failed model also fails consistently, without changing the repair.
 {
   const { f, patched } = releasedFixture();
   Object.assign(f.c.aiRepair, { status: 'error', released: false, error: 'bad model' });
-  f.c.inpaintManualBrush = (input) => Promise.resolve(input === f.clean ? f.repaired : null);
-  const value = await f.c.renderCurrentImageDataForExport({ format: 'png', bitDepth: 8 });
-  assert.equal(f.loadRequests.length, 0, 'no load for the dust');
-  assert.equal(f.dustPasses.length, 1, 'a from-scratch pass');
-  assert.equal(value, f.repaired);
-  assert.notEqual(value, patched);
+  f.c.inpaintManualBrush = () => assert.fail('no pass while the required model is unavailable');
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await assert.rejects(f.c.renderCurrentImageDataForExport({ format: 'png', bitDepth: 8 }), /AI repair model could not be loaded/);
+  }
+  assert.deepEqual([f.loadRequests.length, f.dustPasses.length, f.commits.length, f.exportReads.length], [0, 0, 0, 0]);
+  assert.equal(f.state.dustRemoval.inpaintedImageData, patched);
 }
 
-console.log('repairExportOwnership: scheduled manual-only zero-mask refresh is safe in both completion orders; genuine source/token/stroke/dust-mask/mode changes reject without stale commits; a released model is loaded again and repairs from scratch, or the export fails clearly; a failed model repairs with TELEA from scratch');
+console.log('repairExportOwnership: scheduled manual-only zero-mask refresh is safe in both completion orders; genuine source/token/stroke/dust-mask/mode changes reject without stale commits; a released model is loaded again and repairs from scratch, or the export fails clearly; repeated exports after model failure never substitute TELEA');

@@ -19087,7 +19087,6 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     async function prepareCurrentImageForExport({ onModelLoad = null } = {}) {
       await ensureFullResolutionReadyForExport();
       await ensureRepairsReadyForExport();
-      const modelFailed = aiRepair.status === 'error';
       // A load in flight decides which inpainter the recipe names.
       if (state.dustRemoval.ai && aiRepair.status === 'loading') await loadAiRepairForExport(onModelLoad, { load: false });
       // A quick export after a stroke must use MI-GAN, not its temporary preview.
@@ -19102,10 +19101,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (needsRepair && repairStamps.matches(state.dustRemoval.inpaintedImageData, currentRepairRecipe())) {
         if (state.processedImageData !== state.dustRemoval.inpaintedImageData) applyDustResultToState();
       } else if (needsRepair) {
-        // The pass runs MI-GAN, so a model that is not loaded is loaded first.
-        // One that had failed before leaves TELEA the dust repair, as on
-        // screen (the stroke pass still asks for the model).
-        if (!modelFailed && aiRepair.status !== 'ready') await loadAiRepairForExport(onModelLoad);
+        // An unstamped AI repair always needs the model, including retries
+        // after a failed load. A retry must not silently switch to TELEA.
+        if (aiRepair.status !== 'ready') await loadAiRepairForExport(onModelLoad);
         const source = getDustSource();
         const dustEnabled = Boolean(state.dustRemoval.enabled);
         // Brush strokes patch the mask in place, so the pass reads a copy

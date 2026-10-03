@@ -203,7 +203,9 @@ and every count equals a full recount.
   keeps its view and history. An export after a stroke loads the model too,
   with the load on its overlay, and repairs from scratch; when the model cannot
   be loaded (offline without a cached copy) the export fails with a message
-  instead of shipping TELEA in its place. A settled repair keeps its stamp
+  instead of shipping TELEA in its place. Repeated exports after that failure
+  also fail until the model is explicitly reloaded; a previous model error
+  does not authorize a different repair algorithm. A settled repair keeps its stamp
   across the release and is exported without a load.
 - **The refresh's memory.** The refresh keeps the repair strokes' frame-sized
   mask with the clean source it was built for, and drops both with that source
