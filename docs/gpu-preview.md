@@ -192,6 +192,7 @@ surface at 2.2–4 MP, in Node). They now stay on the GPU.
   while it is false only a look or a rescue keeps the CPU display.
   Identity WB with nonzero vibrance and a look or rescue also keeps the exact
   CPU display: this recipe misses the stricter original rounding fixture. Both
+  the gate and the shader read WB as float32, including gains that round to 1.
   `drawStep3` and `drawApply` reject it even after the mode programs link, and
   the app resumes GL when the recipe becomes supported. The force switch does
   not bypass this pixel-correctness gate.

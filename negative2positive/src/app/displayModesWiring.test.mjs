@@ -44,6 +44,8 @@ class TestImageData {
   assert.equal(active(), true, 'and draws on the GPU once they are ready');
   Object.assign(state, { vibrance: 35, wbR: 1, wbG: 1, wbB: 1 });
   assert.equal(active(), false, 'identity WB plus vibrance uses the exact CPU display even with linked modes');
+  state.wbR = 1 + Number.EPSILON;
+  assert.equal(active(), false, 'WB that rounds to identity in the shader cannot bypass the same gate');
   state.wbR = 1.06;
   assert.equal(active(), true, 'supported modes keep their GL path');
   state.vibrance = 0;

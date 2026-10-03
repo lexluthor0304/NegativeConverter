@@ -188,7 +188,7 @@ export function displayStageUniforms(params, { previous = null, sameAnalysis = f
 // The fp32 mode shader misses the original zero-error fixture; keep that
 // recipe on the exact CPU display until the shader meets its strict target.
 export function displayModesSupported({ wb, vib }) {
-  return !vib || !wb.every(gain => gain === 1);
+  return !vib || !wb.every(gain => Math.fround(gain) === 1);
 }
 
 // u_frame for a draw of a width × height texture that is the whole frame.
