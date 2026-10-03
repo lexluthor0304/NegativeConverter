@@ -283,13 +283,8 @@ export async function loadRawFile(buffer, fileName, options = {}) {
     if (sniffed && sniffed.kind !== 'tiff') {
       console.warn(`[TIFF] ${fileName} is actually ${sniffed.kind}; decoding it as such`);
       if (onMetadata) onMetadata(null);
-<<<<<<< HEAD
-      if (sniffed.kind === 'png') return await loadPngImageData(buffer, { signal, sharedPlanes: options.sharedPlanes === true });
-      const image = await loadStandardImage(new Blob([buffer]), { signal });
-=======
       if (sniffed.kind === 'png') return await loadPngImageData(buffer, { signal, sharedPlanes: options.sharedPlanes === true, reserveDecode: reserve });
       const image = await loadStandardImage(new Blob([buffer]), { signal, reserveDecode: reserve });
->>>>>>> 8aa6881 (fix: recheck decode-ahead admission at loader dispatch)
       throwIfAborted(signal);
       return image;
     }

@@ -17,7 +17,6 @@ assert.equal(terminated, 2);
 assert.equal((await decodeHeifInWorker(file, { workerFactory: good })).height, 1, 'a timeout must not poison the next decode');
 console.log('HEIF worker timeout, retry and heap disposal passed');
 
-<<<<<<< HEAD
 // Abort must never become HEIC_DECODE_FAILED or retain a decoder heap.
 {
   const c = new AbortController(); c.abort(); let created = 0;
@@ -27,20 +26,24 @@ console.log('HEIF worker timeout, retry and heap disposal passed');
 for (const duringFactory of [false, true]) {
   const c = new AbortController(); let stopped = 0, posts = 0, lateReply;
   const worker = { terminate() { stopped++; }, postMessage() { posts++; lateReply = this.onmessage; } };
-  const result = decodeHeifInWorker({}, { signal: c.signal, workerFactory: () => {
+  const result = decodeHeifInWorker(file, { signal: c.signal, workerFactory: () => {
     if (duringFactory) c.abort();
     return worker;
   } });
-  const rejection = assert.rejects(result, { name: 'AbortError' });
+  const rejection = assert.rejects(result, error => error.name === 'AbortError' && error.code !== 'HEIC_DECODE_FAILED');
+  if (!duringFactory) {
+    worker.onmessage({ data: { ready: true } });
+    for (let i = 0; i < 8; i++) await new Promise(setImmediate);
+  }
   c.abort(); await rejection;
   lateReply?.({ data: { width: 1, height: 1 } });
   assert.equal(stopped, 1, 'abort/late reply dispose exactly once');
   assert.equal(posts, duringFactory ? 0 : 1);
   assert.equal(worker.onmessage, null); assert.equal(worker.onerror, null);
 }
-assert.equal((await decodeHeifInWorker({}, { workerFactory: good })).width, 1, 'abort does not poison another decode');
+assert.equal((await decodeHeifInWorker(file, { workerFactory: good })).width, 1, 'abort does not poison another decode');
 console.log('HEIF pre-dispatch/in-flight abort, late reply and recovery passed');
-=======
+
 const defer = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
 const tick = async () => { for (let i = 0; i < 8; i++) await new Promise(setImmediate); };
 const source = readFileSync(new URL('../../public/codecs/heif-worker.js', import.meta.url), 'utf8');
@@ -94,4 +97,3 @@ for (const abort of [false, true]) {
   assert.equal(starts, abort ? 0 : 1); assert.equal(stopped, 1); assert.equal(budget.idle, true);
 }
 console.log('HEIF served worker: library readiness and file-read dispatch admission, counted bytes and abort passed');
->>>>>>> 8aa6881 (fix: recheck decode-ahead admission at loader dispatch)

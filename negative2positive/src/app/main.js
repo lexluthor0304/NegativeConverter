@@ -20184,13 +20184,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           image = await loadPngImageData(arrayBuffer, { signal, sharedPlanes: sharedPlanes && sharedPlanesAvailable(),
             reserveDecode: size => memoryClaim.atDecode(size) });
         } else {
-<<<<<<< HEAD
-          await memoryClaim.atDecode({ kind: 'scan' });
-          if (signal?.aborted) throw aborted();
-          image = await loadStandardImage(file, { signal, sharedPlanes: sharedPlanes && sharedPlanesAvailable() });
-=======
-          image = await loadStandardImage(file, { signal, reserveDecode: size => memoryClaim.atDecode(size) });
->>>>>>> 8aa6881 (fix: recheck decode-ahead admission at loader dispatch)
+          image = await loadStandardImage(file, { signal, sharedPlanes: sharedPlanes && sharedPlanesAvailable(),
+            reserveDecode: size => memoryClaim.atDecode(size) });
           if (signal?.aborted) throw aborted();
         }
       } finally {

@@ -96,13 +96,8 @@ export function createLibRaw({ background = false, LibRawClass = LibRaw, env = g
 // sends) answers once its module and pool are up; until then nothing else is
 // posted, so the bytes `open()` transfers are still here when the instance
 // fails to start, and the single-threaded build decodes them instead.
-<<<<<<< HEAD
-function threadedLibRaw(LibRawClass, threads, startTimeoutMs) {
-  let current = watchLibRawWorker(new LibRawClass({ threads }));
-=======
 function threadedLibRaw(LibRawClass, threads, startTimeoutMs, beforeDecode) {
-  let current = new LibRawClass({ threads });
->>>>>>> 8aa6881 (fix: recheck decode-ahead admission at loader dispatch)
+  let current = watchLibRawWorker(new LibRawClass({ threads }));
   let started = null;
   let disposed = false;
   const decoder = {

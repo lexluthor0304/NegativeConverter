@@ -124,15 +124,10 @@ export async function decodeJpegInWorker(extracted, {
   return new Promise((resolve, reject) => {
     let finished = false;
     let dispatched = false;
-<<<<<<< HEAD
-    const onAbort = () => finish(abortError(signal));
-    const finish = (error, result = null) => {
-=======
     let admitting = false;
     let startupFailed = false;
-    const onAbort = () => finish(null, abortError(signal));
-    const finish = (result, error = null) => {
->>>>>>> 8aa6881 (fix: recheck decode-ahead admission at loader dispatch)
+    const onAbort = () => finish(abortError(signal));
+    const finish = (error, result = null) => {
       if (finished) return;
       finished = true;
       clearTimeout(timer);
@@ -161,12 +156,8 @@ export async function decodeJpegInWorker(extracted, {
             if (reserveDecode) await reserveDecode({ kind: 'scan', width: extracted.width, height: extracted.height });
             if (finished) return;
             if (signal?.aborted) { onAbort(); return; }
-<<<<<<< HEAD
-          } catch (error) { finish(error); return; }
-=======
             if (startupFailed) { finish(null); return; }
-          } catch (error) { finish(null, error); return; }
->>>>>>> 8aa6881 (fix: recheck decode-ahead admission at loader dispatch)
+          } catch (error) { finish(error); return; }
           // Transfer only a buffer that holds exactly the JPEG: a view into a
           // larger container is copied so the container stays intact.
           try {
