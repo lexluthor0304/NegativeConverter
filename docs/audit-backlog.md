@@ -32,6 +32,11 @@ The developer Tauri harness now has a native view/XPC association provider,
 isolates its startup cache with an opt-in native feature, and revalidates PID
 identity before cleanup. A separate tiny actual-app caller proof is available;
 its page and guard inputs are synthetic and its app uses the debug cache.
+Initial self-drive waits for bounded attribution and positive renderer/GPU
+footprints; acquired scope loss or sampling failure automatically stops the
+verified native host and launcher. Changed endpoints remain excluded from
+signals, partial metrics survive, and the tiny controlled-revocation proof
+measures real host disappearance separately from callback latency.
 Safari's exclusive GPU association
 remains unavailable and is refused before navigation; tiny native attribution
 proof does not establish the unmeasured performance targets.

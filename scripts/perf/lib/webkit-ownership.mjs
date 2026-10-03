@@ -63,7 +63,7 @@ export function verifiedWebKitAssociation(snapshot, { root, current, port }) {
 export class WebKitOwnership {
   constructor({ library, file, port, metadata = processMetadata, read = readFileSync, write = writeFileSync } = {}) {
     this.library = library; this.file = file; this.port = port; this.metadata = metadata; this.read = read;
-    this.root = null; this.child = null; this.association = null; this.cleanupAttempts = [];
+    this.root = null; this.child = null; this.association = null; this.cleanupAttempts = []; this.failure = null;
     write(file, '', { flag: 'wx', mode: 0o600 });
   }
 
@@ -73,11 +73,12 @@ export class WebKitOwnership {
 
   bindProcess(child) {
     this.child = child;
-    this.root = this.metadata([child.pid])[child.pid] || null;
+    this.root = structuredClone(this.metadata([child.pid])[child.pid] || null);
   }
 
   resolve() {
     this.association = null;
+    this.failure = null;
     if (!this.root) return null;
     let snapshots;
     try {
@@ -95,15 +96,23 @@ export class WebKitOwnership {
       ...(item.ancestors || []).map(p => p.pid), ...(item.views || []).flatMap(view => [view.renderer?.identity?.pid, view.gpu?.identity?.pid])])]
       .filter(pid => Number.isInteger(pid) && pid > 1);
     const current = this.metadata(pids);
+    const owned = snapshots.filter(snapshot => snapshot.source === 'wkwebview+xpc-oneshot' && snapshot.port === this.port
+      && ownedDescendant(snapshot, this.root, current));
+    if (owned.some(snapshot => snapshot.views?.length && !verifiedWebKitAssociation(snapshot, { root: this.root, current, port: this.port }))) {
+      this.failure = 'invalid or ambiguous WebKit endpoint identity/association';
+      return null;
+    }
     const associations = snapshots.map(snapshot => verifiedWebKitAssociation(snapshot, { root: this.root, current, port: this.port })).filter(Boolean);
     if (associations.length === 1) this.association = associations[0];
+    if (associations.length > 1) this.failure = 'ambiguous owned WebKit associations';
     return this.association;
   }
 
-  kill(pid, number = 9) {
+  kill(pid, number = 9, enrolled) {
     const association = this.resolve();
     const endpoint = [association?.renderer, association?.gpu].find(p => p?.identity.pid === pid);
     if (!endpoint) return false;
+    if (enrolled && (!sameProcess(enrolled.identity, endpoint.identity) || enrolled.instance !== endpoint.instance)) return false;
     const expected = [this.root, association.owner, endpoint.identity];
     const result = this.metadata(expected.map(p => p.pid), {
       expected, signal: { ...endpoint, number }
@@ -113,7 +122,24 @@ export class WebKitOwnership {
   }
 
   killOwnedProcess(signal = 'SIGKILL') {
-    if (!this.child || this.child.exitCode !== null || !sameProcess(this.root, this.metadata([this.root?.pid])[this.root?.pid])) return false;
-    try { process.kill(-this.child.pid, signal); return true; } catch { return false; }
+    const number = { SIGKILL: 9, SIGTERM: 15 }[signal];
+    if (!number || !this.root) return false;
+    // Native ancestry is independent of the renderer/GPU association. Even
+    // initial missing evidence must stop the actual host, not only its CLI.
+    const current = this.metadata([this.root.pid], { descendantsOf: this.root });
+    if (!sameProcess(this.root, current[this.root.pid])) return false;
+    const chains = [...(current.descendants || []).map(item => item.chain), [this.root]]
+      .filter(chain => chain?.length && !/\/com\.apple\.WebKit\./.test(chain[0].path))
+      .sort((a, b) => b.length - a.length);
+    let stopped = false;
+    for (const chain of chains) {
+      const target = chain[0];
+      if (!sameProcess(chain.at(-1), this.root)) continue;
+      const result = this.metadata(chain.map(p => p.pid), { expected: chain, ownedChain: chain,
+        signal: { identity: target, number } });
+      this.cleanupAttempts.push({ pid: target.pid, number, authority: 'owned-native-ancestry', ...result });
+      stopped ||= result.signalled === true;
+    }
+    return stopped;
   }
 }

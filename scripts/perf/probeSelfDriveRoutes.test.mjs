@@ -5,8 +5,9 @@ import { metricsFromSelfDriven } from './lib/webkit.mjs';
 
 const source = readFileSync(process.env.NC_PERF_SELFDRIVE_PROBE_PATH || new URL('./probe.js', import.meta.url), 'utf8');
 
-async function drive(scenario, abortIndex = -1) {
+async function drive(scenario, abortIndex = -1, admission) {
   let clock = 0, current = 0, report, world, worker, frames = 0;
+  let polls = 0, fixtureFetches = 0;
   const names = [0, 1, 2, 3].map(index => `r${index}.dng`), visits = [];
   const type = ['bw', 'positive', 'color', 'bw'];
   class TinyBlob { constructor() { this.size = 1; this.type = ''; } }
@@ -62,15 +63,24 @@ async function drive(scenario, abortIndex = -1) {
     getComputedStyle: () => ({ display: 'block', opacity: '1' }), localStorage: { setItem() {} },
     addEventListener() {}, __TAURI_INTERNALS__: { invoke: async cmd => cmd === 'begin_export_write' ? 'fake-write' : undefined },
     fetch: async (url, options) => {
+      if (url.startsWith('/__perf/admission')) {
+        polls++;
+        assert.equal(visits.length, 0, 'no decode/UI scenario work before native admission');
+        assert.equal(fixtureFetches, 0, 'even fixture fetches wait for the complete native scope');
+        return { ok: admission !== 'unavailable', json: async () => ({ state: admission === 'revoked' ? 'aborted'
+          : admission === 'ready' && polls > 2 ? 'admitted' : 'pending' }) };
+      }
       if (options?.method === 'POST') report = JSON.parse(options.body);
+      else fixtureFetches++;
       return { ok: true, blob: async () => new TinyBlob() };
     }
   };
   runInNewContext(source, world);
   worker = new world.Worker('/conversionWorker.js');
   const exports = scenario.startsWith('s9') ? [{ id: 'single.dng.imported', format: 'dng', bitDepth: 16 }] : [];
-  await world.__ncPerf.selfDrive({ scenario, fixtures: names, sliders: [], exports });
-  return { report, visits, window: world.__ncPerf.dump().window, metrics: metricsFromSelfDriven(report) };
+  await world.__ncPerf.selfDrive({ scenario, fixtures: names, sliders: [], exports,
+    ...(admission ? { admission: admission === 'missing' ? '' : 'a'.repeat(32), scopeTimeoutMs: 350 } : {}) });
+  return { report, visits, polls, fixtureFetches, window: world.__ncPerf.dump().window, metrics: metricsFromSelfDriven(report) };
 }
 
 for (const id of ['s7', 's9', 's9-parallel']) {
@@ -97,4 +107,18 @@ assert.match(aborted.report.error, /metadata visit failed/);
 assert.equal(aborted.metrics['s7.photo0.route'], 'bw', 'completed request metadata survives a later self-drive rejection');
 assert.equal(aborted.metrics['s7.photo3.route'], undefined);
 assert.equal(aborted.window, null, 'a rejected metadata visit closes its measurement window');
+for (const admission of ['ready', 'timeout', 'revoked', 'unavailable', 'missing']) {
+  const guarded = await drive('s1', -1, admission);
+  if (admission === 'ready') {
+    assert.equal(guarded.report.error, undefined);
+    assert.equal(guarded.polls, 3);
+    assert.equal(guarded.fixtureFetches, 4);
+  } else {
+    assert.match(guarded.report.error, /admission/);
+    assert.equal(guarded.fixtureFetches, 0);
+    assert.deepEqual(guarded.visits, []);
+    assert.equal(guarded.report.parts.length, 0, 'initial failure must not invent import metrics');
+    assert.deepEqual(guarded.metrics, {});
+  }
+}
 console.log('probe self-drive routes: actual probe/mapper callers, post-window visits and retained pre-error metadata (no native measurement)');

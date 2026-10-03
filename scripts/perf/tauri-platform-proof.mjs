@@ -10,6 +10,7 @@ import { promisify } from 'node:util';
 import { buildWebKitObserver, WebKitOwnership, processMetadata, sameProcess } from './lib/webkit-ownership.mjs';
 import { launchWebKitScript, tauriScenario, webkitMemory } from './lib/webkit.mjs';
 import { freeDiskBytes, GiB } from './lib/guards.mjs';
+import { createPerfMiddleware } from './preview-plugin.mjs';
 
 const run = promisify(execFile), out = resolve(process.argv[2]), port = Number(process.env.PORT || 5591);
 mkdirSync(out, { recursive: true });
@@ -24,7 +25,9 @@ const resultsDir = join(out, 'results');
 mkdirSync(resultsDir, { recursive: true });
 let active = null, outsider = null, sequence = 0;
 const owners = [], results = [];
+const middleware = createPerfMiddleware({ webkit: true, resultsDir });
 const server = createServer(async (request, response) => {
+  if (request.url.startsWith('/__perf/')) return middleware(request, response, () => { response.statusCode = 404; response.end(); });
   response.setHeader('Cache-Control', 'no-store');
   response.setHeader('Content-Type', request.url === '/tiny.js' ? 'text/javascript' : 'text/html');
   if (request.url === '/tiny.js') {
@@ -33,12 +36,21 @@ const server = createServer(async (request, response) => {
       (async()=>{let native=null,error=null;
         try{native=await window.__TAURI__.core.invoke('get_memory_info')}catch(e){error=String(e)}
         if(window.__TAURI_INTERNALS__)await fetch('/native-probe',{method:'POST',body:JSON.stringify({guard:${JSON.stringify(active?.guard)},tauri:true,native,error,webgl:!!gl})});
-      })();setInterval(()=>fetch('/alive'),250);`);
+      })();
+      (async()=>{const token=new URLSearchParams(location.search).get('admission');
+        if(!token)return; const deadline=Date.now()+30000;
+        while(Date.now()<deadline){const state=await(await fetch('/__perf/admission?token='+token)).json();
+          if(state.state==='admitted'){await fetch('/workload-start');setInterval(()=>fetch('/alive'),250);return}
+          if(state.state!=='pending')return; await new Promise(r=>setTimeout(r,50))}
+      })();`);
   } else if (request.url === '/native-probe') {
     let body = '';
     for await (const part of request) body += part;
     const probe = JSON.parse(body);
     if (active && probe.guard === active.guard) active.nativeProbe = probe;
+    response.end('ok');
+  } else if (request.url === '/workload-start') {
+    if (active) active.workloadStartedAt = Date.now();
     response.end('ok');
   } else if (request.url === '/alive') response.end('ok');
   else response.end('<!doctype html><canvas width="64" height="48"></canvas><script src="/tiny.js"></script>');
@@ -77,11 +89,22 @@ function checkOutsider() {
 }
 let failure = null;
 try {
-  for (const guard of ['scope', 'memory-ceiling', 'swap-growth', 'low-disk']) {
+  for (const guard of ['scope', 'identity-revocation', 'memory-ceiling', 'swap-growth', 'low-disk']) {
     const previousCaches = new Set(readdirSync(out).filter(name => name.startsWith('tauri-cache-')));
     const ownership = owner(guard);
-    const state = { guard, nativeProbe: null, association: null, triggerAt: null, abortAt: null, crossing: false };
+    const state = { guard, nativeProbe: null, association: null, triggerAt: null, abortAt: null, crossing: false,
+      workloadStartedAt: null, ownedHostGoneAt: null, revoked: false };
     active = state;
+    // Only this metadata/policy input is synthetic. Footprints and every
+    // native-ancestry cleanup request still go to the real OS reader.
+    ownership.metadata = (pids, request = {}) => {
+      const current = processMetadata(pids, request);
+      const gpu = state.association?.gpu.identity;
+      if (state.revoked && !request.signal && !request.descendantsOf && current[gpu?.pid]) {
+        current[gpu.pid] = { ...current[gpu.pid], version: gpu.version + 1 };
+      }
+      return current;
+    };
     const originalResolve = ownership.resolve.bind(ownership);
     ownership.resolve = () => {
       const association = originalResolve();
@@ -106,10 +129,16 @@ try {
         assert.ok(freeDiskBytes(out) > 3.5 * GiB, 'real disk margin must stay above 3.5 GiB during synthetic guard proof');
         const measured = memory.sampler.samples.find(sample => sample.rendererBytes > 0 && sample.gpuBytes > 0);
         if (state.association && measured && guard === 'scope' && !outsider) outsider = await startOutsider();
-        if (state.association && measured && state.nativeProbe?.native?.totalBytes > 0 && !state.crossing) {
+        if (state.triggerAt && !state.ownedHostGoneAt) {
+          const host = state.association.owner;
+          if (!sameProcess(host, processMetadata([host.pid])[host.pid])) state.ownedHostGoneAt = Date.now();
+        }
+        if (state.association && measured && state.nativeProbe?.native?.totalBytes > 0 && !state.crossing
+            && (guard === 'memory-ceiling' || state.workloadStartedAt)) {
           if (outsider) checkOutsider();
           state.crossing = true;
           state.triggerAt = Date.now();
+          if (guard === 'identity-revocation') state.revoked = true;
           if (guard === 'scope') {
             writeFileSync(join(resultsDir, `result-${Date.now()}-${++sequence}.json`), JSON.stringify({ scenario: 's1', parts: [],
               synthetic: true, nativeCallerProof: state.nativeProbe }));
@@ -130,10 +159,21 @@ try {
         assert.equal(memory.verdict, null);
       } else {
         assert.ok(pendingError, 'the production scenario caller must reject automatic guard aborts');
-        assert.equal(memory.verdict?.reason, 'memory-ceiling');
-        assert.match(memory.verdict.detail, guard === 'swap-growth' ? /swap grew/ : guard === 'low-disk' ? /free disk fell/ : /browser footprint/);
+        assert.equal(memory.verdict?.reason, guard === 'identity-revocation' ? 'error' : 'memory-ceiling');
+        assert.match(memory.verdict.detail, guard === 'identity-revocation' ? /identity|attribution/ : guard === 'swap-growth' ? /swap grew/ : guard === 'low-disk' ? /free disk fell/ : /browser footprint/);
         if (guard === 'memory-ceiling') state.triggerAt = measured.t;
         assert.ok(state.abortAt - state.triggerAt >= 0 && state.abortAt - state.triggerAt < 1500, 'observed guard response must be bounded');
+        const host = state.association.owner;
+        if (!state.ownedHostGoneAt && !sameProcess(host, processMetadata([host.pid])[host.pid])) state.ownedHostGoneAt = Date.now();
+        assert.ok(state.ownedHostGoneAt, 'actual native host disappearance is required, not just an observer/CLI stop');
+        assert.ok(state.ownedHostGoneAt - state.triggerAt < 2000, 'tiny owned-host termination must be bounded independently of callback latency');
+        if (guard === 'identity-revocation') {
+          assert.ok(state.workloadStartedAt < state.triggerAt, 'revocation follows valid admission and actual tiny workload startup');
+          assert.ok(ownership.cleanupAttempts.some(attempt => attempt.pid === host.pid && attempt.signalled
+            && attempt.authority === 'owned-native-ancestry'), 'automatic guard terminates the real verified app');
+          assert.ok(!ownership.cleanupAttempts.some(attempt => [state.association.renderer.identity.pid, state.association.gpu.identity.pid].includes(attempt.pid)
+            && attempt.signalled), 'synthetically revoked endpoints never receive a signal');
+        }
       }
       checkOutsider();
       const cacheRoots = readdirSync(out).filter(name => name.startsWith('tauri-cache-') && !previousCaches.has(name));
@@ -142,6 +182,8 @@ try {
       assert.ok(existsSync(join(cacheRoot, 'display-proxies', 'session')), 'this exact application startup used its isolated cache');
       results.push({ ...state, crossing: undefined, startedAt: started, settledAt: Date.now(), responseMs: state.abortAt === null ? null : state.abortAt - state.triggerAt,
         callerResponseMs: state.triggerAt === null ? null : Date.now() - state.triggerAt, samples: memory.sampler.samples,
+        ownedHostTerminationMs: state.ownedHostGoneAt === null ? null : state.ownedHostGoneAt - state.triggerAt,
+        attributionRevocationSynthetic: guard === 'identity-revocation',
         cleanupAttempts: ownership.cleanupAttempts, root: ownership.root, cacheRoot, metrics, notes, unrelated: outsider.association,
         automaticSampler: true, manualProofTicks: 0, policyInputsSynthetic: true, pageSynthetic: true, nativeFootprintsReal: true });
     } finally { memory.stop(); }

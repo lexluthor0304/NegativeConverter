@@ -6,6 +6,7 @@
 //   GET  /__perf/requests       requests that only a dev server would see
 //   GET  /__perf/probe.js       the in-page probe (same origin: CSP 'self')
 //   GET  /__perf/fixtures/NAME  WebKit modes only; the configured files only
+//   GET  /__perf/admission      bounded native scope warmup, before self-drive
 //   POST /__perf/results        probe results (WebKit modes)
 //   POST /__perf/heartbeat      "main thread silent" reports (WebKit modes)
 //   POST /__perf/export?name=   export bytes for the S9 verification pass
@@ -20,6 +21,11 @@ import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
+
+export function admissionPaths(resultsDir, token) {
+  if (!resultsDir || !/^[a-f\d]{32}$/.test(token || '')) throw new Error('invalid WebKit workload admission claim');
+  return { request: join(resultsDir, `admission-request-${token}.json`), grant: join(resultsDir, `admission-${token}.json`) };
+}
 
 export function optionsFromEnv(env = process.env) {
   let fixtures = {};
@@ -82,6 +88,16 @@ export function createPerfMiddleware(options) {
       if (req.method === 'GET' && path === '/__perf/requests') return send(res, 200, { suspicious });
       if (req.method === 'GET' && path === '/__perf/probe.js') {
         return send(res, 200, readFileSync(options.probePath), 'text/javascript; charset=utf-8');
+      }
+      if (req.method === 'GET' && path === '/__perf/admission') {
+        if (!options.webkit || !options.resultsDir) return send(res, 404, { error: 'no guarded WebKit workload' });
+        const token = parsed.searchParams.get('token');
+        if (!/^[a-f\d]{32}$/.test(token || '')) return send(res, 400, { error: 'invalid workload claim' });
+        const files = admissionPaths(options.resultsDir, token);
+        mkdirSync(options.resultsDir, { recursive: true });
+        if (!existsSync(files.request)) writeFileSync(files.request, JSON.stringify({ requestedAt: Date.now() }), { flag: 'wx', mode: 0o600 });
+        const state = existsSync(files.grant) ? JSON.parse(readFileSync(files.grant, 'utf8')) : { state: 'pending' };
+        return send(res, 200, state);
       }
       if (req.method === 'GET' && path.startsWith('/__perf/fixtures/')) {
         const name = decodeURIComponent(path.slice('/__perf/fixtures/'.length));

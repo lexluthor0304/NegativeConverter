@@ -7,6 +7,7 @@ import ctypes
 import json
 import os
 import sys
+import subprocess
 
 lib = ctypes.CDLL('/usr/lib/libSystem.B.dylib', use_errno=True)
 lib.proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
@@ -42,15 +43,48 @@ def identity(pid):
 
 def answer(request):
     metadata = {str(pid): identity(pid) for pid in request['pids']}
+    root = request.get('descendantsOf')
+    keys = ('pid', 'unique', 'version', 'uid', 'path')
+    if root:
+        live = metadata.get(str(root['pid']))
+        descendants = []
+        if live and all(live[k] == root[k] for k in keys):
+            rows = subprocess.run(['ps', '-axo', 'pid=,ppid='], capture_output=True, text=True, timeout=1, check=True).stdout.splitlines()
+            children = {}
+            for row in rows:
+                pid, parent = map(int, row.split())
+                children.setdefault(parent, []).append(pid)
+            pending = [[root]]
+            while pending:
+                chain = pending.pop()
+                for pid in children.get(chain[0]['pid'], []):
+                    child = identity(pid)
+                    if child and child['parentPid'] == chain[0]['pid'] and child['parentUnique'] == chain[0]['unique']:
+                        owned = [child] + chain
+                        descendants.append({'chain': owned})
+                        pending.append(owned)
+        metadata['descendants'] = descendants
+        return metadata
     target = request.get('signal')
     if target:
         current = metadata.get(str(target['identity']['pid']))
         # The caller supplies the proven owner and peer together; recheck both
         # identities here immediately before the kernel's versioned signal.
         expected = request['expected']
-        keys = ('pid', 'unique', 'version', 'uid', 'path')
         valid = all(metadata.get(str(item['pid'])) and all(metadata[str(item['pid'])][k] == item[k] for k in keys) for item in expected)
-        token = target['auditToken']
+        chain = request.get('ownedChain')
+        if chain:
+            valid = valid and chain == expected and target['identity'] == chain[0]
+            for child, parent in zip(chain, chain[1:]):
+                live = metadata.get(str(child['pid']))
+                valid = valid and live and live['parentPid'] == parent['pid'] and live['parentUnique'] == parent['unique']
+            valid = valid and not '/com.apple.WebKit.' in target['identity']['path']
+            # XNU proc_find_audit_token validates PID version atomically. The
+            # owned-child claim above supplies authority; this is not an XPC
+            # association or permission to signal a WebKit service.
+            token = [0, 0, 0, 0, 0, target['identity']['pid'], 0, target['identity']['version']]
+        else:
+            token = target['auditToken']
         valid = valid and current and len(token) == 8 and token[5] == current['pid'] and token[7] == current['version']
         if valid:
             audit = (ctypes.c_uint32 * 8)(*token)

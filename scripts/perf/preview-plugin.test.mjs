@@ -1,10 +1,10 @@
 // The /__perf routes, exercised through a plain node:http server (no Vite).
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createPerfMiddleware, injectProbe, isDevServerRequest, optionsFromEnv, ncPerfPreviewPlugin } from './preview-plugin.mjs';
+import { admissionPaths, createPerfMiddleware, injectProbe, isDevServerRequest, optionsFromEnv, ncPerfPreviewPlugin } from './preview-plugin.mjs';
 import perfPreviewConfig from './vite.preview.config.js';
 
 const root = mkdtempSync(join(tmpdir(), 'nc-perf-preview-'));
@@ -44,6 +44,15 @@ try {
     assert.equal((await fetch(`${origin}/__perf/results`, { method: 'POST', body: JSON.stringify({ scenario: 's1', metrics: { a: 1 } }) })).status, 204);
     const [result] = readdirSync(options.resultsDir);
     assert.equal(JSON.parse(readFileSync(join(options.resultsDir, result), 'utf8')).scenario, 's1');
+    const token = 'a'.repeat(32), claims = admissionPaths(options.resultsDir, token);
+    assert.equal((await fetch(`${origin}/__perf/admission?token=../invalid`)).status, 400);
+    assert.deepEqual(await (await fetch(`${origin}/__perf/admission?token=${token}`)).json(), { state: 'pending' });
+    assert.ok(existsSync(claims.request), 'native warmup begins at the first UI bootstrap request');
+    writeFileSync(claims.grant, JSON.stringify({ state: 'admitted' }));
+    assert.deepEqual(await (await fetch(`${origin}/__perf/admission?token=${token}`)).json(), { state: 'admitted' });
+    writeFileSync(claims.grant, JSON.stringify({ state: 'aborted' }));
+    assert.deepEqual(await (await fetch(`${origin}/__perf/admission?token=${token}`)).json(), { state: 'aborted' });
+    assert.deepEqual(await (await fetch(`${origin}/__perf/admission?token=${'b'.repeat(32)}`)).json(), { state: 'pending' }, 'one launch cannot reuse another launch grant');
     assert.equal((await fetch(`${origin}/__perf/results`, { method: 'POST', body: 'not json' })).status, 400);
     const exported = await (await fetch(`${origin}/__perf/export?name=${encodeURIComponent('../L1000617.png')}`, { method: 'POST', body: Buffer.alloc(5000, 1) })).json();
     assert.equal(exported.size, 5000);
@@ -62,6 +71,7 @@ try {
   const chromeOrigin = `http://127.0.0.1:${chromeServer.address().port}`;
   try {
     assert.equal((await fetch(`${chromeOrigin}/__perf/fixtures/L1000617.DNG`)).status, 404);
+    assert.equal((await fetch(`${chromeOrigin}/__perf/admission?token=${'a'.repeat(32)}`)).status, 404);
     assert.equal(await (await fetch(`${chromeOrigin}/?perf=1`)).text(), 'static');
   } finally {
     chromeServer.close();

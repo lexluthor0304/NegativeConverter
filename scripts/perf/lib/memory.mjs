@@ -105,6 +105,7 @@ export function webkitProcessScope({ before, port, ownership, list = listProcess
       const all = await list();
       if (ownership) {
         const association = ownership.resolve();
+        if (ownership.failure) throw new Error(ownership.failure);
         renderer = association?.renderer.identity.pid || null;
         gpu = association?.gpu.identity.pid || null;
         if ([renderer, gpu].some(pid => pid && existing.has(pid))) {
@@ -145,7 +146,7 @@ export function webkitProcessScope({ before, port, ownership, list = listProcess
       if (!renderer) throw new Error('could not attribute a WebContent PID to harness navigation');
       if (!gpu) throw new Error('could not prove exclusive WebKit GPU ownership; renderer-only data is incomplete');
     },
-    kill(pid) { return ownership?.kill(pid) === true; }
+    kill(pid, expected) { return ownership?.kill(pid, 9, expected) === true; }
   };
 }
 
@@ -256,11 +257,15 @@ export class FootprintReader {
  * `onSample` so the run guards can abort within one sampling period.
  */
 export class MemorySampler {
-  constructor({ reader, resolvePids, intervalMs = 250, onSample = () => {} }) {
+  constructor({ reader, resolvePids, intervalMs = 250, timeoutMs = 0, validateSample = () => true,
+    onSample = () => {}, onError = () => {} }) {
     this.reader = reader;
     this.resolvePids = resolvePids;
     this.intervalMs = intervalMs;
     this.onSample = onSample;
+    this.onError = onError;
+    this.validateSample = validateSample;
+    this.timeoutMs = timeoutMs;
     this.samples = [];
     this.timer = null;
     this.busy = false;
@@ -275,19 +280,32 @@ export class MemorySampler {
   async tick() {
     if (this.busy) return;
     this.busy = true;
+    const bounded = async task => {
+      if (!this.timeoutMs) return task();
+      let timer;
+      try {
+        return await Promise.race([task(), new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error('process memory sampling timed out')), this.timeoutMs);
+        })]);
+      } finally { clearTimeout(timer); }
+    };
     try {
-      const groups = await this.resolvePids();
+      const groups = await bounded(this.resolvePids);
+      if (!groups) return; // Initial attribution is pending, not a zero-byte observation.
       const pids = [...(groups.renderer || []), ...(groups.gpu || []), ...(groups.other || [])];
-      const values = await this.reader.read(pids);
+      const values = await bounded(() => this.reader.read(pids));
       const pick = list => (list || []).map(pid => ({ pid, ...(values[pid] || {}) })).filter(entry => Number.isFinite(entry.footprint));
       const sample = { t: Date.now(), renderer: pick(groups.renderer), gpu: pick(groups.gpu), other: pick(groups.other) };
       sample.rendererBytes = Math.max(0, ...sample.renderer.map(entry => entry.footprint));
       sample.gpuBytes = sample.gpu.reduce((total, entry) => total + entry.footprint, 0);
       sample.totalBytes = [...sample.renderer, ...sample.gpu, ...sample.other].reduce((total, entry) => total + entry.footprint, 0);
+      if (!await bounded(() => this.validateSample(sample, groups))) return;
       this.samples.push(sample);
-      await this.onSample(sample);
-    } catch {
-      // A vanished process between listing and reading is normal.
+      await bounded(() => this.onSample(sample));
+    } catch (error) {
+      // Chrome may ignore a vanished process. An acquired native scope must
+      // explicitly abort on errors, timeouts or missing footprints.
+      await this.onError(error);
     } finally {
       this.busy = false;
     }

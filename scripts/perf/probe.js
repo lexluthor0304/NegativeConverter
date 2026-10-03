@@ -896,9 +896,27 @@
       return part;
     });
   }
+  function waitForAdmission(spec) {
+    if (spec.admission === undefined) return Promise.resolve();
+    if (!/^[a-f\d]{32}$/.test(spec.admission || '')) return Promise.reject(new Error('missing native workload admission claim'));
+    var deadline = now() + (spec.scopeTimeoutMs || 30000);
+    function poll() {
+      if (now() >= deadline) throw new Error('native workload admission timed out before fixture import');
+      return fetch('/__perf/admission?token=' + spec.admission, { cache: 'no-store' }).then(function (response) {
+        if (!response.ok) throw new Error('native workload admission unavailable');
+        return response.json();
+      }).then(function (state) {
+        if (state.state === 'admitted') return;
+        if (state.state !== 'pending') throw new Error('native workload admission revoked');
+        return sleepMs(100).then(poll);
+      });
+    }
+    return Promise.resolve().then(poll);
+  }
   function selfDrive(spec) {
     var report = { scenario: spec.scenario, synthetic: true, engine: navigator.userAgent, dpr: global.devicePixelRatio, parts: [], startedAt: now() };
-    return waitUntil(function () { return document.getElementById('studioImportAutoCrop') && document.body.classList.contains('studio'); }, 120000)
+    return waitForAdmission(spec)
+      .then(function () { return waitUntil(function () { return document.getElementById('studioImportAutoCrop') && document.body.classList.contains('studio'); }, 120000); })
       .then(function () { return sleepMs(1500); })
       .then(function () {
         report.bootMs = now();
@@ -1032,6 +1050,8 @@
         fixtures: (params.get('fixtures') || '').split(',').filter(Boolean),
         sliders: (params.get('sliders') || 'coreExposure,coreContrast,coreTemperature,wbR,cyan').split(',').filter(Boolean),
         exports: JSON.parse(params.get('exports') || '[]'),
+        admission: params.get('admission') || '',
+        scopeTimeoutMs: Number(params.get('scopeTimeoutMs')) || 30000,
         results: location.origin + '/__perf/results'
       };
       var start = function () { selfDrive(spec); };
