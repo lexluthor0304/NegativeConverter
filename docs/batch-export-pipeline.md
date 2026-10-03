@@ -272,11 +272,29 @@ at 8 GiB or unknown), the editor's bytes are its ledger's, and the budget's
 other holders count with their reservations (the batch's own lanes are
 counted by the rows above instead). A prepared decode rechecks at the loader
 gate after asynchronous waits and reads, then takes a non-waiting reservation.
+The gate travels into the real loaders: PNG/TIFF transfer only after scan-worker
+readiness, PNG8/ordinary bitmaps after header reads, and UPNG/UTIF, native-image
+and HEIF retries after their imports or factories. RAW checks again after a
+decode-slot wait, threaded readiness, a native-to-WASM retry and post-decode
+readiness. Scan callbacks keep `{ kind: 'scan' }`; RAW uses its metadata size,
+and embedded JPEGs use their extracted size. Admission rejection and abort
+propagate rather than being classified as codec unavailability. Each disposable
+worker terminates and every prepare handle releases once; finishing a prepare
+also withdraws any gate left waiting by an early worker failure.
 It waits for foreground ownership to end, but never queues for bytes a lane
 holds while waiting for that prepare. A refused dispatch returns no base, and
 the frame is decoded by its lane inside the lane's reservation. Once decoded, a frame
 waiting for its lane is in the ledger (`heldJobFrames`) until a lane takes it
 or the batch drops it, so the budget's other requests see it.
+
+`decodeAheadLoaders.test.mjs` exercises the actual batch prepare, UI loader,
+PNG/TIFF/browser callers and worker transfer with 4x4 fixtures. It injects
+foreground ownership during factory/readiness and checks zero dispatches while
+held, counted bytes afterward, exact low sample bits, codec retry admission,
+and abort/error/refusal/disposal. `decodeAheadRawDispatch.test.mjs` covers RAW
+factory/slot/post readiness and the threaded/native retry adapters. The existing
+RAW embedded-preview, cancellation and geometry archive precision tests remain
+required. These are correctness proofs, not native or 60 MP measurements.
 
 - **Smaller lane** (Part 1). `processFileWithSettings` with `releaseEarly`
   (batch only) releases the decoded base and the geometry/lens outputs it

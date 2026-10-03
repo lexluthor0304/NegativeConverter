@@ -192,6 +192,7 @@ export function createNativeLibRaw({
   transferTimeoutMs = 20_000,
   openPlaneReader = openNativePlaneReader,
   sharedPlane = false,
+  beforeDecode = null,
 }) {
   let disposed = false;
   // Set once the native session is given up (a fallback or dispose): a
@@ -208,6 +209,12 @@ export function createNativeLibRaw({
   const timers = new Set();
   const readers = new Set();
   const transfer = typeof AbortController === 'function' ? new AbortController() : null;
+  let admissionError = null;
+  const admit = async () => {
+    try { if (beforeDecode) await beforeDecode(); }
+    catch (error) { admissionError = error; throw error; }
+    assertLive();
+  };
 
   const invoke = (command, args, options) => core.invoke(command, args, options);
 
@@ -265,9 +272,11 @@ export function createNativeLibRaw({
     console.warn(`[RAW] native ${step} failed, decoding with WASM:`, reason?.message || reason?.status || reason);
     assertLive();
     wasm = createWasm();
+    if (step !== 'open' && beforeDecode) await admit();
     await track(wasm.open(input, settings));
     assertLive();
     if (step === 'open') return undefined;
+    if (beforeDecode) await admit();
     return track(wasm.imageData());
   }
 
@@ -278,6 +287,8 @@ export function createNativeLibRaw({
     readers.add(reader);
     let reply;
     try {
+      if (beforeDecode) await admit();
+      assertNative();
       reply = await withStepTimeout(invoke('native_raw_process', { id: session, threads }), processTimeoutMs, 'decode', timers);
       assertNative();
     } catch (err) {
@@ -353,6 +364,7 @@ export function createNativeLibRaw({
         outcome = await track(nativeImage());
       } catch (err) {
         assertLive();
+        if (err === admissionError) throw err;
         return toWasm('decode', err);
       }
       if (outcome?.status === 'ok') return outcome.result;
@@ -399,6 +411,7 @@ export async function createRawDecoder(createWasm, {
   sharedPlane = false,
   core = tauriCore(),
   probe = probeNativeRawDecoder,
+  beforeDecode = null,
 } = {}) {
   const gate = core ? await probe({ core }) : null;
   if (!gate?.enabled) return createWasm();
@@ -410,5 +423,6 @@ export async function createRawDecoder(createWasm, {
     processTimeoutMs: Math.min(20_000, Math.max(2_000, Math.floor(decodeTimeoutMs / 3))),
     transferTimeoutMs: Math.min(20_000, Math.max(2_000, Math.floor(decodeTimeoutMs / 3))),
     sharedPlane,
+    beforeDecode,
   });
 }

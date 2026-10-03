@@ -19,7 +19,8 @@ export async function decodeScanInWorker(buffer, format, {
   timeoutMs = 120000,
   signal = null,
   // The 16-bit plane in shared memory where the page is isolated (#264).
-  sharedPlanes = false
+  sharedPlanes = false,
+  reserveDecode = null
 } = {}) {
   if (signal?.aborted) throw abortError(signal);
   if (!workerFactory) return null;
@@ -28,6 +29,8 @@ export async function decodeScanInWorker(buffer, format, {
   return new Promise((resolve, reject) => {
     let finished = false;
     let dispatched = false;
+    let admitting = false;
+    let startupFailed = false;
     const onAbort = () => finish(abortError(signal));
     const finish = (error, result) => {
       if (finished) return;
@@ -40,22 +43,42 @@ export async function decodeScanInWorker(buffer, format, {
     };
     const timer = setTimeout(() => finish(new Error('Scan decode timed out')), timeoutMs);
     signal?.addEventListener?.('abort', onAbort, { once: true });
+    if (signal?.aborted) { onAbort(); return; }
     worker.onerror = () => {
       // Module workers can fail asynchronously during startup (CSP, browser
       // support, unavailable chunk). Keep input ownership until ready so the
       // existing decoder can still handle these environments.
-      if (!dispatched) finish(null, null);
+      if (admitting && !dispatched) startupFailed = true;
+      else if (!dispatched) finish(null, null);
       else finish(new Error('Scan decoder worker failed'));
     };
     worker.onmessageerror = () => finish(new Error('Scan decoder returned unreadable pixels'));
     worker.onmessage = ({ data }) => {
-      if (data.ready && !dispatched) {
-        dispatched = true;
-        try { worker.postMessage({ buffer, format, sharedPlanes }, [buffer]); }
-        catch (error) {
-          if (buffer.byteLength) finish(null, null);
-          else finish(error);
-        }
+      if (finished) return;
+      if (data.ready && !dispatched && !admitting) {
+        admitting = true;
+        // Import/startup can outlive the caller's provisional admission.
+        // Keep the input until the actual transfer is admitted; rejection
+        // terminates this idle worker and must never request a fallback.
+        const dispatch = () => {
+          if (finished) return;
+          if (signal?.aborted) { onAbort(); return; }
+          if (startupFailed) { finish(null, null); return; }
+          try {
+            worker.postMessage({ buffer, format, sharedPlanes }, [buffer]);
+            dispatched = true;
+          } catch (error) {
+            if (buffer.byteLength) finish(null, null);
+            else finish(error);
+          }
+        };
+        if (reserveDecode) {
+          void (async () => {
+            try { await reserveDecode({ kind: 'scan' }); }
+            catch (error) { finish(error); return; }
+            dispatch();
+          })();
+        } else dispatch();
         return;
       }
       if (data.ready) return;
@@ -101,8 +124,15 @@ export async function decodeJpegInWorker(extracted, {
   return new Promise((resolve, reject) => {
     let finished = false;
     let dispatched = false;
+<<<<<<< HEAD
     const onAbort = () => finish(abortError(signal));
     const finish = (error, result = null) => {
+=======
+    let admitting = false;
+    let startupFailed = false;
+    const onAbort = () => finish(null, abortError(signal));
+    const finish = (result, error = null) => {
+>>>>>>> 8aa6881 (fix: recheck decode-ahead admission at loader dispatch)
       if (finished) return;
       finished = true;
       clearTimeout(timer);
@@ -114,14 +144,16 @@ export async function decodeJpegInWorker(extracted, {
     const timer = setTimeout(() => finish(null), timeoutMs);
     signal?.addEventListener?.('abort', onAbort, { once: true });
     if (signal?.aborted) { onAbort(); return; }
-    worker.onerror = () => finish(null);
-    worker.onmessageerror = () => finish(null);
+    worker.onerror = worker.onmessageerror = () => {
+      if (admitting && !dispatched) startupFailed = true;
+      else finish(null);
+    };
     worker.onmessage = ({ data }) => {
       if (finished) return;
       if (data?.ready) {
-        if (dispatched) return;
+        if (dispatched || admitting) return;
         if (!data.canDecodeImages) return finish(null);
-        dispatched = true;
+        admitting = true;
         // Worker startup yields too: foreground may have arrived since the
         // preview helper's admission. Recheck before transferring the input.
         void (async () => {
@@ -129,12 +161,18 @@ export async function decodeJpegInWorker(extracted, {
             if (reserveDecode) await reserveDecode({ kind: 'scan', width: extracted.width, height: extracted.height });
             if (finished) return;
             if (signal?.aborted) { onAbort(); return; }
+<<<<<<< HEAD
           } catch (error) { finish(error); return; }
+=======
+            if (startupFailed) { finish(null); return; }
+          } catch (error) { finish(null, error); return; }
+>>>>>>> 8aa6881 (fix: recheck decode-ahead admission at loader dispatch)
           // Transfer only a buffer that holds exactly the JPEG: a view into a
           // larger container is copied so the container stays intact.
           try {
             const bytes = input.byteOffset === 0 && input.byteLength === input.buffer.byteLength ? input : input.slice();
             worker.postMessage({ type: 'jpeg', id: 1, bytes: bytes.buffer }, [bytes.buffer]);
+            dispatched = true;
           }
           catch { finish(null); }
         })();

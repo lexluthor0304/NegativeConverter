@@ -20181,12 +20181,16 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         } else if (isPngFile(file)) {
           const arrayBuffer = await file.arrayBuffer();
           if (signal?.aborted) throw aborted();
-          await memoryClaim.atDecode({ kind: 'scan' });
-          image = await loadPngImageData(arrayBuffer, { signal, sharedPlanes: sharedPlanes && sharedPlanesAvailable() });
+          image = await loadPngImageData(arrayBuffer, { signal, sharedPlanes: sharedPlanes && sharedPlanesAvailable(),
+            reserveDecode: size => memoryClaim.atDecode(size) });
         } else {
+<<<<<<< HEAD
           await memoryClaim.atDecode({ kind: 'scan' });
           if (signal?.aborted) throw aborted();
           image = await loadStandardImage(file, { signal, sharedPlanes: sharedPlanes && sharedPlanesAvailable() });
+=======
+          image = await loadStandardImage(file, { signal, reserveDecode: size => memoryClaim.atDecode(size) });
+>>>>>>> 8aa6881 (fix: recheck decode-ahead admission at loader dispatch)
           if (signal?.aborted) throw aborted();
         }
       } finally {
@@ -21564,6 +21568,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
             throw error;
           } finally {
             signal.removeEventListener('abort', abort);
+            // A startup failure can settle a worker while its gate still
+            // waits. Withdraw every late gate before releasing the claim.
+            controller.abort();
             // The base is now in the ledger, or the decoder has failed. A
             // ready prepare holds no reservation its consuming lane needs.
             handle?.release();

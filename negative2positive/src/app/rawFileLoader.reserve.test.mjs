@@ -137,12 +137,16 @@ const superseded = () => new DOMException('Superseded photo activation', 'AbortE
     }
   });
   assert.equal(image.width, 64);
-  assert.equal(calls.length, 1, 'one gate per decode');
+  assert.equal(calls.length, 2, 'demosaic and post-decode readiness each recheck the same claim');
   assert.deepEqual({ kind: calls[0].kind, width: calls[0].width, height: calls[0].height },
     { kind: 'raw', width: 64, height: 48 });
   assert.equal(calls[0].estimatedBytes, estimateRawDecodeBytes(64, 48));
   assert.ok(calls[0].received.includes('metadata'), 'after metadata()');
   assert.ok(!calls[0].received.includes('imageData'), 'before imageData()');
+  assert.deepEqual({ kind: calls[1].kind, width: calls[1].width, height: calls[1].height, estimatedBytes: calls[1].estimatedBytes },
+    { kind: calls[0].kind, width: calls[0].width, height: calls[0].height, estimatedBytes: calls[0].estimatedBytes },
+    'the dispatch recheck preserves the original callback arguments');
+  assert.ok(calls[1].received.includes('imageData'), 'after demosaic, before packing dispatch');
 }
 
 // --- a waiting reservation holds the demosaic ---------------------------------------

@@ -78,7 +78,7 @@ export function planLibRawThreads({ isolated = false, hardwareConcurrency = 4, b
  * waits for the instance to start (`startTimeoutMs`) and otherwise runs the
  * decode on `new LibRaw()`; its `threads` then reads 1.
  */
-export function createLibRaw({ background = false, LibRawClass = LibRaw, env = globalThis, startTimeoutMs = THREADED_START_TIMEOUT_MS } = {}) {
+export function createLibRaw({ background = false, LibRawClass = LibRaw, env = globalThis, startTimeoutMs = THREADED_START_TIMEOUT_MS, beforeDecode = null } = {}) {
   const support = librawThreadSupport(LibRawClass);
   // Threads need shared memory, not only the isolation flag: macOS WKWebView
   // reports crossOriginIsolated without a SharedArrayBuffer constructor.
@@ -88,7 +88,7 @@ export function createLibRaw({ background = false, LibRawClass = LibRaw, env = g
     isolated, background, maxThreads: support.maxThreads,
     hardwareConcurrency: env?.navigator?.hardwareConcurrency
   });
-  return { raw: threadedLibRaw(LibRawClass, threads, startTimeoutMs), threads, threaded: true };
+  return { raw: threadedLibRaw(LibRawClass, threads, startTimeoutMs, beforeDecode), threads, threaded: true };
 }
 
 // `new LibRaw({ threads })` behind libraw-wasm's interface. The instance's
@@ -96,8 +96,13 @@ export function createLibRaw({ background = false, LibRawClass = LibRaw, env = g
 // sends) answers once its module and pool are up; until then nothing else is
 // posted, so the bytes `open()` transfers are still here when the instance
 // fails to start, and the single-threaded build decodes them instead.
+<<<<<<< HEAD
 function threadedLibRaw(LibRawClass, threads, startTimeoutMs) {
   let current = watchLibRawWorker(new LibRawClass({ threads }));
+=======
+function threadedLibRaw(LibRawClass, threads, startTimeoutMs, beforeDecode) {
+  let current = new LibRawClass({ threads });
+>>>>>>> 8aa6881 (fix: recheck decode-ahead admission at loader dispatch)
   let started = null;
   let disposed = false;
   const decoder = {
@@ -143,6 +148,7 @@ function threadedLibRaw(LibRawClass, threads, startTimeoutMs) {
 
   async function call(fn, args) {
     await start();
+    if (fn === 'imageData' && beforeDecode) await beforeDecode();
     if (disposed) throw new Error('LibRaw disposed');
     if (typeof current[fn] !== 'function') return undefined;
     return current[fn](...args);

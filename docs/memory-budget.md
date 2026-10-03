@@ -113,6 +113,14 @@ header without dimensions borrows those of a decoded file with the same
 extension in the queue (`imagePixelsWithSiblings`); the progress rule covers
 the rest.
 
+Dispatch rechecks use that same claim after scan-worker or threaded readiness,
+RAW decode-slot acquisition, browser header reads, lazy codec imports and
+worker/browser retries. PNG/TIFF and ordinary scans retain `{ kind: 'scan' }`,
+RAW retains its metadata-sized arguments, and embedded JPEG retains its
+extracted dimensions. A failed admission rejects and releases the idle worker;
+it cannot signal successful decode or request an unaccounted fallback. Every
+prepare exit withdraws late waiting gates before releasing its current handle.
+
 **No deadlock.** Foreground never waits. A lane reserves before it claims an
 index. Every job holds at most one reservation while it waits for the next
 (Auto Frame Selected and the roll analysis release per frame; the blank-frame

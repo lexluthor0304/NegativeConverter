@@ -8,11 +8,17 @@ self.addEventListener('message', event => {
     sharedArrayBuffer: typeof SharedArrayBuffer === 'function', secureContext: self.isSecureContext === true });
 });
 importScripts('./libheif.js');
-self.onmessage = async ({ data: { file } }) => {
+let initializedHeif = null;
+libheif({ locateFile: name => new URL(name, self.location.href).href }).then(heif => {
+  initializedHeif = heif;
+  self.postMessage({ ready: true });
+}, error => self.postMessage({ error: error.message }));
+self.onmessage = async ({ data: { buffer } }) => {
   try {
-    const heif = await libheif({ locateFile: name => new URL(name, self.location.href).href });
+    const heif = initializedHeif;
+    if (!heif) throw new Error('HEIF decoder is not ready');
     const decoder = new heif.HeifDecoder();
-    const images = decoder.decode(new Uint8Array(await file.arrayBuffer()));
+    const images = decoder.decode(new Uint8Array(buffer));
     const primary = images.find(image => heif.heif_image_handle_is_primary_image(image.handle));
     if (!primary) throw new Error('No primary HEIF image');
     // libheif applies irot/imir by default during decode; handle dimensions

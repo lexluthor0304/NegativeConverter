@@ -197,9 +197,11 @@ function asDecodeMemoryError(err, width, height) {
  * no 16-bit mirror, so nothing downstream can mistake ×257 padding for real
  * precision (silverAdapter promotes on demand for those).
  */
-async function loadTiffBuffer(buffer, signal = null, sharedPlanes = false) {
-  const decoded = await decodeScanInWorker(buffer, 'tiff', { signal, sharedPlanes });
+async function loadTiffBuffer(buffer, signal = null, sharedPlanes = false, reserveDecode = null) {
+  const decoded = await decodeScanInWorker(buffer, 'tiff', { signal, sharedPlanes, reserveDecode });
   if (decoded) return decoded;
+  throwIfAborted(signal);
+  if (reserveDecode) await reserveDecode({ kind: 'scan' });
   throwIfAborted(signal);
   // Built here, so a shared plane (#264) is allocated here.
   const alloc = sharedPlanes && sharedPlanesAvailable() ? (length) => allocPlane16(length, { shared: true }) : null;
@@ -264,9 +266,12 @@ export async function loadRawFile(buffer, fileName, options = {}) {
   const fastPreview = options.preview === true;
   const signal = options.signal || null;
   const reserveDecode = typeof options.reserveDecode === 'function' ? options.reserveDecode : null;
+  let admissionError = null;
   const reserve = async (size = {}) => {
+    throwIfAborted(signal);
     if (!reserveDecode) return;
-    await reserveDecode(size);
+    try { await reserveDecode(size); }
+    catch (error) { admissionError = error; throw error; }
     throwIfAborted(signal);
   };
   throwIfAborted(signal);
@@ -275,17 +280,21 @@ export async function loadRawFile(buffer, fileName, options = {}) {
     // A .tif name is not proof of a TIFF container: files renamed by scanning
     // software land here as JPEG or PNG and would only produce a UTIF error.
     const sniffed = sniffImageKind(buffer);
-    await reserve({ kind: 'scan' });
     if (sniffed && sniffed.kind !== 'tiff') {
       console.warn(`[TIFF] ${fileName} is actually ${sniffed.kind}; decoding it as such`);
       if (onMetadata) onMetadata(null);
+<<<<<<< HEAD
       if (sniffed.kind === 'png') return await loadPngImageData(buffer, { signal, sharedPlanes: options.sharedPlanes === true });
       const image = await loadStandardImage(new Blob([buffer]), { signal });
+=======
+      if (sniffed.kind === 'png') return await loadPngImageData(buffer, { signal, sharedPlanes: options.sharedPlanes === true, reserveDecode: reserve });
+      const image = await loadStandardImage(new Blob([buffer]), { signal, reserveDecode: reserve });
+>>>>>>> 8aa6881 (fix: recheck decode-ahead admission at loader dispatch)
       throwIfAborted(signal);
       return image;
     }
     try {
-      const imageData = await loadTiffBuffer(buffer, signal, options.sharedPlanes === true);
+      const imageData = await loadTiffBuffer(buffer, signal, options.sharedPlanes === true, reserve);
       if (onMetadata) onMetadata(null);
       return imageData;
     } catch (err) {
@@ -297,15 +306,15 @@ export async function loadRawFile(buffer, fileName, options = {}) {
 
   if (normalizedFileName.endsWith('.dng')) {
     if (isIPhoneDngHeader(buffer)) {
-      await reserve({ kind: 'scan' });
       try {
         // Preserve the original container for LibRaw if this is a CFA DNG
         // rather than a scanner-style TIFF that UTIF can actually render.
-        const imageData = await loadTiffBuffer(buffer.slice(0), signal, options.sharedPlanes === true);
+        const imageData = await loadTiffBuffer(buffer.slice(0), signal, options.sharedPlanes === true, reserve);
         if (onMetadata) onMetadata(null);
         return imageData;
       } catch (err) {
         if (signal?.aborted) throw abortError(signal);
+        if (err?.name === 'AbortError' || err === admissionError) throw err;
         console.error('UTIF.js failed:', err);
       }
     }
@@ -352,13 +361,15 @@ export async function loadRawFile(buffer, fileName, options = {}) {
   // all of them decode to the same pixels. One flag caps a background lane's
   // threads on either decoder.
   const background = options.priority === 'background';
+  let rawDecodeSize = { kind: 'raw' };
+  const admitRaw = reserveDecode ? () => reserve(rawDecodeSize) : null;
   let raw;
   let wasmDecoder = null;
   try {
     raw = await createRawDecoder(() => {
-      wasmDecoder = createLibRaw({ background });
+      wasmDecoder = createLibRaw({ background, beforeDecode: admitRaw });
       return wasmDecoder.raw;
-    }, { priority: background ? 'background' : 'user', openTimeoutMs, decodeTimeoutMs });
+    }, { priority: background ? 'background' : 'user', openTimeoutMs, decodeTimeoutMs, beforeDecode: admitRaw });
   } catch (err) {
     throw new Error(`module worker not supported: ${err?.message || err}`);
   }
@@ -523,7 +534,8 @@ export async function loadRawFile(buffer, fileName, options = {}) {
       }
       // The renderer-wide budget (#258) with the real size, before the
       // demosaic allocates anything.
-      await reserve({ kind: 'raw', width: metaWidth * scale, height: metaHeight * scale, estimatedBytes: budget.estimatedBytes });
+      rawDecodeSize = { kind: 'raw', width: metaWidth * scale, height: metaHeight * scale, estimatedBytes: budget.estimatedBytes };
+      await reserve(rawDecodeSize);
     } else {
       await reserve({ kind: 'raw' });
     }
@@ -536,6 +548,8 @@ export async function loadRawFile(buffer, fileName, options = {}) {
       const bytes = metaWidth > 0 && metaHeight > 0 ? estimateRawDecodeBytes(metaWidth * scale, metaHeight * scale) : Number.MAX_SAFE_INTEGER;
       releaseSlot = await decodeSlot.acquire({ bytes, signal });
       throwIfAborted(signal);
+      // Slot contention yields after the size gate. Recheck at demosaic.
+      if (admitRaw) await admitRaw();
     }
 
     let result;
@@ -584,7 +598,7 @@ export async function loadRawFile(buffer, fileName, options = {}) {
         // a roll lane's frame worker (#252) is handed the lane's options as
         // they were.
         ...(options.sharedPlanes === true ? { sharedPlanes: true } : {})
-      }, { signal });
+      }, { signal, ...(admitRaw ? { reserveDecode: admitRaw } : {}) });
       result = null;
       outcome = await running;
     } catch (err) {

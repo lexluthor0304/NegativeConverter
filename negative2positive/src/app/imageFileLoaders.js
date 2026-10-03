@@ -134,6 +134,11 @@ export async function loadRawImageDataPreview(buffer, fileName, options) {
   return loadRawFile(buffer, fileName, { ...options, preview: true });
 }
 
+function throwIfAborted(signal) {
+  if (signal?.aborted) throw signal.reason?.name === 'AbortError' ? signal.reason
+    : new DOMException('Image decode was aborted', 'AbortError');
+}
+
 /**
  * Decode a PNG buffer.
  *
@@ -142,168 +147,21 @@ export async function loadRawImageDataPreview(buffer, fileName, options) {
  * 1/2/4-bit, interlaced, tRNS — is handed to the browser decoder, which is
  * off-thread, handles every colour type correctly and costs ~1/5 the memory.
  */
-export async function loadPngImageData(buffer, { signal = null, sharedPlanes = false } = {}) {
+export async function loadPngImageData(buffer, { signal = null, sharedPlanes = false, reserveDecode = null } = {}) {
   const aborted = () => signal?.reason?.name === 'AbortError' ? signal.reason
     : new DOMException('PNG decode was aborted', 'AbortError');
   if (signal?.aborted) throw aborted();
+  let admissionError = null;
+  const admit = async (size) => {
+    throwIfAborted(signal);
+    try { if (reserveDecode) await reserveDecode(size); }
+    catch (error) { admissionError = error; throw error; }
+    throwIfAborted(signal);
+  };
+  const options = { signal, sharedPlanes, ...(reserveDecode ? { reserveDecode: admit } : {}) };
   const header = sniffImageKind(buffer);
   const sixteenBit = header?.kind === 'png' && header.depth === 16;
 
   if (!sixteenBit && typeof createImageBitmap === 'function' && typeof Blob === 'function') {
     try {
-      const image = await loadStandardImage(new Blob([buffer], { type: 'image/png' }), { signal });
-      if (signal?.aborted) throw aborted();
-      return image;
-    } catch (err) {
-      if (signal?.aborted) throw aborted();
-      if (err?.code === 'IMAGE_TOO_LARGE') throw err;
-      // Fall through: UPNG also handles palette/low-bit-depth correctly.
-    }
-  }
-
-  const { decodeScanInWorker } = await import('./scanDecodeClient.js');
-  // `sharedPlanes` (#264): a 16-bit PNG's plane in shared memory where the
-  // page is cross-origin isolated (the editor's scans).
-  const decoded = await decodeScanInWorker(buffer, 'png', { signal, sharedPlanes });
-  if (decoded) return decoded;
-  if (signal?.aborted) throw aborted();
-  const { loadPngFile } = await import('./pngFileLoader.js');
-  if (signal?.aborted) throw aborted();
-  const alloc = sharedPlanes && sharedPlanesAvailable() ? (length) => allocPlane16(length, { shared: true }) : null;
-  const image = loadPngFile(buffer, { alloc });
-  if (image.__image16) markDerivedEightBit(image);
-  return image;
-}
-
-// No eager __image16 in either path below: an 8-bit source holds no extra
-// precision, and silverAdapter promotes to 16-bit on demand — on the cropped
-// region instead of the full scan. For a 90+ MP scan the eager mirror cost
-// ~750 MB and a 370M-iteration loop at load time.
-
-function imageSourceToImageData(source, width, height) {
-  assertCanvasSize(width, height);
-  const tempCanvas = document.createElement('canvas');
-  tempCanvas.width = width;
-  tempCanvas.height = height;
-  // willReadFrequently keeps the canvas on the CPU, so the immediate
-  // getImageData below avoids a GPU readback of the whole scan.
-  const tempCtx = tempCanvas.getContext('2d', { willReadFrequently: true });
-  if (!tempCtx) throw imageTooLargeError(width, height);
-  tempCtx.drawImage(source, 0, 0);
-  const imageData = tempCtx.getImageData(0, 0, width, height);
-  if (looksLikeBlankReadback(imageData.data, width, height)) {
-    throw imageTooLargeError(width, height);
-  }
-  return imageData;
-}
-
-function decodeFailureError(file) {
-  const name = String(file?.name || '');
-  const type = String(file?.type || '');
-  const err = new Error(`Could not decode ${name || 'image'} (${type || 'unknown type'})`);
-  // HEIC/HEIF is what phone camera rolls hand over and what Chrome/Firefox
-  // cannot decode; it deserves its own message instead of "[object Event]".
-  err.code = /\.(heic|heif|hif)$/i.test(name) || /hei[cf]/i.test(type)
-    ? 'HEIC_DECODE_FAILED'
-    : 'IMAGE_DECODE_FAILED';
-  return err;
-}
-
-async function sniffBlobHeader(file) {
-  if (!file || typeof file.slice !== 'function') return null;
-  try {
-    const head = await file.slice(0, IMAGE_SNIFF_BYTES).arrayBuffer();
-    return sniffImageKind(head);
-  } catch {
-    return null;
-  }
-}
-
-export async function loadStandardImage(file, { signal = null, sharedPlanes = false } = {}) {
-  const aborted = () => signal?.reason?.name === 'AbortError' ? signal.reason
-    : new DOMException('Image decode was aborted', 'AbortError');
-  const checkAbort = () => { if (signal?.aborted) throw aborted(); };
-  checkAbort();
-  // Route by content, not by name: a 16-bit PNG whose File.type is empty would
-  // otherwise be flattened to 8 bits here without any warning.
-  const sniffed = await sniffBlobHeader(file);
-  checkAbort();
-  if (sniffed?.kind === 'png' && sniffed.depth === 16) {
-    const buffer = await file.arrayBuffer();
-    checkAbort();
-    return loadPngImageData(buffer, { signal, sharedPlanes });
-  }
-
-  // Preferred path. Chromium decodes Blob-sourced ImageBitmaps off the main
-  // thread; WebKit (WKWebView, WebKitGTK) decodes them synchronously on the
-  // calling thread, so there this still blocks the page for the decode.
-  if (typeof createImageBitmap === 'function') {
-    try {
-      const bitmap = await createImageBitmap(file);
-      try {
-        // The native bitmap API cannot be interrupted. Close its late result
-        // without a canvas allocation/readback or another decoder fallback.
-        checkAbort();
-        return imageSourceToImageData(bitmap, bitmap.width, bitmap.height);
-      } finally {
-        bitmap.close();
-      }
-    } catch (err) {
-      checkAbort();
-      if (err?.name === 'AbortError') throw err;
-      if (err?.code === 'IMAGE_TOO_LARGE') throw err;
-      // Fall through to the <img> path (unsupported format edge cases).
-    }
-  }
-
-  const nativeImage = new Promise((resolve, reject) => {
-    const img = new Image();
-    let objectUrl = null;
-    let finished = false;
-    const finish = (error, image) => {
-      if (finished) return;
-      finished = true;
-      signal?.removeEventListener('abort', onAbort);
-      img.onload = img.onerror = null;
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
-      img.src = '';
-      if (error) reject(error); else resolve(image);
-    };
-    const onAbort = () => finish(aborted());
-
-    img.onload = () => {
-      try {
-        checkAbort();
-        finish(null, imageSourceToImageData(img, img.width, img.height));
-      } catch (err) {
-        finish(err);
-      }
-    };
-
-    img.onerror = () => {
-      // The raw event stringifies to "[object Event]"; reject with something
-      // the UI can actually translate.
-      finish(signal?.aborted ? aborted() : decodeFailureError(file));
-    };
-
-    signal?.addEventListener('abort', onAbort, { once: true });
-    if (signal?.aborted) { onAbort(); return; }
-    try {
-      objectUrl = URL.createObjectURL(file);
-      img.src = objectUrl;
-    } catch (error) { finish(error); }
-  });
-  try { return await nativeImage; }
-  catch (error) {
-    checkAbort();
-    if (error?.name === 'AbortError') throw error;
-    if (error?.code === 'IMAGE_TOO_LARGE') throw error;
-    if (sniffed?.kind !== 'heif' && !/\.(heic|heif|hif)$/i.test(file?.name || '') && !/hei[cf]/i.test(file?.type || '')) throw error;
-    const { decodeHeifInWorker } = await import('./heifLoader.js');
-    checkAbort();
-    const decoded = await decodeHeifInWorker(file, { signal });
-    checkAbort();
-    assertCanvasSize(decoded.width, decoded.height);
-    return new ImageData(new Uint8ClampedArray(decoded.data), decoded.width, decoded.height);
-  }
-}
+      const image = await loadStandardImage(new Blob([buffer], { type: 'image/png' }), options);

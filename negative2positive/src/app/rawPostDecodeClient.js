@@ -119,7 +119,7 @@ export function startRawPostDecode({ readyTimeoutMs = READY_TIMEOUT_MS } = {}) {
     }
   }
 
-  function settle(reply, shape, options, signal) {
+  async function settle(reply, shape, options, signal, reserveDecode) {
     if (reply.type === 'result') {
       ranInWorker = true;
       if (reply.garbled) return { garbled: true };
@@ -133,6 +133,8 @@ export function startRawPostDecode({ readyTimeoutMs = READY_TIMEOUT_MS } = {}) {
         filmStats: reply.filmStats || null
       };
     }
+    if (signal?.aborted) throw abortError(signal);
+    if (reserveDecode) await reserveDecode();
     if (signal?.aborted) throw abortError(signal);
     console.warn('[RAW] post-decode worker failed, finishing on the main thread:', reply.message);
     if (reply.input) {
@@ -158,14 +160,20 @@ export function startRawPostDecode({ readyTimeoutMs = READY_TIMEOUT_MS } = {}) {
    * `signal` (#243): an aborted decode never runs a step on this thread; the
    * owner terminates the worker to stop the steps running there.
    */
-  async function run(result, options = {}, { signal = null } = {}) {
+  async function run(result, options = {}, { signal = null, reserveDecode = null } = {}) {
     ranInWorker = false;
     if (signal?.aborted) throw abortError(signal);
     const data = result?.data;
-    if (!isTransferableRawData(data) || !(await workerReady())) {
+    const ready = isTransferableRawData(data) && await workerReady();
+    // Readiness and worker-to-page retries are actual dispatch boundaries.
+    // Gate outside the transport catch so refusal cannot run a fallback.
+    try { if (reserveDecode) await reserveDecode(); }
+    catch (error) { terminate(); throw error; }
+    if (!ready || !worker) {
       if (signal?.aborted) throw abortError(signal);
       return runRawPostDecode(result, options);
     }
+    if (signal?.aborted) throw abortError(signal);
     const shape = { width: result.width, height: result.height, bits: result.bits, colors: result.colors };
     const input = describeView(data);
     const id = nextId++;
@@ -185,11 +193,13 @@ export function startRawPostDecode({ readyTimeoutMs = READY_TIMEOUT_MS } = {}) {
       if (input.buffer.byteLength > 0) {
         // postMessage refused the transfer (or the worker died before it
         // happened): the pixels are still ours.
+        if (reserveDecode) await reserveDecode();
+        if (signal?.aborted) throw abortError(signal);
         return runRawPostDecode({ ...shape, data }, options);
       }
       throw err?.code === 'RAW_POST_DECODE_LOST' ? err : lostError(err?.message || String(err));
     }
-    return settle(reply, shape, options, signal);
+    return settle(reply, shape, options, signal, reserveDecode);
   }
 
   function terminate() {
