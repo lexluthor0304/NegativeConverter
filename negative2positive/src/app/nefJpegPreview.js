@@ -208,7 +208,7 @@ export function createEmbeddedPreviewSource(buffer, sourceBlob = null, { extract
  * Try to extract a usable embedded JPEG preview from a TIFF-based RAW (NEF, etc.)
  * and decode it via the browser's native JPEG decoder. Returns an `ImageData`
  * on success, or `null` if no suitable preview was found / decoding failed.
- * Never throws.
+ * Abort or admission errors propagate; an unavailable decoder returns null.
  *
  * @param {ArrayBuffer} arrayBuffer
  * @returns {Promise<ImageData | null>}
@@ -254,16 +254,24 @@ function throwIfPreviewAborted(signal) {
  * to the main-thread decoder below, which produces the same planes.
  *
  * @param {{ jpegBytes: Uint8Array, width?: number, height?: number } | null} extracted
- * @param {{ decodeInWorker?: Function | null, signal?: AbortSignal | null }} [options]
+ * @param {{ decodeInWorker?: Function | null, signal?: AbortSignal | null, reserveDecode?: Function | null }} [options]
  * @returns {Promise<ImageData | null>}
  */
-export async function decodeNefPreviewJpeg(extracted, { decodeInWorker = decodeJpegInWorker, signal = null } = {}) {
+export async function decodeNefPreviewJpeg(extracted, { decodeInWorker = decodeJpegInWorker, signal = null, reserveDecode = null } = {}) {
   throwIfPreviewAborted(signal);
   if (!extracted || !extracted.jpegBytes || extracted.jpegBytes.byteLength < 4) return null;
+  let admissionError = null;
+  const admit = async () => {
+    try {
+      if (reserveDecode) await reserveDecode({ kind: 'scan', width: extracted.width, height: extracted.height });
+    } catch (error) { admissionError = error; throw error; }
+    throwIfPreviewAborted(signal);
+  };
   if (decodeInWorker) {
-    const decoded = await decodeInWorker(extracted, { signal }).catch(error => {
+    if (reserveDecode) await admit();
+    const decoded = await decodeInWorker(extracted, { signal, ...(reserveDecode ? { reserveDecode: admit } : {}) }).catch(error => {
       throwIfPreviewAborted(signal);
-      if (error?.name === 'AbortError') throw error;
+      if (error?.name === 'AbortError' || error === admissionError) throw error;
       return null;
     });
     throwIfPreviewAborted(signal);
@@ -271,6 +279,11 @@ export async function decodeNefPreviewJpeg(extracted, { decodeInWorker = decodeJ
     if (!extracted.jpegBytes || extracted.jpegBytes.byteLength < 4) return null;
   }
   const { jpegBytes, width, height } = extracted;
+
+  // Worker startup/decoding may have yielded to an editor open. Every real
+  // dispatch, including the browser retry, needs the caller's admission.
+  if (reserveDecode) await admit();
+  throwIfPreviewAborted(signal);
 
   let blob;
   try {

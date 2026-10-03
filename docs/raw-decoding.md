@@ -36,6 +36,13 @@ path at once: `librawRuntime.js` watches every instance's worker, disposes a
 failed one and rejects its calls with the loader's timeout code, where
 libraw-wasm 1.6.0 left `open()` to wait out its 30 s (#229 review R2-046).
 
+Embedded JPEG fallback admission uses the extracted preview dimensions after
+any source reread, including a RAW-open timeout before metadata. The same
+gate runs at the JPEG worker's ready/transfer boundary and before a browser
+retry; foreground work may have arrived during either wait. IIQ's preview
+shortcut uses this path too. Abort and admission errors propagate without
+starting another decoder. This preserves the existing 8-bit fallback pixels.
+
 One flag caps a background lane on either decoder: `loadFileToImageData`'s
 `priority: 'background'`, which only the background lanes pass: roll
 analysis, the prefetch and the shared decodes the editor adopts, and

@@ -217,7 +217,8 @@ async function loadTiffBuffer(buffer, signal = null, sharedPlanes = false) {
  * `options.reserveDecode` (#258): the memory budget's gate. It is awaited
  * before every branch decodes: with the LibRaw size (`width`, `height`,
  * `estimatedBytes`) right after `raw.metadata()`, and without a size before a
- * UTIF, embedded-preview or browser decode (the host then uses the header).
+ * UTIF or browser decode (the host then uses the header). Embedded previews
+ * use their extracted JPEG dimensions, including worker-to-browser retries.
  * A host whose reservation already covers the decode resolves at once.
  * `options.ramBytes`: the machine's RAM when the host knows it, for the
  * low-memory refusal.
@@ -314,8 +315,7 @@ export async function loadRawFile(buffer, fileName, options = {}) {
   const isIIQ = normalizedFileName.endsWith('.iiq');
   if (isIIQ && bufBytes > RAW_SIZE_HEAVY) {
     console.info('[RAW] heavy IIQ detected, taking embedded preview shortcut');
-    await reserve({ kind: 'scan' });
-    const previewImageData = await tryNefJpegPreview(buffer, { signal });
+    const previewImageData = await tryNefJpegPreview(buffer, { signal, reserveDecode: reserve });
     throwIfAborted(signal);
     if (previewImageData) {
       console.warn('[RAW] embedded preview decoded — precision is downgraded to 8-bit for this file.');
@@ -412,7 +412,7 @@ export async function loadRawFile(buffer, fileName, options = {}) {
     throwIfAborted(signal);
     const extracted = await previewSource.read();
     throwIfAborted(signal);
-    const image = await decodeNefPreviewJpeg(extracted, { signal });
+    const image = await decodeNefPreviewJpeg(extracted, { signal, reserveDecode: reserve });
     throwIfAborted(signal);
     return image;
   };

@@ -87,7 +87,8 @@ export async function decodeScanInWorker(buffer, format, {
 export async function decodeJpegInWorker(extracted, {
   workerFactory = defaultWorkerFactory,
   timeoutMs = 60000,
-  signal = null
+  signal = null,
+  reserveDecode = null
 } = {}) {
   if (signal?.aborted) throw abortError(signal);
   const input = extracted?.jpegBytes;
@@ -121,11 +122,22 @@ export async function decodeJpegInWorker(extracted, {
         if (dispatched) return;
         if (!data.canDecodeImages) return finish(null);
         dispatched = true;
-        // Transfer only a buffer that holds exactly the JPEG: a view into a
-        // larger container is copied so the container stays intact.
-        const bytes = input.byteOffset === 0 && input.byteLength === input.buffer.byteLength ? input : input.slice();
-        try { worker.postMessage({ type: 'jpeg', id: 1, bytes: bytes.buffer }, [bytes.buffer]); }
-        catch { finish(null); }
+        // Worker startup yields too: foreground may have arrived since the
+        // preview helper's admission. Recheck before transferring the input.
+        void (async () => {
+          try {
+            if (reserveDecode) await reserveDecode({ kind: 'scan', width: extracted.width, height: extracted.height });
+            if (finished) return;
+            if (signal?.aborted) { onAbort(); return; }
+          } catch (error) { finish(error); return; }
+          // Transfer only a buffer that holds exactly the JPEG: a view into a
+          // larger container is copied so the container stays intact.
+          try {
+            const bytes = input.byteOffset === 0 && input.byteLength === input.buffer.byteLength ? input : input.slice();
+            worker.postMessage({ type: 'jpeg', id: 1, bytes: bytes.buffer }, [bytes.buffer]);
+          }
+          catch { finish(null); }
+        })();
         return;
       }
       if (data?.id !== 1) return;
