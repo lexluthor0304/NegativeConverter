@@ -7789,8 +7789,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       while (measurement?.pending) measurement = measurement.measurement || measurement.previous;
       if (!measurement) return;
       if (!isCurrent() || state.wbUserOverride || state.grayPointSampled || state.wbSemanticApplied
-        || filmInterpretationChanged(state, measurement.settings) || state.expiredEnabled !== measurement.settings.expiredEnabled
-        || !cropMeasurementInputsMatch(state, measurement.settings)) return;
+        || filmInterpretationChanged(state, measurement.settings) || state.expiredEnabled !== measurement.settings.expiredEnabled) return;
+      // The event may precede this entry's controls. Its recipe stays its own;
+      // adoption belongs to the entry that starts replay, unless its inputs
+      // change during the off-state work and a newer measurement takes over.
+      const inputs = cropMeasurementInputs(state);
+      const ownsInputs = () => isCurrent() && cropMeasurementInputsMatch(state, inputs);
       const base = state.loadedBaseImageData;
       if (!base) return;
       const sameFrame = effectiveGeometryAngle(state.rotationAngle) === effectiveGeometryAngle(measurement.settings.rotationAngle)
@@ -7799,22 +7803,21 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const settings = sameFrame ? { ...measurement.settings, autoFrameMeta: state.autoFrame.lastDiagnostics }
         : await resolvePendingFrameEdits({ settings: measurement.settings, pendingFrameEdit: { intent: measurement.intent } },
           measurement.settled, base, { isCurrent });
-      if (!isCurrent()) return;
+      if (!ownsInputs()) return;
       let processed, pixels, source;
       try {
         if (sameFrame) processed = await convertFromCurrentSource(settings, { preview: true, wbSample: true });
         else {
           pixels = await renderGeometryChain(base, settings, { isCurrent });
-          if (!isCurrent()) return;
+          if (!ownsInputs()) return;
           source = await applyLensCorrectionWithSettings(pixels, settings.lensCorrection);
-          if (!isCurrent()) return;
+          if (!ownsInputs()) return;
           processed = await convertFrameOffMainThread({ imageData: source, settings: buildRouterSettings(settings, base),
             options: { preview: false, forceFullProcess: true, includeAnalysisPreview: true, analysisImageData: getColorAnalysisSample(settings, base) },
             wbSample: { fromSource: true, geometry: { sourceWidth: source.width, sourceHeight: source.height, k: 1 } } });
         }
-        if (!isCurrent() || state.wbUserOverride || state.grayPointSampled || state.wbSemanticApplied
-          || filmInterpretationChanged(state, measurement.settings) || state.expiredEnabled !== measurement.settings.expiredEnabled
-          || !cropMeasurementInputsMatch(state, measurement.settings)) return;
+        if (!ownsInputs() || state.wbUserOverride || state.grayPointSampled || state.wbSemanticApplied
+          || filmInterpretationChanged(state, measurement.settings) || state.expiredEnabled !== measurement.settings.expiredEnabled) return;
         const result = automaticWhiteBalanceResult(processed, settings, {
           meta: settings.autoFrameMeta, base, wbSample: processed?.__wbSample
         });
