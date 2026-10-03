@@ -9,6 +9,7 @@ import { estimateAutoWhiteBalance } from './autoWhiteBalance.js';
 import { applyPreparedAdjustmentsToBuffer, applyPreparedAdjustmentsToBuffer16 } from './adjustmentPipeline.js';
 import { convertColorWithSilverCore } from '../pipeline/silverAdapter.js';
 import { analyzeExpiredFilm, defaultExpiredRescueParams, EXPIRED_RESCUE_DEFAULTS, EXPIRED_RESCUE_KEYS } from '../pipeline/expiredRescue.js';
+import { createConversionWorkerClient } from './conversionWorkerClient.js';
 
 // Real history capture, source installation, restore, undo/redo, geometry,
 // Silver conversion, automatic WB and 8/16 adjustment samples. Detection is a leaf.
@@ -219,4 +220,52 @@ if (selected === 'all' || selected === 'automatic-rescue') {
   assert.deepEqual([state.expiredBrightness, state.expiredContrast, state.expiredNeutralize], [17, 23, 61], 'user rescue strengths survive');
   h.pool.dispose(); cases++;
 }
-console.log(`provisionalHistoryAnalysis: ${cases} history/rescue cases; pending/completed hits and confirmations promote full-base recipe/diagnostics/WB at the original event; manual WB/base, rescue strengths and exact Silver/8/16 samples preserved`);
+// A promoted Undo may have settled geometry while its full-base crop/WB
+// measurement still runs. Parking must not save the previous recipe or
+// dispose that photo's worker between those two barriers.
+if (selected === 'all' || selected === 'parking-barrier') {
+  const h = fixture(false), { context: c, target, state } = h;
+  const item = { file: { name: 'tiny-history.png' }, settings: { previous: true }, isDirty: true };
+  const worker = { terminated: false,
+    postMessage(message) { queueMicrotask(() => this.onmessage?.({ data: { id: message.id, type: 'analyzed', key: message.key } })); },
+    terminate() { this.terminated = true; } };
+  const client = createConversionWorkerClient({ cacheInput: true, workerFactory: () => worker });
+  Object.assign(target, { getCurrentQueueItem: () => item, safeStorageGet: () => 'on',
+    gpuPreview: { prepared: null }, previewRepairWorker: { dispose() {} },
+    convertPreviewFrameInWorker: client, dustTint: {}, displayOverlayState: {} });
+  Object.assign(state, { loadedFile: item.file, fileQueue: [item], currentFileIndex: 0, cropRegion: { ...fullRect } });
+  vm.runInContext(['hiddenParkEnabled', 'parkOpenPhotoForHiddenJob', 'persistCurrentFileSettings'].map(fn).join('\n'), c);
+  await c.applyGeometryFromBase({ cropRegion: state.cropRegion });
+  await c.processNegative();
+  const outgoing = state.conversionSourceImageData;
+  await client.analyze({ imageData: outgoing, settings: {} });
+  const snapshot = c.captureSnapshot('promoted-crop').settings;
+  snapshot.fullBaseFrameEdit = { detect: true, automatic: true };
+  target.cropHitHold = true;
+  const restoring = c.restoreColdSnapshotPixels(snapshot);
+  try {
+    for (let i = 0; i < 20 && !h.held.length; i++) await new Promise(setImmediate);
+    assert.equal(h.held.length, 1, 'the real full-base crop detector is held');
+    assert.ok(state.fullBaseHistoryPending, 'real promoted restoration owns its exact-frame barrier');
+    assert.equal(state.geometryPending, false, 'geometry is already settled');
+    assert.equal(Boolean(target.document.body.dataset.studioBusy), false);
+    assert.equal(Boolean(target.processNegativeInFlight), false);
+    const saved = item.settings, generation = target.loadGeneration;
+    assert.equal(await c.parkOpenPhotoForHiddenJob(), false, 'never park before promoted history measurements settle');
+    assert.equal(item.settings, saved, 'pending history cannot replace the saved recipe');
+    assert.equal(target.loadGeneration, generation, 'parking cannot supersede the history restoration');
+    assert.equal(client.holds(outgoing), true, 'the real cached client keeps this unsettled photo');
+    assert.equal(worker.terminated, false);
+  } finally {
+    h.held.splice(0).forEach(resolve => resolve());
+    await restoring;
+    h.pool.dispose();
+  }
+  assert.equal(state.fullBaseHistoryPending, null);
+  assert.equal(await c.parkOpenPhotoForHiddenJob(), true, 'settled history allows genuine ownership release');
+  assert.equal(client.holds(outgoing), false);
+  assert.equal(worker.terminated, true);
+  client.dispose(); cases++;
+}
+if (selected === 'parking-barrier') console.log('provisionalHistoryAnalysis: real promoted history keeps the cached worker until full-base detection settles, then parking releases ownership');
+else console.log(`provisionalHistoryAnalysis: ${cases} history/rescue cases; pending/completed hits and confirmations promote full-base recipe/diagnostics/WB at the original event; manual WB/base, rescue strengths and exact Silver/8/16 samples preserved`);

@@ -11436,7 +11436,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const item = getCurrentQueueItem();
       if (!item || item.file !== state.loadedFile || !state.loadedBaseImageData || state.rawDecodePending || state.provisional
         || state.currentStep < 3 || state.cropping || document.body.dataset.studioBusy || document.body.dataset.photoSwitching
-        || processNegativeInFlight || coreReprocessBusy() || coreReprocessTimer || state.dustRemoval.processing
+        || state.fullBaseHistoryPending || processNegativeInFlight || coreReprocessBusy() || coreReprocessTimer || state.dustRemoval.processing
         || dustDetectionTimer || pendingBrushRepairs || dustDrawing) return false;
       persistCurrentFileSettings({ silent: true, force: true });
       const entries = [...undoStack, ...redoStack];
@@ -11459,7 +11459,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           // history. Nothing can be dropped until the complete record commits
           // and this is still the same settled, hidden photo.
           if (document.visibilityState !== 'hidden' || loadGeneration !== generation || manualEditRevision !== editRevision
-            || processNegativeInFlight || coreReprocessBusy() || coreReprocessTimer || state.dustRemoval.processing
+            || state.fullBaseHistoryPending || processNegativeInFlight || coreReprocessBusy() || coreReprocessTimer || state.dustRemoval.processing
             || dustDetectionTimer || pendingBrushRepairs || dustDrawing || state.cropping
             || document.body.dataset.studioBusy || document.body.dataset.photoSwitching
             || state.dustRemoval.revision !== dustRevision || getCurrentQueueItem() !== item

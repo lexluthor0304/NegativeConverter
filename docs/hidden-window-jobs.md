@@ -138,7 +138,9 @@ storage never clones a full plane in one request. After the settled photo's
 archive commits, the dust worker, tint, repair-preview aliases, display border
 and cached conversion-preview source, analysis and private worker planes are
 released too. Work that starts while storage is pending prevents parking;
-its live planes and workers remain owned. Showing the window reads that exact
+its live planes and workers remain owned. Promoted undo/redo also waits for
+its full-base history measurements after geometry settles; parking cannot
+supersede that restoration or persist its previous recipe. Showing the window reads that exact
 repair instead of detecting dust again. A failed write keeps the live photo
 and history; a failed read keeps the parked record and blocks edits until a
 later show retries. Restoration holds a foreground reservation sized from
