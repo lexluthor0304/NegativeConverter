@@ -27786,6 +27786,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const abort = new AbortController();
       let job = null;
       let reservation = null;
+      let pendingDecode = null;
       let uiOpen = true;
       const closeUi = () => {
         if (!uiOpen) return;
@@ -27833,10 +27834,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           // wait on memory held by this same merge.
           const memoryClaim = coveredMemoryClaim();
           try {
+            pendingDecode = loadFileToImageData(item.file, { claim: memoryClaim, signal: abort.signal })
+              .then((imageData) => ({ imageData }), (error) => ({ error }));
             const decoded = await Promise.race([
-              loadFileToImageData(item.file, { claim: memoryClaim, signal: abort.signal }).then((imageData) => ({ imageData }), (error) => ({ error })),
+              pendingDecode,
               job.failed
             ]);
+            pendingDecode = null;
             if (decoded.error) {
               if (decoded.error.name === 'AbortError') throw decoded.error;
               console.warn('Multi-shot decode failed for', item.file.name, decoded.error);
@@ -27856,8 +27860,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         failure = error;
       } finally {
         job?.dispose();
-        reservation?.release();
         closeUi();
+        // A native ImageBitmap decode cannot be interrupted. The UI closes
+        // immediately, but its accounting must outlive a losing decode in
+        // the race above until the loader closes/discards the late bitmap.
+        const held = reservation;
+        if (pendingDecode) void pendingDecode.then(() => held?.release(), () => held?.release());
+        else held?.release();
       }
       if (failure) {
         const { code, message } = failure instanceof MultiShotError ? failure : describeMultiShotError(failure);

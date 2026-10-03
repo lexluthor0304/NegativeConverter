@@ -4,7 +4,7 @@ import vm from 'node:vm';
 import { loadStandardImage, loadPngImageData } from './imageFileLoaders.js';
 
 const deferred = () => { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; };
-const original = new Map(['createImageBitmap', 'document', 'Image'].map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
+const original = new Map(['createImageBitmap', 'document', 'Image', 'Worker'].map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
 const oldCreateUrl = URL.createObjectURL, oldRevokeUrl = URL.revokeObjectURL;
 let copies = 0, canvases = 0, closed = 0, images = [], revoked = [];
 const pixels = { data: new Uint8ClampedArray([3, 5, 7, 255]), width: 1, height: 1 };
@@ -68,6 +68,31 @@ try {
     const result = loadPngImageData(png.buffer, { signal: c.signal });
     await until(() => started); c.abort(); decoded.resolve(bitmap());
     await assert.rejects(result, { name: 'AbortError' }); assert.equal(canvases, 0);
+  }
+
+  // A PNG16 without its extension routes through content sniffing into the
+  // real scan-decode client. Cancellation must reach that disposable worker.
+  {
+    const png = new Uint8Array(33); png.set([137, 80, 78, 71, 13, 10, 26, 10]);
+    png.set([73, 72, 68, 82], 12); png[24] = 16; png[25] = 2;
+    const c = new AbortController(); let stops = 0, posts = 0;
+    globalThis.Worker = class {
+      constructor() { queueMicrotask(() => this.onmessage?.({ data: { ready: true } })); }
+      terminate() { stops++; }
+      postMessage(message) {
+        posts++; assert.equal(message.format, 'png');
+        c.abort();
+        // Make a lost signal fail promptly rather than wait for the timeout.
+        this.onerror?.(new Error('abort was not forwarded'));
+      }
+    };
+    try {
+      await assert.rejects(loadStandardImage(new File([png], 'unnamed'), { signal: c.signal }), { name: 'AbortError' });
+      assert.equal(posts, 1); assert.equal(stops, 1); assert.equal(canvases, 0);
+    } finally {
+      const descriptor = original.get('Worker');
+      if (descriptor) Object.defineProperty(globalThis, 'Worker', descriptor); else delete globalThis.Worker;
+    }
   }
 
   // Exercise the actual shared UI loader used by mergeSelectedShots. The

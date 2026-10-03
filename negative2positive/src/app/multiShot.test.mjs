@@ -289,6 +289,33 @@ const { estimateMultiShotWorkerBytes } = await import('./multiShotWorkerClient.j
 }
 console.log('multiShot UI: finite refusal before decode, aggregate reservation through disposal, Cancel aborts loader');
 {
+  // Native bitmap decoding cannot be interrupted. Cancel still closes the
+  // actual UI entry point, but another job cannot consume its reservation
+  // until the late bitmap has been discarded by the loader.
+  let finishDecode, decodeSignal;
+  const needed = estimateMultiShotWorkerBytes([64 * 48, 64 * 48]);
+  const h = mergeHarness({ budget: needed + 128, decode: (_file, options) => {
+    decodeSignal = options.signal;
+    return new Promise((_, reject) => { finishDecode = () => reject(decodeSignal.reason); });
+  } });
+  const pending = h.run();
+  while (!finishDecode) await new Promise(setImmediate);
+  const bytes = h.memoryBudget.snapshot().reserved;
+  assert.ok(bytes > 0);
+  h.cancel(); await pending;
+  assert.equal(h.body.dataset.studioBusy, undefined, 'UI does not wait for a native bitmap');
+  assert.equal(h.memoryBudget.snapshot().reserved, bytes, 'uninterruptible decode is still accounted');
+  assert.equal(h.events.filter(([stage]) => stage === 'posted').length, 0);
+  assert.equal(h.alerts.length, 0);
+  const next = h.memoryBudget.reserve(bytes, { priority: 'user', label: 'retry merge' });
+  await new Promise(setImmediate);
+  assert.equal(h.memoryBudget.snapshot().waiting.length, 1, 'retry cannot reuse the native decode allocation');
+  finishDecode();
+  const retry = await next;
+  retry.release();
+  assert.equal(h.memoryBudget.snapshot().reserved, 0, 'late decode completion releases the claim');
+}
+{
   const h = mergeHarness();
   const foreground = await h.memoryBudget.reserve(100, { priority: 'foreground', label: 'open photo' });
   const pending = h.run();

@@ -125,7 +125,9 @@ LibRaw, post-decode and HEIF workers, or withdraws a reservation still waiting
 for memory. Ordinary JPEG/PNG browser decodes also receive the signal: an
 `<img>` decode releases its URL and handlers, and a late `ImageBitmap` is closed
 without copying its pixels or starting a fallback. The native bitmap API
-cannot interrupt a decode already executing inside the browser. The merge
+cannot interrupt a decode already executing inside the browser: its memory
+reservation stays held until that decode settles, even though Cancel has
+already closed the merge UI. The merge
 worker is terminated after the result, on any failure and on Cancel, which
 releases its heap and planes.
 
