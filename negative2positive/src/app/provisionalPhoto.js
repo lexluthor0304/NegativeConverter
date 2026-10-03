@@ -1,4 +1,5 @@
 import { rotatedDimensions } from './imageGeometry.js';
+import { applyInterpretationPatch } from './filmTypeOverride.js';
 
 // The provisional window of a two-stage RAW import (#255): from the moment a
 // half-size stand-in of the photo is on screen until the exact full decode is
@@ -291,9 +292,8 @@ export function windowEdits(settled, live) {
 /** `settings` (automatic values of the full decode) with `edits` on top. */
 export function overlayWindowEdits(settings, edits) {
   if (!settings || !edits) return settings;
-  const next = { ...settings };
-  for (const [key, value] of Object.entries(edits)) next[key] = cloneValue(value);
-  return next;
+  const patch = Object.fromEntries(Object.entries(edits).map(([key, value]) => [key, cloneValue(value)]));
+  return applyInterpretationPatch(settings, patch);
 }
 
 /** The geometry part of `edits` (a user's crop, rotation or mirror), or null. */

@@ -171,6 +171,19 @@ converted frame through `remeasureExpiredAfterRetype`; user strengths, other
 settings and manual white balance survive. Undo restores the old interpretation
 and its anchors together.
 
+Roll histogram levels, density equalization and outlier records belong to the
+same interpretation too. The shared reset drops `rollFrame` on an actual type
+or mode change, before conversion and rescue measurement. `markCurrentFileDirty`
+updates the active queue recipe and any deferred baseline/choice before a
+background consumer can reuse them; the changed recipe key also prevents an old
+photo session from restoring its snapshot. Window overlays use this invariant
+and cannot reinstall old roll, semantic or rescue records from the overlay.
+Re-selecting the same interpretation keeps its completed analysis and automatic
+WB, including a matching manual roll override. Paired saved/history restores
+retain their corresponding records; explicit WB/base and strength ownership
+survive a crossing. Other photos and the global roll analysis are untouched by
+the live invalidation.
+
 The same rule applies to recipes on the current/selected photos, detected-film
 application, film-edge import merges, the Step-2 roll reference and the positive
 conversion entry. These are changes to the interpretation of existing pixels;

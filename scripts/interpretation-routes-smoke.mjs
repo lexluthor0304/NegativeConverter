@@ -362,6 +362,75 @@ export async function runInterpretationRoutesSmoke({ send, evaluate, waitFor, wa
   };
   const lockedColor = await lockedRecipe('color');
   const lockedPositive = await lockedRecipe('positive');
+  const lockedBw = await lockedRecipe('bw');
+  const lockedEdit = await lockedRecipe('positive', 'edit');
+  for (const [original, type, mode] of [[lockedColor, 'bw', 'correct'], [lockedColor, 'positive', 'correct'],
+    [lockedBw, 'color', 'correct'], [lockedBw, 'positive', 'correct'], [lockedPositive, 'color', 'correct'],
+    [lockedPositive, 'bw', 'correct'], [lockedPositive, 'positive', 'edit'], [lockedEdit, 'positive', 'correct']]) {
+    const label = `live locked ${original.filmType}/${original.positiveMode} to ${type}/${mode}`;
+    await evaluate('window.__routeFiles = window.__routeOriginalFiles.slice()');
+    await openProject([original, original, original]);
+    const initial = await evaluate(settings);
+    const otherRecords = await evaluate('window.__ncTwoStage.queuedRecipes().slice(1).map(item => item.settings)');
+    const before = await exports(label + ' before');
+    await evaluate(`(() => {
+      if (${JSON.stringify(original.filmType)} !== '${type}') document.querySelector('.film-type-btn[data-type="${type}"]').click();
+      else {
+        const select = document.getElementById('positiveModeSelect'); select.value = '${mode}';
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    })()`);
+    const changed = await measured(label + ' measured', type, mode);
+    const backing = await evaluate('window.__ncTwoStage.queuedRecipes()[0].settings');
+    if (changed.rollFrame || backing.rollFrame || backing.semanticMap || backing.filmType !== type || backing.positiveMode !== mode
+      || JSON.stringify(backing.expiredAnalysis) === JSON.stringify(initial.expiredAnalysis)) fail(label + ': stale active/backing analysis survived');
+    for (const key of ['wbR', 'wbG', 'wbB', 'wbUserOverride', 'grayPointSampled', 'filmBase', 'expiredBrightness', 'expiredContrast',
+      'expiredBrightnessUserOverride', 'expiredContrastUserOverride']) {
+      if (JSON.stringify(changed[key]) !== JSON.stringify(initial[key])) fail(label + ': explicit value lost: ' + key);
+    }
+    const after = await exports(label + ' current');
+    equalExports(after, await exports(label + ' consecutive'), label + ' consecutive');
+    equalExports(after, await exports(label + ' actual batch', true), label + ' current/batch');
+    const others = await evaluate('window.__ncTwoStage.queuedRecipes().slice(1).map(item => item.settings)');
+    if (JSON.stringify(others) !== JSON.stringify(otherRecords)) fail(label + ': another photo lost valid analysis');
+    await evaluate('document.getElementById("undoBtn").click()');
+    await waitFor(label + ' Undo', `${ready} && ${settings}.filmType === '${original.filmType}'
+      && ${settings}.positiveMode === '${original.positiveMode}' && ${settings}.rollFrame?.locked`);
+    if (JSON.stringify(await evaluate(`${settings}.rollFrame`)) !== JSON.stringify(initial.rollFrame)
+      || JSON.stringify(await evaluate(`${settings}.expiredAnalysis`)) !== JSON.stringify(initial.expiredAnalysis)) fail(label + ': Undo lost matching analysis');
+    equalExports(before, await exports(label + ' undone'), label + ' Undo');
+    await evaluate('document.getElementById("redoBtn").click()');
+    const redone = await measured(label + ' Redo', type, mode);
+    if (redone.rollFrame || JSON.stringify(redone.expiredAnalysis) !== JSON.stringify(changed.expiredAnalysis)) fail(label + ': Redo reinstalled old analysis');
+    equalExports(after, await exports(label + ' redone'), label + ' Redo');
+    for (const index of [1, 0]) {
+      await evaluate(`document.querySelector('.file-list-name[data-index="${index}"]').click()`);
+      await waitFor(label + ' switched ' + index, `${ready} && document.getElementById('studioFilename').textContent === window.__routeFiles[${index}].name`, 120000);
+      await evaluate('window.__ncAnalysis.settle()');
+    }
+    if ((await evaluate(settings)).rollFrame) fail(label + ': switching restored stale roll ownership');
+    equalExports(after, await exports(label + ' switched back'), label + ' switch persistence');
+    const savedProject = await saveProject(label);
+    if (savedProject.files[0].settings.rollFrame) fail(label + ': project saved stale roll ownership');
+    await reopenSavedProject(label);
+    equalExports(after, await exports(label + ' reopened'), label + ' save/reopen');
+    await openProject([{ ...changed, rollFrame: null, semanticMap: null, expiredAnalysis: null }], false);
+    equalExports(after, await exports(label + ' fresh reference'), label + ' correctly invalidated fresh reference');
+  }
+  // Re-selecting a valid interpretation must retain completed roll/rescue
+  // measurements and automatic WB, as do paired project/history restores.
+  for (const original of [lockedColor, lockedBw, lockedPositive, lockedEdit]) {
+    await evaluate('window.__routeFiles = [window.__routeOriginalFiles[0]]');
+    await openProject([original], false);
+    const before = await evaluate(settings);
+    await evaluate(`document.querySelector('.film-type-btn[data-type="${original.filmType}"]').click()`);
+    await evaluate('window.__ncAnalysis.settle()');
+    const after = await evaluate(settings);
+    for (const key of ['rollFrame', 'expiredAnalysis', 'semanticMap', 'wbR', 'wbG', 'wbB', 'wbAutoConfidence']) {
+      if (JSON.stringify(after[key]) !== JSON.stringify(before[key])) fail('same live interpretation discarded ' + key);
+    }
+  }
+  console.log('ok: eight real locked live-control crossings; active/backing invalidation, exact PNG8/TIFF16 current/batch/fresh, switch/save/reopen/Undo/Redo; four unchanged interpretations retain valid analysis');
   for (const action of ['applyToSelectedBtn', 'applyRollReferenceBtn']) for (const crossing of ['bw', 'positive', 'mode']) {
     const label = 'locked ' + action + ' ' + crossing;
     const original = crossing === 'mode' ? lockedPositive : lockedColor;

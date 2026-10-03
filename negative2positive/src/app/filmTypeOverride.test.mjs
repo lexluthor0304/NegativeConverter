@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { applyAutomaticFilmType, applyFilmTypeOverride, sanitizeFilmTypeOverride } from './filmTypeOverride.js';
+import { applyAutomaticFilmType, applyFilmTypeOverride, applyInterpretationPatch, sanitizeFilmTypeOverride, withoutFilmTypeAnalysis } from './filmTypeOverride.js';
 import { buildRollProject, serializeRollProject, parseRollProject } from './rollProject.js';
 import { analyzeExpiredFilm, defaultExpiredRescueParams, EXPIRED_RESCUE_DEFAULTS } from '../pipeline/expiredRescue.js';
 const pick = (source, keys) => Object.fromEntries(keys.map(key => [key, source[key]]));
@@ -39,12 +39,16 @@ const confirmed = applyAutomaticFilmType({ ...original, filmType: 'bw', filmType
 assert.deepEqual(confirmed.rollFrame, original.rollFrame, 'a confirmation keeps analysis of the same type');
 assert.equal(confirmed.wbR, 1.2);
 assert.equal(confirmed.filmTypeConfidence, 'medium');
-// HEAD's override, kept as the reference for the refactor.
+// A manual choice keeps matching measurements; a changed interpretation
+// invalidates the old roll/WB records while retaining explicit edits.
 function referenceOverride(settings, override) {
   const choice = sanitizeFilmTypeOverride(override);
   if (!choice) return settings;
-  const next = { ...settings, ...choice, filmTypeSource: 'manual', filmTypeConfidence: null, filmTypeReason: null, rollFrame: null };
-  if (next.wbAutoConfidence && !next.wbUserOverride && !next.grayPointSampled) {
+  const next = { ...settings, ...choice, filmTypeSource: 'manual', filmTypeConfidence: null, filmTypeReason: null };
+  const changed = (settings.filmType || 'color') !== choice.filmType
+    || (settings.positiveMode === 'edit' ? 'edit' : 'correct') !== choice.positiveMode;
+  if (changed) { next.rollFrame = next.semanticMap = next.expiredAnalysis = null; }
+  if (changed && next.wbAutoConfidence && !next.wbUserOverride && !next.grayPointSampled) {
     next.wbR = next.wbG = next.wbB = 1;
     next.wbAutoConfidence = null; next.wbSemanticApplied = false;
   }
@@ -92,8 +96,33 @@ for (const settings of [original, { ...original, wbUserOverride: true }, { ...or
   assert.equal(mode.expiredAnalysis, null, 'another positive mode is another interpretation');
   assert.equal(applyFilmTypeOverride({ ...rescued, positiveMode: undefined }, { filmType: 'positive' }).expiredAnalysis, positive,
     'an unset positive mode is correct');
-  assert.ok(!('expiredAnalysis' in applyAutomaticFilmType(original, { filmType: 'bw', confidence: 'medium', reason: 'rollMonochrome' })),
+  assert.equal(applyAutomaticFilmType(original, { filmType: 'bw', confidence: 'medium', reason: 'rollMonochrome' }).expiredAnalysis, null,
     'settings without a measurement get none');
+}
+
+// All writers share the interpretation invariant, including snapshot-like
+// overlays that contain stale per-frame analysis beside explicit WB/tone.
+{
+  const semanticMap = { labels: [1, 2], confidence: .9 };
+  const expiredAnalysis = analyzeExpiredFilm(agedFrame(), {});
+  const settings = { ...original, positiveMode: 'correct', semanticMap, expiredAnalysis,
+    ...defaultExpiredRescueParams(expiredAnalysis) };
+  for (const patch of [{ filmType: 'bw' }, { filmType: 'positive' }, { positiveMode: 'edit' }]) {
+    const next = applyInterpretationPatch(settings, { ...patch, rollFrame: settings.rollFrame,
+      semanticMap, expiredAnalysis, wbR: 1.31, wbUserOverride: true,
+      expiredBrightness: 0, expiredContrast: 25, expiredBrightnessUserOverride: true, expiredContrastUserOverride: true });
+    assert.deepEqual([next.rollFrame, next.semanticMap, next.expiredAnalysis], [null, null, null], 'an overlay cannot reinstall old analysis');
+    assert.deepEqual([next.wbR, next.expiredBrightness, next.expiredContrast], [1.31, 0, 25], 'explicit WB/default strengths survive invalidation');
+    assert.equal(withoutFilmTypeAnalysis(settings, { ...settings, ...patch }).rollFrame, null, 'direct invalidation excludes the old roll record');
+  }
+  for (const next of [applyFilmTypeOverride(settings, { filmType: 'color' }),
+    applyInterpretationPatch(settings, { filmType: 'color', positiveMode: 'correct' }),
+    withoutFilmTypeAnalysis(settings, { ...settings })]) {
+    assert.equal(next.rollFrame, settings.rollFrame, 'unchanged inputs retain genuine roll analysis');
+    assert.equal(next.semanticMap, semanticMap);
+    assert.equal(next.expiredAnalysis, expiredAnalysis);
+    assert.deepEqual([next.wbR, next.wbG, next.wbB, next.wbAutoConfidence], [1.2, 1, .8, .8], 'unchanged inputs retain automatic WB');
+  }
 }
 console.log('filmTypeOverride: isolated film selection, manual WB and unopened project persistence passed');
 console.log('filmTypeOverride: a retype drops the expired measurement of the old interpretation and the strengths it set (R1-017)');

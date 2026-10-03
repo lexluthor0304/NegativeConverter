@@ -1,4 +1,4 @@
-import { applyAutomaticFilmType, applyFilmTypeOverride, applyInterpretationPatch, sanitizeFilmTypeOverride, withoutFilmTypeAnalysis } from './filmTypeOverride.js';
+import { applyAutomaticFilmType, applyFilmTypeOverride, applyInterpretationPatch, filmInterpretationChanged, sanitizeFilmTypeOverride, withoutFilmTypeAnalysis } from './filmTypeOverride.js';
 import { decideRollFilmType, mergeRollDecision, ownFilmTypeVerdict, rollDecisionFrame, rollFilmTypeTarget, ROLL_MONOCHROME } from './rollFilmType.js';
 import { createPhotoSessionCache, backingBuffers } from './photoSessionCache.js';
 import { displayProxyKey, displayPlaneHash } from './displayProxy.js';
@@ -20042,6 +20042,24 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     function markCurrentFileDirty() {
       const item = getCurrentQueueItem();
       if (!item) return;
+      // Live edits invalidate this photo's backing recipe too, before a
+      // background consumer or a deferred full-source overlay can reuse it.
+      const choice = { filmType: state.filmType, positiveMode: state.positiveMode,
+        filmTypeSource: state.filmTypeSource, filmTypeConfidence: state.filmTypeConfidence, filmTypeReason: state.filmTypeReason };
+      if (item.settings && filmInterpretationChanged(item.settings, state)) {
+        const next = applyInterpretationPatch(item.settings, choice);
+        // The live state is authoritative: on Undo/Redo these are the valid
+        // measurements restored with that interpretation, rather than the
+        // old backing recipe's records.
+        for (const key of ['rollFrame', 'semanticMap', 'expiredAnalysis', 'wbR', 'wbG', 'wbB',
+          'wbAutoConfidence', 'wbSemanticApplied', 'wbUserOverride', 'grayPointSampled',
+          'expiredBrightness', 'expiredContrast', 'expiredBrightnessUserOverride', 'expiredContrastUserOverride']) next[key] = state[key];
+        item.settings = cloneSettings(next);
+        if (item.pendingFrameEdit?.baseline) item.pendingFrameEdit.baseline = applyInterpretationPatch(item.pendingFrameEdit.baseline, choice);
+        if (item.pendingEdits) item.pendingEdits = applyInterpretationPatch(item.pendingEdits, choice);
+      } else if (item.settings && ['filmTypeSource', 'filmTypeConfidence', 'filmTypeReason'].some(key => item.settings[key] !== state[key])) {
+        item.settings = applyInterpretationPatch(item.settings, choice);
+      }
       scheduleProjectRecovery();
       if (dirtyFileListTimer) deferDirtyFileListRender();
       if (item.isDirty) return;
