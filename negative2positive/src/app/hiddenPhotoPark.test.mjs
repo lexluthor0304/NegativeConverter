@@ -9,7 +9,7 @@ import vm from 'node:vm';
 import { createDustHistoryArchive } from './dustHistoryArchive.js';
 import { archiveDatabaseFixture } from './dustHistoryArchiveHarness.mjs';
 import { applyStrokePatch, applyDustDelta } from './dustStrokeHistory.js';
-import { createMemoryBudget } from './memoryBudget.js';
+import { createMemoryBudget, createRetainedLedger } from './memoryBudget.js';
 
 const source = readFileSync(new URL('./main.js', import.meta.url), 'utf8');
 function functionSource(name) {
@@ -67,6 +67,8 @@ function fixture({ enabled = true, hidden = true, brush = true } = {}) {
     clearRepairedPreview() {}, previewRepairWorker: { dispose() {} }, dustRefreshRepairMask: null,
     dustTint: { mask: state.dustRemoval.mask, image: null, building: null }, displayOverlayState: { tint: null },
     settledAdjustedBuffer: null, previewAdjustedBuffer: null,
+    glBorder: { photo: plane('border'), smear: plane('smear'), source: state.webglSourceImageData, smearSource: state.webglSourceImageData, smearFlight: 2, smearToken: 3 },
+    liveHistoryRoots: () => [state.loadedBaseImageData, ...c.SNAPSHOT_REF_KEYS.map(key => state[key]), state.dustRemoval],
     isCurrentLoad: generation => generation === c.loadGeneration,
     loadFile: async (loaded, options) => {
       calls.push(['loadFile', loaded === file, options.decoded?.base === base, options.autoConvert, options.quiet]);
@@ -84,10 +86,14 @@ function fixture({ enabled = true, hidden = true, brush = true } = {}) {
     updateUndoRedoButtons: () => calls.push('buttons'), updateFileListUI: () => {}, updateRollAnalysisUI: () => {}, studioWorkspace: { sync: () => {} },
     // #239: the GPU preview's prepared copy of the photo.
     gpuPreview: { prepared: { tag: 'open photo' } },
-    webglState: { renderer2: { dropPrepared: () => calls.push('dropPrepared') } }
+    webglState: { renderer2: { dropPrepared: () => calls.push('dropPrepared') }, borderUnderlay: { release: () => calls.push('releaseBorder') } }
   });
-  vm.runInContext(['hiddenParkEnabled', 'parkOpenPhotoForHiddenJob', 'unparkOpenPhoto', 'performUndo', 'performRedo'].map(functionSource).join('\n'), c);
-  return { c, state, item, base, file, calls, undoStack, redoStack, stroke, db, target };
+  vm.runInContext(['hiddenParkEnabled', 'parkOpenPhotoForHiddenJob', 'unparkOpenPhoto', 'performUndo', 'performRedo', 'releaseGlBorder', 'openPhotoMemoryRoots'].map(functionSource).join('\n'), c);
+  const ledger = createRetainedLedger([
+    { name: 'editor', roots: () => c.openPhotoMemoryRoots() },
+    { name: 'history', roots: () => [undoStack, redoStack] }
+  ]);
+  return { c, state, item, base, file, calls, undoStack, redoStack, stroke, db, target, ledger };
 }
 
 // Off by default: nothing is parked until the measurement run turns it on.
@@ -123,6 +129,10 @@ function fixture({ enabled = true, hidden = true, brush = true } = {}) {
   assert.equal(f.c.gpuPreview.prepared, null, 'the GPU preview drops its copy');
   assert.ok(f.calls.includes('dropPrepared'), 'and its texture');
   assert.equal(f.state.loadedBaseImageData, f.base, 'the decoded base stays');
+  assert.ok(f.calls.includes('releaseBorder'), 'parking releases the derived border texture');
+  assert.equal(f.c.glBorder.smear, null, 'the stored border smear does not keep hidden planes live');
+  assert.equal(f.c.glBorder.source, null, 'the border source relinquishes its plane ownership');
+  assert.equal(f.ledger.retained(), f.base.data.byteLength, 'only the retained decoded base remains in the editor/history ledger');
   assert.equal(f.undoStack.length, 2, 'the undo history is never dropped');
   // Ordinary steps go cold; the stroke releases its actual full planes
   // only after their exact, aliased graph is committed to storage.
@@ -184,6 +194,8 @@ for (const failure of ['open', 'write']) {
   assert.equal(f.undoStack[0].refs, refs);
   assert.equal(f.state.processedImageData, f.target, 'storage failure preserves actual live planes and history');
   assert.equal(f.c.parkedPhoto, null);
+  assert.ok(f.c.glBorder.smear, 'a failed archive keeps the live border planes');
+  assert.equal(f.calls.includes('releaseBorder'), false, 'archive failure cannot release the active presentation');
 }
 {
   const f = fixture();

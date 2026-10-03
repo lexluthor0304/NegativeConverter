@@ -39,7 +39,7 @@ const HIDDEN_FUNCTIONS = [
   'hiddenJobRunning', 'shedHiddenJobMemory', 'hiddenJobUsesAiRepair', 'onHiddenJobAdmitted', 'onHiddenJobsIdle',
   'hiddenJobVisibilityChanged', 'hiddenResidentBytes', 'onHiddenJobPaused', 'hiddenParkEnabled',
   'parkOpenPhotoForHiddenJob', 'memoryLedgerConsumers', 'openPhotoMemoryRoots', 'liveHistoryRoots',
-  'sampleStoreBytes', 'workerResidentBytes'
+  'sampleStoreBytes', 'workerResidentBytes', 'releaseGlBorder'
 ];
 
 // A plane of `bytes` bytes, with a buffer of its own.
@@ -337,6 +337,7 @@ function switchHarness(f) {
   f.state.autoFrame = { enabled: false };
   const target = {
     loadGeneration: 0, photoActivation: null, parkedPhoto: null, rewarmAutoFrameWorker: false, corePreviewRetained: null, corePreviewCommit: null,
+    gpuPreviewScheduler: { busy: () => false },
     studioWorkspace: null, lensMapCache: new Map(), webglState: { gl: null }, DEFAULT_FILM_BASE: { r: 1, g: 1, b: 1 },
     quietLoadingOverlay: { show: async () => {}, updateProgress() {}, hide() {} },
     i18n: { en: {} }, currentLang: 'en',

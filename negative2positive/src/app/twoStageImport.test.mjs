@@ -112,6 +112,7 @@ function fixture({ search = '?twoStageMinMp=40&twoStageMode=sequential', settled
     state, loadGeneration: 0, photoActivation: null, rewarmAutoFrameWorker: false, importDetectionAbort: null,
     fullResolutionRenderAbort: null, parkedPhoto: null, pendingImportRotation: null,
     SNAPSHOT_REF_KEYS, settledAdjustedBuffer: null, previewAdjustedBuffer: null,
+    glBorder: { photo: null, smear: null, source: null, smearSource: null },
     coreReprocessGeneration: 0, coreReprocessToken: 0, _coreReprocessPending: null, processNegativeInFlight: null,
     coreReprocessTimer: null, dustDrawing: false, aiBrushDrawing: null, undoStack: [], redoStack: [],
     cropModeWaiters: [], failNextFullDecodes: 0, fullDecodeHold: null, DEBUG_UI: false, TWO_STAGE_MIN_MP_KEY: 'nc_two_stage_min_mp',

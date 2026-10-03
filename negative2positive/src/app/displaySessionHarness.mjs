@@ -33,6 +33,7 @@ export function displaySessionStubs(overrides = {}) {
     displayViewportPending: false, prepareBeforeAfterReference: () => {},
     captureSnapshotWithPendingDisplay: () => null,
     coreReprocessSettledListeners: new Set(),
+    glBorder: { photo: null, smear: null, source: null, smearSource: null, smearFlight: 0, smearToken: 0 },
     noteCoreReprocessSettled: () => {},
     ensureSourcePromise: null, preparingOriginal: 0, displaySourceRequest: null,
     displaySessionDiagnostics: displaySessionDiagnosticsStub(),

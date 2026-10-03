@@ -11371,6 +11371,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       dustTint.mask = dustTint.image = dustTint.building = null;
       displayOverlayState.tint = null;
       settledAdjustedBuffer = previewAdjustedBuffer = null;
+      // The display lane retains these source/smear planes and a GL texture.
+      // After the archive commits, the hidden photo has no presentation that
+      // uses them; release ownership before rechecking the hidden-job budget.
+      releaseGlBorder();
       unpinDustWorker();
       disposeDustWorker();
       // The GPU preview's copy of the photo (#239) goes too; it is prepared again
