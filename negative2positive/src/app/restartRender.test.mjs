@@ -46,7 +46,7 @@ function fixture({ repairs = true, locked = false, large = false } = {}) {
     syncBrushTools: () => {}, cancelDustBrush: () => {},
     brushFeedback: { drawing: false, end: () => {}, cancel: () => {}, sync: () => {} }, remapBrushStroke: () => {},
     liveDisplaySerial: 0,
-    state, coreReprocessToken: 1, coreReprocessGeneration: 0, geometryToken: 0, loadGeneration: 1,
+    state, coreReprocessToken: 1, coreReprocessGeneration: 0, geometryToken: 0, loadGeneration: 1, cropDetection: null,
     _coreReprocessFullInFlight: false, _coreReprocessPreviewInFlight: false,
     _coreReprocessPending: null, _coreReprocessActive: 0,
     _coreReprocessIdle: null, _resolveCoreReprocessIdle: null,
@@ -101,7 +101,7 @@ function fixture({ repairs = true, locked = false, large = false } = {}) {
   });
   vm.runInContext([
     ...DISPLAY_SESSION_HELPERS,
-    'clearFullResolutionRenderState', 'clearCoreReprocessTimer', 'cancelPendingTimers', 'clearDustState',
+    'clearFullResolutionRenderState', 'clearCoreReprocessTimer', 'cancelPendingTimers', 'clearDustState', 'cancelCropDetection',
     'coreReprocessBusy', 'whenCoreReprocessIdle', 'noteCoreReprocessSettled',
     'runCoreReprocess', 'flushScheduledCoreReprocess',
     'resetAllAdjustments', 'rerenderWithCoreControls', 'postPendingPreviewEarly', 'restartPhotoProcessing',
