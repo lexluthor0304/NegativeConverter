@@ -429,7 +429,7 @@ export async function runExpiredFilmSmoke({ send, evaluate, waitFor, wait, fail,
 async function runExpiredLiveTypeSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port }) {
   const ready = `document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy`;
   const settings = `window.__ncTwoStage.status().settings`;
-  const map = { width: 2, height: 1, labels: [0, 4], confidence: .95 };
+  const map = { width: 2, height: 1, labels: [0, 4], confidence: .95, model: 'efficientvit-b1-ade20k-v1' };
   await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en&debug=1` });
   await waitFor('live-type boot', `!!document.getElementById('uploadExpiredBtn') && !!window.__ncTwoStage`);
   await installDialogAutoAccept();
