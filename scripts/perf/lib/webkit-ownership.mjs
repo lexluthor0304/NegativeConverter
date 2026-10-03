@@ -63,7 +63,7 @@ export function verifiedWebKitAssociation(snapshot, { root, current, port }) {
 export class WebKitOwnership {
   constructor({ library, file, port, metadata = processMetadata, read = readFileSync, write = writeFileSync } = {}) {
     this.library = library; this.file = file; this.port = port; this.metadata = metadata; this.read = read;
-    this.root = null; this.child = null; this.association = null;
+    this.root = null; this.child = null; this.association = null; this.cleanupAttempts = [];
     write(file, '', { flag: 'wx', mode: 0o600 });
   }
 
@@ -105,9 +105,11 @@ export class WebKitOwnership {
     const endpoint = [association?.renderer, association?.gpu].find(p => p?.identity.pid === pid);
     if (!endpoint) return false;
     const expected = [this.root, association.owner, endpoint.identity];
-    return this.metadata(expected.map(p => p.pid), {
+    const result = this.metadata(expected.map(p => p.pid), {
       expected, signal: { ...endpoint, number }
-    }).signalled === true;
+    });
+    this.cleanupAttempts.push({ pid, number, ...result });
+    return result.signalled === true;
   }
 
   killOwnedProcess(signal = 'SIGKILL') {

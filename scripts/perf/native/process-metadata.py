@@ -55,8 +55,9 @@ def answer(request):
         if valid:
             audit = (ctypes.c_uint32 * 8)(*token)
             lib.proc_signal_with_audittoken.argtypes = [ctypes.c_void_p, ctypes.c_int]
-            return {'signalled': lib.proc_signal_with_audittoken(ctypes.byref(audit), target['number']) == 0}
-        return {'signalled': False}
+            result = lib.proc_signal_with_audittoken(ctypes.byref(audit), target['number'])
+            return {'signalled': result == 0, 'signalErrno': result}
+        return {'signalled': False, 'validation': 'identity-mismatch'}
     return metadata
 
 for line in sys.stdin:

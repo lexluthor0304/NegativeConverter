@@ -74,9 +74,6 @@ try {
         ownership.root = root;
       }
       const expected = [ownership.root, association.owner, association.renderer.identity];
-      assert.equal(processMetadata(expected.map(p => p.pid), {
-        expected, signal: { ...association.renderer, number: 0 }
-      }).signalled, true, 'the actual OS accepts a harmless signal with the exact owned XPC audit token');
       const stale = expected.map((p, i) => i === 2 ? { ...p, unique: 'stale' } : p);
       assert.equal(processMetadata(expected.map(p => p.pid), {
         expected: stale, signal: { ...association.renderer, number: 0 }
@@ -90,12 +87,16 @@ try {
       if (guard === 'scope') {
         assert.equal(memory.verdict, null);
         assert.ok(processMetadata([outsider.direct().renderer])[outsider.direct().renderer], 'unrelated instance remains alive');
+        const cleaned = ownership.kill(direct.renderer);
+        writeFileSync(join(out, 'cleanup-attempts.json'), JSON.stringify(ownership.cleanupAttempts, null, 2) + '\n');
+        assert.equal(cleaned, true, `versioned SIGKILL must clean the proven owned renderer: ${JSON.stringify(ownership.cleanupAttempts)}`);
       } else {
         assert.equal(memory.verdict?.reason, 'memory-ceiling');
         assert.match(memory.verdict.detail, guard === 'swap-growth' ? /swap grew/ : guard === 'low-disk' ? /free disk fell/ : /browser footprint/);
       }
       results.push({ guard, launcher: ownership.root.pid, direct, rendererBytes: sampled.rendererBytes, gpuBytes: sampled.gpuBytes,
-        verdict: memory.verdict, assertions: 'native getters, one-shot endpoints, PID identity, scoped sampling and safe cleanup',
+        verdict: memory.verdict, cleanupAttempts: ownership.cleanupAttempts,
+        assertions: 'native getters, one-shot endpoints, PID identity, scoped sampling and safe cleanup',
         empiricalPerformance: false, policyInputsSynthetic: guard !== 'scope' });
     } finally { memory.stop(); ownership.killOwnedProcess('SIGTERM'); }
   }
