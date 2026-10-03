@@ -178,8 +178,15 @@ export async function runInterpretationRoutesSmoke({ send, evaluate, waitFor, wa
     analysis: item.settings?.expiredAnalysis ? { method: item.settings.expiredAnalysis.method, confidence: item.settings.expiredAnalysis.confidence,
       interpretation: item.settings.expiredAnalysis.interpretation, spatial: Boolean(item.settings.expiredAnalysis.spatial) } : null
   }))));
-  for (const format of ['png', 'tiff']) for (const entry of batch[format]) {
-    if (entry.samples !== first[format][0].samples) fail('selected/unopened remeasurement differs from fresh current: ' + JSON.stringify(entry));
+  for (const format of ['png', 'tiff']) if (batch[format][1].samples !== first[format][0].samples) {
+    fail('saved selected remeasurement differs from fresh current: ' + JSON.stringify(batch[format][1]));
+  }
+  const unopened = batchSettings[2].settings;
+  for (const key of ['wbR', 'wbG', 'wbB', 'expiredBrightness', 'expiredContrast', 'expiredNeutralize', 'coreExposure']) {
+    if (unopened?.[key] !== patch[key]) fail('unopened recipe explicit value lost: ' + key);
+  }
+  if (!unopened.expiredAnalysis || unopened.semanticMap || JSON.stringify(unopened.expiredAnalysis) === JSON.stringify(old.expiredAnalysis)) {
+    fail('unopened export did not retain a measurement of its new interpretation');
   }
   await evaluate('document.getElementById("undoBtn").click()');
   await waitFor('recipe undo restores completed old anchors', `${ready} && ${settings}.filmType === 'positive' && !!${settings}.semanticMap`);
@@ -204,5 +211,22 @@ export async function runInterpretationRoutesSmoke({ send, evaluate, waitFor, wa
   const fresh = await evaluate(settings);
   if (JSON.stringify(fresh.expiredAnalysis) !== JSON.stringify(detected.expiredAnalysis)) fail('detected action differs from fresh new-interpretation rescue');
   equalExports(detectedExports, await exports('fresh detected interpretation reference'), 'detected vs fresh new-interpretation reference');
-  console.log('ok: actual current/selected/mode recipes and detected-film action invalidate completed analysis; PNG8/TIFF16 consecutive, single/batch and fresh-reference samples exact; saved restoration and Undo/Redo preserve valid analysis');
+  // Fresh tiles may prepare a new, valid measurement before batch starts.
+  // Exports adopt that recipe rather than replacing it with the full-frame
+  // measurement. Check both contracts with the identical decoded source:
+  // restore its corresponding saved recipe, then measure it fresh at full
+  // resolution without the prepared measurement. No old analysis is reused.
+  await openProject([unopened], false);
+  const reopened = await evaluate(settings);
+  if (JSON.stringify(reopened.expiredAnalysis) !== JSON.stringify(unopened.expiredAnalysis)) fail('unopened corresponding saved measurement discarded');
+  const unopenedReference = await exports('unopened corresponding saved reference');
+  for (const format of ['png', 'tiff']) if (unopenedReference[format][0].samples !== batch[format][2].samples) {
+    fail('unopened actual batch differs from its corresponding saved reference: ' + format);
+  }
+  equalExports(unopenedReference, await exports('consecutive unopened saved reference'), 'unopened restored consecutive exports');
+  await openProject([{ ...unopened, expiredAnalysis: null }], false);
+  const unopenedFresh = await evaluate(settings);
+  if (JSON.stringify(unopenedFresh.expiredAnalysis) !== JSON.stringify(current.expiredAnalysis)) fail('unopened fresh full-source remeasurement differs from current recipe');
+  equalExports(first, await exports('unopened fresh full-source reference'), 'unopened fresh full-source reference');
+  console.log('ok: actual current/selected/mode recipes and detected-film action invalidate completed analysis; PNG8/TIFF16 consecutive, saved-selected single/batch and fresh full-source reference samples exact; unopened corresponding measurement, saved restoration and Undo/Redo preserved');
 }
