@@ -139,6 +139,11 @@ area; no viewport, since the level serves any window.
   again from its file; its live recipe is saved first, while it is still the
   current photo (the edit that asked for the original included), its history
   comes back as scalars (#244's cold entries) and a toast says so. A decode
+  mismatch during an actual Export button click keeps the live file identity
+  while `singleExportActive` owns the switch lock. The failed export writes
+  nothing; the queued cold activation runs after unlock and preserves the
+  latest edits and scalar history (R2-005). Other switch locks defer the same
+  way, and a stale queued activation is dropped after a photo change. A decode
   that fails, or falls back to the embedded preview (route `raw-fallback`: a
   LibRaw open timeout, a lost post-decode worker), is a failed decode, not
   another original: the session keeps its planes, records and edits; a
@@ -781,7 +786,10 @@ shows (GPU sample hash, white balance, saved settings).
 `displaySessions.test.mjs` covers the failure paths: a geometry edit whose
 original cannot be decoded again (rejected, or the `raw-fallback` embedded
 preview) keeps the session and rolls the edit back; an original that decodes
-differently reopens the photo with its recipe and history; a recipe-changed
+differently reopens the photo with its recipe and history; a changed
+original (size, depth or route) encountered by the real single-export click
+is deferred until unlock, writes no stand-in, and leaves later edits with a
+current queue item for persistence; a recipe-changed
 activation that cannot read its original opens the photo from its file; a
 session left with a reprocess or the original pending is kept (Tier A, Tier B)
 and comes back without a decode, converting what a cold open converts.

@@ -90,7 +90,7 @@ const FUNCTIONS = [
   'restoreColdSnapshotPixels', 'liveHistoryRoots', 'hotGeometrySnapshot', 'historyExclusiveBytes',
   'pushHistoryEntry', 'pruneHistoryForMemory', 'trimHistorySnapshot', 'commitUndoSnapshot', 'pushUndo', 'performUndo', 'performRedo',
   'rememberPhotoSession', 'rememberUnsettledDisplaySession', 'releaseOutgoingPhotoPlanes', 'photoSettingsKey', 'switchToFile',
-  'reactivateReleasedPhoto', 'reopenLivePhoto', 'invalidatePhotoActivation', 'getCropDraftTotalAngle', 'scaleCropRect',
+  'reactivateReleasedPhoto', 'resumeDeferredPhotoReactivation', 'reopenLivePhoto', 'invalidatePhotoActivation', 'getCropDraftTotalAngle', 'scaleCropRect',
   'interactiveGeometryBands',
   // Apply Crop's pending crop-area detection (#245).
   'getCropDraftSize', 'hasPendingCropDetection', 'noteConversionStarted', 'cancelCropDetection', 'sameCropRect',
@@ -166,7 +166,7 @@ export function createHarness(base, { historyBudget = 768 * 1024 * 1024, session
     geometryDiagnostics: { pendingReads: 0, frameSyncReads: 0, adoptedRotations: 0, workerRotations: 0, mainRotations: 0, coldRestores: 0, rollbacks: 0, coldSessions: false },
     undoStack: [], redoStack: [], MAX_UNDO: 30, HISTORY_MEMORY_BUDGET_BYTES: historyBudget,
     processNegativeInFlight: null, coreReprocessTimer: null, coreReprocessToken: 0, coreReprocessGeneration: 0,
-    studioAutoFrameRunning: false, singleExportActive: false, studioThumbnailUpdateFrame: 0, expiredAnalysisKey: null,
+    studioAutoFrameRunning: false, singleExportActive: false, pendingPhotoReactivation: null, studioThumbnailUpdateFrame: 0, expiredAnalysisKey: null,
     cropDetection: null, cropDetectionStats: { started: 0, hits: 0, misses: 0, stale: 0, reconversions: 0, conversions: 0 },
     lensMapCache: new Map(), canvas: { style: {} }, glCanvas: { style: {} },
     dustDetectionTimer: null, pendingBrushRepairs: 0, dustDrawing: false, fullUpdateTimer: null, fullResolutionRenderTimer: null,

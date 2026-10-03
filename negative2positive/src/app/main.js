@@ -377,6 +377,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     let expiredTabPending = false;
     let expiredAnalysisKey = null;
     let singleExportActive = false;
+    let pendingPhotoReactivation = null;
     const desktopBatchExportState = {
       active: false,
       current: 0,
@@ -12064,8 +12065,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     function reactivateReleasedPhoto(item, { history = null } = {}) {
       const index = state.fileQueue.indexOf(item);
       if (index < 0) return false;
-      state.loadedFile = null;
-      const reopening = switchToFile(index);
+      if (singleExportActive || studioAutoFrameRunning || isDesktopBatchExportLocked()) {
+        pendingPhotoReactivation = { item, history, generation: loadGeneration };
+        setTimeout(resumeDeferredPhotoReactivation, 100);
+        return true;
+      }
+      const reopening = switchToFile(index, { reopen: true });
       if (history) {
         void reopening.then(() => {
           if (getCurrentQueueItem() !== item) return;
@@ -12077,6 +12082,26 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         });
       }
       return true;
+    }
+
+    function resumeDeferredPhotoReactivation() {
+      const pending = pendingPhotoReactivation;
+      if (!pending) return;
+      if (!isCurrentLoad(pending.generation) || getCurrentQueueItem() !== pending.item) {
+        pendingPhotoReactivation = null;
+        return;
+      }
+      if (singleExportActive || studioAutoFrameRunning || isDesktopBatchExportLocked()) {
+        setTimeout(resumeDeferredPhotoReactivation, 100);
+        return;
+      }
+      pendingPhotoReactivation = null;
+      // The export kept the live identity. Include any edits made during its
+      // wait before accepting the cold activation, with scalar-only history.
+      persistCurrentFileSettings({ silent: true, force: true });
+      reactivateReleasedPhoto(pending.item, {
+        history: pending.history ? { undo: coldHistory(undoStack), redo: coldHistory(redoStack) } : null
+      });
     }
 
     // Opens the live photo again from its file when its session cannot go on
@@ -19461,6 +19486,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         notifyExportError(err);
       } finally {
         singleExportActive = false;
+        resumeDeferredPhotoReactivation();
         updateExportButtons();
         updateExportUI();
       }
@@ -21998,14 +22024,14 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       kickBackgroundPhotoWork();
     }
 
-    async function switchToFile(index) {
+    async function switchToFile(index, { reopen = false } = {}) {
       if (studioAutoFrameRunning || isDesktopBatchExportLocked() || singleExportActive) return;
       if (index < 0 || index >= state.fileQueue.length) return;
-      if (index === state.currentFileIndex && state.fileQueue[index].file === state.loadedFile) return;
+      if (!reopen && index === state.currentFileIndex && state.fileQueue[index].file === state.loadedFile) return;
       if (parkedPhoto) {
         await unparkOpenPhoto();
         if (parkedPhoto) return;
-        return switchToFile(index);
+        return switchToFile(index, { reopen });
       }
       // A GPU frame ahead of its exact frame (#239): that frame leaves now,
       // and the photo being left is remembered once it and its plane have
@@ -22013,20 +22039,20 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (gpuPreviewScheduler.busy()) {
         settleCoreInput();
         await whenCoreReprocessIdle();
-        return switchToFile(index);
+        return switchToFile(index, { reopen });
       }
       // A dragged frame's 16-bit plane may still be in the preview worker. The
       // photo being left is remembered only once it is back.
       if (corePreviewRetained || corePreviewCommit) {
         await settleCorePreviewPlane();
-        return switchToFile(index);
+        return switchToFile(index, { reopen });
       }
       // The photo being left is persisted below with what a pending
       // crop-area detection decides (a hit converts again): wait, do not
       // cancel.
       if (hasPendingCropDetection()) {
         await settlePendingCropDetection();
-        return switchToFile(index);
+        return switchToFile(index, { reopen });
       }
       if (state.cropping) exitCropMode({ restore: false });
       if (state.beforeAfterActive) exitBeforeAfter();
@@ -22038,8 +22064,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // A file the user merely clicked through in Step 1/2 has no settings of
       // its own, and freezing live state into it marks it "configured", which
       // makes batch export skip its automatic film-base and gray-point passes.
-      const leavingItem = getCurrentQueueItem();
       const fileItem = state.fileQueue[index];
+      // A reopen is already persisted by its caller. Keep its identity until
+      // this activation is accepted, but do not cache the invalid session.
+      const leavingItem = reopen && fileItem.file === state.loadedFile ? null : getCurrentQueueItem();
       // A visited photo's session, else the prefetched base of the next photo
       // (#243): either way the decode is skipped.
       const cached = photoSessions.take(fileItem) || photoPrefetch.take(fileItem);

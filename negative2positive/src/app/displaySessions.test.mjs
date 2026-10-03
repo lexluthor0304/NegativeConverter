@@ -4,6 +4,7 @@
 // rule that a display proxy never becomes a base, a plane or a source.
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
+import { readFileSync } from 'node:fs';
 
 // ImageData in both constructor forms (the harness's stand-in has only one).
 globalThis.ImageData = class ImageData {
@@ -1315,6 +1316,64 @@ async function returnedTierA({ tier = 'A', conversionRequests = false } = {}) {
   return { ...photo, itemB };
 }
 const NO_TURN = 'matrix(1, 0, 0, 1, 0, 0)';
+
+// The real Export button owns singleExportActive while exportSingle rebuilds
+// a Tier B source. A differing original must defer the reopen, preserve the
+// current item for persistence, and never write a stand-in export.
+for (const mismatch of ['size', 'depth', 'route']) {
+  const { h, c, base, item } = await returnedTierA({ tier: 'B' });
+  c.pushUndo('exposure');
+  h.state.exposure = 7;
+  let resolveDecode;
+  h.target.decodeBase = () => new Promise(resolve => { resolveDecode = resolve; });
+  const decoded = makeBase(base.width + (mismatch === 'size' ? 8 : 0), base.height, 9);
+  if (mismatch === 'depth') delete decoded.__image16;
+  if (mismatch === 'route') h.state.baseDescriptor.route = 'previous-decoder';
+  let reopened = 0, written = 0;
+  h.target.loadFile = async file => {
+    assert.equal(h.target.singleExportActive, false, 'activation starts only after the export unlocks');
+    reopened++;
+    Object.assign(h.state, {
+      loadedFile: file, loadedBaseImageData: decoded, originalImageData: decoded, croppedImageData: null,
+      cropRegion: null, rotationAngle: 0, mirrored: false, baseDescriptor: null, sourcePending: null,
+      processedImageData: null, conversionSourceImageData: null, currentStep: 1
+    });
+    h.target.undoStack.length = 0; h.target.redoStack.length = 0;
+    return { status: 'loaded' };
+  };
+  h.target.prepareStudioPhoto = async () => { await c.processNegative({ quiet: true }); };
+  Object.assign(h.target, {
+    isTauriDesktop: () => false,
+    getExportInfo: () => ({ format: 'png', bitDepth: 8, extension: 'png' }),
+    saveBlob: async () => { written++; return { saved: true }; }
+  });
+  vm.runInContext(functionSource('exportSingle'), c);
+  const source = readFileSync(new URL('./main.js', import.meta.url), 'utf8');
+  const marker = "    document.getElementById('exportSingleBtn').addEventListener('click', async () => {";
+  const start = source.indexOf(marker), end = source.indexOf('\n    });', start);
+  assert.ok(start >= 0 && end > start, 'the real Export button handler exists');
+  vm.runInContext('var exportClick = async () => {' + source.slice(start + marker.length, end) + '\n};', c);
+  const exporting = c.exportClick();
+  for (let i = 0; i < 10 && !resolveDecode; i++) await settle();
+  assert.ok(resolveDecode, `${mismatch}: Export requested the original`);
+  assert.equal(h.target.singleExportActive, true, 'the real click holds the export lock');
+  assert.equal(h.target.getCurrentQueueItem(), item, 'the queue item stays current during the decode');
+  resolveDecode(decoded);
+  await exporting;
+  for (let i = 0; i < 4; i++) { await settle(); await h.state.geometryReady; }
+  assert.equal(written, 0, `${mismatch}: no file is written from the mismatched session`);
+  assert.equal(reopened, 1, `${mismatch}: the queued activation runs after unlock`);
+  assert.equal(h.state.loadedFile, item.file, 'the live identity survives');
+  assert.equal(h.target.getCurrentQueueItem(), item);
+  assert.equal(h.state.loadedBaseImageData, decoded);
+  assert.equal(item.settings.exposure, 7, 'the saved recipe keeps the pending edits');
+  assert.equal(h.state.exposure, 7);
+  assert.equal(h.target.undoStack.length, 1);
+  assert.ok(h.target.undoStack[0].refs.cold, 'history is rebased to the new original');
+  h.state.exposure = 8;
+  h.target.persistCurrentFileSettings();
+  assert.equal(item.settings.exposure, 8, 'later edits still have a current item for persistence');
+}
 
 // A geometry edit on it whose original cannot be decoded again: the decode
 // is rejected (a LibRaw error), or falls back to the 8-bit embedded preview
