@@ -1,4 +1,4 @@
-import { applyAutomaticFilmType, applyFilmTypeOverride, sanitizeFilmTypeOverride, withoutFilmTypeAnalysis } from './filmTypeOverride.js';
+import { applyAutomaticFilmType, applyFilmTypeOverride, applyInterpretationPatch, sanitizeFilmTypeOverride, withoutFilmTypeAnalysis } from './filmTypeOverride.js';
 import { decideRollFilmType, mergeRollDecision, ownFilmTypeVerdict, rollDecisionFrame, rollFilmTypeTarget, ROLL_MONOCHROME } from './rollFilmType.js';
 import { createPhotoSessionCache, backingBuffers } from './photoSessionCache.js';
 import { displayProxyKey, displayPlaneHash } from './displayProxy.js';
@@ -2502,6 +2502,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       expiredCrossover: 100,
       expiredBrightness: 0,
       expiredContrast: 25,
+      expiredBrightnessUserOverride: false,
+      expiredContrastUserOverride: false,
       expiredUnevenFog: 100,
       expiredLocalContrast: 0,
       expiredAnalysis: null,
@@ -2996,6 +2998,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       'mirrored', 'sprocketPreviewEnabled', 'currentStep',
       'expiredEnabled', 'expiredLevels', 'expiredNeutralize', 'expiredCrossover', 'expiredBrightness', 'expiredContrast',
       'expiredUnevenFog', 'expiredLocalContrast',
+      'expiredBrightnessUserOverride', 'expiredContrastUserOverride',
     ];
 
     // Category B: heavy image data (stored by reference)
@@ -4725,6 +4728,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         // Expired-film rescue: the strengths are colour settings and inherit like
         // the look; the analysis is this frame's own measurement, never inherited.
         ...sanitizeExpiredRescueParams(source, fallbackSettings),
+        expiredBrightnessUserOverride: Boolean(source.expiredBrightnessUserOverride),
+        expiredContrastUserOverride: Boolean(source.expiredContrastUserOverride),
         expiredAnalysis: sanitizeExpiredAnalysis(source === state ? state.expiredAnalysis : source.expiredAnalysis),
         frameMetadata: sanitizeFrameMetadata(source === state ? state.frameMetadata : (Object.hasOwn(source, 'frameMetadata') ? source.frameMetadata : fallbackSettings.frameMetadata)),
         // Roll-level like the film base: a new file inherits the roll's flat field.
@@ -14674,7 +14679,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const ref = state.rollReference.settingsSnapshot;
       if (!ref) return false;
 
-      state.filmType = sanitizePresetType(ref.filmType || inferFilmTypeFromLegacyPreset(ref.filmPreset, 'color'));
+      Object.assign(state, applyInterpretationPatch(state, {
+        filmType: sanitizePresetType(ref.filmType || inferFilmTypeFromLegacyPreset(ref.filmPreset, 'color'))
+      }));
       state.filmBase = { ...ref.filmBase };
       state.filmBaseSet = true;
       if (ref.lensCorrection) {
@@ -18867,10 +18874,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
     // Convert positive button (skip to step 2 with positive mode selected)
     document.getElementById('convertPositiveBtn').addEventListener('click', () => {
-      state.filmType = 'positive';
-      state.filmTypeSource = 'manual';
-      state.filmTypeConfidence = null;
-      state.filmTypeReason = null;
+      Object.assign(state, applyInterpretationPatch(state, { filmType: 'positive',
+        filmTypeSource: 'manual', filmTypeConfidence: null, filmTypeReason: null }));
       setFilmTypeButtons(state.filmType);
       updateFilmModeUI();
       markCurrentFileDirty();
@@ -19109,6 +19114,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       state.expiredSession = false;
       state.expiredEnabled = false;
       state.expiredAnalysis = null;
+      state.expiredBrightnessUserOverride = state.expiredContrastUserOverride = false;
       expiredAnalysisKey = null;
       expiredTabPending = false;
       previewAdjustedBuffer = null;
@@ -20638,6 +20644,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         ...EXPIRED_RESCUE_DEFAULTS,
         expiredEnabled: Boolean(state.expiredSession),
         expiredAnalysis: null,
+        expiredBrightnessUserOverride: false,
+        expiredContrastUserOverride: false,
         frameMetadata: sanitizeFrameMetadata({}),
         flatFieldId: state.flatFieldId || null,
         coreSaturation: 100,
@@ -22891,6 +22899,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       updateFlatFieldUI();
       state.look = safe.look ? structuredClone(safe.look) : null;
       for (const key of EXPIRED_RESCUE_KEYS) state[key] = safe[key];
+      state.expiredBrightnessUserOverride = safe.expiredBrightnessUserOverride;
+      state.expiredContrastUserOverride = safe.expiredContrastUserOverride;
       state.expiredAnalysis = safe.expiredAnalysis ? structuredClone(safe.expiredAnalysis) : null;
       // A saved measurement belongs to this file; adopt it instead of re-measuring.
       expiredAnalysisKey = null;
@@ -25157,7 +25167,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         const next = { ...settings, filmEdge: sanitizeFilmEdgeForSettings({ ...text, found: true, shortName: text.filmName, text: text.text }) };
         if (rollDate && applyDefaults && text.year && !state.rollMetadata.date) { state.rollMetadata.date = String(text.year); updateMetadataUI(); }
         if (applyDefaults && text.filmKind) {
-          next.filmType = text.filmKind; next.filmTypeSource = 'auto'; next.filmTypeConfidence = 'high'; next.filmTypeReason = 'edge-text';
+          Object.assign(next, applyInterpretationPatch(next, { filmType: text.filmKind,
+            filmTypeSource: 'auto', filmTypeConfidence: 'high', filmTypeReason: 'edge-text' }));
         }
         if (!next.frameMetadata?.frameNumber && text.frameNumber) next.frameMetadata = { ...next.frameMetadata, frameNumber: text.frameNumber };
         if (applyDefaults && text.mirrorDetected && !settings.mirrored) {
@@ -25199,10 +25210,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const contradictory = record.polarity === 'light' && record.filmKind !== 'positive';
       if (applyDefaults && !contradictory && record.filmKind) {
         record.appliedFilmType = record.filmKind !== next.filmType;
-        next.filmType = record.filmKind;
-        next.filmTypeSource = 'auto';
-        next.filmTypeConfidence = 'high';
-        next.filmTypeReason = 'dx';
+        Object.assign(next, applyInterpretationPatch(settings, { filmType: record.filmKind,
+          filmTypeSource: 'auto', filmTypeConfidence: 'high', filmTypeReason: 'dx' }));
       }
       if (applyDefaults && result.text?.mirrorDetected && !settings.mirrored) {
         next.mirrored = true;
@@ -25263,8 +25272,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const edge = state.filmEdge;
       if (!edge?.found || !state.originalImageData) return;
       pushUndo('filmEdgeApply');
-      if (edge.filmKind && edge.filmKind !== state.filmType) {
-        state.filmType = edge.filmKind;
+      const filmTypeChanged = edge.filmKind && edge.filmKind !== state.filmType;
+      if (filmTypeChanged) {
+        Object.assign(state, applyInterpretationPatch(state, { filmType: edge.filmKind }));
         setFilmTypeButtons(state.filmType);
         if (requiresFilmBase()) setStep2Mode(suggestStep2Mode());
         else updateFilmModeUI();
@@ -25279,6 +25289,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       updateFilmEdgeUI();
       const label = edge.shortName || edge.filmName || edge.dxNumber;
       showToast(getInterpolatedText('filmEdgeAppliedPreset', { name: label }, `Applied the ${label} preset.`));
+      if (filmTypeChanged) remeasureExpiredAfterRetype();
       if (usesSilverCoreConversion(state)) scheduleSilverSourceRefresh({ commit: true });
       else schedulePreviewUpdate();
     }
@@ -26359,7 +26370,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         // Brightness and contrast that still hold the first phase's measured
         // values follow the new measurement; values the user moved stay.
         const previousAuto = defaultExpiredRescueParams(state.expiredAnalysis);
-        const untouched = state.expiredBrightness === previousAuto.expiredBrightness && state.expiredContrast === previousAuto.expiredContrast;
+        const untouched = !state.expiredBrightnessUserOverride && !state.expiredContrastUserOverride
+          && state.expiredBrightness === previousAuto.expiredBrightness && state.expiredContrast === previousAuto.expiredContrast;
         applyExpiredAnalysisDefaults(state, analysis, { force: untouched });
         expiredAnalysisKey = key;
         syncAllSlidersFromState();
@@ -26380,12 +26392,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // measured, unless the user (or a sync) already moved them off the defaults.
     function applyExpiredAnalysisDefaults(target, analysis, { force = false } = {}) {
       const auto = defaultExpiredRescueParams(analysis);
-      if (force || target.expiredBrightness === EXPIRED_RESCUE_DEFAULTS.expiredBrightness) target.expiredBrightness = auto.expiredBrightness;
-      if (force || target.expiredContrast === EXPIRED_RESCUE_DEFAULTS.expiredContrast) target.expiredContrast = auto.expiredContrast;
+      if (force || (!target.expiredBrightnessUserOverride && target.expiredBrightness === EXPIRED_RESCUE_DEFAULTS.expiredBrightness)) target.expiredBrightness = auto.expiredBrightness;
+      if (force || (!target.expiredContrastUserOverride && target.expiredContrast === EXPIRED_RESCUE_DEFAULTS.expiredContrast)) target.expiredContrast = auto.expiredContrast;
       target.expiredAnalysis = analysis;
     }
 
     function resetExpiredStrengthsInState({ force = true } = {}) {
+      state.expiredBrightnessUserOverride = state.expiredContrastUserOverride = false;
       for (const key of EXPIRED_RESCUE_KEYS) if (key !== 'expiredEnabled') state[key] = EXPIRED_RESCUE_DEFAULTS[key];
       if (state.expiredAnalysis) applyExpiredAnalysisDefaults(state, state.expiredAnalysis, { force });
     }
@@ -26596,6 +26609,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     function applyExpiredToSelected() {
       const patch = {};
       for (const key of EXPIRED_RESCUE_KEYS) patch[key] = state[key];
+      patch.expiredBrightnessUserOverride = patch.expiredContrastUserOverride = true;
       const targets = state.fileQueue.filter((item) => item.selected && item.file !== state.loadedFile);
       for (const item of targets) {
         if (item.settings) item.settings = { ...item.settings, ...patch };
@@ -26616,7 +26630,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       }
     };
     for (const key of ['expiredLevels', 'expiredNeutralize', 'expiredCrossover', 'expiredBrightness', 'expiredContrast', 'expiredUnevenFog', 'expiredLocalContrast']) {
-      setupSlider(key, key, expiredSliderHandlers);
+      setupSlider(key, key, { ...expiredSliderHandlers, onCommit: () => {
+        if (key === 'expiredBrightness' || key === 'expiredContrast') state[`${key}UserOverride`] = true;
+        expiredSliderHandlers.onCommit();
+      } });
     }
     document.getElementById('expiredEnabled')?.addEventListener('change', (event) => setExpiredEnabled(event.target.checked));
     function analyzeExpiredAgain() {
@@ -28398,19 +28415,35 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       return patch;
     }
 
+    function applyRecipeSettings(settings, patch) {
+      const next = applyInterpretationPatch(settings, patch);
+      if (Object.hasOwn(patch, 'filmType')) {
+        next.filmTypeSource = 'manual'; next.filmTypeConfidence = null; next.filmTypeReason = null;
+      }
+      for (const key of ['expiredBrightness', 'expiredContrast']) {
+        if (Object.hasOwn(patch, key)) next[`${key}UserOverride`] = true;
+      }
+      // Gains copied from another photo are explicit recipe values, even if
+      // its own gains were automatic. A later estimator must not replace them.
+      if (['wbR', 'wbG', 'wbB'].some(key => Object.hasOwn(patch, key))) {
+        next.wbAutoConfidence = null; next.wbSemanticApplied = false; next.grayPointSampled = true;
+      }
+      return next;
+    }
+
     function applyRecipeToCurrent() {
       if (!decodedRecipe || state.currentStep < 3 || !state.processedImageData) return;
       const patch = recipePatch();
       if (!Object.keys(patch).length) return;
       pushUndo('recipe');
       const filmTypeChanged = Object.hasOwn(patch, 'filmType') && patch.filmType !== state.filmType;
+      const interpretationChanged = filmTypeChanged || (Object.hasOwn(patch, 'positiveMode') && patch.positiveMode !== state.positiveMode);
+      Object.assign(state, applyRecipeSettings(state, patch));
       if (filmTypeChanged) {
-        state.filmType = patch.filmType;
         setFilmTypeButtons(state.filmType);
         if (requiresFilmBase()) setStep2Mode(suggestStep2Mode());
         else updateFilmModeUI();
       }
-      for (const [key, value] of Object.entries(patch)) if (key !== 'filmType') state[key] = value;
       if (Object.hasOwn(patch, 'filmType')) state.filmTypeSource = 'manual';
       updateFilmModeUI();
       if (patch.curvePoints) ['r', 'g', 'b'].forEach((ch) => updateCurveFromPoints(ch));
@@ -28421,6 +28454,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       updateLabMatchUI();
       updateExpiredRescueUI();
       markCurrentFileDirty();
+      if (interpretationChanged) remeasureExpiredAfterRetype();
       if (filmTypeChanged || usesSilverCoreConversion(state)) scheduleSilverSourceRefresh({ commit: true });
       else schedulePreviewUpdate();
       showToast(getLocalizedText('recipeApplied', 'Recipe applied.'));
@@ -28432,8 +28466,22 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const patch = recipePatch();
       const targets = state.fileQueue.filter((item) => item.selected && item.file !== state.loadedFile);
       for (const item of targets) {
-        if (item.settings) item.settings = { ...item.settings, ...structuredClone(patch) };
-        else item.studioColors = { ...(item.studioColors || {}), ...structuredClone(patch) };
+        if (item.settings) item.settings = applyRecipeSettings(item.settings, structuredClone(patch));
+        else {
+          // Fresh/window-left photos still compute their own base and analysis.
+          // Keep the explicit recipe over those defaults, including film mode
+          // and WB (neither is part of the colour-sync subset).
+          item.pendingEdits = applyRecipeSettings(item.pendingEdits || {}, structuredClone(patch));
+          item.studioColors = applyRecipeSettings(item.studioColors || {}, structuredClone(patch));
+        }
+        if (item.pendingFrameEdit) {
+          item.pendingFrameEdit.baseline = applyRecipeSettings(item.pendingFrameEdit.baseline, structuredClone(patch));
+          item.pendingEdits = applyRecipeSettings(item.pendingEdits || {}, structuredClone(patch));
+        }
+        if (patch.filmType || patch.positiveMode) item.filmTypeOverride = {
+          filmType: patch.filmType || item.settings?.filmType || item.filmTypeOverride?.filmType || state.filmType,
+          positiveMode: patch.positiveMode || item.settings?.positiveMode || item.filmTypeOverride?.positiveMode || state.positiveMode
+        };
         item.isDirty = false;
         item.status = 'pending';
       }

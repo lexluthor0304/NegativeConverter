@@ -27,6 +27,17 @@ function interpretationOf(settings) {
   return `${settings.filmType || 'color'}|${settings.positiveMode === 'edit' ? 'edit' : 'correct'}`;
 }
 
+// A patch reinterprets this frame's existing pixels, rather than restoring a
+// stored frame and its matching analysis. Invalidate before applying explicit
+// WB or strength values: those edits must win over automatic-value resets.
+export function applyInterpretationPatch(settings, patch) {
+  const choice = { ...settings };
+  for (const key of ['filmType', 'positiveMode']) if (Object.hasOwn(patch, key)) choice[key] = patch[key];
+  const next = interpretationOf(settings) === interpretationOf(choice) ? { ...settings }
+    : withoutFilmTypeAnalysis(settings, { ...choice, rollFrame: null });
+  return { ...next, ...patch };
+}
+
 export function withoutFilmTypeAnalysis(previous, next) {
   // Semantic anchors were measured on the old interpretation's positive too.
   if (next.semanticMap && interpretationOf(previous) !== interpretationOf(next)) next.semanticMap = null;
@@ -43,7 +54,7 @@ export function withoutFilmTypeAnalysis(previous, next) {
   if (next.expiredAnalysis && interpretationOf(previous) !== interpretationOf(next)) {
     const measured = defaultExpiredRescueParams(next.expiredAnalysis);
     for (const key of ['expiredBrightness', 'expiredContrast']) {
-      if (next[key] === measured[key]) next[key] = EXPIRED_RESCUE_DEFAULTS[key];
+      if (!next[`${key}UserOverride`] && next[key] === measured[key]) next[key] = EXPIRED_RESCUE_DEFAULTS[key];
     }
     next.expiredAnalysis = null;
   }

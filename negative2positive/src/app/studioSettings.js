@@ -1,5 +1,7 @@
 // 調色だけを同期する。片基・レンズ・切り抜き・修復は各写真に残す。
 // 期限切れフィルムの救済は強度のみ同期し、解析結果は写真ごとに測り直す。
+import { applyInterpretationPatch } from './filmTypeOverride.js';
+
 export const STUDIO_COLOR_KEYS = [
   'coreFilmPreset', 'coreColorModel', 'coreEnhancedProfile', 'coreProfileStrength',
   'corePreSaturation', 'coreBrightness', 'coreExposure', 'coreContrast',
@@ -9,7 +11,8 @@ export const STUDIO_COLOR_KEYS = [
   'exposure', 'contrast', 'highlights', 'shadows', 'temperature', 'tint',
   'vibrance', 'saturation', 'cyan', 'magenta', 'yellow', 'curvePoints', 'curves',
   'expiredEnabled', 'expiredLevels', 'expiredNeutralize', 'expiredCrossover',
-  'expiredBrightness', 'expiredContrast', 'expiredUnevenFog', 'expiredLocalContrast'
+  'expiredBrightness', 'expiredContrast', 'expiredUnevenFog', 'expiredLocalContrast',
+  'expiredBrightnessUserOverride', 'expiredContrastUserOverride'
 ];
 
 export function pickStudioColors(settings) {
@@ -19,7 +22,12 @@ export function pickStudioColors(settings) {
 }
 
 export function mergeStudioColors(target, source) {
-  return { ...structuredClone(target), ...pickStudioColors(source) };
+  // Unopened-photo recipes also carry film mode and explicit WB. Colour sync
+  // still picks only STUDIO_COLOR_KEYS, so it never copies those fields.
+  const keys = [...STUDIO_COLOR_KEYS, 'filmType', 'positiveMode',
+    'wbR', 'wbG', 'wbB', 'wbUserOverride', 'grayPointSampled', 'wbAutoConfidence', 'wbSemanticApplied'];
+  const patch = Object.fromEntries(keys.filter(key => source[key] !== undefined).map(key => [key, structuredClone(source[key])]));
+  return applyInterpretationPatch(structuredClone(target), patch);
 }
 
 // Nearest-neighbour sampling for tiles and presentation proxies. 8-bit RGBA

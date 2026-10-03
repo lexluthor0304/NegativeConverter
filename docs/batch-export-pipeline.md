@@ -73,6 +73,14 @@ Now one driver (`runBatchExport` in `main.js`) runs the per-file pipeline
   the selected model and its provider/revision cache key. Released-model AI
   stamps remain reusable; explicit AI-off repair remains TELEA. Previews keep
   their existing fallback, and an empty dust mask needs no model (#229 R1-102).
+- Interpretation-changing recipes and detected-film/edge application invalidate
+  the old frame's semantic anchors and expired-rescue measurement before explicit
+  edits are applied (#229 R1-017). A saved selected-photo recipe with no valid
+  rescue measurement is measured by `processFileWithSettings` on its new positive
+  before adjustment/encoding, using the real spatial/global rescue kernel.
+  Recipe WB and explicit strength ownership survive that measurement; subsequent
+  exports adopt the valid new measurement. Saved same-interpretation state and
+  matching history restore their measurements without blanket invalidation.
 - The geometry chain (base → rotation → mirror → crop) runs in one pass that
   only builds the cropped window, for right angles and mirror-only geometry
   too, bit-identical to the step chain (`planGeometry` + `renderGeometryRows`

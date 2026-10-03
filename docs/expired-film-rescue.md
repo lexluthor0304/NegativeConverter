@@ -171,6 +171,22 @@ converted frame through `remeasureExpiredAfterRetype`; user strengths, other
 settings and manual white balance survive. Undo restores the old interpretation
 and its anchors together.
 
+The same rule applies to recipes on the current/selected photos, detected-film
+application, film-edge import merges, the Step-2 roll reference and the positive
+conversion entry. These are changes to the interpretation of existing pixels;
+restoring a saved source/recipe or history entry instead retains its matching
+measurement. Current recipes and detected-film application arm measurement
+before queuing the new conversion token. Selected recipes leave analysis empty
+for the real batch/open-photo processor to measure; unopened and provisional
+photos retain the recipe over their own full-source defaults.
+
+Explicit recipe WB is sampled/user-owned after a copy. Brightness/contrast
+ownership (`expiredBrightnessUserOverride`, `expiredContrastUserOverride`) is
+stored with the frame and its history, so a recipe or slider value equal to an
+automatic/default value still survives remeasurement, including OpenCV's second
+phase. Reset/One-click colour correct restores automatic ownership. The recipe
+format continues to share strengths, never a per-frame measurement.
+
 `state.expiredSession` is the session-level entry: photos added while it is
 on start rescued, and the Studio shows the rescue tab first. It is switched
 on by the welcome-screen button "Rescue an expired roll" and the menu entry,
@@ -195,7 +211,9 @@ are auto-framed exactly as outside the flow.
 node negative2positive/src/pipeline/expiredRescue.test.mjs
 node negative2positive/src/app/expiredRescueOpenCv.test.mjs
 node negative2positive/src/app/expiredMeasurement.test.mjs
+node negative2positive/src/app/interpretationRoutes.test.mjs
 node scripts/smoke-test.mjs --expired-only
+node scripts/smoke-test.mjs --interpretation-routes-only
 ```
 
 `expiredMeasurement.test.mjs` runs the real main.js functions: a fog-surface
@@ -203,6 +221,16 @@ request with other inputs measures again, and the stored measurement equals
 1703835's (frozen copy) when One-click colour correct resets the strengths
 while a request is in flight; the open photo's automatic retype and "These
 are positives" measure the new mode, equal to the photo opened in that mode.
+
+`interpretationRoutes.test.mjs` executes the production recipe/detected/reference/
+edge/positive writers and batch processor with tiny real conversion/rescue and
+8/16 adjustment kernels. Frozen-base controls fail on retained completed anchors
+and zero batch measurements. The targeted browser check covers actual current,
+selected and positive-mode recipes, the detected-film button, saved restoration
+and Undo/Redo, with exact consecutive PNG8/TIFF16 bytes, single/batch samples and
+a fresh new-interpretation export reference. The semantic-model answer is a
+bounded test leaf; these checks do not establish model quality, 60MP timing or
+native acceptance.
 
 The OpenCV test loads the real opencv-js build in Node, ages a scene with a
 left-edge fog gradient and a bright wall, and checks the floor map follows
