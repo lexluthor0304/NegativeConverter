@@ -1,7 +1,9 @@
+import { hasDerivedEightBit, markDerivedEightBit } from './crossOriginIsolation.js';
+
 // Parking must release the full mutable planes dust history patches, while
 // retaining their exact bytes and shared identities. These records are undo
 // data, never cache entries: no LRU or quota eviction may discard them.
-function pack(roots, base) {
+function pack(roots, base, { createGeometryFrame, geometryKeyOf }) {
   const seen = new Map(), nodes = [], buffers = [], bufferIds = new Map();
   function bufferId(buffer) {
     if (!bufferIds.has(buffer)) { bufferIds.set(buffer, buffers.length); buffers.push(buffer); }
@@ -28,12 +30,27 @@ function pack(roots, base) {
       node.kind = 'set'; node.fields = [...value].map(visit);
     } else if (value instanceof Date) {
       node.kind = 'date'; node.value = value.getTime();
+    } else if (Object.getOwnPropertyDescriptor(value, '__geometryFrame')?.value) {
+      if (typeof createGeometryFrame !== 'function') throw Error('Geometry history restoration is unavailable');
+      // Never touch a descriptor's pixel getters, even to classify it. The
+      // recipe retains the base, key and only pixels already materialized.
+      node.kind = 'geometry';
+      node.recipe = visit(value.__geometryFrame);
+      node.fields = Object.entries(value).filter(([key]) => !['data', '__image16', '__geometryFrame'].includes(key))
+        .map(([key, item]) => [key, visit(item)]);
+      node.geometryKey = visit(geometryKeyOf?.(value) || null);
     } else {
       const image = value.data instanceof Uint8ClampedArray && Number.isInteger(value.width) && Number.isInteger(value.height);
       node.kind = image ? 'image' : Array.isArray(value) ? 'array' : 'object';
-      // ImageData's native fields are not enumerable; __image16 and image
-      // metadata are ordinary properties and must travel with them too.
+      // ImageData's native fields and a genuine 16-bit plane may be
+      // nonenumerable. Store the precision explicitly, never promote it.
       const fields = image ? { ...value, width: value.width, height: value.height, data: value.data } : value;
+      if (image) {
+        if (value.__image16) fields.__image16 = value.__image16;
+        node.image16Enumerable = Object.prototype.propertyIsEnumerable.call(value, '__image16');
+        node.derived8 = hasDerivedEightBit(value);
+        node.geometryKey = visit(geometryKeyOf?.(value) || null);
+      }
       node.fields = Object.entries(fields).map(([key, item]) => [key, visit(item)]);
     }
     return { ref };
@@ -41,7 +58,7 @@ function pack(roots, base) {
   return { record: { version: 1, root: visit(roots), nodes }, buffers };
 }
 
-function unpack(record, buffers, base, ImageDataCtor) {
+function unpack(record, buffers, base, ImageDataCtor, { createGeometryFrame, restoreGeometryKey }) {
   if (record?.version !== 1 || !Array.isArray(record.nodes)) throw Error('Invalid dust history record');
   const values = new Map();
   function visit(value) {
@@ -69,8 +86,14 @@ function unpack(record, buffers, base, ImageDataCtor) {
       }
       return result;
     }
-    if (!['array', 'object', 'image'].includes(node.kind)) throw Error('Invalid dust history node');
+    if (!['array', 'object', 'image', 'geometry'].includes(node.kind)) throw Error('Invalid dust history node');
     let result = node.kind === 'array' ? [] : {};
+    if (node.kind === 'geometry') {
+      if (typeof createGeometryFrame !== 'function') throw Error('Geometry history restoration is unavailable');
+      const recipe = visit(node.recipe);
+      if (!recipe?.base || !recipe.key) throw Error('Invalid parked geometry recipe');
+      result = createGeometryFrame(recipe.base, recipe.key, recipe);
+    }
     if (node.kind === 'image' && ImageDataCtor) {
       const fields = new Map(node.fields);
       result = new ImageDataCtor(visit(fields.get('data')), fields.get('width'), fields.get('height'));
@@ -79,14 +102,22 @@ function unpack(record, buffers, base, ImageDataCtor) {
     if (!Array.isArray(node.fields)) throw Error('Invalid dust history fields');
     for (const [key, item] of node.fields) {
       if (node.kind === 'image' && ImageDataCtor && ['width', 'height', 'data'].includes(key)) continue;
-      Object.defineProperty(result, key, { value: visit(item), enumerable: true, configurable: true, writable: true });
+      Object.defineProperty(result, key, { value: visit(item), enumerable: key !== '__image16' || node.image16Enumerable !== false,
+        configurable: true, writable: true });
+    }
+    if (node.derived8) markDerivedEightBit(result);
+    if (node.geometryKey) {
+      const key = visit(node.geometryKey);
+      if (key) restoreGeometryKey?.(result, key);
     }
     return result;
   }
   return visit(record.root);
 }
 
-export function createDustHistoryArchive({ indexedDB = globalThis.indexedDB, ImageDataCtor = globalThis.ImageData, chunkBytes = 8 * 1024 * 1024 } = {}) {
+export function createDustHistoryArchive({ indexedDB = globalThis.indexedDB, ImageDataCtor = globalThis.ImageData,
+  chunkBytes = 8 * 1024 * 1024, createGeometryFrame = null, geometryKeyOf = null, restoreGeometryKey = null } = {}) {
+  const geometry = { createGeometryFrame, geometryKeyOf, restoreGeometryKey };
   let opened = null;
   function database() {
     if (!indexedDB) return Promise.reject(Error('Dust history storage is unavailable'));
@@ -127,7 +158,7 @@ export function createDustHistoryArchive({ indexedDB = globalThis.indexedDB, Ima
   }
   return {
     async save(roots, { base = null } = {}) {
-      const { record, buffers } = pack(roots, base);
+      const { record, buffers } = pack(roots, base, geometry);
       const key = globalThis.crypto.randomUUID?.()
         || Array.from(globalThis.crypto.getRandomValues(new Uint32Array(4)), value => value.toString(16).padStart(8, '0')).join('');
       const size = Math.max(1, Math.floor(chunkBytes));
@@ -167,7 +198,7 @@ export function createDustHistoryArchive({ indexedDB = globalThis.indexedDB, Ima
         if (offset !== bytes.length) throw Error('Incomplete parked dust history plane');
         buffers.push(bytes.buffer);
       }
-      return unpack(record, buffers, base, ImageDataCtor);
+      return unpack(record, buffers, base, ImageDataCtor, geometry);
     },
     remove
   };

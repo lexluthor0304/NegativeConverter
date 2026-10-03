@@ -9,6 +9,7 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
+import { runGeometryArchiveSmoke } from './geometry-archive-smoke.mjs';
 
 export async function runGeometrySmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port, root }) {
   const second = join(root, 'negative2positive', 'test-fixtures', 'negative-sample.jpg');
@@ -227,6 +228,7 @@ export async function runGeometrySmoke({ send, evaluate, waitFor, wait, fail, in
       fail('a cold session rebuilt different planes: ' + JSON.stringify({ first, reopened }));
     }
     console.log('ok: a session kept without its planes reopens with the exact planes rebuilt from its base');
+    await runGeometryArchiveSmoke({ evaluate, waitFor, wait, fail });
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

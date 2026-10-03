@@ -123,6 +123,12 @@ In `main.js` the scalars change synchronously and the planes follow:
   a photo switch leaves while the next photo decodes: a redraw (a window
   resize) keeps the last histogram. Without a crop the working frame is the
   output itself.
+- Hidden brush-history archives store lazy frame descriptors as their base,
+  geometry key and any pixels already built, without reading pixel getters.
+  Restore recreates the lazy descriptor and its aliases, reinstalls geometry
+  memos for hot Undo/Redo, and preserves nonenumerable 16-bit planes and the
+  derived-8-bit sampling flag. A missing descriptor restorer fails storage
+  before live history can be released. Writes remain bounded to 8 MiB.
 - History counts only the bytes it holds exclusively (`backingBuffers` over
   undo/redo minus live state), after every edit, Undo and Redo. Over
   768 MiB the oldest entries become cold (pixel references dropped, scalars

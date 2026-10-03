@@ -129,6 +129,10 @@ stay held. Dust-brush history (#259) and the current repair are persisted
 losslessly to IndexedDB before their target, clean-source and mask references
 are dropped. Shared image/array identities, 8-bit and 16-bit pixels, stroke
 patches and ordinary snapshots around those strokes are restored together;
+lazy rotated/mirrored frame recipes are persisted without materialization,
+including already-built pixels and nonenumerable 16-bit planes. Restored
+geometry keeps its memo and sample precision, so hot geometry history still
+swaps references.
 no undo or redo step is removed. Writes use chunks of at most 8 MiB, so
 storage never clones a full plane in one request. The dust worker, tint and
 repair-preview aliases are released too. Showing the window reads that exact
@@ -233,7 +237,10 @@ state, cache bytes, live workers, the MI-GAN session and `aiRepair.revision`.
   overlay; hiding sheds caches and idle workers and keeps the revision; a
   hidden contact sheet completes; a batch killed after frame 1 is named at boot
   and resumes only the missing frames under the same names and bytes; the
-  opt-in park rebuilds an identical export (WARN line otherwise). A TIFF 16-bit
+  opt-in park requires an identical export. The geometry smoke also parks a
+  genuine 16-bit rotated/mirrored/cropped scan with a brush stroke, requiring
+  retained-byte reduction, no synchronous full-frame build, and byte-identical
+  PNG16/TIFF16 exports through restoration and stroke Undo/Redo. A TIFF 16-bit
   browser ZIP and a 'Download individually' run, with dust removal (AI off),
   the sprocket border and custom edge markings, killed after frame 1 and
   resumed after a reload: same names, format, bit depth and decoded pixels as

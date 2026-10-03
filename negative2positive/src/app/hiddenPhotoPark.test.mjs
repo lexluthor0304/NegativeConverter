@@ -14,6 +14,8 @@ import { createDustWorkerClient } from './dustWorkerClient.js';
 import { createHiddenJobGate } from './hiddenJobGate.js';
 import { ROLL_OPENCV_REALM_BYTES } from './batchExportScheduler.js';
 import { isSharedPlane } from './crossOriginIsolation.js';
+import { createHarness, makeBase, samePixels } from './geometryTestHarness.mjs';
+import { encodeTiffBlob } from './exportImageEncoders.js';
 
 const source = readFileSync(new URL('./main.js', import.meta.url), 'utf8');
 function functionSource(name) {
@@ -25,29 +27,37 @@ function functionSource(name) {
 const refKeys = /const SNAPSHOT_REF_KEYS = (\[[^\]]+\]);/.exec(source)[1];
 const plane = (tag) => ({ tag, data: new Uint8ClampedArray(16), width: 2, height: 2 });
 
-function fixture({ enabled = true, hidden = true, brush = true } = {}) {
-  const base = plane('base');
+function fixture({ enabled = true, hidden = true, brush = true, geometry = null } = {}) {
+  const base = geometry?.state.loadedBaseImageData || plane('base');
   const file = { name: 'L1009967.dng' };
   const item = { file, settings: null, isDirty: true };
   const calls = [];
   const storage = new Map(enabled ? [['nc_hidden_park_v1', 'on']] : []);
   const state = {
     fileQueue: [{ file: { name: 'other' } }, item], currentFileIndex: 1, loadedFile: file,
-    loadedBaseImageData: base, originalImageData: plane('rotated'), croppedImageData: plane('crop'),
+    loadedBaseImageData: base, originalImageData: geometry?.state.originalImageData || plane('rotated'),
+    croppedImageData: geometry?.state.croppedImageData || plane('crop'),
     processedImageData: plane('processed'), conversionSourceImageData: plane('source'),
     conversionPreviewImageData: plane('preview'), previewSourceImageData: plane('previewSource'),
     histogramSourceImageData: plane('hist'), webglSourceImageData: plane('webgl'), displayImageData: plane('display'),
     rawMetadata: { camera: 'M11' }, rawDecodePending: false, currentStep: 3, cropping: false,
-    dustRemoval: { processing: false, mask: new Uint8Array(4), inpaintedImageData: plane('dust'), cleanSource: plane('clean'), _state: {} },
+    dustRemoval: { processing: false, mask: new Uint8Array(geometry ? 12 : 4),
+      inpaintedImageData: geometry ? makeBase(4, 3, 43) : plane('dust'),
+      cleanSource: geometry ? makeBase(4, 3, 41) : plane('clean'), _state: {} },
     zoomLevel: 2, panX: 5, panY: 6
   };
   const db = archiveDatabaseFixture();
-  const archive = createDustHistoryArchive({ indexedDB: db.indexedDB });
+  const archive = createDustHistoryArchive({ indexedDB: db.indexedDB,
+    createGeometryFrame: geometry ? (...args) => geometry.context.createGeometryFrame(...args) : null,
+    geometryKeyOf: image => geometry?.target.geometryMemo.get(image),
+    restoreGeometryKey: (image, key) => geometry?.target.geometryMemo.set(image, key) });
   const target = state.dustRemoval.inpaintedImageData;
   state.processedImageData = target;
   const rect = { x: 0, y: 0, width: 1, height: 1 };
   const stroke = { label: 'dustBrushStroke', dustDelta: applyStrokePatch(target, state.dustRemoval.mask, {
-    rect, maskRect: rect, rgba8: Uint8ClampedArray.of(41, 42, 43, 255), maskBytes: Uint8Array.of(255), particleCount: 1
+    rect, maskRect: rect, rgba8: Uint8ClampedArray.of(41, 42, 43, 255),
+    ...(geometry ? { rgba16: Uint16Array.of(10511, 10783, 11039, 65535) } : {}),
+    maskBytes: Uint8Array.of(255), particleCount: 1
   }, { cleanSource: state.dustRemoval.cleanSource, countBefore: 0, tagBefore: 0, tagAfter: 1 }) };
   if (!brush) { state.dustRemoval.mask = state.dustRemoval.inpaintedImageData = state.dustRemoval.cleanSource = null; }
 
@@ -99,6 +109,45 @@ function fixture({ enabled = true, hidden = true, brush = true } = {}) {
     { name: 'workers', bytes: () => c.workerResidentBytes?.() || 0 }
   ]);
   return { c, state, item, base, file, calls, undoStack, redoStack, stroke, db, target, ledger };
+}
+
+// A real rotated/mirrored/cropped RAW descriptor must stay lazy through the
+// actual park/unpark functions, and its brush still patches exact 16-bit data.
+{
+  const h = createHarness(makeBase(8, 6, 37)), c = h.context;
+  c.restoreSettings({ rotationAngle: 17.3, mirrored: true, cropRegion: { left: 1, top: 1, width: 4, height: 3 } });
+  await h.state.geometryReady;
+  const sample = c.renderFrameSample(12, { with16: true });
+  const f = fixture({ geometry: h });
+  f.undoStack[0].refs.originalImageData = f.state.originalImageData;
+  f.undoStack[0].refs.croppedImageData = f.state.croppedImageData;
+  const liveFrame = f.state.originalImageData, liveDelta = f.stroke.dustDelta;
+  f.db.failures.writeAt = 3;
+  assert.equal(await f.c.parkOpenPhotoForHiddenJob(), false, 'partial geometry storage failure rolls back');
+  assert.equal(f.state.originalImageData, liveFrame);
+  assert.equal(f.stroke.dustDelta, liveDelta);
+  assert.equal(liveFrame.__geometryFrame.pixels, null);
+  assert.equal(f.db.records.size, 0);
+  f.db.failures.writeAt = null;
+  const tiff = await encodeTiffBlob(f.target, 16).arrayBuffer();
+  const cropTiff = await encodeTiffBlob(f.state.croppedImageData, 16).arrayBuffer();
+  assert.equal(await f.c.parkOpenPhotoForHiddenJob(), true);
+  assert.equal(h.target.geometryDiagnostics.frameSyncReads, 0, 'parking never expands a lazy geometry frame');
+  f.c.document.visibilityState = 'visible';
+  await f.c.unparkOpenPhoto();
+  assert.equal(f.state.originalImageData.__geometryFrame.pixels, null);
+  assert.equal(f.state.originalImageData.__geometryFrame.base, f.base);
+  assert.equal(f.undoStack[0].refs.originalImageData, f.state.originalImageData);
+  assert.equal(f.undoStack[0].refs.croppedImageData, f.state.croppedImageData);
+  h.state.originalImageData = f.state.originalImageData;
+  samePixels(c.renderFrameSample(12, { with16: true }), sample, 'unparked frame sample');
+  assert.deepEqual(await encodeTiffBlob(f.state.croppedImageData, 16).arrayBuffer(), cropTiff, 'transformed TIFF16 stays exact');
+  applyDustDelta(f.stroke.dustDelta, 'undo');
+  samePixels(f.state.processedImageData, makeBase(4, 3, 43), 'archived brush undo retains low sample bits');
+  applyDustDelta(f.stroke.dustDelta, 'redo');
+  assert.deepEqual(await encodeTiffBlob(f.state.processedImageData, 16).arrayBuffer(), tiff, 'brush redo TIFF16 stays exact');
+  assert.equal(h.target.geometryDiagnostics.frameSyncReads, 0);
+  assert.equal(f.db.records.size, 0);
 }
 
 // Off by default: nothing is parked until the measurement run turns it on.

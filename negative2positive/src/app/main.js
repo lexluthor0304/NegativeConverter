@@ -389,7 +389,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // The open photo while it is parked in a hidden window (#241 part 2e).
     let parkedPhoto = null;
     let parkingPhoto = false;
-    const dustHistoryArchive = createDustHistoryArchive();
+    const dustHistoryArchive = createDustHistoryArchive({
+      createGeometryFrame, geometryKeyOf: image => geometryMemo.get(image),
+      restoreGeometryKey: (image, key) => geometryMemo.set(image, key)
+    });
     // Every long job asks this gate before an item starts, so a hidden macOS
     // window stays under WebKit's inactive memory limit (#241; the callbacks
     // live under "Hidden-window jobs" below).
@@ -16158,9 +16161,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // only. Its pixels are not kept: renderFrameSample and geometryFramePixels
     // build what a reader needs. A synchronous read of `data` still works as
     // a last resort (counted, built once on this thread).
-    function createGeometryFrame(base, key) {
+    function createGeometryFrame(base, key, recipe = { base, key, pixels: null }) {
       const frame = { width: key.frameWidth, height: key.frameHeight };
-      const recipe = { base, key, pixels: null };
       Object.defineProperties(frame, {
         __geometryFrame: { value: recipe },
         data: { get: () => materializeGeometryFrame(recipe).data },
