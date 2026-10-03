@@ -39,12 +39,21 @@ export async function runInterpretationRoutesSmoke({ send, evaluate, waitFor, wa
     const revoke = URL.revokeObjectURL.bind(URL), pending = new Set();
     URL.revokeObjectURL = url => { if (!pending.has(url)) revoke(url); };
     window.__routeDownloads = [];
+    window.__routeProjectOpened = false;
+    new MutationObserver(records => {
+      if (records.some(record => Array.from(record.addedNodes).some(node => /Project opened:/.test(node.textContent)))) window.__routeProjectOpened = true;
+    }).observe(document.getElementById('toastContainer'), { childList: true, subtree: true });
     const hash = async bytes => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), b => b.toString(16).padStart(2, '0')).join('');
     HTMLAnchorElement.prototype.click = function () {
       if (!this.download || !this.href.startsWith('blob:')) return;
       const name = this.download, href = this.href; pending.add(href);
       window.__routeDownloads.push(fetch(href).then(r => r.arrayBuffer()).then(async bytes => {
         const u8 = new Uint8Array(bytes), fileHash = await hash(bytes);
+        if (name.endsWith('.ncroll.json')) {
+          const text = new TextDecoder().decode(bytes);
+          window.__routeSavedProjectText = text;
+          return { name, fileHash, project: JSON.parse(text) };
+        }
         if (u8[0] === 137) {
           const { loadPngFile } = await import('/src/app/pngFileLoader.js');
           const image = loadPngFile(bytes);
@@ -78,6 +87,10 @@ export async function runInterpretationRoutesSmoke({ send, evaluate, waitFor, wa
     image.__image16 = { width, height, data: data16 };
     const blob = encodePng16Blob(image);
     window.__routeFiles = ['current', 'selected', 'unopened'].map(name => new File([blob], 'route-' + name + '.png', { type: 'image/png', lastModified: 1 }));
+    window.__routeOriginalFiles = window.__routeFiles.slice();
+    const donor = new ImageData(Uint8ClampedArray.from(image.data, (v, i) => i % 4 === 3 ? v : Math.round(v * .7)), width, height);
+    donor.__image16 = { width, height, data: Uint16Array.from(data16, (v, i) => i % 4 === 3 ? v : Math.round(v * .7)) };
+    window.__routeDonorFile = new File([encodePng16Blob(donor)], 'route-current.png', { type: 'image/png', lastModified: 1 });
     const dt = new DataTransfer(); dt.items.add(window.__routeFiles[0]);
     const input = document.getElementById('fileInput'); input.files = dt.files; input.dispatchEvent(new Event('change', { bubbles: true }));
   })()`);
@@ -92,6 +105,7 @@ export async function runInterpretationRoutesSmoke({ send, evaluate, waitFor, wa
   const openProject = async (values, all = true) => {
     await evaluate(`(async () => {
       const { buildRollProject, serializeRollProject } = await import('/src/app/rollProject.js');
+      window.__routeProjectOpened = false;
       const files = window.__routeFiles.slice(0, ${all ? 3 : 1});
       const values = ${JSON.stringify(values)};
       const entries = files.map((file, i) => ({ name: file.name, size: file.size, selected: true,
@@ -100,7 +114,8 @@ export async function runInterpretationRoutesSmoke({ send, evaluate, waitFor, wa
       const dt = new DataTransfer(); for (const file of files) dt.items.add(file); dt.items.add(project);
       const input = document.getElementById('projectInput'); input.files = dt.files; input.dispatchEvent(new Event('change', { bubbles: true }));
     })()`);
-    await waitFor('saved project source restored', `${ready} && document.getElementById('studioFilename').textContent === 'route-current.png'
+    await waitFor('saved project source restored', `window.__routeProjectOpened && ${ready}
+      && document.getElementById('studioFilename').textContent === window.__routeFiles[0].name
       && ${settings}?.expiredAnalysis?.spatial`, 120000);
     await evaluate('window.__ncAnalysis.settle()');
     await wait(600);
@@ -232,4 +247,124 @@ export async function runInterpretationRoutesSmoke({ send, evaluate, waitFor, wa
   // exports above also require identical complete encoded files.
   equalExports(first, await exports('unopened fresh full-source reference'), 'unopened fresh full-source reference', false);
   console.log('ok: actual current/selected/mode recipes and detected-film action invalidate completed analysis; PNG8/TIFF16 consecutive, saved-selected single/batch and fresh full-source reference samples exact; unopened corresponding measurement, saved restoration and Undo/Redo preserved');
+
+  const saveProject = async label => {
+    await evaluate('window.__routeDownloads.length = 0; document.getElementById("studioSaveProject").click()');
+    await waitFor(label + ' saved', 'window.__routeDownloads.length === 1', 120000);
+    const [download] = await evaluate('Promise.all(window.__routeDownloads)');
+    if (!download.project) fail(label + ': actual project save did not produce a project');
+    return download.project;
+  };
+  const reopenSavedProject = async label => {
+    const before = await evaluate('window.__ncTwoStage.status().settings');
+    await evaluate(`(() => {
+      window.__routeProjectOpened = false;
+      const project = new File([window.__routeSavedProjectText], 'saved.ncroll.json', { type: 'application/json' });
+      const dt = new DataTransfer(); for (const file of window.__routeFiles) dt.items.add(file); dt.items.add(project);
+      const input = document.getElementById('projectInput'); input.files = dt.files; input.dispatchEvent(new Event('change', { bubbles: true }));
+    })()`);
+    await waitFor(label + ' reopened', `window.__routeProjectOpened && ${ready} && ${settings}.filmType === '${before.filmType}' && ${settings}.positiveMode === '${before.positiveMode}'
+      && ${settings}.expiredAnalysis?.spatial`, 120000);
+    await evaluate('window.__ncAnalysis.settle()');
+  };
+  const equalRecipient = (batchResult, singleResult, label) => {
+    for (const format of ['png', 'tiff']) if (batchResult[format][1].samples !== singleResult[format][0].samples) {
+      fail(label + ': decoded ' + format + ' samples differ');
+    }
+    console.log(label + ': exact decoded PNG8/TIFF16 samples; encoded metadata hashes', JSON.stringify(
+      Object.fromEntries(['png', 'tiff'].map(format => [format, { batch: batchResult[format][1].fileHash, single: singleResult[format][0].fileHash }]))));
+  };
+  for (const action of ['applyToSelectedBtn', 'applyRollReferenceBtn', 'import-lock']) for (const modeOnly of [false, true]) {
+    const label = action + ' ' + (modeOnly ? 'mode' : 'type');
+    await evaluate('window.__routeFiles = [window.__routeDonorFile, ...window.__routeOriginalFiles.slice(1)]');
+    const donorRecipe = { ...old, filmType: modeOnly ? 'positive' : 'bw', positiveMode: modeOnly ? 'edit' : 'correct',
+      semanticMap: null, expiredAnalysis: null, wbR: 1.23, wbG: 1, wbB: .91, wbUserOverride: true,
+      expiredBrightness: 0, expiredContrast: 25, expiredBrightnessUserOverride: true, expiredContrastUserOverride: true };
+    await openProject([donorRecipe, old, old], action !== 'import-lock');
+    const donorSettings = await measured(label + ' donor measured', donorRecipe.filmType, donorRecipe.positiveMode);
+    if (action !== 'applyToSelectedBtn') {
+      await evaluate('document.getElementById("setRollReferenceBtn").click()');
+      await wait(300);
+    }
+    if (action === 'import-lock') {
+      await evaluate(`(() => {
+        const lock = document.getElementById('lockRollReference'); if (!lock.checked) lock.click();
+        const dt = new DataTransfer(); for (const file of window.__routeFiles.slice(1)) dt.items.add(file);
+        const click = HTMLInputElement.prototype.click;
+        HTMLInputElement.prototype.click = function () {
+          if (this.type === 'file' && this.onchange) {
+            this.files = dt.files; this.dispatchEvent(new Event('change', { bubbles: true }));
+          } else click.call(this);
+        };
+        try { document.getElementById('addMoreFilesBtn').click(); }
+        finally { HTMLInputElement.prototype.click = click; }
+      })()`);
+      await waitFor(label + ' imports copied', 'window.__ncTwoStage.queuedRecipes().length === 3', 120000);
+    } else await evaluate(`document.getElementById('${action}').click()`);
+    await waitFor(label + ' copied', `window.__ncTwoStage.queuedRecipes().slice(1).every(item => item.settings?.filmType === '${donorRecipe.filmType}'
+      && item.settings.positiveMode === '${donorRecipe.positiveMode}' && !item.settings.semanticMap)`, 120000);
+    const copiedRecipes = await evaluate('window.__ncTwoStage.queuedRecipes()');
+    for (const item of copiedRecipes.slice(1)) {
+      if (item.settings.expiredAnalysis && JSON.stringify(item.settings.expiredAnalysis) === JSON.stringify(donorSettings.expiredAnalysis)) {
+        fail(label + ': donor measurement transferred to recipient');
+      }
+      for (const key of ['wbR', 'wbG', 'wbB', 'expiredBrightness', 'expiredContrast']) {
+        if (item.settings[key] !== donorRecipe[key]) fail(label + ': copied explicit value lost: ' + key);
+      }
+    }
+    const copiedBatch = await exports(label + ' real batch', true);
+    const savedCopy = await saveProject(label);
+    const recipient = savedCopy.files[1].settings;
+    if (!recipient.expiredBrightnessUserOverride || !recipient.expiredContrastUserOverride) fail(label + ': saved copy lost explicit ownership');
+    // Reopen the actually saved project, then compare the recipient to its
+    // single-export path using identical source/settings/measurement.
+    await reopenSavedProject(label);
+    await evaluate('window.__routeFiles = [window.__routeOriginalFiles[1]]');
+    await openProject([recipient], false);
+    const recipientSingle = await exports(label + ' saved recipient single');
+    equalRecipient(copiedBatch, recipientSingle, label + ' saved single/batch');
+    equalExports(recipientSingle, await exports(label + ' consecutive recipient single'), label + ' consecutive recipient');
+    const prepared = await evaluate(settings);
+    if (JSON.stringify(prepared.expiredAnalysis) === JSON.stringify(donorSettings.expiredAnalysis)) fail(label + ': recipient failed to measure its own pixels');
+    await openProject([{ ...recipient, semanticMap: null, expiredAnalysis: null }], false);
+    const freshRecipient = await exports(label + ' fresh recipient reference');
+    equalExports(recipientSingle, freshRecipient, label + ' fresh recipient reference');
+  }
+  // Save through the actual Studio command, read the downloaded project,
+  // reopen through the file input, then retype without supplying strengths.
+  for (const modeOnly of [false, true]) for (const defaults of [false, true]) {
+    const label = 'saved explicit ' + (modeOnly ? 'mode' : 'type') + ' ' + (defaults ? 'defaults' : 'measured-equal');
+    await evaluate('window.__routeFiles = window.__routeOriginalFiles.slice(0, 1)');
+    await openProject([old], false);
+    const values = defaults ? { expiredBrightness: 0, expiredContrast: 25 }
+      : await evaluate(`(async () => { const { defaultExpiredRescueParams } = await import('/src/pipeline/expiredRescue.js');
+        const auto = defaultExpiredRescueParams(${settings}.expiredAnalysis); return { expiredBrightness: auto.expiredBrightness, expiredContrast: auto.expiredContrast }; })()`);
+    await evaluate(`(() => {
+      for (const [key, value] of Object.entries(${JSON.stringify(values)})) {
+        const input = document.getElementById(key + 'Value'); input.value = String(value);
+        input.dispatchEvent(new Event('input', { bubbles: true })); input.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    })()`);
+    await evaluate('window.__ncAnalysis.settle()');
+    const before = await exports(label + ' before save');
+    const savedProject = await saveProject(label);
+    for (const key of ['expiredBrightnessUserOverride', 'expiredContrastUserOverride']) if (!savedProject.files[0].settings[key]) fail(label + ': actual save omitted ' + key);
+    await reopenSavedProject(label);
+    equalExports(before, await exports(label + ' reopened'), label + ' exact saved exports');
+    const retype = modeOnly ? { positiveMode: 'edit' } : { filmType: 'bw' };
+    await applyRecipe(retype);
+    const changed = await measured(label + ' remeasured', modeOnly ? 'positive' : 'bw', modeOnly ? 'edit' : 'correct');
+    for (const [key, value] of Object.entries(values)) if (changed[key] !== value) fail(label + ': retype lost ' + key);
+    const after = await exports(label + ' retyped');
+    await evaluate('document.getElementById("undoBtn").click()');
+    await waitFor(label + ' undo', `${ready} && ${settings}.filmType === 'positive' && ${settings}.positiveMode === 'correct' && !!${settings}.semanticMap`);
+    equalExports(before, await exports(label + ' undone'), label + ' undo exact saved exports');
+    await evaluate('document.getElementById("redoBtn").click()');
+    const redoneCopy = await measured(label + ' redo', changed.filmType, changed.positiveMode);
+    if (JSON.stringify(redoneCopy.expiredAnalysis) !== JSON.stringify(changed.expiredAnalysis)) fail(label + ': redo lost valid new measurement');
+    equalExports(after, await exports(label + ' redone'), label + ' redo exact exports');
+    await openProject([{ ...changed, expiredAnalysis: null }], false);
+    equalExports(after, await exports(label + ' fresh saved-strength reference'), label + ' exact fresh reference');
+  }
+  console.log('ok: both full-settings buttons and import lock remeasure recipient type/mode; actual project save/reopen retains measured-equal/default strength intent and valid history; strict PNG8/TIFF16 single/batch/fresh samples and corresponding encoded files');
 }

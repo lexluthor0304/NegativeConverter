@@ -81,6 +81,16 @@ Now one driver (`runBatchExport` in `main.js`) runs the per-file pipeline
   Recipe WB and explicit strength ownership survive that measurement; subsequent
   exports adopt the valid new measurement. Saved same-interpretation state and
   matching history restore their measurements without blanket invalidation.
+  Full-settings copies (current-to-selected, roll reference and import lock)
+  exclude donor semantic/rescue measurements. Each recipient retains its own
+  anchors only for matching geometry/interpretation, and its rescue only for
+  matching measurement inputs; changed frames measure their new positive before
+  exact adjustment. Copied WB and brightness/contrast strengths are explicit,
+  including values equal to automatic measurements or defaults. Both strength
+  ownership flags survive extraction, cloning, project save/reopen and history.
+  A newly measured saved recipient adopts the analysis only while its recipe's
+  measurement inputs still match. Adoption retains newer explicit WB/strength
+  edits and any valid measurement already saved; changed inputs reject it.
 - The geometry chain (base → rotation → mirror → crop) runs in one pass that
   only builds the cropped window, for right angles and mirror-only geometry
   too, bit-identical to the step chain (`planGeometry` + `renderGeometryRows`

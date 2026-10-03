@@ -20088,6 +20088,21 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       return true;
     }
 
+    // The receiving frame may keep its own measurement only while the source
+    // geometry, interpretation and measurement inputs still describe it.
+    // WB and rescue tone strengths are explicit edits applied afterwards.
+    function copiedFrameAnalysisMatches(previous, next) {
+      const keys = ['filmType', 'positiveMode', 'cropRegion', 'rotationAngle', 'mirrored',
+        'filmBase', 'lensCorrection', 'flatFieldId', 'localExposure', 'repairStrokes', 'rollFrame',
+        'coreFilmPreset', 'coreColorModel', 'coreEnhancedProfile', 'coreProfileStrength', 'corePreSaturation',
+        'coreBorderBuffer', 'coreBrightness', 'coreExposure', 'coreContrast', 'coreHighlights',
+        'coreShadows', 'coreWhites', 'coreBlacks', 'coreWbMode', 'coreTemperature', 'coreTint', 'coreCyan',
+        'corePaper', 'corePaperToning', 'corePaperToningStrength', 'coreSaturation', 'coreGlow', 'coreFade',
+        'coreCurvePrecision', 'expiredUnevenFog', 'semanticMap'];
+      return keys.every(key => JSON.stringify(previous[key]) === JSON.stringify(next[key]))
+        && JSON.stringify(previous.autoFrameMeta?.imageArea || null) === JSON.stringify(next.autoFrameMeta?.imageArea || null);
+    }
+
     function applySettingsToItems(baseSettings, items, options = {}) {
       const includeCrop = Boolean(options.includeCrop);
       const copied = cloneSettings(baseSettings);
@@ -20097,14 +20112,21 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // the auto provenance: the restore heuristic then treats them as
       // user-owned and the per-file estimator leaves them alone.
       copied.wbAutoConfidence = null; copied.wbSemanticApplied = false;
+      copied.grayPointSampled = true;
+      copied.expiredBrightnessUserOverride = copied.expiredContrastUserOverride = true;
+      // Measurements belong to the donor's pixels, never its colour recipe.
+      copied.semanticMap = copied.expiredAnalysis = null;
 
       let count = 0;
       items.forEach(item => {
+        const previous = cloneSettings(item.settings);
+        const recipient = previous ? applyInterpretationPatch(previous, {
+          filmType: copied.filmType, positiveMode: copied.positiveMode
+        }) : null;
         const next = cloneSettings(copied);
         next.repairStrokes = structuredClone(item.settings?.repairStrokes || []);
         // These describe the receiving photograph, not the copied colour recipe.
         next.reviewed = Boolean(item.settings?.reviewed);
-        next.semanticMap = !includeCrop && item.settings?.semanticMap ? structuredClone(item.settings.semanticMap) : null;
         next.frameMetadata = sanitizeFrameMetadata(item.settings?.frameMetadata);
         next.filmEdge = item.settings?.filmEdge ? structuredClone(item.settings.filmEdge) : null;
         // The roll analysis share (lock, offset, outlier flag) describes the
@@ -20122,6 +20144,16 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           // the look being copied across the roll.
           next.mirrored = Boolean(item.settings && item.settings.mirrored);
         }
+        const sameGeometry = previous && ['cropRegion', 'rotationAngle', 'mirrored'].every(key =>
+          JSON.stringify(previous[key]) === JSON.stringify(next[key]))
+          && JSON.stringify(previous.autoFrameMeta?.imageArea || null) === JSON.stringify(next.autoFrameMeta?.imageArea || null);
+        next.semanticMap = sameGeometry && recipient.semanticMap ? structuredClone(recipient.semanticMap) : null;
+        next.expiredAnalysis = previous && recipient.expiredAnalysis && copiedFrameAnalysisMatches(previous, next)
+          ? structuredClone(recipient.expiredAnalysis) : null;
+        // A pending full-source overlay must not put the old interpretation
+        // back after this explicit copy. Keep the new recipe as its baseline.
+        if (item.pendingFrameEdit) item.pendingFrameEdit.baseline = cloneSettings(next);
+        delete item.pendingEdits;
         item.settings = next;
         item.isDirty = false;
         count++;
@@ -20775,6 +20807,18 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       trace?.mark('expiredRescue', { analysed: Boolean(analysis), spatial: Boolean(analysis?.spatial) });
     }
 
+    function adoptFrameExpiredAnalysis(item, settings, options) {
+      if (!item?.settings || !settings.expiredAnalysis || options.updateItemSettings === false) return;
+      if (!state.fileQueue.includes(item)) return;
+      const current = cloneSettings(item.settings);
+      const measured = cloneSettings(settings);
+      // A copy/retype may have left a saved recipe awaiting measurement.
+      // Adopt only this frame's corresponding result; a newer recipe wins.
+      if (current.expiredAnalysis || !copiedFrameAnalysisMatches(current, measured)) return;
+      applyExpiredAnalysisDefaults(current, measured.expiredAnalysis);
+      item.settings = cloneSettings(current);
+    }
+
     // The small 16-bit analysis reference a tile is converted with away from
     // its base (#247): roll samples and retained tile sources carry it.
     function tileAnalysisReference(settings, base) {
@@ -21202,6 +21246,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // OpenCV fog map when OpenCV is available).
       if (settings.expiredEnabled && !settings.expiredAnalysis && processed) {
         await applyFrameExpiredAnalysis(processed, settings, imageData, trace);
+        assertRepairCurrent(isCurrent);
+        adoptFrameExpiredAnalysis(queuedItem, settings, options);
       }
 
       // A batch export adjusts, composes and encodes the frame itself (#250),

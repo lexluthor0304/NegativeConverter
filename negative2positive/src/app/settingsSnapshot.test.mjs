@@ -54,6 +54,10 @@ function makeSafeSettings() {
     wbG: 1,
     wbB: 1,
     grayPointSampled: false,
+    expiredBrightness: -25,
+    expiredContrast: 25,
+    expiredBrightnessUserOverride: true,
+    expiredContrastUserOverride: true,
     curvePoints: {
       r: [{ x: 0, y: 0 }, { x: 255, y: 255 }],
       g: [{ x: 0, y: 0 }, { x: 128, y: 100 }, { x: 255, y: 255 }],
@@ -75,6 +79,8 @@ function makeSafeSettings() {
   assert.equal(copy.coreFilmPreset, 'portra-classic');
   assert.deepEqual(copy.curvePoints.g, safe.curvePoints.g);
   assert.deepEqual([...copy.curves.r], [...safe.curves.r]);
+  assert.equal(copy.expiredBrightnessUserOverride, true);
+  assert.equal(copy.expiredContrastUserOverride, true);
 }
 
 // 2. Copy is fully independent: mutating it never touches the source

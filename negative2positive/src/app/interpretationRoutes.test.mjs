@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
 import vm from 'node:vm';
 import { createHarness, samePixels } from './geometryTestHarness.mjs';
 import * as filmType from './filmTypeOverride.js';
@@ -8,6 +9,8 @@ import { sanitizeSemanticMap } from './semanticAnchors.js';
 import { hasWindowEdits, overlayWindowEdits } from './provisionalPhoto.js';
 import { mergeStudioColors } from './studioSettings.js';
 import { buildRollProject, serializeRollProject, parseRollProject } from './rollProject.js';
+const { deepCopySanitizedSettings } = await import(process.env.NC229_SNAPSHOT_SOURCE
+  ? pathToFileURL(process.env.NC229_SNAPSHOT_SOURCE).href : './settingsSnapshot.js');
 import { convertFrameWithRouter } from '../pipeline/conversionRouter.js';
 import { applyPreparedAdjustmentsToBuffer, applyPreparedAdjustmentsToBuffer16 } from './adjustmentPipeline.js';
 import { resolveAnalysisRegion, analysisPixelBounds } from './analysisRegion.js';
@@ -43,7 +46,9 @@ const functions = ['recipePatch', 'applyRecipeToCurrent', 'applyRecipeToSelected
   'applyFrameExpiredAnalysis', 'processFileWithSettings', 'frameWantsAutoWhiteBalance',
   'resolveLensCorrection', 'lensCorrectionActive', 'perPhotoSettingsFallback', 'withPendingEdits',
   'sanitizeSettings', 'sanitizeNumeric', 'clampBetween', 'sanitizeCurveLut', 'sanitizeCurvePointChannel', 'buildCurveLutFromPoints',
-  'makeLinearCurvePoints', 'makeLinearCurveLut'];
+  'makeLinearCurvePoints', 'makeLinearCurveLut', 'extractCurrentSettings', 'cloneSettings',
+  'applySettingsToItems', 'applyCurrentSettingsToSelected', 'applyRollReferenceToSelected', 'addFilesToQueue',
+  'createQueueItemId', 'persistCurrentFileSettings', 'buildCurrentProject', 'sanitizeProjectSettings'];
 const positiveMarker = "    document.getElementById('convertPositiveBtn').addEventListener('click', () => {";
 const positiveStart = source.indexOf(positiveMarker), positiveEnd = source.indexOf('\n    });', positiveStart);
 assert.ok(positiveStart >= 0 && positiveEnd > positiveStart);
@@ -72,6 +77,7 @@ async function fixture({ type = 'positive', mode = 'correct', manual = false } =
     sanitizeSemanticMap, sanitizeExpiredAnalysis, sanitizeExpiredRescueParams, analyzeExpiredFilm, defaultExpiredRescueParams,
     resolveAnalysisRegion, analysisPixelBounds, downsampleImageDataForMaxPixels,
     hasWindowEdits, overlayWindowEdits, mergeStudioColors, planeBuffersOf, sharesPlaneBuffers, markOwnedPlanes,
+    deepCopySanitizedSettings, buildRollProject,
     decodedRecipe: null, expiredAnalysisKey: null, expiredTabPending: false,
     coreReprocessToken: 4, displayedFrameToken: 4, processNegativeInFlight: null,
     document: { body: { dataset: {} }, getElementById: () => ({ value: '', classList: { toggle() {} } }) },
@@ -95,7 +101,11 @@ async function fixture({ type = 'positive', mode = 'correct', manual = false } =
     renderGeometryChain: async image => image,
     applyLensCorrectionWithSettings: async image => image,
     applyAdjustmentsWithSettings: async (image, s, options) => adjusted(image, s, options.bitDepth),
-    cloneSettings: s => structuredClone(s),
+    getCurrentQueueItem: () => state.fileQueue.find(item => item.file === state.loadedFile),
+    savedProjectThumbnail: () => ({}), ensureFullDecodeWithNotice: async () => true,
+    appConfirm: async () => true, i18n: { en: {} }, currentLang: 'en',
+    studioWorkspace: { sync() {}, text: () => 'Apply settings' },
+    hasRollReference: () => Boolean(state.rollReference.settingsSnapshot),
     runImportDetections: async image => ({ image, read: { result: null } }),
     measureExpiredAnalysisWithSpatial: async () => null,
     runExpiredSpatialAnalysis: () => Promise.resolve(false),
@@ -114,9 +124,10 @@ async function fixture({ type = 'positive', mode = 'correct', manual = false } =
     settleMeasurementInputs: async (measure, current) => { if (current()) measure(); }
   });
   vm.runInContext(functions.map(fn).join('\n'), c);
+  if (/^    function copiedFrameAnalysisMatches\(/m.test(source)) vm.runInContext(fn('copiedFrameAnalysisMatches'), c);
+  if (/^    function adoptFrameExpiredAnalysis\(/m.test(source)) vm.runInContext(fn('adoptFrameExpiredAnalysis'), c);
   vm.runInContext(positiveCaller, c);
   if (/^    function applyRecipeSettings\(/m.test(source)) vm.runInContext(fn('applyRecipeSettings'), c);
-  target.extractCurrentSettings = () => c.sanitizeSettings(state);
   const realAnalyze = target.analyzeExpiredFilm;
   target.analyzeExpiredFilm = (...args) => { measurements.push(args); return realAnalyze(...args); };
   await target.flushScheduledCoreReprocess();
@@ -260,5 +271,178 @@ if (selection === 'all' || selection === 'preservation') {
   assert.equal(pending.pendingEdits.expiredBrightnessUserOverride, true);
   assert.equal(pending.pendingEdits.coreExposure, 22, 'existing provisional edits preserved');
   f.pool.dispose(); cases++;
+}
+// Full-settings copying is distinct from applying a partial recipe. The
+// donor's measurement comes from different pixels, even in the same mode.
+for (const route of ['copy-current', 'copy-reference', 'copy-import']) {
+  if (selection !== 'all' && selection !== route) continue;
+  for (const modeOnly of [false, true]) {
+    if (process.env.NC229_COPY_CROSSING && process.env.NC229_COPY_CROSSING !== (modeOnly ? 'mode' : 'type')) continue;
+    const f = await fixture(), { context: c, target, state, old } = f;
+    const donor = c.cloneSettings({ ...old, filmType: modeOnly ? 'positive' : 'bw', positiveMode: modeOnly ? 'edit' : 'correct',
+      wbR: 1.23, wbG: 1, wbB: .91, wbUserOverride: true, expiredBrightness: old.expiredBrightness, expiredContrast: 0 });
+    const donorImage = new ImageData(Uint8ClampedArray.from(base.data, (v, i) => i % 4 === 3 ? v : Math.round(v * .7)), width, height);
+    donorImage.__image16 = { width, height, data: Uint16Array.from(data16, (v, i) => i % 4 === 3 ? v : Math.round(v * .7)) };
+    const donorPositive = await convertFrameWithRouter({ imageData: donorImage, settings: target.buildRouterSettings(donor), options: { forceFullProcess: true } });
+    donor.expiredAnalysis = analyzeExpiredFilm(donorPositive, { borderBuffer: 0 });
+    donor.semanticMap = null;
+    c.restoreSettings(donor, { refreshDisplay: false });
+    await target.flushScheduledCoreReprocess();
+    state.fileQueue[0].selected = false;
+    const file = { name: 'copy-recipient.png', size: 1, type: 'image/png' };
+    let recipient;
+    if (route === 'copy-import') {
+      state.rollReference = { settingsSnapshot: donor, applyLock: true, applyCrop: false };
+      [recipient] = c.addFilesToQueue([file], { automaticRoll: false });
+    } else {
+      recipient = { file, selected: true, settings: c.cloneSettings(old) };
+      state.fileQueue.push(recipient);
+      if (route === 'copy-current') await c.applyCurrentSettingsToSelected();
+      else {
+        state.rollReference = { settingsSnapshot: donor, applyCrop: false };
+        c.applyRollReferenceToSelected();
+      }
+    }
+    f.measurements.length = 0;
+    const copiedRecipe = c.cloneSettings(recipient.settings);
+    let settled;
+    const comparisons = [];
+    const fresh = { ...copiedRecipe, semanticMap: null, expiredAnalysis: null,
+      expiredBrightnessUserOverride: true, expiredContrastUserOverride: true };
+    for (const depth of [8, 16]) {
+      const before = f.measurements.length;
+      const actual = await c.processFileWithSettings(file, copiedRecipe, { sourceImageData: base, bitDepth: depth,
+        onPreparedSettings: s => { settled ||= c.cloneSettings(s); } });
+      const actualCount = f.measurements.length - before;
+      const reference = await c.processFileWithSettings(file, fresh, { sourceImageData: base, bitDepth: depth });
+      const plane = depth === 16 ? '__image16' : null;
+      const samples = plane ? actual[plane].data : actual.data, expected = plane ? reference[plane].data : reference.data;
+      const differences = samples.reduce((n, v, i) => n + Number(v !== expected[i]), 0);
+      console.log(`${route} ${modeOnly ? 'mode' : 'type'} ${depth}-bit: recipient measurements=${actualCount}, differing samples=${differences}`);
+      comparisons.push({ actualCount, samples, expected, depth });
+    }
+    for (const { actualCount, samples, expected, depth } of comparisons) {
+      assert.equal(actualCount, 1, `${route}: recipient must measure its own new positive`);
+      assert.deepEqual(Array.from(samples), Array.from(expected), `${route}: strict fresh ${depth}-bit samples`);
+    }
+    assert.equal(copiedRecipe.semanticMap, null, `${route}: stale recipient anchors excluded`);
+    assert.equal(copiedRecipe.expiredAnalysis, null, `${route}: donor rescue never copied`);
+    assert.deepEqual(canon(recipient.settings.expiredAnalysis), canon(settled.expiredAnalysis), `${route}: valid recipient measurement saved by actual processor`);
+    assert.deepEqual([settled.wbR, settled.wbB, settled.expiredBrightness, settled.expiredContrast],
+      [1.23, .91, old.expiredBrightness, 0], `${route}: explicit WB and measured-equal/default strengths preserved`);
+    assert.deepEqual(canon(settled.filmBase), canon(donor.filmBase), `${route}: explicit donor film base preserved`);
+    assert.notDeepEqual(canon(settled.expiredAnalysis), canon(donor.expiredAnalysis), `${route}: measurement belongs to recipient pixels`);
+    const count = f.measurements.length;
+    await c.processFileWithSettings(file, settled, { sourceImageData: base, bitDepth: 16 });
+    await c.processFileWithSettings(file, recipient.settings, { sourceImageData: base, bitDepth: 16 });
+    assert.equal(f.measurements.length, count, `${route}: valid prepared recipient analysis adopted`);
+    f.pool.dispose(); cases++;
+  }
+}
+if (selection === 'all' || selection === 'copy-preservation') {
+  const f = await fixture({ manual: true }), { context: c, state, old } = f;
+  const recipient = state.fileQueue[0];
+  const donor = c.cloneSettings(old);
+  donor.expiredAnalysis = { ...donor.expiredAnalysis, confidence: .1 };
+  donor.semanticMap = null;
+  donor.wbR = 1.23; donor.expiredContrast = 0;
+  c.applySettingsToItems(donor, [recipient]);
+  assert.deepEqual(canon(recipient.settings.semanticMap), canon(old.semanticMap), 'matching recipient anchors retained');
+  assert.deepEqual(canon(recipient.settings.expiredAnalysis), canon(old.expiredAnalysis), 'matching recipient rescue retained instead of donor rescue');
+  const count = f.measurements.length;
+  await c.processFileWithSettings(f.file, recipient.settings, { sourceImageData: base, bitDepth: 16 });
+  assert.equal(f.measurements.length, count, 'matching recipient recipe needs no replacement measurement');
+  c.applySettingsToItems(donor, [recipient], { includeCrop: true });
+  assert.deepEqual(canon(recipient.settings.semanticMap), canon(old.semanticMap), 'matching copied geometry keeps recipient anchors');
+  assert.deepEqual(canon(recipient.settings.expiredAnalysis), canon(old.expiredAnalysis), 'matching copied geometry keeps recipient rescue');
+  for (const patch of [{ filmBase: { ...donor.filmBase, r: 199 } }, { coreBorderBuffer: 12 }, { expiredUnevenFog: 27 },
+    { coreExposure: 25 }, { cropRegion: { left: 1, top: 2, width: 60, height: 44 } }, { mirrored: true }]) {
+    recipient.settings = c.cloneSettings(old);
+    c.applySettingsToItems({ ...donor, ...patch }, [recipient], { includeCrop: true });
+    assert.equal(recipient.settings.expiredAnalysis, null, 'changed copied measurement input excludes old recipient rescue');
+    if (patch.cropRegion || patch.mirrored) assert.equal(recipient.settings.semanticMap, null, 'changed copied geometry excludes old anchors');
+  }
+  recipient.settings = c.cloneSettings(old);
+  recipient.pendingFrameEdit = { baseline: c.cloneSettings(old) };
+  recipient.pendingEdits = { filmType: 'positive', positiveMode: 'edit', wbR: .7, expiredContrast: 12 };
+  c.applySettingsToItems({ ...donor, filmType: 'bw' }, [recipient]);
+  assert.equal(recipient.pendingFrameEdit.baseline.expiredAnalysis, null, 'full-copy pending baseline excludes old rescue');
+  assert.equal(recipient.pendingFrameEdit.baseline.filmType, 'bw', 'full-copy pending baseline keeps new interpretation');
+  assert.equal(recipient.pendingEdits, undefined, 'superseded pending recipe cannot restore old values');
+  f.pool.dispose(); cases++;
+}
+if (selection === 'all' || selection === 'saved-ownership') {
+  for (const modeOnly of [false, true]) for (const explicitDefaults of [false, true]) {
+    const caseName = `${modeOnly ? 'mode' : 'type'}-${explicitDefaults ? 'defaults' : 'equal'}`;
+    if (process.env.NC229_OWNERSHIP_CASE && process.env.NC229_OWNERSHIP_CASE !== caseName) continue;
+    const f = await fixture({ manual: true }), { context: c, target, state, old } = f;
+    const values = explicitDefaults ? EXPIRED_RESCUE_DEFAULTS : defaultExpiredRescueParams(old.expiredAnalysis);
+    const strengths = ['expiredBrightness', 'expiredContrast'].map(key => values[key]);
+    Object.assign(state, c.applyRecipeSettings(state, { expiredBrightness: strengths[0], expiredContrast: strengths[1] }));
+    const extracted = c.extractCurrentSettings(), cloned = c.cloneSettings(extracted);
+    const project = parseRollProject(serializeRollProject(c.buildCurrentProject({ persist: true })));
+    const restored = c.sanitizeProjectSettings(project.files[0].settings);
+    c.restoreSettings(restored, { refreshDisplay: false });
+    assert.deepEqual(canon(state.expiredAnalysis), canon(old.expiredAnalysis), 'project restoration retains corresponding valid rescue');
+    const count = f.measurements.length;
+    await c.processFileWithSettings(f.file, restored, { sourceImageData: base, bitDepth: 16 });
+    assert.equal(f.measurements.length, count, 'saved matching analysis is adopted');
+    target.decodedRecipe = decodeRecipe(encodeRecipe(modeOnly ? { positiveMode: 'edit' } : { filmType: 'bw' }));
+    c.applyRecipeToCurrent();
+    await f.timers.shift()();
+    console.log(`saved-ownership ${modeOnly ? 'mode' : 'type'} ${explicitDefaults ? 'defaults' : 'measured-equal'}: expected=${strengths}, restored/retyped=${[state.expiredBrightness, state.expiredContrast]}`);
+    for (const depth of [8, 16]) {
+      const retyped = c.extractCurrentSettings();
+      const actual = await c.processFileWithSettings(f.file, retyped, { sourceImageData: base, bitDepth: depth });
+      const reference = await c.processFileWithSettings(f.file, { ...retyped, expiredBrightness: strengths[0], expiredContrast: strengths[1],
+        expiredBrightnessUserOverride: true, expiredContrastUserOverride: true }, { sourceImageData: base, bitDepth: depth });
+      const samples = depth === 16 ? actual.__image16.data : actual.data;
+      const expected = depth === 16 ? reference.__image16.data : reference.data;
+      console.log(`saved-ownership ${caseName} ${depth}-bit: differing samples=${samples.reduce((n, v, i) => n + Number(v !== expected[i]), 0)}`);
+    }
+    assert.deepEqual([state.expiredBrightness, state.expiredContrast], strengths, 'saved explicit strength intent survives retype and remeasurement');
+    for (const snapshot of [extracted, cloned, project.files[0].settings, restored, c.extractCurrentSettings()]) {
+      assert.equal(snapshot.expiredBrightnessUserOverride, true, 'production extraction/clone/project/restore retains brightness ownership');
+      assert.equal(snapshot.expiredContrastUserOverride, true, 'production extraction/clone/project/restore retains contrast ownership');
+    }
+    const retyped = c.extractCurrentSettings();
+    await c.performUndo();
+    assert.deepEqual([state.expiredBrightness, state.expiredContrast], strengths, 'undo restores explicit saved strengths');
+    assert.deepEqual(canon(state.expiredAnalysis), canon(old.expiredAnalysis), 'undo restores matching old rescue');
+    await c.performRedo();
+    assert.deepEqual([state.expiredBrightness, state.expiredContrast], strengths, 'redo retains explicit strengths');
+    assert.deepEqual(canon(state.expiredAnalysis), canon(retyped.expiredAnalysis), 'redo adopts matching new rescue');
+    for (const depth of [8, 16]) {
+      const actual = await c.processFileWithSettings(f.file, c.cloneSettings(retyped), { sourceImageData: base, bitDepth: depth });
+      const reference = await c.processFileWithSettings(f.file, { ...retyped, expiredAnalysis: null,
+        expiredBrightness: strengths[0], expiredContrast: strengths[1], expiredBrightnessUserOverride: true, expiredContrastUserOverride: true },
+      { sourceImageData: base, bitDepth: depth });
+      assert.deepEqual(Array.from(actual.data), Array.from(reference.data), 'saved retyped recipe exact 8-bit samples');
+      if (depth === 16) samePixels(actual, reference, 'saved retyped recipe strict 16-bit samples');
+    }
+    f.pool.dispose(); cases++;
+  }
+}
+if (selection === 'all' || selection === 'copy-adoption') {
+  for (const change of ['type', 'region', 'strength']) {
+    const f = await fixture(), { context: c, target, state, old } = f;
+    const item = state.fileQueue[0];
+    item.settings = c.cloneSettings({ ...old, semanticMap: null, expiredAnalysis: null });
+    let enter, release;
+    const entered = new Promise(resolve => { enter = resolve; }), held = new Promise(resolve => { release = resolve; });
+    target.measureExpiredAnalysisWithSpatial = async () => { enter(); await held; return null; };
+    const processing = c.processFileWithSettings(f.file, c.cloneSettings(item.settings), { sourceImageData: base, bitDepth: 16 });
+    await entered;
+    const edit = change === 'type' ? { filmType: 'bw' } : change === 'region' ? { coreBorderBuffer: 14 }
+      : { expiredBrightness: 0, expiredContrast: 25, expiredBrightnessUserOverride: true, expiredContrastUserOverride: true, wbR: 1.31 };
+    item.settings = c.cloneSettings({ ...item.settings, ...edit });
+    release(); await processing;
+    if (change === 'strength') {
+      assert.ok(item.settings.expiredAnalysis, 'same measurement inputs adopt corresponding analysis despite later tone edits');
+      assert.deepEqual([item.settings.expiredBrightness, item.settings.expiredContrast, item.settings.wbR], [0, 25, 1.31], 'adopting measurement preserves newer explicit strengths/WB');
+    } else assert.equal(item.settings.expiredAnalysis, null, 'new interpretation/region rejects stale measurement adoption');
+    assert.deepEqual(canon(state.expiredAnalysis), canon(old.expiredAnalysis), 'batch adoption never mutates live history measurement');
+    f.pool.dispose(); cases++;
+  }
 }
 console.log(`interpretationRoutes: ${cases} tiny real-caller/conversion/rescue/batch cases; explicit WB/strengths, saved same-type analysis and history preserved; exact 8/16 samples`);
