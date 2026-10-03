@@ -10,6 +10,7 @@ import { promisify } from 'node:util';
 import { buildWebKitObserver, WebKitOwnership, processMetadata, sameProcess } from './lib/webkit-ownership.mjs';
 import { launchWebKitScript, tauriScenario, webkitMemory } from './lib/webkit.mjs';
 import { freeDiskBytes, GiB } from './lib/guards.mjs';
+import { FootprintReader } from './lib/memory.mjs';
 import { createPerfMiddleware } from './preview-plugin.mjs';
 
 const run = promisify(execFile), out = resolve(process.argv[2]), port = Number(process.env.PORT || 5591);
@@ -93,7 +94,7 @@ try {
     const previousCaches = new Set(readdirSync(out).filter(name => name.startsWith('tauri-cache-')));
     const ownership = owner(guard);
     const state = { guard, nativeProbe: null, association: null, triggerAt: null, abortAt: null, crossing: false,
-      workloadStartedAt: null, ownedHostGoneAt: null, revoked: false };
+      workloadStartedAt: null, ownedHostGoneAt: null, ownedEndpointsGoneAt: null, revoked: false };
     active = state;
     // Only this metadata/policy input is synthetic. Footprints and every
     // native-ancestry cleanup request still go to the real OS reader.
@@ -111,7 +112,20 @@ try {
       if (association && !state.association) state.association = structuredClone(association);
       return association;
     };
+    const footprints = new FootprintReader();
+    const reader = { start: () => footprints.start(), stop: () => footprints.stop(), read: async pids => {
+      // A one-byte synthetic ceiling can stop bootstrap before its native
+      // IPC reply arrives. Complete that read-only proof prerequisite first;
+      // workload admission still waits for the guarded real footprint sample.
+      if (guard === 'memory-ceiling') {
+        const deadline = Date.now() + 1500;
+        while (!state.nativeProbe && Date.now() < deadline) await sleep(25);
+        assert.ok(state.nativeProbe, 'bounded native bootstrap reply before synthetic ceiling');
+      }
+      return footprints.read(pids);
+    } };
     const memory = await webkitMemory({ label: guard, port, outDir: out, args: {}, ownership, swapAtStart: 0,
+      reader,
       ceilingBytes: guard === 'memory-ceiling' ? 1 : 2 * GiB,
       readSwap: async () => ({ used: state.crossing && guard === 'swap-growth' ? 3 * GiB : 0 }),
       readDisk: () => state.crossing && guard === 'low-disk' ? 19 * GiB : 100 * GiB,
@@ -175,6 +189,18 @@ try {
             && attempt.signalled), 'synthetically revoked endpoints never receive a signal');
         }
       }
+      // The app is distinct from the injected observer/CLI. Its WebContent
+      // and GPU must disappear too, using real OS metadata even in the case
+      // where the scope validator's input was synthetically revoked.
+      const identities = [state.association.owner, state.association.renderer.identity, state.association.gpu.identity];
+      let alive = identities;
+      while (Date.now() - state.triggerAt < 2000) {
+        const current = processMetadata(identities.map(p => p.pid));
+        alive = identities.filter(p => sameProcess(p, current[p.pid]));
+        if (!alive.length) { state.ownedEndpointsGoneAt = Date.now(); break; }
+        await sleep(25);
+      }
+      assert.deepEqual(alive, [], 'bounded cleanup must stop the native workload and both original endpoints');
       checkOutsider();
       const cacheRoots = readdirSync(out).filter(name => name.startsWith('tauri-cache-') && !previousCaches.has(name));
       assert.equal(cacheRoots.length, 1, 'this exact application launch creates one fresh cache claim');
@@ -183,6 +209,7 @@ try {
       results.push({ ...state, crossing: undefined, startedAt: started, settledAt: Date.now(), responseMs: state.abortAt === null ? null : state.abortAt - state.triggerAt,
         callerResponseMs: state.triggerAt === null ? null : Date.now() - state.triggerAt, samples: memory.sampler.samples,
         ownedHostTerminationMs: state.ownedHostGoneAt === null ? null : state.ownedHostGoneAt - state.triggerAt,
+        ownedWorkloadEndpointsTerminationMs: state.ownedEndpointsGoneAt === null ? null : state.ownedEndpointsGoneAt - state.triggerAt,
         attributionRevocationSynthetic: guard === 'identity-revocation',
         cleanupAttempts: ownership.cleanupAttempts, root: ownership.root, cacheRoot, metrics, notes, unrelated: outsider.association,
         automaticSampler: true, manualProofTicks: 0, policyInputsSynthetic: true, pageSynthetic: true, nativeFootprintsReal: true });
