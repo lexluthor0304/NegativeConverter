@@ -202,7 +202,7 @@ export async function runGeometrySmoke({ send, evaluate, waitFor, wait, fail, in
 
     // A session kept without its planes (as a 60 MP session that does not
     // fit the cache is) rebuilds them from its base when reopened.
-    await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en` });
+    await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en&debug=1` });
     await waitFor('geometry workspace reboot', `!!document.getElementById('studioImportAutoCrop') && !!window.__ncGeometry`);
     await installDialogAutoAccept();
     await wait(300);

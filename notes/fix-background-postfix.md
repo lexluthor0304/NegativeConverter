@@ -73,6 +73,12 @@ real IndexedDB parking of its existing 4.08 MP genuine 16-bit tilted scan,
 requiring lazy semantics, lower retained bytes and exact PNG16/TIFF16 brush
 Undo/Redo exports. Original PNG8/TIFF16 brush smoke assertions are retained.
 
+The first exact-head run passed 318/318 Node files. Its geometry browser run
+passed all original assertions, then the added probe found that the parking
+hook is exposed only with `?debug=1`. The cold-session page now enables that
+existing hook; no assertion was relaxed. The attempt is retained in
+`background-postfix-validation-attempt-1.json` and matching attempt logs.
+
 Targeted read-only integration inspection of `perf229/fix-roll-followup`:
 `noteDustWorkerMemory` counts page-independent worker copies, excludes a shared
 16-bit source already counted by its owner, and the dust resident becomes zero
