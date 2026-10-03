@@ -21,7 +21,7 @@ function switchFixture() {
     rawDecodePending: false, rawMetadata: null, filmEdge: null, zoomLevel: 1, panX: 0, panY: 0,
   });
   Object.assign(f.context, {
-    studioAutoFrameRunning: false, singleExportActive: false, isDesktopBatchExportLocked: () => false,
+    studioAutoFrameRunning: false, singleExportActive: false, isDesktopBatchExportLocked: () => false, parkedPhoto: null,
     hasPendingCropDetection: () => false, exitCropMode: noop, exitBeforeAfter: noop, releaseBeforeAfterCanvas: noop,
     cancelProvisionalFrame: noop, getCurrentQueueItem: () => f.state.fileQueue[f.state.currentFileIndex],
     photoSessions: { take: () => null, put: (item, entry) => { stored.push({ item, entry }); return true; } },
@@ -115,6 +115,44 @@ function switchFixture() {
   assert.ok(f.switched, 'the switch goes on');
   assert.ok(f.log.includes('abandon'), 'the display returns to its exact frame');
   assert.equal(f.stored.length, 1);
+}
+
+{
+  // Restoring parked brush history precedes the GPU settle. Neither barrier
+  // may let the outgoing photo be remembered with incomplete pixels.
+  const f = switchFixture();
+  let restored;
+  const restoring = new Promise(resolve => { restored = resolve; });
+  f.context.parkedPhoto = { file: 'a' };
+  f.context.unparkOpenPhoto = async () => {
+    await restoring;
+    f.context.parkedPhoto = null;
+  };
+  f.state.coreExposure = 40;
+  f.context.scheduleCoreReprocess({ full: false });
+  f.clock.runFrame();
+  const switching = f.switchTo(1);
+  await settle();
+  assert.equal(f.conversions.length, 0, 'no GPU settle before the parked history is restored');
+  assert.equal(f.stored.length, 0, 'no incomplete outgoing session is remembered');
+  restored();
+  await settle();
+  assert.equal(f.conversions.length, 1, 'restoration retains the immediate GPU settle');
+  assert.equal(f.conversions[0].exposure, 40);
+  await f.answer();
+  f.commits[0].resolve(new Uint16Array(4));
+  await switching;
+  assert.equal(f.stored[0].entry.snapshot.refs.processedImageData.exposure, 40);
+  assert.equal(f.stored[0].entry.undo.length, 1);
+}
+
+{
+  const f = switchFixture();
+  f.context.parkedPhoto = { file: 'a' };
+  f.context.unparkOpenPhoto = async () => {};
+  await f.context.switchToFile(1);
+  assert.equal(f.switched, false, 'an unresolved parked restore keeps the current photo');
+  assert.equal(f.stored.length, 0, 'cold brush history is never remembered as a live session');
 }
 
 console.log('settleOnSwitch: a switch right after a GPU-drawn change or commit settles it first and remembers the photo settled; without a GPU frame, or with a failed settle, it does not wait');
