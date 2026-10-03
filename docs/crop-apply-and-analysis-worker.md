@@ -90,12 +90,14 @@ worker meanwhile (`startCropDetection`):
   restoring such an entry applies it (`restoreSnapshot`): the image area and
   review flags, and the white balance its auto white balance set where the
   entry held the white balance it started from. White balance the user set
-  while the detection ran wins (no auto white balance ran then), so an entry
-  taken before that edit gets the hit without an auto white balance. Entries
-  of another Apply carry that Apply's token. The crop-apply smoke holds the
-  detection request while a magenta drag starts and checks that the PNG8 and
-  TIFF16 exports, before and after undoing the drag, equal those of the same
-  drag made after the hit.
+  while the detection ran wins on the live photo. The same positive also
+  supplies the automatic estimate for eligible pre-override history states,
+  so undoing that manual WB restores the hit's automatic gains, including
+  when exposure was edited before WB (R1-072/R1-134). Entries of another
+  Apply carry that Apply's token. The crop-apply smoke holds the detection
+  request across a magenta drag, and across exposure followed by manual WB,
+  then compares settings and PNG8/TIFF16 exports before and after undoing
+  those edits with the same edits made after waiting for the hit.
 - `settlePendingCropDetection()` is the barrier for everything that reads or
   copies the photo's settings for output: single export (before it persists
   the settings), `ensureFullResolutionReadyForExport`, batch and ZIP export,

@@ -60,6 +60,8 @@ function setup({ expired = false, step = 3, points = null, immediate = false, au
     getLoadingOverlay: () => ({ show: async () => {}, hide() {} }),
     studioWorkspace: { sync() {}, text: key => key },
     imageAreaFromWorkingRect, isSameAnalysisFrame, workingPointsToBase, buildCropDetectionInput,
+    estimateAutoWhiteBalance: () => ({ ...HIT_WB, confidence: HIT_WB.wbAutoConfidence }),
+    resolveAnalysisRegion: () => null, analysisRegionSample: () => ({}), baseSizeSource: () => base,
     exitCropMode: () => { h.state.cropping = false; h.state.cropDraft = null; },
     // The worker's answer is released by the test.
     runOpenCvTask: async (type, task) => {
@@ -82,15 +84,13 @@ function setup({ expired = false, step = 3, points = null, immediate = false, au
         conversions.push({ start, end: structuredClone(h.state.autoFrame.lastDiagnostics), options });
         h.state.processedImageData = h.state.croppedImageData || h.state.originalImageData;
         h.state.currentStep = 3;
-        // maybeAutoWhiteBalance's gates, at the end of the conversion.
-        const s = h.state;
-        if (autoWb && options.automatic !== false && !s.expiredEnabled && !s.grayPointSampled && !s.wbUserOverride
-          && !s.wbSemanticApplied && !s.autoFrame.lastDiagnostics?.analysisNeedsReview) Object.assign(s, HIT_WB);
+        if (autoWb && options.automatic !== false) c.maybeAutoWhiteBalance(h.state.processedImageData);
       })();
       h.target.processNegativeInFlight = promise;
       return promise.finally(() => { if (h.target.processNegativeInFlight === promise) h.target.processNegativeInFlight = null; });
     }
   });
+  vm.runInContext(['automaticWhiteBalanceResult', 'maybeAutoWhiteBalance', 'autoWbSampleKey'].map(functionSource).join('\n'), c);
   vm.runInContext(applyCropHandlerSource(), c);
   h.state.currentStep = step;
   h.state.expiredEnabled = expired;
@@ -411,8 +411,14 @@ const view = state => ({ exposure: state.exposure, wb: whiteBalanceOf(state), me
   assert.equal(t.h.state.wbR, 1.3, 'the user\'s white balance wins over the hit\'s');
   assert.equal(t.h.state.autoFrame.lastDiagnostics.method, 'manual-image-window');
   t.c.performUndo();
-  assert.equal(t.h.state.wbR, 1, 'no auto white balance ran, so the entry keeps what it held');
+  assert.deepEqual(whiteBalanceOf(t.h.state), HIT_WB, 'undoing manual WB restores the hit-derived automatic gains');
   assert.equal(t.h.state.autoFrame.lastDiagnostics.method, 'manual-image-window', 'but it has the hit');
+  t.c.performUndo();
+  assert.equal(t.h.state.exposure, 0);
+  assert.deepEqual(whiteBalanceOf(t.h.state), HIT_WB, 'undoing the exposure also keeps automatic WB');
+  t.c.performRedo();
+  t.c.performRedo();
+  assert.equal(t.h.state.wbR, 1.3, 'redo keeps the manual gains');
 }
 
 // ---- Entries of another Apply are left alone ----
@@ -490,21 +496,34 @@ const view = state => ({ exposure: state.exposure, wb: whiteBalanceOf(state), me
 // The same user actions, Apply then an exposure edit, export, undo, export,
 // redo, give the same state whether the edit came before or after the hit.
 {
-  const run = async immediate => {
+  const run = async (immediate, manualWb) => {
     const t = setup({ points: hitPoints, autoWb: true });
     await applyAndConvert(t);
     if (!immediate) await hitLands(t);
     t.c.pushUndo('exposure');
     t.h.state.exposure = 0.5;
+    if (manualWb) {
+      t.c.pushUndo('wbR');
+      Object.assign(t.h.state, { wbR: 1.3, wbUserOverride: true, wbAutoConfidence: null });
+    }
     if (immediate) await hitLands(t);
     const states = [view(t.h.state)];
     t.c.performUndo();
     states.push(view(t.h.state));
+    if (manualWb) {
+      t.c.performUndo();
+      states.push(view(t.h.state));
+      t.c.performRedo();
+      states.push(view(t.h.state));
+    }
     t.c.performRedo();
     states.push(view(t.h.state));
     return states;
   };
-  assert.deepEqual(await run(true), await run(false), 'an edit made while the detection ran leaves history as waiting would');
+  for (const manualWb of [false, true]) {
+    assert.deepEqual(await run(true, manualWb), await run(false, manualWb),
+      `pending-window exposure${manualWb ? ' and manual WB' : ''} history matches waiting for the hit`);
+  }
 }
 
 // ---- A full-resolution render in flight when the hit lands (R1-070) ----

@@ -287,19 +287,20 @@ async function runEditWhileDetecting({ send, evaluate, waitFor, wait, fail, inst
     })()`);
   };
   const exportBoth = async label => ({ png8: await exportOnce(label + ' PNG8', 'png', 8), tiff16: await exportOnce(label + ' TIFF16', 'tiff', 16) });
-  const slider = (events, value = null) => evaluate(`(() => {
-    const el = document.getElementById('magenta');
+  const slider = (events, value = null, id = 'magenta') => evaluate(`(() => {
+    const el = document.getElementById('${id}');
     for (const type of ${JSON.stringify(events)}) {
       if (type === 'input') el.value = '${value}';
       el.dispatchEvent(type === 'pointerdown' ? new PointerEvent(type, { bubbles: true }) : new Event(type, { bubbles: true }));
     }
     return el.value;
   })()`);
-  const view = `({ diagnostics: window.__ncAnalysis.diagnostics(), whiteBalance: window.__ncAnalysis.whiteBalance(), magenta: document.getElementById('magenta').value })`;
+  const view = `({ diagnostics: window.__ncAnalysis.diagnostics(), whiteBalance: window.__ncAnalysis.whiteBalance(), magenta: document.getElementById('magenta').value, exposure: document.getElementById('coreExposure').value })`;
   const state = `({ ready: ${READY}, cropMode: ${cropMode}, converting: window.__ncAnalysis.converting(), pending: window.__ncAnalysis.pendingDetection(),
     held: window.__cropEditProbe.held.length, detection: { ...window.__ncAnalysis.detection }, diagnostics: window.__ncAnalysis.diagnostics() })`;
-  const run = async (atOnce) => {
-    const label = atOnce ? 'edit at once' : 'edit after the hit';
+  const run = async (atOnce, manualWb = false) => {
+    const label = (atOnce ? 'edit at once' : 'edit after the hit') + (manualWb ? ', exposure and manual WB' : '');
+    const editedSlider = manualWb ? 'coreExposure' : 'magenta';
     await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en` });
     await waitFor(label + ': boot', `!!document.getElementById('studioImportAutoCrop') && !!window.__ncAnalysis && !!window.__ncGeometry`);
     await installDialogAutoAccept();
@@ -351,14 +352,19 @@ async function runEditWhileDetecting({ send, evaluate, waitFor, wait, fail, inst
       if (pendingArea.notice !== 'detectingFrame' || pendingArea.analysis !== 'analysisHint' || pendingArea.flagged) {
         fail(label + ': while the crop-area detection runs, Studio asks to confirm the image area: ' + JSON.stringify(pendingArea));
       }
-      await slider(['pointerdown', 'input'], 12);
+      await slider(['pointerdown', 'input'], 12, editedSlider);
+      if (manualWb) {
+        await slider(['change'], null, editedSlider);
+        await slider(['pointerdown', 'input', 'change'], 1.3, 'wbR');
+      }
       await evaluate(`window.__cropEditProbe.release()`);
       await evaluate(`window.__ncAnalysis.settle()`);
-      await slider(['change']);
+      if (!manualWb) await slider(['change']);
     } else {
       await waitFor(label + ': applied', `${READY} && !${cropMode} && !window.__ncAnalysis.converting()`, 120_000);
       await evaluate(`window.__ncAnalysis.settle()`);
-      await slider(['pointerdown', 'input', 'change'], 12);
+      await slider(['pointerdown', 'input', 'change'], 12, editedSlider);
+      if (manualWb) await slider(['pointerdown', 'input', 'change'], 1.3, 'wbR');
     }
     const edited = await evaluate(view);
     if (edited.diagnostics?.method !== 'manual-image-window' || edited.diagnostics?.analysisNeedsReview) fail(label + ': the detection did not hit: ' + JSON.stringify(edited));
@@ -368,31 +374,41 @@ async function runEditWhileDetecting({ send, evaluate, waitFor, wait, fail, inst
       fail(label + ': after the hit, Studio still reports the detection or asks to confirm the image area: ' + JSON.stringify(hitArea));
     }
     const editedFiles = await exportBoth(label);
+    let wbUndone = null, wbUndoneFiles = null;
+    if (manualWb) {
+      await evaluate(`document.getElementById('undoBtn').click()`);
+      await waitFor(label + ': manual WB undone', `${READY} && !window.__ncAnalysis.converting()`, 60_000);
+      wbUndoneFiles = await exportBoth(label + ' after undo WB');
+      wbUndone = await evaluate(view);
+    }
     const undoState = `({ magenta: document.getElementById('magenta').value, undoDisabled: document.getElementById('undoBtn').disabled,
       busy: document.body.dataset.studioBusy || null, ready: ${READY}, converting: window.__ncAnalysis.converting(),
       toast: [...document.querySelectorAll('.toast')].map(t => t.textContent) })`;
     const beforeUndo = await evaluate(undoState);
     await evaluate(`document.getElementById('undoBtn').click()`);
-    if (!await waitFor(label + ': undone', `document.getElementById('magenta').value === '0' && ${READY} && !window.__ncAnalysis.converting()`, 60_000, { soft: true })) {
+    if (!await waitFor(label + ': undone', `document.getElementById('${editedSlider}').value === '0' && ${READY} && !window.__ncAnalysis.converting()`, 60_000, { soft: true })) {
       fail(label + ': the undo did not settle: ' + JSON.stringify({ beforeUndo, after: await evaluate(undoState) }));
     }
     const undone = await evaluate(view);
     const undoneFiles = await exportBoth(label + ' after undo');
-    return { edited, editedFiles, undone, undoneFiles, detection: await evaluate(`({ ...window.__ncAnalysis.detection })`) };
+    return { edited, editedFiles, wbUndone, wbUndoneFiles, undone, undoneFiles, detection: await evaluate(`({ ...window.__ncAnalysis.detection })`) };
   };
-  const atOnce = await run(true);
-  const waited = await run(false);
   const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
-  if (atOnce.detection.reconversions !== 1) fail('the held hit did not convert again: ' + JSON.stringify(atOnce.detection));
-  if (!same(atOnce.undone, waited.undone)) fail('undoing an edit made while the detection ran lost the hit: ' + JSON.stringify({ atOnce: atOnce.undone, waited: waited.undone }));
-  if (!same(atOnce.edited, waited.edited)) fail('an edit made while the detection ran changed the settings: ' + JSON.stringify({ atOnce: atOnce.edited, waited: waited.edited }));
-  for (const [step, files] of [['edited', 'editedFiles'], ['undone', 'undoneFiles']]) {
-    for (const format of ['png8', 'tiff16']) {
-      const a = atOnce[files][format], b = waited[files][format];
-      if (!a.size || a.sha256 !== b.sha256) fail(`${step} ${format}: the export of an edit made while the detection ran differs: ` + JSON.stringify({ atOnce: a, waited: b }));
+  for (const manualWb of [false, true]) {
+    const atOnce = await run(true, manualWb);
+    const waited = await run(false, manualWb);
+    if (atOnce.detection.reconversions !== 1) fail('the held hit did not convert again: ' + JSON.stringify(atOnce.detection));
+    if (!same(atOnce.undone, waited.undone)) fail('undoing an edit made while the detection ran lost the hit: ' + JSON.stringify({ atOnce: atOnce.undone, waited: waited.undone }));
+    if (!same(atOnce.edited, waited.edited)) fail('an edit made while the detection ran changed the settings: ' + JSON.stringify({ atOnce: atOnce.edited, waited: waited.edited }));
+    if (!same(atOnce.wbUndone, waited.wbUndone)) fail('undoing pending-window manual WB lost automatic hit gains: ' + JSON.stringify({ atOnce: atOnce.wbUndone, waited: waited.wbUndone }));
+    for (const [step, files] of [['edited', 'editedFiles'], ...(manualWb ? [['WB undone', 'wbUndoneFiles']] : []), ['undone', 'undoneFiles']]) {
+      for (const format of ['png8', 'tiff16']) {
+        const a = atOnce[files][format], b = waited[files][format];
+        if (!a.size || a.sha256 !== b.sha256) fail(`${step} ${format}: the export of an edit made while the detection ran differs: ` + JSON.stringify({ atOnce: a, waited: b }));
+      }
     }
+    console.log(`ok: ${manualWb ? 'exposure and manual WB edited before the hit' : 'a magenta drag across the hit'} exports, and after undo exports, the same PNG8 and TIFF16 as one made after it (${atOnce.editedFiles.tiff16.sha256.slice(0, 12)}, ${atOnce.undoneFiles.tiff16.sha256.slice(0, 12)})`);
   }
-  console.log(`ok: an edit made while the detection ran (a magenta drag across the hit) exports, and after undo exports, the same PNG8 and TIFF16 as one made after it (${atOnce.editedFiles.tiff16.sha256.slice(0, 12)}, ${atOnce.undoneFiles.tiff16.sha256.slice(0, 12)})`);
 }
 
 // Measurements made while their inputs are pending (R1-023, R1-071). Each run

@@ -7489,44 +7489,49 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // sliders. Low-confidence estimates apply nothing and leave the existing
     // gray-point guide nudging toward the manual click instead. Returns
     // whether it estimated.
-    function maybeAutoWhiteBalance(processed) {
-      if (!usesSilverCoreConversion(state)) return;
-      if (sanitizePresetType(state.filmType || 'color') !== 'color') return;
+    function automaticWhiteBalanceResult(processed, settings) {
+      if (!usesSilverCoreConversion(settings)) return null;
+      if (sanitizePresetType(settings.filmType || 'color') !== 'color') return null;
       // The expired-film rescue balances per tonal band; a global gain on top
       // would fight it.
-      if (state.expiredEnabled) return;
-      if (state.grayPointSampled || state.wbUserOverride || state.wbSemanticApplied) return;
-      if (state.autoFrame.lastDiagnostics?.analysisNeedsReview) return;
+      if (settings.expiredEnabled) return null;
+      if (settings.grayPointSampled || settings.wbUserOverride || settings.wbSemanticApplied) return null;
+      if (state.autoFrame.lastDiagnostics?.analysisNeedsReview) return null;
       const reference = processed?.__analysisPreview;
       // The viewport-independent sample of this source (#248): the display
       // preview it replaces followed the window size, DPR and zoom.
       const wbSample = autoWbSampleFor(autoWbSampleKey());
       const positive = wbSample || state.previewSourceImageData || state.processedImageData;
       const source = reference || positive;
-      if (!source) return;
-      const roi = resolveAnalysisRegion({ ...state, autoFrameMeta: state.autoFrame.lastDiagnostics }, baseSizeSource());
-      const estimate = state.semanticMap ? estimateAutoWhiteBalance(wbSample || processed, { anchors: state.semanticMap })
+      if (!source) return null;
+      const roi = resolveAnalysisRegion({ ...settings, autoFrameMeta: state.autoFrame.lastDiagnostics }, baseSizeSource());
+      const estimate = settings.semanticMap ? estimateAutoWhiteBalance(wbSample || processed, { anchors: settings.semanticMap })
         : estimateAutoWhiteBalance(source, reference ? {} : analysisRegionSample(source, roi));
       if (estimate.confidence === 'low') {
         // Only clear a previous auto estimate; user-owned gains stay put.
-        if (state.wbAutoConfidence && state.wbAutoConfidence !== 'low') {
-          state.wbR = 1;
-          state.wbG = 1;
-          state.wbB = 1;
-          state.wbAutoConfidence = null; state.wbSemanticApplied = false;
-          updateWBSliders();
-          updateGrayPointGuideUI();
-        }
-        state.wbAutoConfidence = 'low';
-        return true;
+        return settings.wbAutoConfidence && settings.wbAutoConfidence !== 'low'
+          ? { wbR: 1, wbG: 1, wbB: 1, wbAutoConfidence: 'low', wbSemanticApplied: false }
+          : { wbAutoConfidence: 'low' };
       }
-      state.wbR = estimate.wbR;
-      state.wbG = estimate.wbG;
-      state.wbB = estimate.wbB;
-      state.wbAutoConfidence = estimate.confidence;
+      return { wbR: estimate.wbR, wbG: estimate.wbG, wbB: estimate.wbB, wbAutoConfidence: estimate.confidence };
+    }
+
+    function maybeAutoWhiteBalance(processed) {
+      const result = automaticWhiteBalanceResult(processed, state);
+      // The hit also belongs to history captured before a manual WB edit.
+      // Estimate from the same positive even when the live user's gains now
+      // suppress automatic WB; only matching pre-override entries adopt it.
+      const before = cropDetection?.whiteBalance;
+      if (cropDetection?.token.hit && before) {
+        const historyResult = Object.keys(before).every(key => state[key] === before[key]) ? result
+          : automaticWhiteBalanceResult(processed, { ...state, ...before });
+        if (historyResult) cropDetection.token.hit.whiteBalance = { before, result: historyResult };
+      }
+      if (!result) return;
+      Object.assign(state, result);
       updateWBSliders();
       updateGrayPointGuideUI();
-      markCurrentFileDirty();
+      if (result.wbAutoConfidence !== 'low') markCurrentFileDirty();
       return true;
     }
 
@@ -18233,6 +18238,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         // of such an entry applies it (restoreSnapshot). It holds no pixels,
         // so history keeps no image alive through it.
         token: { hit: null },
+        whiteBalance: Object.fromEntries(['wbR', 'wbG', 'wbB', 'wbAutoConfidence', 'filmType', 'expiredEnabled',
+          'grayPointSampled', 'wbUserOverride', 'wbSemanticApplied'].map(key => [key, state[key]])),
         // Whether the state, or a history entry's settings, has this frame.
         isFrame: s => effectiveGeometryAngle(s.rotationAngle) === effectiveGeometryAngle(geometry.rotationAngle)
           && Boolean(s.mirrored) === Boolean(geometry.mirrored) && sameCropRect(s.cropRegion, geometry.cropRegion),
@@ -18300,7 +18307,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       Object.assign(detection.meta, structuredClone(fields));
       // History taken while this ran holds the miss outcome; it gets the hit
       // when it is restored (restoreSnapshot).
-      const hit = detection.token.hit = { fields };
+      detection.token.hit = { fields };
       markCurrentFileDirty();
       // A conversion that has not started yet reads the hit (one pass). One
       // that ran with the miss outcome is redone in full: the analysis area,
@@ -18318,19 +18325,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         const { processedImageDataIsPreview, fullResolutionPending } = state;
         clearFullResolutionRenderState();
         Object.assign(state, { processedImageDataIsPreview, fullResolutionPending });
-        // What auto white balance writes, and the state that decides whether
-        // it runs (maybeAutoWhiteBalance).
-        const written = ['wbR', 'wbG', 'wbB', 'wbAutoConfidence'];
-        const gates = ['filmType', 'expiredEnabled', 'grayPointSampled', 'wbUserOverride', 'wbSemanticApplied'];
-        const before = Object.fromEntries([...written, ...gates].map(key => [key, state[key]]));
         await processNegative({ quiet: true });
-        // Its auto white balance reaches those entries too, where they hold
-        // the white balance it started from, as it reached the single pass's
-        // entries. White balance the user set meanwhile wins: none ran then.
-        if (isCurrentCropDetection(detection) && gates.every(key => state[key] === before[key])
-          && written.some(key => state[key] !== before[key])) {
-          hit.whiteBalance = { before, result: Object.fromEntries(written.map(key => [key, state[key]])) };
-        }
       }
     }
 
