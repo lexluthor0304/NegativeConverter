@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import vm from 'node:vm';
 import { createHarness, makeBase, samePixels } from './geometryTestHarness.mjs';
 import { createExactGeometry, windowEdits, overlayWindowEdits, analysisAreaEdited, confirmedImageArea } from './provisionalPhoto.js';
 import { resolveAnalysisRegion, imageAreaFromWorkingRect } from './analysisRegion.js';
 import { workingPointsToBase, buildCropDetectionInput, isSameAnalysisFrame } from './cropColorAnalysis.js';
 import { estimateAutoWhiteBalance } from './autoWhiteBalance.js';
-import { applyPreparedAdjustmentsToBuffer, applyPreparedAdjustmentsToBuffer16 } from './adjustmentPipeline.js';
+import { deepCopySanitizedSettings } from './settingsSnapshot.js';
+import { applyPreparedAdjustmentsToBuffer, applyPreparedAdjustmentsToBuffer16, stripLegacyToneSettingsForSilverCore } from './adjustmentPipeline.js';
 import { convertColorWithSilverCore } from '../pipeline/silverAdapter.js';
 import { analyzeExpiredFilm, defaultExpiredRescueParams, EXPIRED_RESCUE_DEFAULTS, EXPIRED_RESCUE_KEYS } from '../pipeline/expiredRescue.js';
 import { createConversionWorkerClient } from './conversionWorkerClient.js';
@@ -41,21 +43,29 @@ function fixture(staged, manualWb = false) {
     wbR: 1, wbG: 1, wbB: 1, wbAutoConfidence: null, wbSemanticApplied: false, wbUserOverride: false, grayPointSampled: false,
     semanticMap: null, filmBase: { ...(staged ? standInFilmBase : fullFilmBase) }, currentStep: 3,
     autoFrame: { lastDiagnostics: structuredClone(staged ? standInMeta : fullMeta) } });
-  if (manualWb) Object.assign(state, { wbR: 1.17, wbG: 1, wbB: .83, wbUserOverride: true });
+  // restoreSettings treats saved user WB as sampled too; use that canonical
+  // recipe in both fixtures so ownership comparisons test the same state.
+  if (manualWb) Object.assign(state, { wbR: 1.17, wbG: 1, wbB: .83, wbUserOverride: true, grayPointSampled: true });
   const detections = [], held = [];
   Object.assign(target, { createExactGeometry, windowEdits, overlayWindowEdits, analysisAreaEdited, confirmedImageArea,
     resolveAnalysisRegion, imageAreaFromWorkingRect, workingPointsToBase, buildCropDetectionInput, isSameAnalysisFrame,
-    estimateAutoWhiteBalance, cropHitHold: false,
+    estimateAutoWhiteBalance, deepCopySanitizedSettings, stripLegacyToneSettingsForSilverCore, cropHitHold: false,
     usesSilverCoreConversion: () => true,
     // Use real geometry pixels and WB sampling; no display-sized stand-in.
     convertFromCurrentSource: async (settings = state) => convertColorWithSilverCore(state.conversionSourceImageData,
       { filmBase: settings.filmBase, colorModel: 'standard', filmPreset: 'none', borderBuffer: 0, exposure: settings.coreExposure },
       { analysisImageData: c.getColorAnalysisSample(settings === state ? { ...settings, autoFrameMeta: state.autoFrame.lastDiagnostics } : settings) }),
+    buildRouterSettings: settings => settings,
+    convertFrameOffMainThread: async ({ imageData, settings, options }) => convertColorWithSilverCore(imageData,
+      { filmBase: settings.filmBase, colorModel: 'standard', filmPreset: 'none', borderBuffer: 0, exposure: settings.coreExposure },
+      { analysisImageData: options.analysisImageData }),
     runOpenCvTask: async (_kind, options) => {
       await options.build();
-      detections.push({ base: state.loadedBaseImageData, crop: { ...state.cropRegion } });
+      const base = state.loadedBaseImageData;
+      detections.push({ base, crop: { ...state.cropRegion } });
       if (target.cropHitHold) await new Promise(resolve => held.push(resolve));
-      return state.loadedBaseImageData === standIn ? area(2, 2, 17, 13) : area(9, 7, 33, 27);
+      if (target.cropMiss) return null;
+      return base === standIn ? area(2, 2, 17, 13) : area(9, 7, 33, 27);
     },
     extractCurrentSettings: () => {
       const s = c.captureSnapshot('settings').settings;
@@ -64,8 +74,10 @@ function fixture(staged, manualWb = false) {
     getUndoLabel: label => label, inferConfidenceLevel: () => 'high', MAX_UNDO: 30 });
   vm.runInContext(['liveGeometry', 'rebaseProvisionalHistory', 'windowFrameMetaOnFull', 'windowFrameIntent', 'frameMetaWithWindowIntent',
     'installFullDecode', 'restoreAutoFrameDiagnostics', 'automaticWhiteBalanceResult', 'maybeAutoWhiteBalance', 'analysisRegionSample',
-    'provisionalWhiteBalanceMeasurement', 'promoteWhiteBalanceMeasurement', 'restorePromotedWhiteBalance',
-    'restoreColdSnapshotPixels', 'hasPendingCropDetection', 'settlePendingCropDetection'].map(fn).join('\n'), c);
+    'whiteBalanceMeasurementSettings', 'provisionalWhiteBalanceMeasurement', 'promoteWhiteBalanceMeasurement', 'restorePromotedWhiteBalance',
+    'restoreColdSnapshotPixels', 'hasPendingCropDetection', 'settlePendingCropDetection',
+    'waitForProvisionalSwap', 'startCropDetection', 'applyCropDetectionOutcome', 'resolvePendingFrameEdits', 'cloneSettings', 'renderGeometryChain',
+    'buildAdjustmentSettings'].map(fn).join('\n'), c);
   c.restoreAutoFrameDiagnostics(staged ? standInMeta : fullMeta);
   return { ...h, detections, held };
 }
@@ -94,8 +106,8 @@ function samples(h, depth) {
   const source = h.state.processedImageData;
   const out = { width: source.width, height: source.height, data: new Uint8ClampedArray(source.data.length) };
   const identity = Uint8Array.from({ length: 256 }, (_, i) => i);
-  const settings = { wbR: h.state.wbR, wbG: h.state.wbG, wbB: h.state.wbB, exposure: h.state.exposure,
-    curves: { r: identity, g: identity, b: identity } };
+  const settings = h.context.buildAdjustmentSettings({ wbR: h.state.wbR, wbG: h.state.wbG, wbB: h.state.wbB, exposure: h.state.exposure,
+    curves: { r: identity, g: identity, b: identity } });
   (depth === 16 ? applyPreparedAdjustmentsToBuffer16 : applyPreparedAdjustmentsToBuffer)(source, settings, out);
   return depth === 16 ? Array.from(out.__image16.data) : Array.from(out.data);
 }
@@ -220,6 +232,103 @@ if (selected === 'all' || selected === 'automatic-rescue') {
   assert.deepEqual([state.expiredBrightness, state.expiredContrast, state.expiredNeutralize], [17, 23, 61], 'user rescue strengths survive');
   h.pool.dispose(); cases++;
 }
+for (const stack of ['undo', 'redo']) for (const wbMode of ['automatic', 'manual', 'late-manual', 'late-gray-point', 'late-semantic'])
+  for (const manualBase of [false, true]) for (const outcome of ['hit', 'miss']) {
+  if (selected !== 'all' && selected !== `pending-at-swap-${stack}`) continue;
+  const manualWb = wbMode === 'manual';
+  const h = fixture(true, manualWb), reference = fixture(false, manualWb), { context: c, state, target } = h;
+  const baseline = target.extractCurrentSettings();
+  const record = { decodedImage: full, status: 'decoded', urgent: true };
+  const provisional = { size: { width: 32, height: 24 }, fullSize: { width: 64, height: 48 },
+    geometry: createExactGeometry({ size: { width: 32, height: 24 }, fullSize: { width: 64, height: 48 } }), settledSnapshot: baseline, record };
+  state.provisional = provisional;
+  for (const item of [h, reference]) {
+    item.target.cropMiss = outcome === 'miss';
+    // Establish an earlier import measurement. The crop's measurement must
+    // replace this event even though it has not produced a stand-in hit.
+    await item.context.processNegative();
+    await apply(item, item === h ? rect : fullRect, { held: true });
+    for (let i = 0; i < 8 && !item.held.length; i++) await new Promise(setImmediate);
+    assert.equal(item.held.length, 1, 'crop detector is explicitly held');
+    assert.equal(item.target.cropDetection.token.hit, null, 'no crop hit before history capture');
+    if (manualBase) item.state.filmBase = { ...manualFilmBase };
+    item.context.pushUndo('exposure');
+    Object.assign(item.state, { exposure: 27, coreExposure: 15 });
+    await item.context.processNegative({ automatic: false });
+    if (stack === 'redo') await item.context.performUndo();
+    // Semantic colour is deferred until the full base. Test its live guard
+    // there, rather than inventing semantic output on a provisional frame.
+    if (wbMode.startsWith('late-') && (wbMode !== 'late-semantic' || item === reference)) Object.assign(item.state, { wbR: 1.17, wbG: 1, wbB: .83,
+      ...(wbMode === 'late-manual' ? { grayPointSampled: true } : {}),
+      ...(wbMode === 'late-semantic' ? { wbAutoConfidence: 'high' } : {}),
+      [wbMode === 'late-manual' ? 'wbUserOverride' : wbMode === 'late-gray-point' ? 'grayPointSampled' : 'wbSemanticApplied']: true });
+  }
+  const old = target.cropDetection;
+  if (process.env.NC229_HISTORY_TRACE) console.log('before swap', JSON.stringify({ event: Boolean(provisional.whiteBalanceMeasurement?.pending),
+    previousExposure: provisional.whiteBalanceMeasurement?.previous?.settings.coreExposure, wb: [state.wbR, state.wbG, state.wbB] }));
+  let cancelled = false;
+  old.settled.then(() => { cancelled = true; });
+  // Use the production admission caller. Never release/await the preview
+  // detector here: promotion cancels it while its worker is still held.
+  await c.waitForProvisionalSwap(record, provisional, () => true);
+  assert.ok(cancelled, 'promotion cancelled the stand-in settlement barrier');
+  assert.equal(old.token.hit, null, 'stand-in has no hit at the full-source swap');
+  assert.equal(target.cropDetection, null, 'old detector no longer owns the current frame');
+  assert.equal(h.held.length, 1, 'old worker remains held through promotion');
+  target.cropHitHold = false;
+  const settled = { ...baseline, autoFrameMeta: structuredClone(fullMeta), filmBase: { ...fullFilmBase }, cropRegion: null };
+  c.installFullDecode(record, provisional, full, settled);
+  if (wbMode === 'late-semantic') Object.assign(state, { wbR: 1.17, wbG: 1, wbB: .83, wbAutoConfidence: 'high', wbSemanticApplied: true });
+  if (process.env.NC229_HISTORY_TRACE) console.log('installed', JSON.stringify({ event: Boolean(provisional.fullBaseWhiteBalance?.pending),
+    bound: target.cropDetection?.whiteBalanceMeasurement === provisional.fullBaseWhiteBalance, detected: Boolean(target.cropDetection) }));
+  await c.whenGeometrySettled(); await c.processNegative(); await c.settlePendingCropDetection();
+  if (process.env.NC229_HISTORY_TRACE) console.log('full hit', JSON.stringify({ event: Boolean(provisional.fullBaseWhiteBalance?.pending),
+    measuredExposure: provisional.fullBaseWhiteBalance?.measurement?.settings.coreExposure, wb: [state.wbR, state.wbG, state.wbB] }));
+  assert.equal(old.token.hit, null, 'replacement settled without completing the cancelled token');
+  assert.equal(target.cropDetectionStats.hits, outcome === 'hit' ? 1 : 0, 'only the full-base replacement may hit');
+  assert.equal(target.cropDetectionStats.misses, outcome === 'miss' ? 1 : 0, 'replacement miss settles without a new measurement');
+  assert.equal(h.detections.at(-1).base, full, 'replacement measured the full source');
+  await c.restorePromotedWhiteBalance(provisional.fullBaseWhiteBalance, () => true);
+  state.provisional = null; record.status = 'installed';
+  await land(reference);
+  // A hot Undo can still display its old plane while the core render is
+  // queued. Exact export renders the restored recipe without remeasuring WB.
+  await reference.context.processNegative({ automatic: false });
+  const check = phase => {
+    const label = `pending-at-swap/${stack}/${outcome}/${phase}/WB ${wbMode}/manual base ${manualBase}`;
+    const hashes = item => Object.fromEntries([8, 16].map(depth => [depth,
+      createHash('sha256').update(Buffer.from(new Uint16Array(samples(item, depth)).buffer)).digest('hex')]));
+    const actual = hashes(h), expected = hashes(reference);
+    if (actual[8] !== expected[8] || actual[16] !== expected[16]) console.log(label, JSON.stringify({
+      wb: [state.wbR, state.wbG, state.wbB], referenceWb: [reference.state.wbR, reference.state.wbG, reference.state.wbB], actual, expected
+    }));
+    assert.deepEqual(canon(state.autoFrame.lastDiagnostics), canon(reference.state.autoFrame.lastDiagnostics), label + ': diagnostics');
+    assert.deepEqual(canon(state.filmBase), canon(reference.state.filmBase), label + ': film base');
+    assert.deepEqual([state.wbR, state.wbG, state.wbB, state.wbAutoConfidence],
+      [reference.state.wbR, reference.state.wbG, reference.state.wbB, reference.state.wbAutoConfidence], label + ': WB event');
+    assert.deepEqual([state.exposure, state.coreExposure], [reference.state.exposure, reference.state.coreExposure], label + ': exposure strengths');
+    assert.deepEqual([state.wbUserOverride, state.grayPointSampled, state.wbSemanticApplied],
+      [reference.state.wbUserOverride, reference.state.grayPointSampled, reference.state.wbSemanticApplied], label + ': WB ownership');
+    samePixels(state.processedImageData, reference.state.processedImageData, label + ': Silver samples');
+    for (const depth of [8, 16]) assert.deepEqual(samples(h, depth), samples(reference, depth), label + `: exact ${depth}-bit samples`);
+  };
+  check('live');
+  const stale = target.cropDetectionStats.stale;
+  h.held.splice(0).forEach(resolve => resolve());
+  await old.done;
+  assert.equal(target.cropDetectionStats.stale, stale + 1, 'cancelled late preview answer rejected');
+  assert.equal(old.token.hit, null, 'late preview answer never becomes a saved measurement');
+  check('late preview');
+  for (const action of stack === 'undo' ? ['Undo', 'Redo'] : ['Redo', 'Undo']) {
+    const restoring = c[`perform${action}`]();
+    await c.settlePendingCropDetection(); await restoring;
+    await reference.context[`perform${action}`]();
+    await reference.context.processNegative({ automatic: false });
+    await c.processNegative({ automatic: false });
+    check(action);
+  }
+  h.pool.dispose(); reference.pool.dispose(); cases++;
+}
 // A promoted Undo may have settled geometry while its full-base crop/WB
 // measurement still runs. Parking must not save the previous recipe or
 // dispose that photo's worker between those two barriers.
@@ -268,4 +377,4 @@ if (selected === 'all' || selected === 'parking-barrier') {
   client.dispose(); cases++;
 }
 if (selected === 'parking-barrier') console.log('provisionalHistoryAnalysis: real promoted history keeps the cached worker until full-base detection settles, then parking releases ownership');
-else console.log(`provisionalHistoryAnalysis: ${cases} history/rescue cases; pending/completed hits and confirmations promote full-base recipe/diagnostics/WB at the original event; manual WB/base, rescue strengths and exact Silver/8/16 samples preserved`);
+else console.log(`provisionalHistoryAnalysis: ${cases} history/rescue cases; pending/completed/cancelled-at-swap hits and confirmations promote full-base recipe/diagnostics/WB at the original event; manual WB/base, rescue strengths and exact Silver/8/16 samples preserved`);

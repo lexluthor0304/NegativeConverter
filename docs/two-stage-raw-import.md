@@ -174,6 +174,13 @@ instead (step 4 runs it on the full base). It then swaps in one task:
    edit and a completed hit measured before it remain distinct, as with one
    decode. The swap and cold restores remeasure that event on the full base
    without installing its older controls; manual WB remains the entry's.
+   If the stand-in detector is still pending at the swap, cancellation keeps
+   its unresolved WB intent shared with the matching history entries. The
+   replacement full-base hit supplies that event's actual settings, even if
+   detection finishes before conversion begins. It must not replay the
+   preceding import/confirmation measurement over the new crop hit. A miss
+   keeps that preceding completed measurement; manual, gray-point and
+   semantic WB overrides still win. The intent retains no pixel planes.
    Other automatic conversion measurements, including expired-film analysis,
    still run before that WB replay, preserving user rescue strengths.
    Pending restoration joins the crop-analysis barrier, so exports and saved
@@ -357,6 +364,12 @@ previously configured photos, hits, misses and manual confirmations.
   automaticDefaults and exports. With three photos and the open one's stage
   2 failed, the other two get their thumbnails while it stays provisional,
   and no roll is analysed from its stand-in.
+  `TWO_STAGE_SCENES=crop-history` also holds the preview detector through
+  full-source promotion, proves cancellation and replacement settlement
+  before releasing the old worker request, and compares live/Undo/Redo
+  PNG8/TIFF16 decoded samples and file bytes with a delayed-hit single-stage
+  reference. The cancelled late preview answer must leave WB and diagnostics
+  unchanged. Existing before/after-exposure hit scenes remain included.
 
 ## Verification on real files (not in the repository)
 

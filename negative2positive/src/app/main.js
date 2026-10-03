@@ -3315,12 +3315,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // Start before yielding so exact consumers see the restoration barrier.
       let detection = promoted?.detect && base && state.cropRegion ? startCropDetection({
         meta: state.autoFrame.lastDiagnostics, base, frame: geometryFrameSize(base, state.rotationAngle),
-        cropRegion: { ...state.cropRegion }, ready
+        cropRegion: { ...state.cropRegion }, ready, whiteBalanceMeasurement: promoted.whiteBalance
       }) : null;
       const restoring = afterGeometry(ready, async isCurrent => {
         if (promoted?.detect && !detection && state.loadedBaseImageData && state.cropRegion) {
           detection = startCropDetection({ meta: state.autoFrame.lastDiagnostics, base: state.loadedBaseImageData,
-            frame: geometryFrameSize(state.loadedBaseImageData, state.rotationAngle), cropRegion: { ...state.cropRegion }, ready });
+            frame: geometryFrameSize(state.loadedBaseImageData, state.rotationAngle), cropRegion: { ...state.cropRegion }, ready,
+            whiteBalanceMeasurement: promoted.whiteBalance });
         }
         if (detection) await detection.settled;
         if (!isCurrent()) return false;
@@ -7634,13 +7635,21 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // The hit also belongs to history captured before a manual WB edit.
       // Estimate from the same positive even when the live user's gains now
       // suppress automatic WB; only matching pre-override entries adopt it.
-      const before = cropDetection?.whiteBalance;
-      if (cropDetection?.token.hit && before) {
+      const event = cropDetection?.whiteBalanceMeasurement || (state.provisional?.swapped
+        ? state.provisional.fullBaseWhiteBalance : state.fullBaseFrameEdit?.whiteBalance);
+      const before = event?.pending && !event.measurement ? event.before : cropDetection?.whiteBalance;
+      const hit = cropDetection?.token.hit || (event?.hit && isCurrentLoad(event.hit.generation)
+        && effectiveGeometryAngle(state.rotationAngle) === effectiveGeometryAngle(event.hit.geometry.rotationAngle)
+        && Boolean(state.mirrored) === Boolean(event.hit.geometry.mirrored) && sameCropRect(state.cropRegion, event.hit.geometry.cropRegion));
+      if (hit && before) {
         const historyResult = Object.keys(before).every(key => state[key] === before[key]) ? result
           : automaticWhiteBalanceResult(processed, { ...state, ...before });
         if (historyResult) {
           const measurement = provisionalWhiteBalanceMeasurement({ ...state, ...before });
-          cropDetection.token.hit.whiteBalance = { before, result: historyResult, ...(measurement ? { measurement } : {}) };
+          if (cropDetection?.token.hit) cropDetection.token.hit.whiteBalance = { before, result: historyResult, ...(measurement ? { measurement } : {}) };
+          if (event?.pending && !event.measurement) event.measurement = measurement || {
+            settings: whiteBalanceMeasurementSettings({ ...state, ...before }), intent: event.intent, settled: event.settled
+          };
         }
       }
       if (!result) return;
@@ -7657,14 +7666,19 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // after an exposure edit, while a completed hit measured before it.
     // Keep that event's immutable recipe, geometry and frame intent, without
     // retaining any provisional pixels or recursively capturing history.
-    function provisionalWhiteBalanceMeasurement(settings) {
-      if (!provisionalUnits()) return null;
+    function whiteBalanceMeasurementSettings(settings) {
       const recipe = extractCurrentSettings();
       for (const key of ['wbR', 'wbG', 'wbB', 'wbAutoConfidence', 'filmType', 'expiredEnabled',
         'grayPointSampled', 'wbUserOverride', 'wbSemanticApplied']) recipe[key] = settings[key];
       delete recipe.provisionalWhiteBalanceMeasurement;
       delete recipe.cropDetectionToken;
       delete recipe.fullBaseFrameEdit;
+      return recipe;
+    }
+
+    function provisionalWhiteBalanceMeasurement(settings) {
+      if (!provisionalUnits()) return null;
+      const recipe = whiteBalanceMeasurementSettings(settings);
       return {
         settings: recipe, geometry: state.provisional.geometry.save(), live: liveGeometry(),
         intent: windowFrameIntent(state.provisional.settledSnapshot, recipe)
@@ -7673,6 +7687,14 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
     function promoteWhiteBalanceMeasurement(measurement, provisional, base, settled) {
       if (!measurement) return null;
+      if (measurement.pending) {
+        if (measurement.measurement) return promoteWhiteBalanceMeasurement(measurement.measurement, provisional, base, settled);
+        // Every matching live/history recipe shares the unresolved event.
+        // The full-base hit supplies its actual recipe, even after a slider
+        // edit; cancellation must not turn it into the preceding WB event.
+        return measurement.fullBase ||= { pending: true, before: measurement.before, intent: measurement.intent, settled,
+          previous: promoteWhiteBalanceMeasurement(measurement.previous, provisional, base, settled) };
+      }
       const geometry = createExactGeometry({ size: provisional.size, fullSize: provisional.fullSize });
       geometry.restore(measurement.geometry, measurement.live);
       const edits = windowEdits(provisional.settledSnapshot, measurement.settings);
@@ -7686,6 +7708,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // another geometry is rendered off-state, with the same router/sample
     // path. The restore/swap barrier includes this work. User WB wins.
     async function restorePromotedWhiteBalance(measurement, isCurrent) {
+      while (measurement?.pending) measurement = measurement.measurement || measurement.previous;
+      if (!measurement) return;
       if (!isCurrent() || state.wbUserOverride || state.grayPointSampled || state.wbSemanticApplied
         || state.filmType !== measurement.settings.filmType || state.expiredEnabled !== measurement.settings.expiredEnabled) return;
       const base = state.loadedBaseImageData;
@@ -14165,8 +14189,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // geometry build is running, and (unless an exact consumer is waiting) no
     // input came for the background gate's quiet period, so the rebuild never
     // lands inside a drag. A crop-area detection of a crop applied here
-    // measures the stand-in's sample: it ends, and the swap runs it again on
-    // the full base (installFullDecode).
+    // measures the stand-in's sample: cancellation keeps its unresolved WB
+    // intent, and the swap detects/measures it on the full base (installFullDecode).
     async function waitForProvisionalSwap(record, provisional, current) {
       for (;;) {
         if (!current()) return;
@@ -14423,7 +14447,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (detectCrop && state.cropRegion) {
         startCropDetection({
           meta: state.autoFrame.lastDiagnostics, base: image, frame: geometryFrameSize(image, state.rotationAngle),
-          cropRegion: { ...state.cropRegion }, ready: whenGeometrySettled()
+          cropRegion: { ...state.cropRegion }, ready: whenGeometrySettled(), whiteBalanceMeasurement: provisional.fullBaseWhiteBalance
         });
       }
       provisional.swapBaseline = extractCurrentSettings();
@@ -18591,12 +18615,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // Starts the detection for the frame Apply has just set up (state holds
     // its geometry). `meta` is the diagnostics object Apply installed with
     // the miss outcome; a hit completes it in place.
-    function startCropDetection({ meta, base, frame, cropRegion, ready }) {
+    function startCropDetection({ meta, base, frame, cropRegion, ready, whiteBalanceMeasurement = null }) {
       cancelCropDetection();
       let resolveSettled;
       const geometry = { rotationAngle: state.rotationAngle, mirrored: state.mirrored, cropRegion: state.cropRegion ? { ...state.cropRegion } : null };
       const detection = {
         meta, base, geometry,
+        whiteBalanceMeasurement,
         generation: loadGeneration,
         conversions: cropDetectionStats.conversions,
         // Carried by every history entry taken while this is pending
@@ -18611,6 +18636,15 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           && Boolean(s.mirrored) === Boolean(geometry.mirrored) && sameCropRect(s.cropRegion, geometry.cropRegion),
         settled: new Promise(resolve => { resolveSettled = resolve; })
       };
+      if (provisionalUnits()) {
+        // An Apply requests a new WB event before its detector has a hit.
+        // Keep the prior completed event only as the miss fallback. History
+        // holds this intent by identity until the stand-in or full-base hit.
+        detection.whiteBalanceMeasurement = state.provisional.whiteBalanceMeasurement = {
+          pending: true, before: detection.whiteBalance, previous: state.provisional.whiteBalanceMeasurement || null,
+          intent: windowFrameIntent(state.provisional.settledSnapshot, extractCurrentSettings())
+        };
+      }
       detection.finish = () => {
         if (cropDetection === detection) cropDetection = null;
         resolveSettled();
@@ -18674,6 +18708,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // History taken while this ran holds the miss outcome; it gets the hit
       // when it is restored (restoreSnapshot).
       detection.token.hit = { fields };
+      if (detection.whiteBalanceMeasurement?.pending && !detection.whiteBalanceMeasurement.measurement) {
+        detection.whiteBalanceMeasurement.hit = { generation: detection.generation, geometry: detection.geometry };
+      }
       markCurrentFileDirty();
       // A conversion that has not started yet reads the hit (one pass). One
       // that ran with the miss outcome is redone in full: the analysis area,
