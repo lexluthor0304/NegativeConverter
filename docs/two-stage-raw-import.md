@@ -223,6 +223,8 @@ instead (step 4 runs it on the full base). It then swaps in one task:
    across the worker wait, and a crossing converts the current recipe before
    adopting it. Manual/gray WB locks still permit missing rescue analysis on
    cold replay.
+   Promoted replay also checks those measurement inputs before dispatch and
+   after its await, retaining genuine newer WB if an input changed meanwhile.
    Other automatic conversion measurements, including expired-film analysis,
    still run before that WB replay, preserving user rescue strengths.
    Pending restoration joins the crop-analysis barrier, so exports and saved

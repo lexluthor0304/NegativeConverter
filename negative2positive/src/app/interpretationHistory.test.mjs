@@ -391,6 +391,48 @@ async function exactBatch(f, expectedGains, label) {
   assert.deepEqual([state.wbR, state.wbG, state.wbB], expectedGains, `${label}: live WB ownership`);
 }
 
+if (selection === 'all' || selection === 'promoted-inputs') {
+  for (const input of ['filmBase', 'semanticMap', 'rollFrame']) {
+    const f = await historyFixture(['color', 'correct']), { context: c, state, target } = f;
+    Object.assign(state, { expiredEnabled: false, semanticMap: null });
+    if (input !== 'rollFrame') state.rollFrame = null;
+    const old = c.cloneSettings(c.extractCurrentSettings());
+    f.provisional.settledSnapshot = c.cloneSettings(old);
+    const promoted = c.promoteWhiteBalanceMeasurement(c.provisionalWhiteBalanceMeasurement(state), f.provisional, full, old);
+    c.installFullDecode(f.record, f.provisional, full, c.cloneSettings(old));
+    await c.whenGeometrySettled(); state.provisional = null;
+    await target.processNegative();
+    const oldGains = [state.wbR, state.wbG, state.wbB];
+    let release, entered, held = false;
+    const started = new Promise(resolve => { entered = resolve; });
+    const gate = new Promise(resolve => { release = resolve; });
+    const convert = target.convertFromCurrentSource;
+    target.convertFromCurrentSource = async (settings = state) => {
+      if (!held) { held = true; entered(); await gate; }
+      return convert(settings);
+    };
+    const restoring = c.restorePromotedWhiteBalance(promoted, () => true);
+    await started;
+    c.pushUndo(input);
+    if (input === 'filmBase') state.filmBase = { r: 219, g: 187, b: 136, method: 'manual' };
+    if (input === 'semanticMap') state.semanticMap = structuredClone(f.old.semanticMap);
+    if (input === 'rollFrame') state.rollFrame = { ...state.rollFrame, offsetStops: state.rollFrame.offsetStops + .35 };
+    await target.processNegative();
+    const newGains = [state.wbR, state.wbG, state.wbB];
+    const newer = c.cloneSettings(c.extractCurrentSettings());
+    release(); await restoring;
+    await exactBatch(f, newGains, `promoted replay late ${input} actual newer measurement`);
+    assert.deepEqual(canon(state[input]), canon(newer[input]), 'late measurement input owns its recipe');
+    await c.performUndo();
+    await exactBatch(f, oldGains, `promoted replay late ${input} actual Undo`);
+    assert.deepEqual(canon(state[input]), canon(old[input]), 'matching old input survives Undo');
+    await c.performRedo();
+    await exactBatch(f, newGains, `promoted replay late ${input} actual Redo`);
+    assert.deepEqual(canon(state[input]), canon(newer[input]), 'matching new input survives Redo');
+    f.pool.dispose(); cases++;
+  }
+}
+
 if (selection === 'all' || selection === 'pending-events') {
   for (const timing of ['pending', 'applied']) for (const change of ['type', 'mode', 'matching']) for (const stack of ['undo', 'redo']) {
     const f = await historyFixture(['color', 'correct']), { context: c, state, target } = f;

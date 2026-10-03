@@ -7789,7 +7789,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       while (measurement?.pending) measurement = measurement.measurement || measurement.previous;
       if (!measurement) return;
       if (!isCurrent() || state.wbUserOverride || state.grayPointSampled || state.wbSemanticApplied
-        || filmInterpretationChanged(state, measurement.settings) || state.expiredEnabled !== measurement.settings.expiredEnabled) return;
+        || filmInterpretationChanged(state, measurement.settings) || state.expiredEnabled !== measurement.settings.expiredEnabled
+        || !cropMeasurementInputsMatch(state, measurement.settings)) return;
       const base = state.loadedBaseImageData;
       if (!base) return;
       const sameFrame = effectiveGeometryAngle(state.rotationAngle) === effectiveGeometryAngle(measurement.settings.rotationAngle)
@@ -7812,7 +7813,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
             wbSample: { fromSource: true, geometry: { sourceWidth: source.width, sourceHeight: source.height, k: 1 } } });
         }
         if (!isCurrent() || state.wbUserOverride || state.grayPointSampled || state.wbSemanticApplied
-          || filmInterpretationChanged(state, measurement.settings) || state.expiredEnabled !== measurement.settings.expiredEnabled) return;
+          || filmInterpretationChanged(state, measurement.settings) || state.expiredEnabled !== measurement.settings.expiredEnabled
+          || !cropMeasurementInputsMatch(state, measurement.settings)) return;
         const result = automaticWhiteBalanceResult(processed, settings, {
           meta: settings.autoFrameMeta, base, wbSample: processed?.__wbSample
         });
