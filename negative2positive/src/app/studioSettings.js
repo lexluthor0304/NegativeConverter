@@ -26,7 +26,9 @@ export function mergeStudioColors(target, source) {
   // still picks only STUDIO_COLOR_KEYS, so it never copies those fields.
   const keys = [...STUDIO_COLOR_KEYS, 'filmType', 'positiveMode',
     'wbR', 'wbG', 'wbB', 'wbUserOverride', 'grayPointSampled', 'wbAutoConfidence', 'wbSemanticApplied'];
-  const patch = Object.fromEntries(keys.filter(key => source[key] !== undefined).map(key => [key, structuredClone(source[key])]));
+  const patch = pickStudioColors(source);
+  const recipe = source.recipe && typeof source.recipe === 'object' ? source.recipe : null;
+  if (recipe) for (const key of keys) if (recipe[key] !== undefined) patch[key] = structuredClone(recipe[key]);
   return applyInterpretationPatch(structuredClone(target), patch);
 }
 
