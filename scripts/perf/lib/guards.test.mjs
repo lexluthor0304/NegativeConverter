@@ -36,6 +36,14 @@ assert.equal(evaluateRunGuards({ ...base, browserBytes: 9.7 * GiB, swapUsed: 13 
 assert.match(evaluateRunGuards({ ...base, browserBytes: 5 * GiB, swapUsed: 15.1 * GiB }).detail, /swap grew/);
 assert.match(evaluateRunGuards({ ...base, browserBytes: 5 * GiB, swapUsed: 13 * GiB, freeDisk: 19 * GiB }).detail, /free disk/);
 
+// Real guard, fake df readings: forcing a 4.5 GiB start allows ordinary
+// sampling, but never a further 2 GiB disk loss, swap growth or a ceiling.
+const forced = { ...base, force: true, freeDiskAtStart: 4.5 * GiB };
+for (const freeGiB of [4.5, 4, 2.51]) assert.equal(evaluateRunGuards({ ...forced, freeDisk: freeGiB * GiB }), null);
+assert.match(evaluateRunGuards({ ...forced, freeDisk: 2.5 * GiB }).detail, /dropped by 2.00 GB/);
+assert.match(evaluateRunGuards({ ...forced, freeDisk: 4.5 * GiB, browserBytes: 10 * GiB }).detail, /footprint/);
+assert.match(evaluateRunGuards({ ...forced, freeDisk: 4.5 * GiB, swapUsed: 15.1 * GiB }).detail, /swap grew/);
+
 // Load guard: waits, then labels the run noisy instead of refusing it.
 {
   let clock = 0;

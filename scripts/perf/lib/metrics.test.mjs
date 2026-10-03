@@ -271,3 +271,20 @@ assert.deepEqual(flattenMetrics('s1', { a: 1, b: { c: 'x', d: null, e: [1] } }),
 }
 
 console.log('metrics: pictures, drags, import, switch, zoom, pan, windows tests passed');
+
+// #239: a LUT upload on every SilverCore tick is a uniform-like change,
+// even though 256² met the old source-texture threshold. Integer sensor
+// textures must not inherit an earlier conversion's request time either.
+for (const upload of [{ w: 256, h: 256, format: 0x1908, type: 0x1401 }, { w: 1800, h: 1200, format: 0x8D99, type: 0x1403 }]) {
+  const events = [{ k: 'res', cls: 'convert', t: 10, rt: 0, hash: 'initial', w: 1800, h: 1200 }];
+  for (let i = 0; i < 180; i++) {
+    const t = 1000 + i * 1000 / 60;
+    events.push({ k: 'input', type: 'input', id: 'coreExposure', t, tr: true, v: String(i + 1) },
+      { k: 'gl.upload', c: 'glCanvas', t: t + 1, hash: `table${i}`, ...upload },
+      { k: 'gl.draw', c: 'glCanvas', t: t + 6, sig: `tick${i}` });
+  }
+  const m = dragMetrics(events, { targetId: 'coreExposure', initialValue: 0, window: { start: 1000, release: 4000, end: 4500 } });
+  assert.equal(m.updatesPerSecond, 60);
+  assert.equal(m.framesCoveredPct, 100);
+  assert.equal(m.inputToDrawP95Ms, 6);
+}

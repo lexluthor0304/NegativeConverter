@@ -50,6 +50,38 @@ try {
   utimesSync(path, old, old);
   acquireLock({ path }).release();
 
+  // Force both contenders to observe the same stale owner before either
+  // reclaims it. Exactly one may hold the machine lock afterward.
+  writeFileSync(path, JSON.stringify({ pid: deadPid, startedAt: 'old', argv: [] }));
+  const raceScript = `
+    import { acquireLock, isProcessAlive } from ${JSON.stringify(join(here, 'lock.mjs'))};
+    import { existsSync, writeFileSync } from 'node:fs';
+    const barrier = ${JSON.stringify(join(dir, 'race-'))};
+    const side = process.argv[1];
+    let first = true;
+    try {
+      const lock = acquireLock({ path: ${JSON.stringify(path)}, isAlive: pid => {
+        if (first && pid === ${deadPid}) {
+          first = false; writeFileSync(barrier + side, 'ready');
+          const end = Date.now() + 5000;
+          while (!existsSync(barrier + (side === 'a' ? 'b' : 'a'))) {
+            if (Date.now() > end) throw new Error('barrier timeout');
+            Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+          }
+        }
+        return isProcessAlive(pid);
+      } });
+      process.stdout.write('holder\\n');
+      process.stdin.once('data', () => { lock.release(); process.exit(0); });
+    } catch (error) { process.stdout.write('refused\\n'); process.exit(error.code === 'NC_PERF_LOCKED' ? 3 : 1); }
+  `;
+  const contenders = ['a', 'b'].map(side => spawn(process.execPath, ['--input-type=module', '-e', raceScript, side]));
+  const decisions = await Promise.all(contenders.map(child => new Promise(resolve => child.stdout.once('data', data => resolve(String(data).trim())))));
+  assert.deepEqual(decisions.sort(), ['holder', 'refused']);
+  for (const child of contenders) if (child.exitCode === null) child.stdin.end('done');
+  await Promise.all(contenders.map(child => child.exitCode === null ? new Promise(resolve => child.once('exit', resolve)) : Promise.resolve()));
+  assert.equal(existsSync(path), false);
+
   // Two processes with different $TMPDIR values: the second exits within 1 s
   // and names the holder PID.
   const script = `

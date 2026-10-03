@@ -14,7 +14,7 @@ export const sleep = ms => new Promise(resolve => setTimeout(resolve, ms * TIME_
 export const THUMB_PX = 16;
 
 export function appUrl(ctx, extra = '') {
-  return `${ctx.origin}/?lang=en${ctx.perfFlag === false ? '' : '&perf=1'}${extra}`;
+  return `${ctx.origin}/?lang=en${ctx.perfFlag === false ? '' : '&perf=1'}${ctx.scenario.debugCounters ? '&debugCounters=1' : ''}${extra}`;
 }
 
 /** Warm HTTP and WASM caches with two loads, then the measured boot. */
@@ -67,16 +67,47 @@ export function routeLabel(req) {
 }
 
 /** Film type and conversion route of the current photo. */
-export async function recordRoute(ctx, prefix, photo) {
+export async function recordRoute(ctx, prefix, photo, { from = -Infinity } = {}) {
+  await ctx.session.drain();
   const snapshot = await ctx.session.evaluate('globalThis.__ncPerf ? globalThis.__ncPerf.snapshot() : null');
-  const req = byKind(ctx.session.events, 'req').filter(event => event.cls === 'convert').pop();
-  const entry = { photo: photo || snapshot?.filename || '?', filmType: snapshot?.filmType || null, route: routeLabel(req), status: snapshot?.filmTypeStatus || null };
-  ctx.routes.push(entry);
+  const name = photo || snapshot?.filename || '?';
+  // Full-resolution foreground workers are uncached too. A hash ties their
+  // result to displayed pixels; order-only fallback requires the foreground
+  // preview cache so a background reply cannot acquire the current photo.
+  const shown = allPictures(ctx.session.events).filter(pic => pic.res && pic.t >= from && pic.contentT !== null
+    && (pic.res.cache || pic.matchedBy === 'hash' || pic.kind !== 'draw')).at(-1);
+  const candidates = byKind(ctx.session.events, 'req').filter(event => /^(convert|prepare|analyze)$/.test(event.cls) && event.cache && event.t >= from);
+  const displayed = shown && byKind(ctx.session.events, 'req').find(event => event.wid === shown.res.wid && event.id === shown.res.id);
+  // GPU rendering uses prepare/analyze on the preview client, without an
+  // RGBA8 reply to hash. Those cached requests belong to the foreground.
+  const cached = candidates.at(-1);
+  const req = displayed && (!cached || displayed.t > cached.t) ? displayed : cached;
+  const prior = ctx.routes.find(entry => entry.photo === name);
+  const entry = { photo: name, filmType: req?.ft || prior?.filmType || snapshot?.filmType || null,
+    route: routeLabel(req) || prior?.route || null, status: snapshot?.filmTypeStatus || null,
+    request: req ? { wid: req.wid, id: req.id, t: req.t } : prior?.request || null };
+  if (prior) Object.assign(prior, entry); else ctx.routes.push(entry);
   if (prefix) {
     ctx.record(`${prefix}.filmType`, entry.filmType);
     ctx.record(`${prefix}.route`, entry.route);
   }
   return entry;
+}
+
+/** Visit any remaining roll photos after measured windows, so route collection
+ * never warms a cold switch or distorts the roll-import timings.
+ */
+export async function recordRollRoutes(ctx) {
+  if (!ctx.args.probe) return;
+  for (const [index, photo] of (ctx.roll || []).entries()) {
+    const prefix = `${ctx.scenario.id}.photo${index}`;
+    if (ctx.metrics[`${prefix}.route`]) continue;
+    const from = await pageNow(ctx);
+    await ctx.session.evaluate(`document.querySelector('.file-list-name[data-index="${index}"]')?.click(); true`);
+    await ctx.session.waitFor('route photo current', `document.getElementById('studioFilename')?.textContent === ${JSON.stringify(photo.name)} && document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy`, { timeoutMs: 600_000 });
+    await ctx.session.drain();
+    await recordRoute(ctx, prefix, photo.name, { from });
+  }
 }
 
 /**
@@ -101,6 +132,15 @@ export async function importPhotos(ctx, paths, { settle = true, window = 'import
   metrics.readyByPollMs = readyByPollMs;
   metrics.changeT = changeT ?? before;
   metrics.settledT = settledT;
+  if (ctx.args.probe) await recordRoute(ctx, `${ctx.scenario.id}.photo0`, ctx.roll?.[0]?.name || ctx.fixture?.name, { from: metrics.changeT });
+  if (!ctx.args.probe) {
+    metrics.controlStages = await session.evaluate(`globalThis.__ncPerfControl ? globalThis.__ncPerfControl.stages(${before}) : []`);
+  }
+  const stage = predicate => metrics.stages.find(predicate)?.ms;
+  ctx.record(`${ctx.scenario.id}.control.stage.librawDecodeMs`, ctx.args.probe
+    ? stage(entry => entry.cls === 'libraw' && entry.fn === 'imageData') : metrics.controlStages?.find(entry => entry.key === 'librawDecodeMs')?.ms);
+  ctx.record(`${ctx.scenario.id}.control.stage.autoFrameMs`, ctx.args.probe
+    ? stage(entry => entry.cls === 'analyze-frame' || entry.cls === 'analyze-import') : metrics.controlStages?.find(entry => entry.key === 'autoFrameMs')?.ms);
   return metrics;
 }
 
@@ -146,6 +186,20 @@ export function longTasks(ctx, start, end) {
   return longTaskSummary(ctx.session.events, start, end);
 }
 
+export async function uiCounters(ctx) {
+  if (!ctx.scenario.debugCounters) return null;
+  return ctx.session.evaluate('globalThis.__ncDebug ? globalThis.__ncDebug.counters() : null');
+}
+
+export async function recordUiCounters(ctx, prefix, before) {
+  const after = await uiCounters(ctx);
+  if (!after?.sync || !before?.sync) throw new Error(`${prefix}: debugCounters=1 counters unavailable`);
+  ctx.record(`${prefix}.ui.flushes`, after.sync.flushes - before.sync.flushes);
+  ctx.record(`${prefix}.ui.lastFlushWrites`, after.sync.lastFlushWrites);
+  ctx.record(`${prefix}.ui.writes`, after.sync.writes - before.sync.writes);
+  ctx.record(`${prefix}.ui.fileListRenders`, after.fileListRenders - before.fileListRenders);
+}
+
 function inputsBetween(events, start, end, predicate = () => true) {
   return byKind(events, 'input').filter(event => event.t >= start && event.t <= end && predicate(event));
 }
@@ -166,10 +220,12 @@ export async function dragSlider(ctx, id, prefix, { cpu = false, observeMs = 300
   const x1 = x0 + direction * 0.4 * span;
   await sleep(500);
   await session.drain();
+  const uiBefore = await uiCounters(ctx);
   const windowStart = await session.beginWindow(`${prefix}`);
   await session.drag({ from: { x: x0, y }, to: { x: x1, y }, steps: 180 });
   await sleep(500);
   const window = await session.endWindow();
+  if (ctx.scenario.debugCounters) await recordUiCounters(ctx, prefix, uiBefore);
   // Probe-free control measures, comparable between probe and --no-probe runs.
   ctx.record(`${prefix}.control.mainBusyPct`, window.mainBusyPct);
   ctx.record(`${prefix}.control.scriptMs`, window.scriptMs);

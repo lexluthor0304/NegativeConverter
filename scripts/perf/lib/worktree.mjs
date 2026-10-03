@@ -12,6 +12,7 @@ import { execFile, spawn } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
+import { registerWorktree, registerProcess } from './resources.mjs';
 
 const run = promisify(execFile);
 
@@ -68,6 +69,8 @@ function runNpmCi(cwd, log) {
   return new Promise((resolvePromise, reject) => {
     const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
     const child = spawn(npm, ['ci', '--no-audit', '--no-fund'], { cwd, stdio: ['ignore', 'pipe', 'pipe'], shell: process.platform === 'win32' });
+    const unregister = registerProcess(child, { detached: false });
+    child.once('exit', unregister);
     let output = '';
     child.stdout.on('data', chunk => { output = (output + chunk).slice(-4000); });
     child.stderr.on('data', chunk => { output = (output + chunk).slice(-4000); });
@@ -83,12 +86,15 @@ function runNpmCi(cwd, log) {
 export async function createRefWorktree({ repo, sha, tmpRoot, invokingRoot, log = () => {}, npmCi = runNpmCi }) {
   const path = resolve(tmpRoot, `wt-${sha.slice(0, 12)}-${process.pid}-${Date.now().toString(36)}`);
   await git(repo, ['worktree', 'add', '--detach', '--quiet', path, sha]);
+  const unregister = registerWorktree(repo, path);
   let removed = false;
   const cleanup = async () => {
     if (removed) return;
     removed = true;
+    if (!existsSync(path)) { unregister(); return; }
     try {
       await git(repo, ['worktree', 'remove', '--force', path]);
+      unregister();
     } catch (error) {
       log(`git worktree remove failed (${error.message.split('\n')[0]}); deleting ${path}`);
       rmSync(path, { recursive: true, force: true });

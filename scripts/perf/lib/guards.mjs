@@ -2,7 +2,8 @@
 // through a browser; on a 16 GB Mac parallel runs have frozen the machine and
 // filled the disk with swap, so a run refuses to start under memory pressure
 // or low disk, and aborts when the browser crosses a memory ceiling, when swap
-// grows by 2 GB or when free disk drops below 20 GB. Parsers are pure and
+// grows by 2 GB or when free disk drops below 20 GB (forced runs allow their
+// starting free space until a further 2 GB drop). Parsers are pure and
 // unit-tested; the probes shell out to sysctl/pmset on macOS.
 
 import { execFile } from 'node:child_process';
@@ -14,6 +15,7 @@ const run = promisify(execFile);
 export const GiB = 1024 ** 3;
 export const MIN_FREE_DISK_BYTES = 20 * GiB;
 export const MAX_SWAP_GROWTH_BYTES = 2 * GiB;
+export const MAX_DISK_DROP_BYTES = 2 * GiB;
 
 const UNIT = { B: 1, K: 1024, M: 1024 ** 2, G: 1024 ** 3, T: 1024 ** 4 };
 
@@ -121,10 +123,11 @@ export function evaluatePreflight({ pressure, freeDisk, minFreeDisk = MIN_FREE_D
 
 /**
  * During a scenario: abort when the browser's summed phys_footprint crosses
- * the ceiling, swap grew by more than 2 GB, or free disk fell below 20 GB.
+ * the ceiling, swap grew by more than 2 GB, or the run's disk limit is crossed.
  * Returns null or { reason, detail }.
  */
 export function evaluateRunGuards({ browserBytes, ceilingBytes, swapUsed, swapUsedAtStart, freeDisk,
+  force = false, freeDiskAtStart, maxDiskDrop = MAX_DISK_DROP_BYTES,
   maxSwapGrowth = MAX_SWAP_GROWTH_BYTES, minFreeDisk = MIN_FREE_DISK_BYTES }) {
   if (Number.isFinite(browserBytes) && Number.isFinite(ceilingBytes) && browserBytes > ceilingBytes) {
     return { reason: 'memory-ceiling', detail: `browser footprint ${(browserBytes / GiB).toFixed(2)} GB > ceiling ${(ceilingBytes / GiB).toFixed(2)} GB` };
@@ -132,7 +135,10 @@ export function evaluateRunGuards({ browserBytes, ceilingBytes, swapUsed, swapUs
   if (Number.isFinite(swapUsed) && Number.isFinite(swapUsedAtStart) && swapUsed - swapUsedAtStart > maxSwapGrowth) {
     return { reason: 'memory-ceiling', detail: `swap grew by ${((swapUsed - swapUsedAtStart) / GiB).toFixed(2)} GB` };
   }
-  if (Number.isFinite(freeDisk) && freeDisk < minFreeDisk) {
+  if (force && Number.isFinite(freeDisk) && Number.isFinite(freeDiskAtStart) && freeDiskAtStart - freeDisk >= maxDiskDrop) {
+    return { reason: 'memory-ceiling', detail: `free disk dropped by ${((freeDiskAtStart - freeDisk) / GiB).toFixed(2)} GB from the forced run's start` };
+  }
+  if ((!force || !Number.isFinite(freeDiskAtStart)) && Number.isFinite(freeDisk) && freeDisk < minFreeDisk) {
     return { reason: 'memory-ceiling', detail: `free disk fell to ${(freeDisk / GiB).toFixed(1)} GB` };
   }
   return null;

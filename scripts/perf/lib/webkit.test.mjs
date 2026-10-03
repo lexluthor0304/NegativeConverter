@@ -4,6 +4,31 @@ import assert from 'node:assert/strict';
 
 process.env.NC_PERF_TIME_SCALE = '0';
 const { safariScenario } = await import('./webkit.mjs');
+const { webkitMemory } = await import('./webkit.mjs');
+const { GiB } = await import('./guards.mjs');
+
+// Mail's pre-existing WebContent/GPU never enter the harness footprint.
+{
+  let processList = [
+    { pid: 900000001, command: 'com.apple.WebKit.WebContent' },
+    { pid: 900000002, command: 'com.apple.WebKit.GPU' }
+  ];
+  const reads = [], aborted = [];
+  const memory = await webkitMemory({ label: 'fake', port: 1, outDir: '.', args: { force: true },
+    freeDiskAtStart: 4.5 * GiB, swapAtStart: 0, ceilingBytes: GiB, start: false,
+    list: async () => processList, connected: async () => [], readSwap: async () => ({ used: 0 }), readDisk: () => 4.5 * GiB,
+    reader: { start: async () => {}, stop() {}, read: async pids => {
+      reads.push(pids); return Object.fromEntries(pids.map(pid => [pid, { footprint: 0.6 * GiB }]));
+    } }, onAbort: verdict => aborted.push(verdict)
+  });
+  processList = [...processList, { pid: 900000003, command: 'com.apple.WebKit.WebContent' }, { pid: 900000004, command: 'com.apple.WebKit.GPU' }];
+  await memory.sampler.tick();
+  assert.deepEqual(reads, [[900000003, 900000004]]);
+  assert.equal(aborted.length, 1);
+  assert.equal(aborted[0].reason, 'memory-ceiling');
+  memory.assertScope();
+  memory.stop();
+}
 
 class FakeWebDriver {
   constructor() { this.t = 1000; this.pending = []; this.files = []; this.focused = 0; this.current = null; this.lastRect = null; this.zoom = 1; this.windowStart = 0; }

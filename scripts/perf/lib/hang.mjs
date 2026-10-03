@@ -2,7 +2,7 @@
 // second; after NC_PERF_HANG_S seconds without a reply (default 30 s, above
 // the longest main-thread task measured so far) the watchdog dumps state:
 //
-// - Debugger.pause on the page and every attached worker session. Chrome
+// - Diagnostic repetitions only: Debugger.pause on the page and workers. Chrome
 //   handles Debugger.pause on the IO thread and interrupts running
 //   JavaScript, while Debugger.enable queues behind the busy main thread, so
 //   the Debugger is enabled at attach time (section 1 of #230).
@@ -16,6 +16,7 @@
 import { execFile } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 
 export function hangThresholdMs(env = process.env) {
   const seconds = Number(env.NC_PERF_HANG_S);
@@ -75,13 +76,15 @@ function sampleProcess(pid, seconds, file) {
 
 /**
  * Collect a hang dump. `sessions` = [{ id, kind: 'page'|'worker', url, session }].
- * Returns the dump object (also written to `dir/hang-<label>.json`).
+ * Returns the dump object (also written to `dir/hang-<label>-<stall>.json`).
  */
 export async function collectHangDump({
   connection, sessions, mapper = null, traceRecorder = null, processIds = {}, dir, label, info,
-  platform = process.platform, pauseTimeoutMs = 5000, sampleSeconds = 3
+  platform = process.platform, pauseTimeoutMs = 5000, sampleSeconds = 3, captureStacks = true
 }) {
-  const dump = { label, info, at: new Date().toISOString(), stacks: [], ring: null, samples: [], processes: null, trace: null, errors: [] };
+  const stall = randomUUID();
+  const dump = { label, stall, file: dir ? join(dir, `hang-${label}-${stall}.json`) : null, info, processIds,
+    at: new Date().toISOString(), stacks: [], ring: null, samples: [], processes: null, trace: null, errors: [] };
   const mapFrame = frame => {
     const location = frame.location || {};
     const url = frame.url || '';
@@ -91,16 +94,19 @@ export async function collectHangDump({
   };
   const native = platform === 'darwin'
     ? Promise.all([...(processIds.renderer || []), ...(processIds.gpu || [])].map(pid =>
-      sampleProcess(pid, sampleSeconds, join(dir, `hang-${label}-sample-${pid}.txt`))))
+      sampleProcess(pid, sampleSeconds, join(dir, `hang-${label}-${stall}-sample-${pid}.txt`))))
     : Promise.resolve([]);
 
-  await Promise.all(sessions.map(async entry => {
+  if (captureStacks) await Promise.all(sessions.map(async entry => {
     try {
       const paused = entry.session.waitFor('Debugger.paused', { timeoutMs: pauseTimeoutMs });
+      paused.catch(() => {});
       await entry.session.send('Debugger.pause', {}, { timeoutMs: pauseTimeoutMs });
       const event = await paused;
       const frames = (event.callFrames || []).map(mapFrame);
-      const stack = { kind: entry.kind, url: entry.url || null, reason: event.reason, frames };
+      // A successful pause without JS frames identifies an otherwise unknown
+      // idle worker. A failed pause always remains unknown/busy.
+      const stack = { kind: entry.kind, id: entry.id || null, busy: entry.busy ?? (frames.length > 0), url: entry.url || null, reason: event.reason, frames };
       if (entry.kind === 'page' && event.callFrames?.length) {
         try {
           const response = await entry.session.send('Debugger.evaluateOnCallFrame', {
@@ -115,7 +121,7 @@ export async function collectHangDump({
       }
       dump.stacks.push(stack);
     } catch (error) {
-      dump.stacks.push({ kind: entry.kind, url: entry.url || null, error: `no JS pause: ${error.message}` });
+      dump.stacks.push({ kind: entry.kind, id: entry.id || null, busy: entry.busy ?? null, url: entry.url || null, error: `no JS pause: ${error.message}` });
     }
   }));
 
@@ -133,6 +139,6 @@ export async function collectHangDump({
     dump.errors.push(`process info: ${error.message}`);
   }
   dump.samples = await native;
-  if (dir) writeFileSync(join(dir, `hang-${label}.json`), JSON.stringify(dump, null, 2));
+  if (dump.file) writeFileSync(dump.file, JSON.stringify(dump, null, 2));
   return dump;
 }

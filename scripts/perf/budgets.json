@@ -3034,6 +3034,466 @@
           "note": "two >5-min stalls, not reproduced in a 12-drag repro"
         }
       ]
+    },
+    "s9.single.png16.*.encodeMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 100
+      },
+      "budget": "#257 imageDataToBlob png/16 on a 60 MP frame at level 6",
+      "target": 5000
+    },
+    "s9.zip.png16.lanes1.encodeMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 100
+      },
+      "budget": "#257 PNG16 per-frame encode, one lane",
+      "target": 5000
+    },
+    "s9.zip.png16.lanes1.msPerFile": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 100
+      },
+      "budget": "#257 one-lane PNG16 batch throughput; record against same-session base",
+      "acceptance": "At least 10000 ms per-frame improvement on the 10-frame 60 MP acceptance roll"
+    },
+    "s9.zip.png16.lanes3.msPerFile": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.05,
+        "abs": 0
+      },
+      "budget": "#257 PNG16 batch at >=3 observed lanes: no more than 5 percent slowdown"
+    },
+    "s9.zip.dng.linearDngBuildMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "#257 linearDngBatch build and Blob construction; actual trace duration per frame",
+      "target": 400
+    },
+    "s9.zip.dng.linearDngTotalMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "#257 linearDngBatch build and Blob construction; actual trace duration per frame",
+      "target": 500
+    },
+    "s9.zip.dng.blobMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "#257 linearDngBatch build and Blob construction; actual trace duration per frame",
+      "target": 50
+    },
+    "s9.single.*.*.desktopWriteMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "#257 Tauri begin_export_write to finish_export_write resolution",
+      "acceptance": "At least 2x faster than same-session base; target head/base <=0.5"
+    },
+    "s9.zip.*.desktopWriteMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "#257 Tauri begin_export_write to finish_export_write resolution",
+      "acceptance": "At least 2x faster than same-session base; target head/base <=0.5"
+    },
+    "s9.zip.png16.*.desktopWriteMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "#257 Tauri begin_export_write to finish_export_write resolution",
+      "acceptance": "At least 2x faster than same-session base; target head/base <=0.5"
+    },
+    "dust-brush.releaseToRepairedP95Ms": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "#259 60 MP, AI off, Show mask on, 20 strokes: mouseup to painted repair",
+      "target": 150
+    },
+    "dust-brush.maxLongTaskMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#259 per-stroke main-thread long task ceiling",
+      "target": 50
+    },
+    "dust-brush.postMessageMaxBytes": {
+      "unit": "bytes",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0,
+        "abs": 0
+      },
+      "budget": "#259 no per-stroke postMessage of 16 MiB or more; binary lengths plus metadata estimate",
+      "target": 16777215
+    },
+    "dust-brush.stroke0.workerMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#259 local brush worker time",
+      "target": 20
+    },
+    "dust-brush.stroke1.workerMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#259 local brush worker time",
+      "target": 20
+    },
+    "dust-brush.stroke2.workerMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#259 local brush worker time",
+      "target": 20
+    },
+    "dust-brush.stroke3.workerMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#259 local brush worker time",
+      "target": 20
+    },
+    "dust-brush.stroke4.workerMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#259 local brush worker time",
+      "target": 20
+    },
+    "dust-brush.stroke5.workerMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#259 local brush worker time",
+      "target": 20
+    },
+    "dust-brush.stroke6.workerMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#259 local brush worker time",
+      "target": 20
+    },
+    "dust-brush.stroke7.workerMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#259 local brush worker time",
+      "target": 20
+    },
+    "dust-brush.stroke8.workerMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#259 local brush worker time",
+      "target": 20
+    },
+    "dust-brush.stroke9.workerMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#259 local brush worker time",
+      "target": 20
+    },
+    "dust-brush.stroke10.workerMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#259 local brush worker time",
+      "target": 20
+    },
+    "dust-brush.stroke11.workerMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#259 local brush worker time",
+      "target": 20
+    },
+    "dust-brush.stroke12.workerMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#259 local brush worker time",
+      "target": 20
+    },
+    "dust-brush.stroke13.workerMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#259 local brush worker time",
+      "target": 20
+    },
+    "dust-brush.stroke14.workerMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#259 local brush worker time",
+      "target": 20
+    },
+    "dust-brush.stroke15.workerMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#259 local brush worker time",
+      "target": 20
+    },
+    "dust-brush.stroke16.workerMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#259 local brush worker time",
+      "target": 20
+    },
+    "dust-brush.stroke17.workerMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#259 local brush worker time",
+      "target": 20
+    },
+    "dust-brush.stroke18.workerMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#259 local brush worker time",
+      "target": 20
+    },
+    "dust-brush.stroke19.workerMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#259 local brush worker time",
+      "target": 20
+    },
+    "s2.*.*.ui.flushes": {
+      "unit": "count",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#261 Studio flushes in measured drag window"
+    },
+    "s2.*.*.ui.lastFlushWrites": {
+      "unit": "count",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#261 DOM writes in last Studio flush"
+    },
+    "s2.*.*.ui.writes": {
+      "unit": "count",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#261 total DOM writes in measured drag window"
+    },
+    "s2.*.*.ui.fileListRenders": {
+      "unit": "count",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0,
+        "abs": 0
+      },
+      "budget": "#261 file-list renders during a slider or curve drag",
+      "target": 0
+    },
+    "s3.*.*.ui.flushes": {
+      "unit": "count",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#261 Studio flushes in measured drag window"
+    },
+    "s3.*.*.ui.lastFlushWrites": {
+      "unit": "count",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#261 DOM writes in last Studio flush"
+    },
+    "s3.*.*.ui.writes": {
+      "unit": "count",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#261 total DOM writes in measured drag window"
+    },
+    "s3.*.*.ui.fileListRenders": {
+      "unit": "count",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0,
+        "abs": 0
+      },
+      "budget": "#261 file-list renders during a slider or curve drag",
+      "target": 0
+    },
+    "overlay-idle.runningAnimations": {
+      "unit": "count",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0,
+        "abs": 0
+      },
+      "budget": "#261 hidden loading overlays have no running animations after export",
+      "target": 0
+    },
+    "loupe.mainBusyPct": {
+      "unit": "%",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#261 live fake-camera loupe main-thread busy time",
+      "target": 10
+    },
+    "s2.*.cpu.*.ui.flushes": {
+      "unit": "count",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#261 Studio flushes in measured drag window"
+    },
+    "s2.*.cpu.*.ui.lastFlushWrites": {
+      "unit": "count",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#261 DOM writes in last Studio flush"
+    },
+    "s2.*.cpu.*.ui.writes": {
+      "unit": "count",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#261 total DOM writes in measured drag window"
+    },
+    "s2.*.cpu.*.ui.fileListRenders": {
+      "unit": "count",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0,
+        "abs": 0
+      },
+      "budget": "#261 file-list renders during a slider or curve drag",
+      "target": 0
     }
   }
 }

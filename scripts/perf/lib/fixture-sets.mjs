@@ -37,24 +37,31 @@ export function realFileList(env = process.env) {
  * Resolve the fixture groups: { singles, interactive, roll, export, hang, smoke }.
  * `synthetic` maps generated fixture names to { path, width, height, sha256 }.
  */
-export function resolveFixtureGroups({ set, synthetic = {}, rollSize = 12, quick = false, only = null, env = process.env, repoRoot }) {
+export function resolveFixtureGroups({ set, synthetic = {}, rollSize = 12, exportCount = 3, quick = false, only = null, env = process.env, repoRoot }) {
   const describe = (path, extra = {}) => ({ name: basename(path), path, ...extra });
   const fromSynthetic = name => synthetic[name] ? describe(synthetic[name].path, { width: synthetic[name].width, height: synthetic[name].height, sha256: synthetic[name].sha256, synthetic: true }) : null;
   const smoke = [describe(join(repoRoot, 'negative2positive', 'test-fixtures', 'negative-sample.jpg'), { width: null })];
-  let singles, interactive, roll, exportRoll, hang;
+  let singles, interactive, roll, exportRoll, exportParallel, hang;
   if (set === 'real') {
     const files = realFileList(env).map(path => describe(path));
     if (!files.length) throw new Error('--fixtures real needs NC_PERF_RAW_DIR (and optionally NC_PERF_RAW_FILES)');
     const rollDir = env.NC_PERF_ROLL_DIR ? resolve(env.NC_PERF_ROLL_DIR) : null;
-    roll = listDir(rollDir).slice(0, rollSize).map(path => describe(path));
+    const availableRoll = listDir(rollDir).map(path => describe(path));
+    roll = availableRoll.slice(0, rollSize);
     singles = files;
     interactive = files;
-    exportRoll = roll.length >= 3 ? [files[0], ...roll.filter(entry => entry.name !== files[0].name).slice(0, 3)] : [];
+    const others = availableRoll.filter(entry => entry.name !== files[0].name).slice(0, exportCount);
+    exportRoll = others.length === exportCount ? [files[0], ...others] : [];
+    exportParallel = files.filter(entry => /\.nef$/i.test(entry.name)).slice(0, 4);
+    if (exportParallel.length < 4) exportParallel = [];
   } else {
     singles = ['synthetic-60mp-cfa.dng', 'synthetic-24mp-cfa.dng', 'synthetic-60mp-color.tif', 'synthetic-60mp-bw.tif', 'synthetic-24mp-color.tif'].map(fromSynthetic).filter(Boolean);
     interactive = ['synthetic-60mp-cfa.dng', 'synthetic-24mp-cfa.dng'].map(fromSynthetic).filter(Boolean);
     roll = Array.from({ length: rollSize }, (_, i) => fromSynthetic(`synthetic-roll-${String(i + 1).padStart(2, '0')}.dng`)).filter(Boolean);
-    exportRoll = [fromSynthetic('synthetic-60mp-cfa.dng'), ...roll.slice(0, 3)].filter(Boolean);
+    const others = Array.from({ length: exportCount }, (_, i) => fromSynthetic(`synthetic-roll-${String(i + 1).padStart(2, '0')}.dng`)).filter(Boolean);
+    const current = fromSynthetic('synthetic-60mp-cfa.dng');
+    exportRoll = current && others.length === exportCount ? [current, ...others] : [];
+    exportParallel = [fromSynthetic('synthetic-24mp-cfa.dng'), ...[1, 2, 3].map(i => fromSynthetic(`synthetic-export24-${i}.dng`))].filter(Boolean);
   }
   const rawDir = env.NC_PERF_RAW_DIR ? resolve(env.NC_PERF_RAW_DIR) : null;
   const hangRaw = rawDir && existsSync(join(rawDir, HANG_RAW)) ? describe(join(rawDir, HANG_RAW)) : null;
@@ -68,20 +75,22 @@ export function resolveFixtureGroups({ set, synthetic = {}, rollSize = 12, quick
     singles = singles.slice(0, 1);
     interactive = interactive.slice(0, 1);
   }
-  return { singles, interactive, roll, export: exportRoll, hang, smoke };
+  return { singles, interactive, roll, export: exportRoll, 'export-parallel': exportParallel, dust: interactive.filter(entry => /\.dng$/i.test(entry.name) && (!entry.width || entry.width * entry.height >= 60_000_000)), hang, smoke };
 }
 
 /** Synthetic fixture names a scenario list needs. */
-export function syntheticNamesFor(groups, { rollSize = 12, quick = false } = {}) {
+export function syntheticNamesFor(groups, { rollSize = 12, exportCount = 3, quick = false } = {}) {
   const names = new Set();
   const singles = ['synthetic-60mp-cfa.dng', 'synthetic-24mp-cfa.dng', 'synthetic-60mp-color.tif', 'synthetic-60mp-bw.tif', 'synthetic-24mp-color.tif'];
   const interactive = ['synthetic-60mp-cfa.dng', 'synthetic-24mp-cfa.dng'];
-  const roll = Array.from({ length: rollSize }, (_, i) => `synthetic-roll-${String(i + 1).padStart(2, '0')}.dng`);
+  const roll = Array.from({ length: Math.max(rollSize, exportCount) }, (_, i) => `synthetic-roll-${String(i + 1).padStart(2, '0')}.dng`);
   for (const group of groups) {
     if (group === 'singles') (quick ? singles.slice(0, 1) : singles).forEach(name => names.add(name));
     if (group === 'interactive') (quick ? interactive.slice(0, 1) : interactive).forEach(name => names.add(name));
-    if (group === 'roll') roll.forEach(name => names.add(name));
-    if (group === 'export') { names.add('synthetic-60mp-cfa.dng'); roll.slice(0, 3).forEach(name => names.add(name)); }
+    if (group === 'roll') roll.slice(0, rollSize).forEach(name => names.add(name));
+    if (group === 'export') { names.add('synthetic-60mp-cfa.dng'); roll.slice(0, exportCount).forEach(name => names.add(name)); }
+    if (group === 'export-parallel') { names.add('synthetic-24mp-cfa.dng'); [1, 2, 3].forEach(i => names.add(`synthetic-export24-${i}.dng`)); }
+    if (group === 'dust') names.add('synthetic-60mp-cfa.dng');
     if (group === 'hang') names.add('synthetic-24mp-cfa.dng');
   }
   return [...names];

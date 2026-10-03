@@ -4,7 +4,7 @@
 // ÷ wall, and Σ thread busy ÷ wall from the profiled trace); Brightness and
 // Cyan drags while the background work runs and after it.
 import { byKind } from '../lib/metrics.mjs';
-import { bootApp, importPhotos, recordImportMetrics, recordMemory, recordRoute, dragSlider, sleep, round } from './common.mjs';
+import { bootApp, recordRollRoutes, importPhotos, recordImportMetrics, recordMemory, recordRoute, dragSlider, sleep, round } from './common.mjs';
 
 export const BACKGROUND_TIMEOUT_MS = 60 * 60 * 1000;
 
@@ -79,5 +79,6 @@ export default {
     await dragSlider(ctx, 'coreExposure', 's6.dragAfter.coreExposure');
     await dragSlider(ctx, 'cyan', 's6.dragAfter.cyan');
     await recordMemory(ctx, 's6', memoryFrom);
+    await recordRollRoutes(ctx);
   }
 };

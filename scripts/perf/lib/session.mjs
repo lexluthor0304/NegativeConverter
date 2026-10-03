@@ -14,6 +14,7 @@ import { runPaced, HZ_60_MS, linearPath } from './pacing.mjs';
 const here = dirname(fileURLToPath(import.meta.url));
 export const PROBE_SOURCE = readFileSync(join(here, '..', 'probe.js'), 'utf8');
 export const WORKER_PROBE_SOURCE = readFileSync(join(here, '..', 'probe-worker.js'), 'utf8');
+export const STAGE_CONTROL_SOURCE = readFileSync(join(here, '..', 'stage-control.js'), 'utf8');
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 export class ScenarioAbort extends Error {
@@ -37,8 +38,9 @@ const KEYS = {
 };
 
 export class ChromeSession {
-  constructor(options) {
+  constructor(options, deps = {}) {
     this.options = options;
+    this.deps = deps;
     this.events = [];
     this.workerTiming = [];
     this.workers = new Map();
@@ -56,16 +58,15 @@ export class ChromeSession {
    * options: { chromeBin, cdpPort, probe, headful, dpr, log, mapper, outDir, label,
    *            ceilingBytes, swapAtStart, guardDiskPath, traceRecorderFactory }
    */
-  static async open(options) {
-    const session = new ChromeSession(options);
-    await session.#start();
-    return session;
+  static async open(options, deps = {}) {
+    const session = new ChromeSession(options, deps);
+    try { await session.#start(); return session; } catch (error) { await session.close(); throw error; }
   }
 
   async #start() {
     const { chromeBin, cdpPort, headful, log = () => {} } = this.options;
-    this.chrome = await launchChrome({ bin: chromeBin, port: cdpPort, headful, log });
-    this.connection = await CdpConnection.connect(this.chrome.version.webSocketDebuggerUrl);
+    this.chrome = await (this.deps.launchChrome || launchChrome)({ bin: chromeBin, port: cdpPort, headful, log, fakeCamera: this.options.fakeCamera });
+    this.connection = await (this.deps.connect || (url => CdpConnection.connect(url)))(this.chrome.version.webSocketDebuggerUrl);
     this.connection.onClose(() => { if (this.status === 'ok') this.#abort('crashed', 'CDP connection closed'); });
     const { targetInfos } = await this.connection.send('Target.getTargets');
     const target = targetInfos.find(info => info.type === 'page') || { targetId: (await this.connection.send('Target.createTarget', { url: 'about:blank' })).targetId };
@@ -86,11 +87,13 @@ export class ChromeSession {
     if (this.options.probe) {
       // Enabled now: once the main thread is busy, Debugger.enable would queue
       // behind it, while Debugger.pause is handled on the IO thread.
-      await this.page.send('Debugger.enable');
+      if (this.options.captureStacks) await this.page.send('Debugger.enable');
       await this.page.send('Page.addScriptToEvaluateOnNewDocument', { source: `globalThis.__ncPerfConfig = ${JSON.stringify({ keepExportChunks: Boolean(this.options.keepExportChunks) })};\n${PROBE_SOURCE}` });
       this.connection.on('Target.attachedToTarget', params => this.#onAttached(params), {});
       this.connection.on('Runtime.bindingCalled', (params, message) => this.#onBinding(params, message), {});
       await this.page.send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: true, flatten: true });
+    } else {
+      await this.page.send('Page.addScriptToEvaluateOnNewDocument', { source: STAGE_CONTROL_SOURCE });
     }
     await this.setDpr(this.options.dpr || 2);
     await this.#startMemory();
@@ -108,7 +111,7 @@ export class ChromeSession {
       await worker.send('Runtime.enable', {}, { timeoutMs: 10_000 });
       await worker.send('Runtime.addBinding', { name: '__ncPerfWorkerEmit' }, { timeoutMs: 10_000 });
       await worker.send('Runtime.evaluate', { expression: WORKER_PROBE_SOURCE }, { timeoutMs: 10_000 });
-      await worker.send('Debugger.enable', {}, { timeoutMs: 10_000 });
+      if (this.options.captureStacks) await worker.send('Debugger.enable', {}, { timeoutMs: 10_000 });
       await worker.send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: true, flatten: true }, { timeoutMs: 10_000 });
     } catch {
       // A worker that is gone already, or cannot be instrumented, must still run.
@@ -127,6 +130,7 @@ export class ChromeSession {
   }
 
   async #startMemory() {
+    if (this.deps.startMemory) return this.deps.startMemory(this);
     this.reader = new FootprintReader();
     await this.reader.start();
     this.sampler = new MemorySampler({
@@ -145,7 +149,8 @@ export class ChromeSession {
       ceilingBytes: this.options.ceilingBytes,
       swapUsed: swap,
       swapUsedAtStart: this.options.swapAtStart,
-      freeDisk: freeDiskBytes(this.options.guardDiskPath || '.')
+      freeDisk: freeDiskBytes(this.options.guardDiskPath || '.'),
+      force: this.options.force, freeDiskAtStart: this.options.freeDiskAtStart
     });
     if (verdict) {
       this.lastMemorySample = sample;
@@ -173,12 +178,20 @@ export class ChromeSession {
     this.options.log?.(`hang detected (${this.abortReason}); collecting a dump`);
     try {
       const sessions = [{ kind: 'page', session: this.page, url: 'page' },
-        ...[...this.workers.values()].map(worker => ({ kind: 'worker', session: worker.session, url: worker.url }))];
+        ...[...this.workers.entries()].map(([id, worker]) => {
+          const pending = new Set();
+          const records = this.workerTiming.filter(record => record.session === id);
+          for (const record of records) {
+            if (record.ph === 'start') pending.add(record.id);
+            else if (record.ph === 'reply') pending.delete(record.id);
+          }
+          return { kind: 'worker', id, session: worker.session, url: worker.url, busy: records.length ? pending.size > 0 : null };
+        })];
       this.hangDump = await collectHangDump({
         connection: this.connection, sessions, mapper: this.options.mapper, traceRecorder: this.traceRecorder || null,
-        processIds: await this.processIds().catch(() => ({})), dir: this.options.outDir, label: this.options.label, info
+        processIds: await this.processIds().catch(() => ({})), dir: this.options.outDir, label: this.options.label, info,
+        captureStacks: Boolean(this.options.captureStacks)
       });
-      this.hangDump.file = join(this.options.outDir, `hang-${this.options.label}.json`);
     } catch (error) {
       this.hangDump = { error: String(error.message || error) };
     }

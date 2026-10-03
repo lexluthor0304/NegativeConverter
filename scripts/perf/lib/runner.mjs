@@ -9,6 +9,7 @@ import { cpus, loadavg, release, tmpdir, totalmem, type as osType } from 'node:o
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs, USAGE, UsageError } from './args.mjs';
+import { cleanupResources } from './resources.mjs';
 import { acquireLock, releaseOnExit, LockHeldError } from './lock.mjs';
 import {
   readPressureLevel, readSwapUsage, readPowerConditions, freeDiskBytes, evaluatePreflight, waitForQuietMachine, memoryCeilingBytes
@@ -41,13 +42,16 @@ function utcStamp() {
 }
 
 /** A scenario repetition in a fresh Chrome. */
-async function runRepetition({ scenario, fixture, group, ref, rep, args, profiled, extra, outDir, chromeBin, ceilingBytes, swapAtStart, collector, sessionFactory = options => ChromeSession.open(options) }) {
+async function runRepetition({ scenario, fixture, group, ref, rep, args, profiled, extra, outDir, chromeBin, ceilingBytes, swapAtStart, freeDiskAtStart, collector, sessionFactory = options => ChromeSession.open(options) }) {
   const label = `${ref.label}-${scenario.id}-${fixture ? fixture.name : group}-${extra?.label || (profiled ? 'profiled' : `r${rep + 1}`)}`.replace(/[^\w.-]+/g, '_');
   const mapper = createSourceMapper({ distDir: ref.dist, origin: ref.origin });
-  const probe = args.probe || scenario.expectHang || Boolean(extra);
+  const probe = args.probe || profiled || scenario.expectHang || Boolean(extra);
+  let sessionNumber = 0;
   const openSession = () => sessionFactory({
     chromeBin, cdpPort: ref.cdpPort, probe, headful: args.headful, dpr: args.dprs.includes(2) ? 2 : args.dprs[0],
-    log, mapper, outDir, label, ceilingBytes, swapAtStart, guardDiskPath: outDir,
+    log, mapper, outDir, label: `${label}-session${sessionNumber++}`, ceilingBytes, swapAtStart, force: args.force, freeDiskAtStart, guardDiskPath: outDir,
+    captureStacks: profiled || scenario.id === 'h' || Boolean(scenario.expectHang),
+    fakeCamera: Boolean(scenario.fakeCamera),
     keepExportChunks: Boolean(extra?.keepExportChunks), watchdogWithoutProbe: true
   });
   const result = { label, ref: ref.label, rep, profiled, extra: extra?.label || null, status: 'ok', metrics: {}, hashes: {}, routes: [], notes: [], raw: {}, hangs: [] };
@@ -71,7 +75,7 @@ async function runRepetition({ scenario, fixture, group, ref, rep, args, profile
     origin: ref.origin,
     perfFlag: extra?.perfFlag !== false,
     dprs: args.dprs,
-    roll: group === 'roll' ? collector.groups.roll : group === 'export' ? collector.groups.export : null,
+    roll: group === 'roll' || group.startsWith('export') ? collector.groups[group] : null,
     get session() { return session; },
     metrics: result.metrics,
     routes: result.routes,
@@ -94,7 +98,7 @@ async function runRepetition({ scenario, fixture, group, ref, rep, args, profile
       if (scenario.continuousTrace && args.browser === 'chrome') await startTrace(true);
     }
   };
-  if (group === 'roll' || group === 'export') ctx.fixture = ctx.roll?.[0] || null;
+  if (ctx.roll) ctx.fixture = ctx.roll[0] || null;
   try {
     if (profiled) await startTrace(false);
     else if (scenario.continuousTrace) await startTrace(true);
@@ -108,6 +112,7 @@ async function runRepetition({ scenario, fixture, group, ref, rep, args, profile
       result.status = 'error';
       result.detail = String(error.stack || error.message || error);
     }
+    result.abortedStep = session.currentWindow || scenario.id;
     log(`${label}: ${result.status} — ${String(result.detail).split('\n')[0]}`);
   } finally {
     try {
@@ -176,16 +181,20 @@ function labelThreads(profile) {
 }
 
 function summarizeGroup(reps) {
-  const timing = reps.filter(rep => !rep.profiled && !rep.extra && rep.status === 'ok');
+  const timing = reps.filter(rep => !rep.profiled && !rep.extra);
   const summary = summarizeRepetitions(timing.map(rep => rep.metrics));
-  const verify = reps.filter(rep => rep.extra === 'verify' && rep.status === 'ok');
-  const noflag = reps.filter(rep => rep.extra === 'verify-noflag' && rep.status === 'ok');
+  const verify = reps.filter(rep => rep.extra === 'verify' || rep.extra === 'verify-zip');
+  const noflag = reps.filter(rep => rep.extra === 'verify-noflag');
   for (const rep of verify) for (const [key, value] of Object.entries(rep.hashes)) summary[key] = { value, n: 1 };
-  for (const rep of verify) for (const [key, value] of Object.entries(rep.metrics)) if (/bitDepth$|hasGainMap$/.test(key)) summary[key] = typeof value === 'number' ? { median: value, min: value, max: value, n: 1, values: [value] } : { value, n: 1 };
+  for (const rep of verify) for (const [key, value] of Object.entries(rep.metrics)) if (/bitDepth$|hasGainMap$|rotationAngle$|mirrored$|cropRegion$/.test(key)) summary[key] = typeof value === 'number' ? { median: value, min: value, max: value, n: 1, values: [value] } : { value, n: 1 };
   if (verify.length && noflag.length) {
+    const flaggedHashes = Object.assign({}, ...verify.map(rep => rep.hashes));
     const keys = Object.keys(noflag[0].hashes);
-    const same = keys.length > 0 && keys.every(key => verify[0].hashes[key] === noflag[0].hashes[key]);
-    summary['s9.perfFlagParity'] = { value: same ? 'identical' : `differs (${keys.filter(key => verify[0].hashes[key] !== noflag[0].hashes[key]).join(', ')})`, n: 1 };
+    const same = keys.length > 0 && keys.every(key => flaggedHashes[key] === noflag[0].hashes[key]);
+    summary['s9.perfFlagParity'] = { value: same ? 'identical' : `differs (${keys.filter(key => flaggedHashes[key] !== noflag[0].hashes[key]).join(', ')})`, n: 1 };
+  }
+  for (const rep of reps.filter(rep => rep.status !== 'ok')) {
+    summary[`${rep.abortedStep || rep.label || 'scenario'}.status`] = { value: rep.status, n: 1 };
   }
   const selfPct = timing.flatMap(rep => Object.entries(rep.metrics).filter(([key]) => key.endsWith('.probeSelfPct')).map(([, value]) => value));
   if (selfPct.length) summary['probe.selfPctMax'] = { median: Math.max(...selfPct), min: Math.min(...selfPct), max: Math.max(...selfPct), n: selfPct.length, values: selfPct };
@@ -219,8 +228,8 @@ async function prepareFixtures({ args, scenarios, repo, chromeBin }) {
   const groups = [...new Set(scenarios.map(scenario => scenario.fixtureGroup))];
   let synthetic = {};
   if (args.fixtures === 'synthetic' || groups.includes('hang')) {
-    const names = new Set(syntheticNamesFor(groups.filter(group => args.fixtures === 'synthetic' || group === 'hang'), { rollSize: args.rollSize, quick: args.quick }));
-    const specs = syntheticFixtureSpecs({ rollSize: Math.max(12, args.rollSize) }).filter(spec => names.has(spec.name));
+    const names = new Set(syntheticNamesFor(groups.filter(group => args.fixtures === 'synthetic' || group === 'hang'), { rollSize: args.rollSize, exportCount: args.exportCount, quick: args.quick }));
+    const specs = syntheticFixtureSpecs({ rollSize: Math.max(12, args.rollSize, args.exportCount) }).filter(spec => names.has(spec.name));
     if (specs.length) {
       const { openJpegEncoderBrowser } = await import('./fixture-browser.mjs');
       let encoder = null;
@@ -234,7 +243,7 @@ async function prepareFixtures({ args, scenarios, repo, chromeBin }) {
       }
     }
   }
-  const resolved = resolveFixtureGroups({ set: args.fixtures, synthetic, rollSize: args.rollSize, quick: args.quick, only: args.fixture, repoRoot: repo });
+  const resolved = resolveFixtureGroups({ set: args.fixtures, synthetic, rollSize: args.rollSize, exportCount: args.exportCount, quick: args.quick, only: args.fixture, repoRoot: repo });
   return resolved;
 }
 
@@ -261,7 +270,7 @@ function recordBaselines(results, budgetsPath = BUDGETS_PATH) {
           const def = findMetricDef(budgets, key);
           if (!def || !budgets.metrics[def.key] || summary.median === undefined || summary.median === null) continue;
           const entry = budgets.metrics[def.key];
-          entry.baselines = (entry.baselines || []).filter(item => !(item.ref === run.sha.slice(0, 7) && item.fixture === fixture && item.metric === key));
+          entry.baselines = (entry.baselines || []).filter(item => !(item.ref === run.sha.slice(0, 7) && item.fixture === fixture && (item.metric ?? def.key) === key));
           entry.baselines.push({ ref: run.sha.slice(0, 7), fixture, route, value: summary.median, range: summary.n > 1 ? [summary.min, summary.max] : null, source: `bench:interactive ${date}`, ...(def.key !== key ? { metric: key } : {}) });
           added++;
         }
@@ -303,7 +312,8 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
   const outBase = d.outBase || resolve(repo, 'output', 'perf');
   mkdirSync(outBase, { recursive: true });
   const pressure = await d.readPressureLevel();
-  const preflight = evaluatePreflight({ pressure, freeDisk: d.freeDiskBytes(outBase) });
+  const freeDiskAtStart = d.freeDiskBytes(outBase);
+  const preflight = evaluatePreflight({ pressure, freeDisk: freeDiskAtStart });
   if (!preflight.ok && !args.force) {
     console.error(`Refusing to start: ${preflight.problems.join('; ')}. Free memory/disk or pass --force.`);
     lock.release();
@@ -314,9 +324,9 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
 
   if (args.browser !== 'chrome') {
     try {
-      return await runWebKit({ args, repo, outBase, noisy: quiet.noisy, log, prepareRef, prepareFixtures, writeOutputs, fixtureConditions, budgetsPath: BUDGETS_PATH });
+      return await runWebKit({ args, repo, outBase, noisy: quiet.noisy, log, prepareRef, prepareFixtures, writeOutputs, fixtureConditions, budgetsPath: BUDGETS_PATH, freeDiskAtStart });
     } finally {
-      lock.release();
+      try { cleanupResources({ removeWorktrees: !args.keepWorktree }); } finally { lock.release(); }
     }
   }
 
@@ -336,6 +346,7 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
   };
   let exitCode = 0;
   const cleanup = async () => {
+    cleanupResources({ removeWorktrees: !args.keepWorktree });
     for (const ref of refs) {
       await ref.preview?.stop().catch(() => {});
       if (!args.keepWorktree) await ref.worktree?.cleanup().catch(() => {});
@@ -352,14 +363,16 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
     const scenarios = selectScenarios(args.scenarios, { injectHang: args.injectHang });
     const groups = await d.prepareFixtures({ args, scenarios, repo, chromeBin });
     const collector = { groups, gpu: null, chromeVersion: null, fixtureInfo: await fixtureConditions(groups) };
-    await d.probeGpu({ ref: refs[0], args, chromeBin, collector });
+    await d.probeGpu({ ref: refs[0], args, chromeBin, collector, freeDiskAtStart, swapAtStart: swapStart });
     const ceilingBytes = memoryCeilingBytes();
     for (const ref of refs) results.runs.push({ label: ref.label, ref: ref.ref, sha: ref.sha, dirty: ref.dirty, scenarios: {} });
 
     for (const scenario of scenarios) {
-      const fixtures = ['roll', 'export'].includes(scenario.fixtureGroup) ? [null] : groups[scenario.fixtureGroup] || [];
-      if (['roll', 'export'].includes(scenario.fixtureGroup) && !(groups[scenario.fixtureGroup] || []).length) {
+      const isRoll = scenario.fixtureGroup === 'roll' || scenario.fixtureGroup.startsWith('export');
+      const fixtures = isRoll ? [null] : groups[scenario.fixtureGroup] || [];
+      if (!groups[scenario.fixtureGroup]?.length) {
         for (const run of results.runs) run.scenarios[scenario.id] = { title: scenario.title, status: 'skipped', detail: `no ${scenario.fixtureGroup} fixtures`, fixtures: {} };
+        exitCode = 1;
         continue;
       }
       for (const run of results.runs) run.scenarios[scenario.id] = { title: scenario.title, status: 'ok', fixtures: {} };
@@ -371,19 +384,19 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
         for (let rep = 0; rep < reps; rep++) {
           for (const ref of refs) {
             log(`${scenario.id} ${fixtureName} ${ref.label} rep ${rep + 1}/${reps}`);
-            repsByRef.get(ref.label).push(await d.runRepetition({ scenario, fixture, group: scenario.fixtureGroup, ref, rep, args, profiled: false, outDir, chromeBin, ceilingBytes, swapAtStart: swapStart, collector }));
+            repsByRef.get(ref.label).push(await d.runRepetition({ scenario, fixture, group: scenario.fixtureGroup, ref, rep, args, profiled: false, outDir, chromeBin, ceilingBytes, swapAtStart: swapStart, freeDiskAtStart, collector }));
           }
         }
         if (args.profile && !scenario.singleRep) {
           for (const ref of refs) {
             log(`${scenario.id} ${fixtureName} ${ref.label} profiled repetition`);
-            repsByRef.get(ref.label).push(await d.runRepetition({ scenario, fixture, group: scenario.fixtureGroup, ref, rep: reps, args, profiled: true, outDir, chromeBin, ceilingBytes, swapAtStart: swapStart, collector }));
+            repsByRef.get(ref.label).push(await d.runRepetition({ scenario, fixture, group: scenario.fixtureGroup, ref, rep: reps, args, profiled: true, outDir, chromeBin, ceilingBytes, swapAtStart: swapStart, freeDiskAtStart, collector }));
           }
         }
         for (const extra of scenario.extraReps || []) {
           for (const ref of refs) {
             log(`${scenario.id} ${fixtureName} ${ref.label} ${extra.label} repetition`);
-            repsByRef.get(ref.label).push(await d.runRepetition({ scenario, fixture, group: scenario.fixtureGroup, ref, rep: -1, args, profiled: false, extra, outDir, chromeBin, ceilingBytes, swapAtStart: swapStart, collector }));
+            repsByRef.get(ref.label).push(await d.runRepetition({ scenario, fixture, group: scenario.fixtureGroup, ref, rep: -1, args, profiled: false, extra, outDir, chromeBin, ceilingBytes, swapAtStart: swapStart, freeDiskAtStart, collector }));
           }
         }
         for (const run of results.runs) {
@@ -400,7 +413,10 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
             reps: reps.map(({ raw, ...rest }) => rest),
             raw: reps.map(rep => ({ label: rep.label, raw: rep.raw }))
           };
-          if (statuses.some(status => status !== 'ok')) run.scenarios[scenario.id].status = statuses.find(status => status !== 'ok');
+          if (statuses.some(status => status !== 'ok')) {
+            run.scenarios[scenario.id].status = statuses.find(status => status !== 'ok');
+            if (args.mode !== 'compare' || run.label === 'head') exitCode = 1;
+          }
           run.scenarios[scenario.id].fixtures[fixtureName] = group;
           for (const rep of reps) results.hangs.push(...rep.hangs);
           if (scenario.expectHang && reps.some(rep => rep.selftestPassed === false)) exitCode = 1;
@@ -441,8 +457,7 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
     console.error(error.stack || error.message);
     exitCode = exitCode || 1;
   } finally {
-    await cleanup();
-    lock.release();
+    try { await cleanup(); } finally { lock.release(); }
   }
   return exitCode;
 }
@@ -474,8 +489,8 @@ function writeOutputs(outDir, results, refs, { args, collector, loadStart, swapS
 }
 
 /** One short session per ref: record the GPU string and refuse software GL. */
-async function probeGpu({ ref, args, chromeBin, collector }) {
-  const session = await ChromeSession.open({ chromeBin, cdpPort: ref.cdpPort, probe: false, headful: args.headful, dpr: 2, log, outDir: tmpdir(), label: 'gpu', ceilingBytes: memoryCeilingBytes(), guardDiskPath: tmpdir() });
+async function probeGpu({ ref, args, chromeBin, collector, freeDiskAtStart, swapAtStart }) {
+  const session = await ChromeSession.open({ chromeBin, cdpPort: ref.cdpPort, probe: false, headful: args.headful, dpr: 2, log, outDir: tmpdir(), label: 'gpu', ceilingBytes: memoryCeilingBytes(), guardDiskPath: tmpdir(), force: args.force, freeDiskAtStart, swapAtStart });
   try {
     await session.boot(`${ref.origin}/?lang=en`);
     collector.gpu = await session.gpuRenderer();

@@ -145,3 +145,23 @@ export function verifyExport(bytes, name = '') {
   if (format === 'zip') return { name, format, entries: zipEntries(bytes).map(entry => verifyExport(entry.data, entry.name)) };
   return { name, format };
 }
+
+/** JPEG primary samples use the same page decoder for singles and ZIP entries. */
+export async function verifyDecodedExport(bytes, name, decodeJpeg) {
+  const format = sniffFormat(bytes);
+  if (format === 'zip') {
+    const entries = [];
+    for (const entry of zipEntries(bytes)) {
+      if (entry.method !== 0) throw new Error(`unsupported compressed ZIP entry: ${entry.name}`);
+      entries.push(await verifyDecodedExport(entry.data, entry.name, decodeJpeg));
+    }
+    return { name, format, entries };
+  }
+  const info = verifyExport(bytes, name);
+  if (format === 'jpeg') {
+    const decoded = await decodeJpeg(bytes, name);
+    if (!decoded?.sha256) throw new Error(`JPEG pixel decode failed: ${name}`);
+    Object.assign(info, decoded);
+  }
+  return info;
+}

@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { summarize } from './stats.mjs';
+import { dragMetrics } from './metrics.mjs';
 import {
   compareMetric, compareRuns, findMetricDef, meetsTarget, renderCompareMarkdown, formatTarget, collectRunSummaries
 } from './compare.mjs';
@@ -59,6 +60,35 @@ assert.equal(compareMetric('k', tracked, s(277000, 273500, 282400), s(330000, 32
 assert.equal(compareMetric('k', tracked, s(277000, 273500, 282400), s(278000, 276000, 281000)).status, 'pass');
 // Missing and string metrics.
 assert.equal(compareMetric('k', null, null, s(1)).status, 'missing');
+assert.equal(compareMetric('k', null, s(1), null).status, 'missing-after');
+assert.equal(compareRuns({ budgets, before: { k: s(1) }, after: {} }).exitCode, 1);
+assert.equal(compareRuns({ budgets, before: {}, after: { k: s(1) } }).exitCode, 0, 'new metrics are informational');
+const mismatch = compareRuns({ budgets, before: {
+  's9.single.png8.geometry.rotationAngle': s('91.2'), 's9.single.png8.geometry.pixelsSha256': s('a')
+}, after: { 's9.single.png8.geometry.rotationAngle': s('91.3'), 's9.single.png8.geometry.pixelsSha256': s('b') }, allowPixelChange: true });
+assert.equal(mismatch.exitCode, 1, 'a recipe mismatch cannot be waived as a pixel change');
+assert.equal(mismatch.rows[0].status, 'recipe-changed');
+assert.equal(mismatch.rows[1].status, 'recipe-mismatch');
+assert.match(renderCompareMarkdown(mismatch), /Export pixel comparison: inconclusive/);
+assert.equal(compareMetric('s9.single.png16.geometry.cropRegion', null,
+  s('{"left":1,"top":2,"width":10,"height":20}'), s('{"height":20,"width":10,"top":2,"left":1}')).status, 'identical',
+  'crop metadata compares values rather than JSON property order');
+assert.equal(compareRuns({ budgets, before: {}, after: { 's2.status': s('hang') } }).exitCode, 1);
+
+// Replayed S2 GPU tick samples compare as an improvement over the old 31 Hz
+// worker path, rather than the zero-rate regression the LUT fallback caused.
+const replay = [{ k: 'res', cls: 'convert', t: 10, rt: 0, w: 1800, h: 1200, hash: 'old' }];
+for (let i = 0; i < 180; i++) {
+  const t = 1000 + i * 1000 / 60;
+  replay.push({ k: 'input', type: 'input', id: 'coreExposure', v: i + 1, t, tr: true },
+    { k: 'gl.upload', c: 'glCanvas', t: t + 1, w: 256, h: 256, hash: `lut${i}` },
+    { k: 'gl.draw', c: 'glCanvas', t: t + 6, sig: i });
+}
+const replayed = dragMetrics(replay, { targetId: 'coreExposure', window: { start: 1000, release: 4000, end: 4500 } });
+const replayCompare = compareRuns({ budgets, before: { 's2.coreExposure.dpr2.updatesPerSecond': s(31) },
+  after: { 's2.coreExposure.dpr2.updatesPerSecond': s(replayed.updatesPerSecond) } });
+assert.equal(replayCompare.exitCode, 0);
+assert.equal(replayCompare.rows[0].status, 'improved');
 assert.equal(compareMetric('s9.png8.imported.pixelsSha256', null, s('aa', 'aa'), s('aa', 'aa')).status, 'identical');
 assert.equal(compareMetric('s9.png8.imported.pixelsSha256', null, s('aa'), s('bb')).status, 'pixels-changed');
 assert.equal(compareMetric('s1.photo0.route', null, s('positive'), s('bw')).status, 'route-changed');
@@ -99,7 +129,7 @@ assert.match(markdown, /`s9.png8.imported.pixelsSha256` \| tracked \| aa \| aa \
 assert.match(markdown, /Exit status: 1\./);
 
 assert.deepEqual(collectRunSummaries({ scenarios: { s1: { fixtures: { 'a.dng': { summary: { 's1.x': 1 } } } }, s2: { fixtures: { 'b.tif': { summary: { 's2.y': 2 } } } } } }),
-  { 's1.x@a.dng': 1, 's2.y@b.tif': 2 });
+  { 's1.status': { value: 'ok', n: 1 }, 's1.x@a.dng': 1, 's2.status': { value: 'ok', n: 1 }, 's2.y@b.tif': 2 });
 assert.equal(findMetricDef(budgets, 's2.coreExposure.dpr2.updatesPerSecond@synthetic-60mp-cfa.dng').target, 55, 'the fixture suffix is ignored for budgets');
 assert.equal(compareMetric('s9.png8.imported.pixelsSha256@x.dng', null, s('a'), s('b')).status, 'pixels-changed');
 

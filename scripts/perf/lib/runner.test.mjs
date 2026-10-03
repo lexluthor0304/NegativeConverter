@@ -3,7 +3,8 @@
 // the production assertion, compare/against exit codes, --record-baselines,
 // outputs and cleanup, with the heavy steps stubbed.
 import assert from 'node:assert/strict';
-import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { spawn, execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -11,7 +12,8 @@ import { fileURLToPath } from 'node:url';
 const here = dirname(fileURLToPath(import.meta.url));
 const dir = mkdtempSync(join(tmpdir(), 'nc-perf-runner-'));
 process.env.NC_PERF_LOCK = join(dir, 'bench.lock');
-const { main } = await import('./runner.mjs');
+const { main, summarizeGroup } = await import('./runner.mjs');
+const { evaluateRunGuards, GiB } = await import('./guards.mjs');
 
 async function quiet(fn) {
   const log = console.log, error = console.error;
@@ -53,6 +55,60 @@ function deps({ rate, suspicious = [], budgetsPath, calls = [], cleaned = [] }) 
 }
 
 try {
+  // A real signal during a stubbed scenario cleans the harness's detached
+  // process group and git registration, including a worktree not yet returned
+  // by prepareRef. No Chrome, Vite or application input is involved.
+  const stubRepo = join(dir, 'repo');
+  execFileSync('git', ['init', '--quiet', stubRepo]);
+  writeFileSync(join(stubRepo, 'fixture.txt'), 'small signal fixture');
+  execFileSync('git', ['-C', stubRepo, 'add', 'fixture.txt']);
+  execFileSync('git', ['-C', stubRepo, '-c', 'user.name=Harness Test', '-c', 'user.email=test@example.invalid', 'commit', '--quiet', '-m', 'test fixture']);
+  for (const duringPrepare of [false, true]) {
+    const script = `
+      import { main } from ${JSON.stringify(join(here, 'runner.mjs'))};
+      import { createRefWorktree } from ${JSON.stringify(join(here, 'worktree.mjs'))};
+      import { registerProcess } from ${JSON.stringify(join(here, 'resources.mjs'))};
+      import { spawn } from 'node:child_process';
+      import { mkdtempSync } from 'node:fs';
+      const hang = () => new Promise(() => {});
+      const ready = child => process.stdout.write('READY ' + child.pid + '\\n');
+      await main(['--scenarios', 's2', '--reps', '1', '--no-profile', '--out', ${JSON.stringify(join(dir, 'signal-out'))}], {
+        outBase: ${JSON.stringify(dir)}, readPressureLevel: async () => ({name: 'normal'}),
+        freeDiskBytes: () => 100 * 1024 ** 3, waitForQuietMachine: async () => ({noisy: false}),
+        findChrome: () => '/fake', probeGpu: async () => {},
+        prepareRef: async spec => {
+          const worktree = await createRefWorktree({repo: ${JSON.stringify(stubRepo)}, sha: 'HEAD',
+            tmpRoot: spec.tmpRoot, invokingRoot: ${JSON.stringify(stubRepo)}, npmCi: async () => {}});
+          const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {detached: true, stdio: 'ignore'});
+          registerProcess(child); globalThis.stubChild = child;
+          if (${duringPrepare}) { ready(child); await hang(); }
+          return {...spec, sha: 'a'.repeat(40), origin: 'http://fake', worktree, preview: {stop: async () => {}}};
+        },
+        prepareFixtures: async () => ({interactive: [{name: 'fake.dng', sha256: 'x'}]}),
+        runRepetition: async () => { ready(globalThis.stubChild); await hang(); }
+      });
+    `;
+    const run = spawn(process.execPath, ['--input-type=module', '-e', script], { env: { ...process.env, NC_PERF_LOCK: join(dir, 'signal.lock') } });
+    let stderr = '';
+    run.stderr.on('data', data => { stderr += data; });
+    const stubPid = await new Promise((resolve, reject) => {
+      let output = '';
+      run.stdout.on('data', data => { output += data; const match = /READY (\d+)/.exec(output); if (match) resolve(Number(match[1])); });
+      run.once('exit', code => reject(new Error(`signal fixture exited ${code}: ${stderr}`)));
+    });
+    const done = new Promise(resolve => run.once('exit', resolve));
+    run.kill('SIGINT');
+    assert.equal(await done, 130, stderr);
+    assert.equal(existsSync(join(dir, 'signal.lock')), false);
+    // Allow the kernel to reap the tiny detached child after SIGKILL.
+    for (let i = 0; i < 40; i++) {
+      try { process.kill(stubPid, 0); } catch { break; }
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    assert.throws(() => process.kill(-stubPid, 0), /ESRCH/, 'no harness process group remains');
+    assert.doesNotMatch(execFileSync('git', ['-C', stubRepo, 'worktree', 'list', '--porcelain'], { encoding: 'utf8' }), /\/wt-/);
+  }
+
   // --compare: interleaved repetitions, an improvement exits 0.
   const calls = [];
   const cleaned = [];
@@ -108,9 +164,49 @@ try {
   assert.deepEqual(baseline.range, [40, 40.4]);
   assert.equal(baseline.route, 'positive');
   assert.match(baseline.source, /^bench:interactive \d{4}-\d{2}-\d{2}$/);
+  await quiet(() => main(['--scenarios', 's2', '--reps', '3', '--no-profile', '--record-baselines', '--out', join(dir, 'record-again')], deps({ rate: () => 41, budgetsPath })));
+  const recordedAgain = JSON.parse(readFileSync(budgetsPath, 'utf8')).metrics['s2.coreExposure.dpr2.updatesPerSecond'].baselines;
+  assert.equal(recordedAgain.filter(entry => entry.ref === 'bbbbbbb' && entry.fixture === 'synthetic-60mp-cfa.dng').length, 1);
+  assert.equal(recordedAgain.find(entry => entry.ref === 'bbbbbbb').value, 41.2);
+
+  for (const status of ['memory-ceiling', 'hang', 'crashed', 'error']) {
+    const failureDeps = deps({ rate: () => 31 });
+    const healthyRep = failureDeps.runRepetition;
+    failureDeps.runRepetition = async options => {
+      const rep = await healthyRep(options);
+      if (options.ref.label === 'head') {
+        rep.status = status; rep.abortedStep = 's2-drag';
+        delete rep.metrics['s2.coreExposure.dpr2.updatesPerSecond'];
+      }
+      return rep;
+    };
+    const failureOut = join(dir, status);
+    const failure = await quiet(() => main(['--compare', 'base', 'head', '--scenarios', 's2', '--reps', '1', '--no-profile', '--out', failureOut], failureDeps));
+    assert.equal(failure.code, 1, status);
+    const saved = JSON.parse(readFileSync(join(failureOut, 'results.json'), 'utf8'));
+    assert.ok(saved.compare.failing.some(row => row.status === 'scenario-failed'));
+    assert.ok(saved.compare.failing.some(row => row.status === 'missing-after'));
+    assert.equal(saved.runs[1].scenarios.s2.fixtures['synthetic-60mp-cfa.dng'].summary['s2-drag.status'].value, status);
+  }
+  const partial = summarizeGroup([
+    { profiled: false, extra: null, status: 'hang', label: 'base', abortedStep: 's7-rapid5', metrics: { 's7.warm1Back.firstPixelsMs': 55 }, hashes: {} },
+    { extra: 'verify', status: 'ok', metrics: {}, hashes: { 's9.single.png8.imported.pixelsSha256': 'single' } },
+    { extra: 'verify-zip', status: 'memory-ceiling', label: 'base-zip', metrics: {}, hashes: { 's9.zip.png8.entry0.pixelsSha256': 'entry0' } },
+    { extra: 'verify-noflag', status: 'ok', metrics: {}, hashes: { 's9.single.png8.imported.pixelsSha256': 'single' } }
+  ]);
+  assert.equal(partial['s7.warm1Back.firstPixelsMs'].median, 55);
+  assert.equal(partial['s9.single.png8.imported.pixelsSha256'].value, 'single');
+  assert.equal(partial['s9.zip.png8.entry0.pixelsSha256'].value, 'entry0');
+  assert.equal(partial['s9.perfFlagParity'].value, 'identical');
 
   // The pre-flight refuses low disk (exit 4) unless forced.
   const lowDisk = { ...deps({ rate: () => 31 }), freeDiskBytes: () => 5 * 1024 ** 3 };
+  const lowDiskRep = lowDisk.runRepetition;
+  lowDisk.runRepetition = async options => {
+    assert.equal(evaluateRunGuards({ force: options.args.force, freeDiskAtStart: options.freeDiskAtStart, freeDisk: 5 * GiB }), null,
+      'forced repetitions use the real disk guard with the run baseline');
+    return lowDiskRep(options);
+  };
   const refused = await quiet(() => main(['--scenarios', 's2', '--out', join(dir, 'refused')], lowDisk));
   assert.equal(refused.code, 4);
   assert.match(refused.text, /free disk 5.0 GB is below 20 GB/);

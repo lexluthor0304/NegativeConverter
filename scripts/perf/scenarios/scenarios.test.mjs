@@ -9,7 +9,8 @@ import { mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
-import { encodeTiffBlob } from '../../../negative2positive/src/workers/imageEncoders.js';
+import * as pako from 'pako';
+import { encodePng16Blob, encodeTiffBlob } from '../../../negative2positive/src/workers/imageEncoders.js';
 import { ZipStoreWriter } from '../../../negative2positive/src/app/zipStoreWriter.js';
 
 const UPNG = createRequire(import.meta.url)('upng-js');
@@ -20,6 +21,36 @@ const { parseArgs } = await import('../lib/args.mjs');
 const { runRepetition } = await import('../lib/runner.mjs');
 const { SCENARIOS } = await import('./index.mjs');
 const { ScenarioAbort } = await import('../lib/session.mjs');
+const { findMetricDef } = await import('../lib/compare.mjs');
+const { exportStageMetrics } = await import('./s9-export.mjs');
+const { readFileSync } = await import('node:fs');
+const budgets = JSON.parse(readFileSync(new URL('../budgets.json', import.meta.url)));
+
+for (const id of ['s9', 's9-parallel', 'dust-brush', 'overlay-idle', 'loupe']) {
+  assert.ok(SCENARIOS[id].steps.length, `${id} has reviewable step definitions`);
+  for (const step of SCENARIOS[id].steps) assert.ok(step.action || (step.moves > 0 && step.x > 0 && step.x < 1));
+}
+assert.equal(SCENARIOS['dust-brush'].steps.length, 20);
+assert.equal(SCENARIOS.loupe.fakeCamera, true);
+assert.equal(SCENARIOS.s2.debugCounters, true);
+assert.equal(SCENARIOS.s3.debugCounters, true);
+for (const key of ['s9.single.png16.imported.encodeMs', 's9.zip.png16.lanes1.encodeMs', 's9.zip.png16.lanes3.msPerFile',
+  's9.zip.dng.linearDngBuildMs', 's9.zip.dng.blobMs', 's9.single.tiff16.imported.desktopWriteMs',
+  'dust-brush.releaseToRepairedP95Ms', 'dust-brush.maxLongTaskMs', 'dust-brush.postMessageMaxBytes',
+  's2.coreExposure.dpr2.ui.flushes', 's3.curve.dpr2.ui.lastFlushWrites', 'overlay-idle.runningAnimations', 'loupe.mainBusyPct']) {
+  assert.ok(findMetricDef(budgets, key), `budget for ${key}`);
+}
+const stageEvents = [
+  { k: 'um', t: 12, n: 'nc:imageDataToBlob', d: 123, detail: { format: 'png', bitDepth: 16 } },
+  { k: 'um', t: 13, n: 'nc:imageDataToBlob', d: 999, detail: { format: 'png', bitDepth: 8 } },
+  { k: 'um', t: 14, n: 'nc:linearDngBatch', d: 450, detail: { stages: [{ stage: 'build', ms: 430 }], blobMs: 20 } },
+  { k: 'um', t: 15, n: 'nc:batchExport', detail: { lanes: 3 } },
+  { k: 'invoke.end', t: 20, rt: 19, cmd: 'finish_export_write', writeStart: 10, error: false },
+  { k: 'invoke.end', t: 21, rt: 20, cmd: 'finish_export_write', writeStart: null, error: false },
+  { k: 'invoke.end', t: 22, rt: 20, cmd: 'finish_export_write', writeStart: 2, error: true }
+];
+assert.deepEqual(exportStageMetrics(stageEvents, { start: 10, end: 22, spec: { format: 'png', bitDepth: 16 } }),
+  { encodeMs: 123, linearDngBuildMs: 430, linearDngTotalMs: 450, blobMs: 20, lanes: 3, desktopWriteMs: 10 });
 
 class FakeSession {
   constructor(options) {
@@ -34,6 +65,7 @@ class FakeSession {
     this.current = null;
     this.lastId = null;
     this.hash = 0;
+    this.geometry = { rotationAngle: 0, mirrored: false, cropRegion: null };
     this.zoom = 1;
     this.selfMs = 0.5;
     this.counters = { 'worker.new': 3 };
@@ -46,6 +78,8 @@ class FakeSession {
     this.format = 'png';
     this.bitDepth = 8;
     this.uploadSeq = 0;
+    this.batchLanes = 1;
+    this.uiCounterRead = 0;
     // Tracing for the continuous ring buffer (H, the hang self-test).
     const listeners = new Map();
     this.connection = {
@@ -64,10 +98,12 @@ class FakeSession {
         this.abortReason = 'page silent for 30 s';
         const sample = join(this.options.outDir, `hang-${this.options.label}-sample-1.txt`);
         writeFileSync(sample, 'Call graph: ncInjectedHang');
+        const gpuSample = join(this.options.outDir, `hang-${this.options.label}-sample-2.txt`);
+        writeFileSync(gpuSample, 'GPU sample');
         this.hangDump = {
           info: { silentMs: 30_500 }, file: join(this.options.outDir, `hang-${this.options.label}.json`), trace: 'trace.json.gz',
           stacks: [{ kind: 'page', frames: [{ function: 'ncInjectedHang' }] }, { kind: 'worker', url: 'conversionWorker.js', frames: [{ function: 'onmessage' }] }],
-          ring: { ring: [{ k: 'input', t: 1 }] }, samples: [{ pid: 1, file: sample }], processes: [{ type: 'renderer', id: 1, cpuTime: 31 }]
+          ring: { ring: [{ k: 'input', t: 1 }] }, samples: [{ pid: 1, file: sample }, { pid: 2, file: gpuSample }], processes: [{ type: 'renderer', id: 1, cpuTime: 31 }, { type: 'GPU', id: 2 }]
         };
       }, 5);
     }
@@ -86,12 +122,13 @@ class FakeSession {
     this.events.sort((a, b) => a.t - b.t);
     return n;
   }
-  convert(value, { cache = true, delay = 20 } = {}) {
+  convert(value, { cache = true, delay = 20, ft = 'color', paint = true } = {}) {
     const id = ++this.hash;
     const rt = this.step(1);
-    this.emit({ k: 'req', t: rt, wid: 7, cls: 'convert', id, cache, ft: 'color' });
+    this.emit({ k: 'req', t: rt, wid: 7, cls: 'convert', id, cache, ft, geometry: structuredClone(this.geometry) });
     const hash = `h${id}-${value}`;
     this.emit({ k: 'res', t: this.step(delay), wid: 7, cls: 'convert', id, rt, hash, cache, w: 1809, h: 1202 });
+    if (!paint) return;
     this.emit({ k: 'gl.upload', t: this.step(1), c: 'glCanvas', w: 1809, h: 1202, hash });
     this.emit({ k: 'gl.draw', t: this.step(2), c: 'glCanvas', sig: `sig-${hash}` });
   }
@@ -107,9 +144,26 @@ class FakeSession {
   async evaluate(expression) {
     this.check();
     this.step(1);
+    if (expression.includes('__ncDebug.counters()')) {
+      const n = ++this.uiCounterRead;
+      return { sync: { flushes: n * 10, writes: n * 20, lastFlushWrites: 2 }, fileListRenders: n,
+        loupe: { conversions: n * 30, grabs: n * 31, defaults: n, repeated: n * 2 } };
+    }
+    if (expression.includes('document.getAnimations()')) return [];
+    if (expression.includes("? '#canvas' : '#glCanvas'")) return '#glCanvas';
+    const lanes = /localStorage.setItem\('nc_batch_lanes_v1', "(\d+)"/.exec(expression);
+    if (lanes) { this.batchLanes = Number(lanes[1]); return true; }
     if (expression === 'performance.now()') return this.t;
     if (expression.includes('? performance.now() : null')) return this.t;
     if (expression.includes('__ncPerf.snapshot()')) return this.snapshot();
+    if (expression.includes('__ncPerfControl.stages')) return [{ key: 'librawDecodeMs', ms: 5000 }, { key: 'autoFrameMs', ms: 2700 }];
+    const selectPhoto = /file-list-name\[data-index="(\d+)"\]'\)\?\.click/.exec(expression);
+    if (selectPhoto) {
+      this.current = this.files[Number(selectPhoto[1])];
+      this.convert('route-photo');
+      this.emit({ k: 'mut', t: this.t, what: 'filename', v: basename(this.current) });
+      return true;
+    }
     if (expression.includes('return { value: e.value')) return { value: '0', min: -100, max: 100 };
     if (expression.includes(".file-list-name')].map")) return this.files.map((_, i) => i);
     const focus = /data-index="(\d+)"\]'\);\s*if \(!button\) return false;/.exec(expression);
@@ -127,7 +181,7 @@ class FakeSession {
     if (expression.includes('__ncPerf.exports.clear()')) { this.exportsList = []; return true; }
     const upload = /exports\.upload\((\d+), '\/__perf\/export\?name=' \+ encodeURIComponent\("([^"]+)"\)\)/.exec(expression);
     if (upload) return this.writeExport(this.exportsList[Number(upload[1])], upload[2]);
-    if (expression.includes('exports.jpegSha256')) return { width: 10, height: 10, sha256: 'jpeg-pixels' };
+    if (/exports.jpeg(Bytes)?Sha256/.test(expression)) return { width: 10, height: 10, sha256: 'jpeg-pixels' };
     return true;
   }
   async writeExport(entry, name) {
@@ -136,15 +190,20 @@ class FakeSession {
     const file = join(FakeSession.exportDir, `${++this.uploadSeq}-${safe}`);
     const rgba16 = new Uint16Array(4 * 4 * 4).fill(4097);
     const tiff = async () => new Uint8Array(await encodeTiffBlob(rgba16, 4, 4, entry.bitDepth).arrayBuffer());
+    const png = async () => entry.bitDepth === 16
+      ? new Uint8Array(await encodePng16Blob(rgba16, 4, 4, pako).arrayBuffer())
+      : new Uint8Array(UPNG.encode([new Uint8Array(32 * 32 * 4).map((_, i) => (i * 37) & 255).buffer], 32, 32, 0));
+    const jpeg = new Uint8Array([0xFF, 0xD8, 0xFF, 0xD9]);
     let bytes;
     // More than 256 colours, so UPNG keeps 8-bit truecolour like the app's PNG8.
-    if (/\.png$/.test(name)) bytes = new Uint8Array(UPNG.encode([new Uint8Array(32 * 32 * 4).map((_, i) => (i * 37) & 255).buffer], 32, 32, 0));
-    else if (/\.tiff?$/.test(name)) bytes = await tiff();
-    else if (/\.jpe?g$/.test(name)) bytes = new Uint8Array([0xFF, 0xD8, 0xFF, 0xD9]);
+    if (/\.png$/.test(name)) bytes = await png();
+    else if (/\.(tiff?|dng)$/.test(name)) bytes = await tiff();
+    else if (/\.jpe?g$/.test(name)) bytes = jpeg;
     else {
       const chunks = [];
       const writer = new ZipStoreWriter({ write: async chunk => { chunks.push(new Uint8Array(chunk)); } });
-      for (let i = 0; i < 3; i++) await writer.addBlob(`f${i}.tif`, new Blob([await tiff()]));
+      const ext = entry.format === 'png' ? 'png' : entry.format === 'jpeg' ? 'jpg' : entry.format === 'dng' ? 'dng' : 'tif';
+      for (let i = 0; i < 3; i++) await writer.addBlob(`f${i}.${ext}`, new Blob([entry.format === 'png' ? await png() : entry.format === 'jpeg' ? jpeg : await tiff()]));
       await writer.close();
       bytes = new Uint8Array(Buffer.concat(chunks.map(chunk => Buffer.from(chunk))));
     }
@@ -213,15 +272,23 @@ class FakeSession {
     }
     if (id === 'cropBtn') this.emit({ k: 'c2d', t: this.step(30), c: 'canvas', fn: 'putImageData', w: 953, h: 633, hash: `crop${t}` });
     if (id === 'applyCropBtn' || id === 'rotateRightBtn' || id === 'mirrorBtn') {
+      if (id === 'rotateRightBtn') this.geometry.rotationAngle += 90;
+      if (id === 'mirrorBtn') this.geometry.mirrored = !this.geometry.mirrored;
+      if (id === 'applyCropBtn') this.geometry.cropRegion = { left: 10, top: 10, width: 1600, height: 1000 };
       this.emit({ k: 'lt', t: t + 1, s: t + 1, d: 2000 });
       this.step(2000);
       this.convert(id, { delay: 60 });
     }
     if (id === 'studioToggleLightTable') this.emit({ k: 'et', t, n: 'click', s: t, ps: t + 1, pe: t + 3, d: 16 });
     if (id === 'exportSingleBtn' || id === 'exportZipBtn') {
-      const ext = this.format === 'jpeg' ? 'jpg' : this.format === 'tiff' ? 'tif' : 'png';
+      const ext = this.format === 'jpeg' ? 'jpg' : this.format === 'tiff' ? 'tif' : this.format === 'dng' ? 'dng' : 'png';
+      this.emit({ k: 'vis', t: this.step(1), ov: true, busy: true });
       this.step(1500);
-      this.exportsList.push({ t: this.t, name: id === 'exportZipBtn' ? 'converted_negatives.zip' : `L1000617_positive.${ext}`, kind: id === 'exportZipBtn' ? 'stream' : 'download', bitDepth: this.bitDepth });
+      this.emit({ k: 'um', t: this.t, n: 'nc:imageDataToBlob', d: 600, detail: { format: this.format, bitDepth: this.bitDepth } });
+      if (id === 'exportZipBtn') this.emit({ k: 'um', t: this.t, n: 'nc:batchExport', d: 1500, detail: { lanes: this.batchLanes } });
+      if (this.format === 'dng' && id === 'exportZipBtn') this.emit({ k: 'um', t: this.t, n: 'nc:linearDngBatch', d: 370, detail: { stages: [{ stage: 'build', ms: 350 }], blobMs: 20 } });
+      this.emit({ k: 'vis', t: this.step(1), ov: false, busy: false });
+      this.exportsList.push({ t: this.t, name: id === 'exportZipBtn' ? 'converted_negatives.zip' : `L1000617_positive.${ext}`, kind: id === 'exportZipBtn' ? 'stream' : 'download', bitDepth: this.bitDepth, format: this.format });
     }
   }
   async dblclick() {
@@ -265,6 +332,12 @@ class FakeSession {
     }
     const up = this.step(20);
     this.emit({ k: 'input', type: 'mouseup', id: target, t: up, tr: true, b: 0 });
+    if (target === 'glCanvas' && modifiers === 1) {
+      const rt = this.step(1), id = ++this.hash;
+      this.emit({ k: 'req', t: rt, cls: 'dust', fn: 'stroke', id, bytes: 700 });
+      this.emit({ k: 'res', t: this.step(12), rt, cls: 'dust', fn: 'stroke', id, bytes: 4096 });
+      this.emit({ k: 'gl.draw', t: this.step(6), c: 'glCanvas', sig: `dust-${id}`, ut: this.t - 1 });
+    }
     if (target === 'cropOverlay' && modifiers) this.emit({ k: 'c2d', t: this.step(35), c: 'canvas', fn: 'putImageData', w: 953, h: 633, hash: `straight${up}` });
   }
   async key(key) {
@@ -289,15 +362,22 @@ try {
   const single = { name: 'synthetic-60mp-cfa.dng', path: '/fixtures/synthetic-60mp-cfa.dng', width: 9536, height: 6336, synthetic: true };
   const roll = Array.from({ length: 12 }, (_, i) => ({ name: `synthetic-roll-${String(i + 1).padStart(2, '0')}.dng`, path: `/fixtures/synthetic-roll-${String(i + 1).padStart(2, '0')}.dng` }));
   const ref = { label: 'run', dist: dir, origin: 'http://127.0.0.1:1', cdpPort: 1, exportDir: dir };
-  const collector = { groups: { roll, export: [single, ...roll.slice(0, 3)] }, gpu: null };
+  const collector = { groups: { roll, export: [single, ...roll.slice(0, 3)], 'export-parallel': roll.slice(0, 4), dust: [single] }, gpu: null };
   const run = (id, argv, overrides = {}) => runRepetition({
-    scenario: SCENARIOS[id], fixture: ['roll', 'export'].includes(SCENARIOS[id].fixtureGroup) ? null : single,
+    scenario: SCENARIOS[id], fixture: SCENARIOS[id].fixtureGroup === 'roll' || SCENARIOS[id].fixtureGroup.startsWith('export') ? null : single,
     group: SCENARIOS[id].fixtureGroup, ref, rep: 0, args: parseArgs(argv, {}), profiled: false, outDir: dir,
     chromeBin: 'chrome', ceilingBytes: 1e12, swapAtStart: 0, collector, sessionFactory: FakeSession.open, ...overrides
   });
   const expectKeys = (result, keys) => {
     assert.equal(result.status, 'ok', `${result.label}: ${result.detail}`);
     for (const key of keys) assert.ok(key in result.metrics, `${result.label} records ${key} (has ${Object.keys(result.metrics).slice(0, 12).join(', ')}…)`);
+  };
+  const expectRoutes = (result, count = 1) => {
+    const id = result.label.split('-')[1];
+    for (let photo = 0; photo < count; photo++) {
+      assert.ok(result.metrics[`${id}.photo${photo}.route`], `${id} photo ${photo} route`);
+      assert.ok(result.metrics[`${id}.photo${photo}.filmType`], `${id} photo ${photo} film type`);
+    }
   };
 
   const s1 = await run('s1', ['--quick']);
@@ -313,7 +393,7 @@ try {
   const s2 = await run('s2', ['--dpr', '2']);
   expectKeys(s2, ['s2.coreExposure.dpr2.updatesPerSecond', 's2.coreExposure.dpr2.framesCoveredPct', 's2.coreExposure.dpr2.inputToDrawP95Ms',
     's2.coreExposure.dpr2.workerRoundTripMs', 's2.coreExposure.dpr2.previewWidth', 's2.coreExposure.dpr2.probeSelfPct', 's2.cyan.dpr2.inputToDrawP50Ms',
-    's2.wbR.dpr2.framesCoveredPct', 's2.coreExposure.cpu.dpr2.control.mainBusyPct', 's2.coreExposure.dpr2.control.scriptMs']);
+    's2.wbR.dpr2.framesCoveredPct', 's2.coreExposure.cpu.dpr2.control.mainBusyPct', 's2.coreExposure.dpr2.control.scriptMs', 's2.coreExposure.dpr2.ui.flushes', 's2.coreExposure.dpr2.ui.lastFlushWrites', 's2.coreExposure.dpr2.ui.fileListRenders']);
   assert.equal(s2.metrics['s2.coreExposure.dpr2.framesCoveredPct'], 50, 'one conversion per two moves covers half the frames');
   assert.equal(s2.metrics['s2.cyan.dpr2.framesCoveredPct'], 100);
   assert.equal(s2.metrics['s2.cyan.dpr2.inputToDrawP50Ms'], 12);
@@ -326,7 +406,7 @@ try {
   assert.ok(!('s2.coreExposure.dpr2.updatesPerSecond' in control.metrics), 'control runs record only probe-free metrics');
 
   const s3 = await run('s3', ['--dpr', '1,2']);
-  expectKeys(s3, ['s3.curve.dpr1.inputToDrawP95Ms', 's3.curve.dpr2.updatesPerSecond', 's3.curve.dpr2.rafFps', 's3.curve.dpr2.longTaskCount']);
+  expectKeys(s3, ['s3.curve.dpr1.inputToDrawP95Ms', 's3.curve.dpr2.updatesPerSecond', 's3.curve.dpr2.rafFps', 's3.curve.dpr2.longTaskCount', 's3.curve.dpr2.ui.flushes', 's3.curve.dpr2.ui.lastFlushWrites', 's3.curve.dpr2.ui.fileListRenders']);
   assert.equal(s3.metrics['s3.curve.dpr2.inputToDrawP50Ms'], 13);
 
   const s4 = await run('s4', ['--dpr', '2']);
@@ -341,13 +421,30 @@ try {
   assert.equal(s4.metrics['s4.dpr2.pan.moveToFrameP50Ms'], 8);
 
   const s6 = await run('s6', ['--scenarios', 's6']);
+  expectRoutes(s6, roll.length);
   expectKeys(s6, ['s6.firstPositiveVisibleMs', 's6.roll.settingsAllMs', 's6.roll.thumbnailsAllMs', 's6.roll.coresUsed', 's6.roll.librawDecodes',
     's6.dragAfter.coreExposure.updatesPerSecond', 's6.dragAfter.cyan.maxLongTaskMs', 's6.memory.rendererPeakMB']);
 
   const s7 = await run('s7', ['--quick']);
   expectKeys(s7, ['s7.coldUnanalysed.firstPixelsMs', 's7.warm1Back.firstDisplayPositiveMs', 's7.coldAnalysed.readyMs', 's7.warm1Back.samples', 's7.coldAnalysed.longTaskCount']);
   assert.equal(s7.metrics['s7.warm1Back.samples'], 2);
+  class MetadataStallSession extends FakeSession {
+    static async open(options) { return new MetadataStallSession(options); }
+    async endWindow() { const result = await super.endWindow(); this.switchCompleted = this.windowLabel === 's7-coldUnanalysed'; return result; }
+    async evaluate(expression) {
+      if (this.switchCompleted && expression.includes('__ncPerf.snapshot()')) {
+        this.status = 'hang'; this.abortReason = 'stub metadata stall';
+        throw new ScenarioAbort('hang', this.abortReason);
+      }
+      return super.evaluate(expression);
+    }
+  }
+  const partialNavigation = await run('s7', ['--quick'], { sessionFactory: MetadataStallSession.open });
+  assert.equal(partialNavigation.status, 'hang');
+  assert.equal(partialNavigation.metrics['s7.coldUnanalysed.samples'], 1);
+  assert.ok(Number.isFinite(partialNavigation.metrics['s7.coldUnanalysed.readyMs']), 'completed navigation survives a metadata stall');
   const s7full = await run('s7', ['--scenarios', 's7']);
+  expectRoutes(s7full, roll.length);
   expectKeys(s7full, ['s7.twoBack.firstPixelsMs', 's7.rapid5.firstPixelsMs', 's7.rapid5.fromFirstPressMs', 's7.rapid5.librawDecodes']);
 
   const s5 = await run('s5', ['--scenarios', 's5']);
@@ -358,27 +455,126 @@ try {
   assert.equal(s5.metrics['s5.rotate90a.maxLongTaskMs'], 2000);
 
   const s8 = await run('s8', ['--scenarios', 's8']);
+  expectRoutes(s8, roll.length);
   expectKeys(s8, ['s8.open.firstFrameMs', 's8.open.clickHandlerMs', 's8.allTilesFinalMs', 's8.scrollNormal.fps', 's8.scrollFast.framesOver25',
     's8.activeTileReencodesPerDrag', 's8.syncColours.allFinalMs', 's8.syncColours.librawDecodes']);
 
   const s9 = await run('s9', ['--scenarios', 's9']);
+  expectRoutes(s9, 4);
   expectKeys(s9, ['s9.single.png8.imported.totalMs', 's9.single.tiff16.imported.bytes', 's9.single.jpegGain.imported.maxLongTaskMs',
     's9.single.jpegNoGain.geometry.totalMs', 's9.zip.tiff16.msPerFile', 's9.single.png8.imported.inputsAccepted', 's9.single.png8.imported.memoryPeakMB',
-    's9.memory.retainedAfterExportMB']);
+    's9.memory.retainedAfterExportMB', 's9.single.png16.imported.encodeMs', 's9.zip.png16.lanes1.lanes', 's9.single.dng.imported.totalMs', 's9.zip.dng.linearDngBuildMs', 's9.zip.dng.blobMs']);
   assert.deepEqual(s9.hashes, {}, 'timing repetitions do not hash');
   const verify = await run('s9', ['--scenarios', 's9'], { extra: SCENARIOS.s9.extraReps[0] });
   assert.equal(verify.status, 'ok', verify.detail);
   assert.equal(verify.metrics['s9.single.tiff16.imported.bitDepth'], 16, 'the TIFF16 header is checked');
   assert.equal(verify.metrics['s9.single.png8.imported.bitDepth'], 8);
+  assert.equal(verify.metrics['s9.single.png16.imported.bitDepth'], 16);
+  assert.ok(verify.hashes['s9.single.png16.imported.pixelsSha256']);
+  assert.equal(verify.metrics['s9.single.png16.geometry.rotationAngle'], '90');
+  assert.equal(verify.metrics['s9.single.png16.geometry.mirrored'], 'true');
+  assert.match(verify.metrics['s9.single.png16.geometry.cropRegion'], /1600/);
   assert.ok(verify.hashes['s9.single.png8.imported.pixelsSha256'] && verify.hashes['s9.single.tiff16.geometry.pixelsSha256']);
   assert.equal(verify.hashes['s9.single.jpegGain.imported.pixelsSha256'], 'jpeg-pixels');
-  assert.equal(verify.hashes['s9.zip.tiff16.entry2.pixelsSha256'], verify.hashes['s9.zip.tiff16.entry0.pixelsSha256']);
+  const verifyZip = await run('s9', ['--scenarios', 's9'], { extra: SCENARIOS.s9.extraReps.find(extra => extra.label === 'verify-zip') });
+  assert.equal(verifyZip.status, 'ok', verifyZip.detail);
+  assert.equal(verifyZip.hashes['s9.zip.tiff16.entry2.pixelsSha256'], verifyZip.hashes['s9.zip.tiff16.entry0.pixelsSha256']);
+  assert.equal(verifyZip.hashes['s9.zip.jpegGain.entry0.pixelsSha256'], 'jpeg-pixels');
+  assert.equal(verifyZip.metrics['s9.zip.png16.lanes1.entry2.bitDepth'], 16);
+  class WrongZipDepthSession extends FakeSession {
+    static async open(options) { return new WrongZipDepthSession(options); }
+    async writeExport(entry, name) { return super.writeExport({ ...entry, bitDepth: 8 }, name); }
+  }
+  const wrongZipDepth = await run('s9', ['--scenarios', 's9'], { sessionFactory: WrongZipDepthSession.open,
+    extra: { ...SCENARIOS.s9.extraReps.find(extra => extra.label === 'verify-zip'), only: ['zip.png16.lanes1'] } });
+  assert.equal(wrongZipDepth.status, 'error');
+  assert.match(wrongZipDepth.detail, /requested 16-bit, ZIP entry .* says 8-bit/);
   assert.ok(!('s9.single.png8.imported.inputsAccepted' in verify.metrics), 'no inputs are sent while bytes are verified');
-  const noflag = await run('s9', ['--scenarios', 's9'], { extra: SCENARIOS.s9.extraReps[1] });
+  const noflag = await run('s9', ['--scenarios', 's9'], { extra: SCENARIOS.s9.extraReps.find(extra => extra.label === 'verify-noflag') });
   assert.deepEqual(Object.keys(noflag.hashes).sort(), ['s9.single.jpegGain.imported.pixelsSha256', 's9.single.png8.imported.pixelsSha256', 's9.single.tiff16.imported.pixelsSha256']);
   assert.equal(noflag.hashes['s9.single.tiff16.imported.pixelsSha256'], verify.hashes['s9.single.tiff16.imported.pixelsSha256']);
 
-  const h = await run('h', ['--scenarios', 'h']);
+  const parallel = await run('s9-parallel', ['--scenarios', 's9-parallel'], { extra: SCENARIOS['s9-parallel'].extraReps[0] });
+  expectKeys(parallel, ['s9.zip.png16.lanes3.lanes', 's9.zip.png16.lanes3.encodeMs', 's9.zip.png16.lanes3.entry0.bitDepth']);
+  assert.equal(parallel.metrics['s9.zip.png16.lanes3.lanes'], 3);
+  assert.ok(parallel.hashes['s9.zip.png16.lanes3.entry0.pixelsSha256']);
+  class OneLaneSession extends FakeSession {
+    static async open(options) { return new OneLaneSession(options); }
+    async click(...args) { await super.click(...args); for (const event of this.pending) if (event.n === 'nc:batchExport') event.detail.lanes = 1; }
+  }
+  const wrongLanes = await run('s9-parallel', ['--scenarios', 's9-parallel'], { sessionFactory: OneLaneSession.open });
+  assert.equal(wrongLanes.status, 'error');
+  assert.match(wrongLanes.detail, /planner ran 1 lanes/);
+
+  const dust = await run('dust-brush', ['--scenarios', 'dust-brush']);
+  expectKeys(dust, ['dust-brush.photo0.route', 'dust-brush.photo0.filmType', 'dust-brush.releaseToRepairedP95Ms',
+    'dust-brush.stroke19.releaseToRepairedMs', 'dust-brush.postMessageMaxBytes', 'dust-brush.memory.rendererPeakMB']);
+  assert.equal(dust.metrics['dust-brush.strokes'], 20);
+  assert.equal(dust.metrics['dust-brush.postMessageMaxBytes'], 4096);
+  assert.equal(dust.metrics['dust-brush.releaseToRepairedP95Ms'], 19);
+  const overlay = await run('overlay-idle', ['--scenarios', 'overlay-idle']);
+  expectKeys(overlay, ['overlay-idle.photo0.route', 'overlay-idle.passed', 'overlay-idle.runningAnimations']);
+  assert.equal(overlay.metrics['overlay-idle.runningAnimations'], 0);
+  class NoExportOverlaySession extends FakeSession {
+    static async open(options) { return new NoExportOverlaySession(options); }
+    async click(...args) { await super.click(...args); this.pending = this.pending.filter(event => event.k !== 'vis'); }
+  }
+  const noOverlay = await run('overlay-idle', ['--scenarios', 'overlay-idle'], { sessionFactory: NoExportOverlaySession.open });
+  assert.equal(noOverlay.status, 'error');
+  assert.match(noOverlay.detail, /no loading overlay was shown during export/);
+  let cameraOptions;
+  const loupe = await run('loupe', ['--scenarios', 'loupe'], { sessionFactory: async options => { cameraOptions = options; return new FakeSession(options); } });
+  expectKeys(loupe, ['loupe.photo0.route', 'loupe.mainBusyPct', 'loupe.conversions', 'loupe.grabs']);
+  assert.equal(cameraOptions.fakeCamera, true);
+  assert.equal(loupe.metrics['loupe.conversions'], 30);
+
+  // A background conversion after import must not replace photo 0's route.
+  class BackgroundSession extends FakeSession {
+    static async open(options) { return new BackgroundSession(options); }
+    async setFiles(paths) { await super.setFiles(paths); this.convert('background', { cache: false, ft: 'bw', paint: false }); }
+  }
+  const background = await run('s6', ['--scenarios', 's6'], { sessionFactory: BackgroundSession.open });
+  assert.equal(background.metrics['s6.photo0.route'], 'color');
+  assert.equal(background.metrics['s6.photo0.filmType'], 'color');
+  assert.equal(background.routes.find(route => route.photo === roll[0].name).request.id, 1);
+  class UncachedForegroundSession extends BackgroundSession {
+    static async open(options) { return new UncachedForegroundSession(options); }
+    async setFiles(paths) {
+      await super.setFiles(paths);
+      for (const event of this.pending) if (event.cls === 'convert') event.cache = false;
+    }
+  }
+  const uncached = await run('s1', ['--quick'], { sessionFactory: UncachedForegroundSession.open });
+  assert.equal(uncached.metrics['s1.photo0.route'], 'color');
+  assert.equal(uncached.routes[0].request.id, 1, 'display hash attributes an uncached foreground result');
+  class GpuRouteSession extends FakeSession {
+    static async open(options) { return new GpuRouteSession(options); }
+    async setFiles(paths) {
+      await super.setFiles(paths);
+      this.pending = this.pending.filter(event => event.cls !== 'convert' && !event.k.startsWith('gl.'));
+      const t = this.step(1);
+      this.emit({ k: 'req', t, wid: 7, cls: 'prepare', id: 20, cache: true, ft: 'positive', pe: 'legacy' });
+      this.emit({ k: 'res', t: this.step(20), rt: t, wid: 7, cls: 'prepare', id: 20 });
+      this.emit({ k: 'gl.upload', t: this.step(1), c: 'glCanvas', w: 1809, h: 1202, format: 0x8D99, type: 0x1403 });
+      this.emit({ k: 'gl.draw', t: this.step(1), c: 'glCanvas', sig: 'gpu-source' });
+      this.convert('background', { cache: false, ft: 'bw', paint: false });
+    }
+  }
+  const gpuRoute = await run('s1', ['--quick'], { sessionFactory: GpuRouteSession.open });
+  assert.equal(gpuRoute.metrics['s1.photo0.route'], 'positive-legacy');
+  assert.equal(gpuRoute.metrics['s1.photo0.filmType'], 'positive');
+  assert.equal(gpuRoute.routes[0].request.id, 20);
+
+  let timingOptions, profiledOptions;
+  await run('s1', ['--quick'], { sessionFactory: async options => { timingOptions = options; return new FakeSession(options); } });
+  await run('s1', ['--quick'], { profiled: true, sessionFactory: async options => { profiledOptions = options; return new FakeSession(options); } });
+  assert.equal(timingOptions.captureStacks, false);
+  assert.equal(profiledOptions.captureStacks, true);
+
+  let hangOptions;
+  const h = await run('h', ['--scenarios', 'h'], { sessionFactory: async options => { hangOptions = options; return new FakeSession(options); } });
+  assert.equal(hangOptions.captureStacks, true);
+  for (const result of [s3, s4, s5, h]) expectRoutes(result);
   expectKeys(h, ['h.stalls', 'h.drags', 'h.fixture']);
   assert.equal(h.metrics['h.stalls'], 0);
   assert.equal(h.metrics['h.drags'], 100);
@@ -403,7 +599,10 @@ try {
   assert.equal(stalled.hangs[0].topFrame, 'applyLUT');
   assert.equal(opened, 2, 'the browser is relaunched after the stall');
 
-  const selftest = await run('selftest-hang', ['--inject-hang'], { fixture: { name: 'negative-sample.jpg', path: '/fixtures/negative-sample.jpg' } });
+  let selftestOptions;
+  const selftest = await run('selftest-hang', ['--inject-hang'], { fixture: { name: 'negative-sample.jpg', path: '/fixtures/negative-sample.jpg' },
+    sessionFactory: async options => { selftestOptions = options; return new FakeSession(options); } });
+  assert.equal(selftestOptions.captureStacks, true);
   assert.equal(selftest.status, 'ok', `the expected hang is not a failure: ${selftest.detail}`);
   assert.equal(selftest.selftestPassed, true, JSON.stringify(selftest.metrics));
   assert.equal(selftest.metrics['selftest.injectedFrame'], 'true');

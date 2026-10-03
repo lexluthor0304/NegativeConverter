@@ -10,6 +10,7 @@ import { execFile, spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { promisify } from 'node:util';
+import { registerProcess } from './resources.mjs';
 
 const run = promisify(execFile);
 
@@ -76,13 +77,51 @@ export async function listProcesses() {
   }
 }
 
-/** WebKit processes (Safari mode, Tauri mode). */
-export async function findWebKitProcesses() {
-  const all = await listProcesses();
+/** Only WebKit PIDs attributed to this run, never every WKWebView on the Mac. */
+export async function findWebKitProcesses({ pids = [], list = listProcesses } = {}) {
+  const owned = new Set(pids);
+  const all = (await list()).filter(p => owned.has(p.pid));
   return {
     webContent: all.filter(p => /com\.apple\.WebKit\.WebContent/.test(p.command)).map(p => p.pid),
     gpu: all.filter(p => /com\.apple\.WebKit\.GPU/.test(p.command)).map(p => p.pid),
     networking: all.filter(p => /com\.apple\.WebKit\.Networking/.test(p.command)).map(p => p.pid)
+  };
+}
+
+/** Resolve the WebContent created for navigation and its newly created GPU.
+ * Existing/shared GPU processes are excluded: their footprint is not ours.
+ * Ambiguous navigation is refused rather than sampling or killing Mail.
+ */
+export function webkitProcessScope({ before, port, list = listProcesses, connected = async () => {
+  try {
+    const { stdout } = await run('lsof', ['-t', `-iTCP:${port}`, '-sTCP:ESTABLISHED'], { timeout: 2000 });
+    return stdout.trim().split(/\s+/).map(Number);
+  } catch { return []; }
+} }) {
+  const existing = new Set(before.map(p => p.pid));
+  let renderer = null, gpu = null;
+  return {
+    async resolve() {
+      const all = await list();
+      const fresh = all.filter(p => !existing.has(p.pid));
+      if (renderer && !all.some(p => p.pid === renderer && /com\.apple\.WebKit\.WebContent/.test(p.command))) renderer = null;
+      if (gpu && !all.some(p => p.pid === gpu && /com\.apple\.WebKit\.GPU/.test(p.command))) gpu = null;
+      if (!renderer) {
+        const links = new Set(await connected());
+        const serving = all.filter(p => /com\.apple\.WebKit\.WebContent/.test(p.command) && links.has(p.pid));
+        const candidates = serving.length ? serving : fresh.filter(p => /com\.apple\.WebKit\.WebContent/.test(p.command));
+        if (candidates.length > 1) throw new Error('ambiguous harness WebContent PIDs; refusing unscoped WebKit measurement');
+        renderer = candidates[0]?.pid || null;
+      }
+      if (renderer && !gpu) {
+        const candidates = fresh.filter(p => /com\.apple\.WebKit\.GPU/.test(p.command));
+        if (candidates.length > 1) throw new Error('ambiguous harness WebKit GPU PIDs');
+        gpu = candidates[0]?.pid || null;
+      }
+      const found = await findWebKitProcesses({ pids: [renderer, gpu].filter(Boolean), list: async () => all });
+      return { renderer: found.webContent, gpu: found.gpu, other: [] };
+    },
+    assert() { if (!renderer) throw new Error('could not attribute a WebContent PID to harness navigation'); }
   };
 }
 
@@ -101,6 +140,7 @@ export class FootprintReader {
     if (this.platform !== 'darwin' || this.helper) return;
     try {
       const child = spawn('python3', ['-u', '-c', RUSAGE_HELPER], { stdio: ['pipe', 'pipe', 'pipe'] });
+      const unregister = registerProcess(child, { detached: false });
       child.on('error', () => { this.helper = null; });
       child.stdin.on('error', () => {});
       const lines = createInterface({ input: child.stdout });
@@ -110,6 +150,7 @@ export class FootprintReader {
         try { waiter.resolve(JSON.parse(line)); } catch (error) { waiter.reject(error); }
       });
       child.once('exit', () => {
+        unregister();
         this.helper = null;
         for (const waiter of this.waiters.splice(0)) waiter.reject(new Error('footprint helper exited'));
       });

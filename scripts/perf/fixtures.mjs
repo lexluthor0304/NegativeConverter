@@ -105,6 +105,7 @@ export function syntheticFixtureSpecs({ rollSize = 12 } = {}) {
     { name: 'synthetic-24mp-cfa.dng', format: 'dng', kind: 'color', seed: 21, ...SIZE_24MP },
     { name: 'synthetic-60mp-cfa.dng', format: 'dng', kind: 'color', seed: 22, ...SIZE_60MP }
   ];
+  for (let i = 1; i <= 3; i++) specs.push({ name: `synthetic-export24-${i}.dng`, format: 'dng', kind: 'color', seed: 200 + i, ...SIZE_24MP });
   for (let i = 1; i <= rollSize; i++) {
     specs.push({ name: `synthetic-roll-${String(i).padStart(2, '0')}.dng`, format: 'dng', kind: 'color', seed: 100 + i, roll: true, ...SIZE_60MP });
   }

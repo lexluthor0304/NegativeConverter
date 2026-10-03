@@ -2,7 +2,7 @@
 // 3 s, keeping the pointer inside the curve canvas (the drag ends on
 // mouseleave). Metrics as S2, plus the rAF frame rate.
 import { byKind, dragMetrics, eventTimingP95, rafGapSummary } from '../lib/metrics.mjs';
-import { bootApp, importPhotos, recordMemory, longTasks, sleep } from './common.mjs';
+import { bootApp, importPhotos, recordMemory, longTasks, sleep, uiCounters, recordUiCounters } from './common.mjs';
 
 export async function dragCurve(ctx, prefix, { observeMs = 3000, steps = 180 } = {}) {
   const { session } = ctx;
@@ -12,10 +12,12 @@ export async function dragCurve(ctx, prefix, { observeMs = 3000, steps = 180 } =
   const to = { x, y: y - rect.height * 0.2 };
   await sleep(500);
   await session.drain();
+  const uiBefore = await uiCounters(ctx);
   const start = await session.beginWindow(prefix);
   await session.drag({ from: { x, y }, to, steps });
   await sleep(500);
   const window = await session.endWindow();
+  if (ctx.scenario.debugCounters) await recordUiCounters(ctx, prefix, uiBefore);
   await sleep(Math.max(0, observeMs - 500));
   await session.drain();
   const inputs = byKind(session.events, 'input').filter(event => event.t >= start);
@@ -49,6 +51,7 @@ export default {
   id: 's3',
   title: 'Curve drag',
   fixtureGroup: 'interactive',
+  debugCounters: true,
   async run(ctx) {
     const { session } = ctx;
     await bootApp(ctx);

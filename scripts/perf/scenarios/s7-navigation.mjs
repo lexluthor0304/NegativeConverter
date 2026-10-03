@@ -6,7 +6,7 @@
 // until ready) and main busy %.
 import { byKind, switchMetrics } from '../lib/metrics.mjs';
 import { median } from '../lib/stats.mjs';
-import { bootApp, recordMemory, recordRoute, sleep, pageNow, round } from './common.mjs';
+import { bootApp, recordRollRoutes, recordMemory, recordRoute, sleep, pageNow, round } from './common.mjs';
 import { importRoll, waitForRollBackground } from './s6-roll.mjs';
 
 const QUICK_PLAN = [
@@ -112,19 +112,20 @@ export default {
       }
       const metrics = await measureSwitch(ctx, keyTimes, target, displaySize);
       (samples[step.cls] ||= []).push(metrics);
-      await recordRoute(ctx, null, target);
       ctx.raw[`s7.${step.cls}.${(samples[step.cls].length)}`] = metrics;
-    }
-    // One value per class and repetition: the median of its samples.
-    for (const [cls, list] of Object.entries(samples)) {
-      for (const key of ['firstPixelsMs', 'firstDisplayPositiveMs', 'readyMs', 'librawDecodes', 'staleResultsAfterShown', 'mainBusyPct', 'fromFirstPressMs']) {
-        const values = list.map(entry => entry[key]).filter(Number.isFinite);
-        if (values.length) ctx.record(`s7.${cls}.${key}`, round(median(values)));
+      // Update after each completed step: a later abort preserves earlier classes.
+      for (const [cls, list] of Object.entries(samples)) {
+        for (const key of ['firstPixelsMs', 'firstDisplayPositiveMs', 'readyMs', 'librawDecodes', 'staleResultsAfterShown', 'mainBusyPct', 'fromFirstPressMs']) {
+          const values = list.map(entry => entry[key]).filter(Number.isFinite);
+          if (values.length) ctx.record(`s7.${cls}.${key}`, round(median(values)));
+        }
+        ctx.record(`s7.${cls}.longTaskCount`, round(median(list.map(entry => entry.longTasks.n))));
+        ctx.record(`s7.${cls}.maxLongTaskMs`, round(median(list.map(entry => entry.longTasks.maxMs))));
+        ctx.record(`s7.${cls}.samples`, list.length);
       }
-      ctx.record(`s7.${cls}.longTaskCount`, round(median(list.map(entry => entry.longTasks.n))));
-      ctx.record(`s7.${cls}.maxLongTaskMs`, round(median(list.map(entry => entry.longTasks.maxMs))));
-      ctx.record(`s7.${cls}.samples`, list.length);
+      await recordRoute(ctx, `s7.photo${current}`, target, { from: keyTimes.at(-1) });
     }
     await recordMemory(ctx, 's7', memoryFrom);
+    await recordRollRoutes(ctx);
   }
 };

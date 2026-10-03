@@ -146,7 +146,9 @@
           var contentHash = sub ? stringHash((state.texHash.get(tex) || '') + ':' + hash) : hash;
           state.texHash.set(tex, contentHash);
           count(label + '.' + fnName);
-          push({ k: 'gl.upload', t: t0, c: canvasName(this.canvas), ctx: label, fn: fnName, w: w, h: h, hash: contentHash, tex: tex });
+          var format = !sub ? (args.length >= 9 ? args[6] : args[3]) : (args.length >= 9 ? args[6] : args[4]);
+          var type = !sub ? (args.length >= 9 ? args[7] : args[4]) : (args.length >= 9 ? args[7] : args[5]);
+          push({ k: 'gl.upload', t: t0, c: canvasName(this.canvas), ctx: label, fn: fnName, w: w, h: h, format: format, type: type, hash: contentHash, tex: tex });
         } finally { selfMs += now() - t0; }
         return result;
       };
@@ -274,26 +276,60 @@
   // ---- workers ----
   var workerIds = new WeakMap();
   var workerPending = new WeakMap();
+  var workerRecipes = new WeakMap();
   var LIBRAW_FNS = /^(open|metadata|imageData|rawImageData|thumbnailData)$/;
-  function classify(message) {
+  function classify(message, worker) {
     if (!message || typeof message !== 'object') return null;
     if (typeof message.fn === 'string' && LIBRAW_FNS.test(message.fn) && Array.isArray(message.args)) {
       return { cls: 'libraw', fn: message.fn, id: message.id };
     }
-    if (message.type === 'convert') {
-      var settings = message.settings || {};
-      return { cls: 'convert', id: message.id, cache: !!message.cacheInput, reuse: !!message.reuseSource,
-        w: message.width, h: message.height, ft: settings.filmType || 'color', pe: settings.positiveEngine || null };
+    if (/^(convert|prepare|analyze|roi|commit|displayNegative)$/.test(message.type || '')) {
+      var recipe = message.settings ? {
+        ft: message.settings.filmType || 'color', pe: message.settings.positiveEngine || null,
+        geometry: { rotationAngle: message.settings.rotationAngle || 0, mirrored: !!message.settings.mirrored,
+          cropRegion: message.settings.cropRegion ? Object.assign({}, message.settings.cropRegion) : null }
+      } : workerRecipes.get(worker);
+      if (message.settings && worker) workerRecipes.set(worker, recipe);
+      return { cls: message.type, fn: message.type === 'convert' ? null : message.type, id: message.id,
+        cache: !!message.cacheInput, reuse: !!message.reuseSource, w: message.width, h: message.height,
+        ft: recipe ? recipe.ft : null, pe: recipe ? recipe.pe : null, geometry: recipe ? recipe.geometry : null };
     }
     if (message.buffer instanceof ArrayBuffer && /^(png|tiff)$/.test(message.format || '')) return { cls: 'decode', fn: message.format };
     if (message.image && message.image.data && !message.type) return { cls: 'semantic' };
     if (typeof message.type === 'string') {
       var type = message.type;
       var cls = /^(applyAdjustments|applyAdjustments16|encode|encodePng16|encodeTiff|encodeJpeg)/.test(type) ? 'export'
-        : /^(detect|inpaint|refine)$/.test(type) && typeof message.reuseSource === 'boolean' ? 'dust' : type;
+        : /^(detect|inpaint|stroke|plane|maskDelta)$/.test(type) ? 'dust' : type;
       return { cls: cls, fn: type, id: message.id, w: message.width, h: message.height };
     }
     return { cls: 'other' };
+  }
+  // Structured-clone payload estimate: exact backing-buffer lengths, small
+  // scalar metadata, shared planes separately (no pixel traversal/copy).
+  function messageBytes(value, seen) {
+    if (value == null) return { bytes: 0, sharedBytes: 0 };
+    if (typeof value === 'number') return { bytes: 8, sharedBytes: 0 };
+    if (typeof value === 'boolean') return { bytes: 4, sharedBytes: 0 };
+    if (typeof value === 'string') return { bytes: value.length * 2, sharedBytes: 0 };
+    if (typeof value !== 'object') return { bytes: 0, sharedBytes: 0 };
+    seen = seen || new Set();
+    if (seen.has(value)) return { bytes: 0, sharedBytes: 0 };
+    seen.add(value);
+    var buffer = ArrayBuffer.isView(value) ? value.buffer : value;
+    var shared = typeof SharedArrayBuffer === 'function' && buffer instanceof SharedArrayBuffer;
+    if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer || shared) {
+      // Cloning a subarray retains its whole backing buffer. Multiple views
+      // of one buffer clone it only once, and SAB never copies its storage.
+      if (buffer !== value && seen.has(buffer)) return { bytes: 0, sharedBytes: 0 };
+      seen.add(buffer);
+      return { bytes: shared ? 0 : buffer.byteLength, sharedBytes: shared ? buffer.byteLength : 0 };
+    }
+    var result = { bytes: 0, sharedBytes: 0 };
+    Object.keys(value).forEach(function (key) {
+      var part = messageBytes(value[key], seen);
+      result.bytes += key.length * 2 + part.bytes; result.sharedBytes += part.sharedBytes;
+    });
+    return result;
   }
   function onWorkerMessage(worker, event) {
     var t0 = now();
@@ -315,6 +351,7 @@
       var out = data && data.out;
       var record = { k: 'res', t: t0, wid: wid, cls: request.cls, fn: request.fn || null, id: request.id, rt: request.t,
         err: !!(data && (data.error || data.type === 'error')) };
+      if (request.cls === 'dust') Object.assign(record, messageBytes(data));
       if (request.cls === 'convert') {
         record.cache = request.cache; record.ft = request.ft;
         if (data && data.rgba) { var bytes = viewBytes(data.rgba); record.hash = sparseHash(bytes); }
@@ -355,15 +392,17 @@
       return function (message) {
         var t0 = now();
         try {
-          var info = classify(message);
+          var info = classify(message, this);
           var pending = workerPending.get(this);
           if (info && pending) {
             info.t = t0;
             if (info.id !== undefined) pending.byId.set(info.id, info); else pending.fifo.push(info);
             count('req.' + info.cls);
             if (info.cls === 'libraw' && info.fn === 'open') count('libraw.decodes');
+            var size = info.cls === 'dust' ? messageBytes(message) : {};
             push({ k: 'req', t: t0, wid: workerIds.get(this), cls: info.cls, fn: info.fn || null, id: info.id,
-              cache: info.cache, reuse: info.reuse, w: info.w, h: info.h, ft: info.ft, pe: info.pe });
+              cache: info.cache, reuse: info.reuse, w: info.w, h: info.h, ft: info.ft, pe: info.pe, geometry: info.geometry,
+              bytes: size.bytes, sharedBytes: size.sharedBytes });
           }
         } finally { selfMs += now() - t0; }
         return original.apply(this, arguments);
@@ -412,12 +451,26 @@
     var internals = global.__TAURI_INTERNALS__;
     if (!internals || typeof internals.invoke !== 'function' || internals.invoke.__ncPerf) return;
     var original = internals.invoke;
+    var writes = new Map();
     var wrapped = function (cmd) {
       var t0 = now();
+      var args = arguments[1];
+      var writeStart = cmd === 'finish_export_write' && args ? writes.get(args.id) : null;
       count('invoke');
       push({ k: 'invoke', t: t0, cmd: String(cmd) });
       selfMs += now() - t0;
-      return original.apply(this, arguments);
+      var result = original.apply(this, arguments);
+      // Observe completion without replacing the app's promise or recording
+      // destination paths, native capability ids or command arguments.
+      if (result && typeof result.then === 'function') result.then(function (value) {
+        if (cmd === 'begin_export_write') writes.set(value, t0);
+        if (cmd === 'finish_export_write' || cmd === 'abort_export_write') writes.delete(args && args.id);
+        push({ k: 'invoke.end', t: now(), rt: t0, cmd: String(cmd), writeStart: writeStart, error: false });
+      }, function () {
+        if (cmd === 'finish_export_write' || cmd === 'abort_export_write') writes.delete(args && args.id);
+        push({ k: 'invoke.end', t: now(), rt: t0, cmd: String(cmd), writeStart: writeStart, error: true });
+      });
+      return result;
     };
     wrapped.__ncPerf = true;
     try { internals.invoke = wrapped; } catch (e) { /* frozen */ }
@@ -661,6 +714,15 @@
   // Decoded-pixel hash of a JPEG export, taken after the measurement window.
   function decodedJpegSha256(index) {
     var blob = exportBlob(index);
+    return decodedJpegBlobSha256(blob);
+  }
+  function decodedJpegBytesSha256(base64) {
+    var text = atob(base64);
+    var bytes = new Uint8Array(text.length);
+    for (var i = 0; i < text.length; i++) bytes[i] = text.charCodeAt(i);
+    return decodedJpegBlobSha256(new Blob([bytes], { type: 'image/jpeg' }));
+  }
+  function decodedJpegBlobSha256(blob) {
     if (!blob || typeof createImageBitmap !== 'function') return Promise.resolve(null);
     return createImageBitmap(blob, { colorSpaceConversion: 'none', premultiplyAlpha: 'none' }).then(function (bitmap) {
       var canvas = typeof OffscreenCanvas === 'function' ? new OffscreenCanvas(bitmap.width, bitmap.height) : Object.assign(document.createElement('canvas'), { width: bitmap.width, height: bitmap.height });
@@ -790,6 +852,48 @@
       return part;
     });
   }
+  function driveExport(spec) {
+    var part = { name: 'export:' + spec.id, spec: spec };
+    var menu = document.getElementById('exportDropdownMenu');
+    if (!menu.classList.contains('show')) document.getElementById('exportBtn').click();
+    document.querySelector('.format-btn[data-format="' + spec.format + '"]').click();
+    if (spec.lanes) localStorage.setItem('nc_batch_lanes_v1', String(spec.lanes));
+    return nextFrame().then(function () {
+      if (spec.format === 'png' || spec.format === 'tiff') {
+        document.querySelector('.bitdepth-btn[data-bitdepth="' + spec.bitDepth + '"]').click();
+      } else if (spec.format === 'jpeg') {
+        var gain = document.getElementById('exportHdrGainMap');
+        if (gain.checked !== !!spec.gainMap) gain.click();
+      }
+      if (spec.zip) {
+        var current = document.querySelector('.file-list-name[aria-current="true"]');
+        document.querySelectorAll('.file-list-item').forEach(function (row) {
+          var box = row.querySelector('.file-list-checkbox');
+          var name = row.querySelector('.file-list-name');
+          var isCurrent = current && name && name.dataset.index === current.dataset.index;
+          if (box && box.checked === !!isCurrent) box.click();
+        });
+      }
+      return sleepMs(300);
+    }).then(function () {
+      drain();
+      beginWindow(spec.id);
+      part.start = now();
+      document.getElementById(spec.zip ? 'exportZipBtn' : 'exportSingleBtn').click();
+      // Tauri retains its real save dialog. A native writer completion is
+      // required; dismissing the dialog cannot silently count as an export.
+      return waitUntil(function () {
+        return ring.some(function (event) { return event.k === 'invoke.end' && event.t >= part.start
+          && (event.cmd === 'finish_export_write' || event.cmd === 'abort_export_write'); });
+      }, 1800000);
+    }).then(function () {
+      part.window = endWindow();
+      part.events = drain().events;
+      if (part.events.some(function (event) { return event.k === 'invoke.end'
+        && (event.error || event.cmd === 'abort_export_write'); })) throw new Error('native export failed: ' + spec.id);
+      return part;
+    });
+  }
   function selfDrive(spec) {
     var report = { scenario: spec.scenario, synthetic: true, engine: navigator.userAgent, dpr: global.devicePixelRatio, parts: [], startedAt: now() };
     return waitUntil(function () { return document.getElementById('studioImportAutoCrop') && document.body.classList.contains('studio'); }, 120000)
@@ -820,6 +924,18 @@
           .then(function (part) { report.parts.push(part); return waitUntil(function () { return document.querySelectorAll('.file-list-settings-badge').length >= count; }, 3600000); });
         if (count > 2) chain = chain.then(function () { return driveSwitch(2, 'coldAnalysed', names[2]); }).then(function (part) { report.parts.push(part); return driveSwitch(0, 'warm1Back', names[0]); }).then(function (part) { report.parts.push(part); });
         return chain;
+      })
+      .then(function () {
+        if (spec.scenario !== 's9' && spec.scenario !== 's9-parallel') return null;
+        return waitUntil(function () { return studioReady()
+          && document.querySelectorAll('.file-list-settings-badge').length >= spec.fixtures.length; }, 3600000)
+          .then(function () {
+            var chain = Promise.resolve();
+            (spec.exports || []).forEach(function (entry) {
+              chain = chain.then(function () { return driveExport(entry); }).then(function (part) { report.parts.push(part); });
+            });
+            return chain;
+          });
       })
       .catch(function (error) { report.error = String(error && error.message || error); })
       .then(function () {
@@ -882,7 +998,7 @@
     counters: function () { return Object.assign({}, counters); },
     selfMs: function () { return selfMs; },
     clearUserTiming: function () { if (perf.clearMarks) perf.clearMarks(); if (perf.clearMeasures) perf.clearMeasures(); },
-    exports: { install: installExportCapture, list: exportList, upload: uploadExport, jpegSha256: decodedJpegSha256, clear: clearExports },
+    exports: { install: installExportCapture, list: exportList, upload: uploadExport, jpegSha256: decodedJpegSha256, jpegBytesSha256: decodedJpegBytesSha256, clear: clearExports },
     importFixtures: importFixtures,
     startMainWatch: startMainWatch,
     selfDrive: selfDrive,
@@ -901,6 +1017,7 @@
         scenario: params.get('scenario'),
         fixtures: (params.get('fixtures') || '').split(',').filter(Boolean),
         sliders: (params.get('sliders') || 'coreExposure,coreContrast,coreTemperature,wbR,cyan').split(',').filter(Boolean),
+        exports: JSON.parse(params.get('exports') || '[]'),
         results: location.origin + '/__perf/results'
       };
       var start = function () { selfDrive(spec); };

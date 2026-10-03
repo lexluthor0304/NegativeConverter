@@ -5,6 +5,7 @@
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { registerProcess, killProcess } from './resources.mjs';
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -35,10 +36,14 @@ export async function buildRef({ worktree, outDir, log = () => {} }) {
   const child = spawn(process.execPath, [viteBin(worktree), ...buildArgs({ outDir })], {
     cwd: worktree,
     stdio: ['ignore', 'pipe', 'pipe'],
+    detached: process.platform !== 'win32',
     env: { ...process.env, NODE_ENV: 'production' }
   });
+  const unregister = registerProcess(child);
   const output = collect(child);
   const code = await new Promise(resolve => child.once('exit', resolve));
+  killProcess(child);
+  unregister();
   if (code !== 0) throw new Error(`vite build failed (${code}):\n${output().slice(-4000)}`);
   if (!existsSync(join(outDir, 'index.html'))) throw new Error(`vite build produced no ${join(outDir, 'index.html')}`);
   log(`built ${worktree} in ${((Date.now() - started) / 1000).toFixed(1)} s`);
@@ -58,6 +63,7 @@ export async function startPreview({ worktree, outDir, port, harnessConfig, env 
     }
   });
   const output = collect(child);
+  const unregister = registerProcess(child);
   let exited = null;
   child.once('exit', code => { exited = code; });
   const url = `http://127.0.0.1:${port}/`;
@@ -69,10 +75,9 @@ export async function startPreview({ worktree, outDir, port, harnessConfig, env 
     await sleep(250);
   }
   const stop = async () => {
-    if (exited !== null) return;
-    try { process.kill(process.platform === 'win32' ? child.pid : -child.pid, 'SIGTERM'); } catch { try { child.kill(); } catch {} }
-    for (let i = 0; i < 40 && exited === null; i++) await sleep(50);
-    if (exited === null) { try { process.kill(-child.pid, 'SIGKILL'); } catch {} }
+    killProcess(child);
+    unregister();
+    for (let i = 0; i < 40 && exited === null; i++) await sleep(25);
   };
   try {
     const health = await (await fetch(`${url}__perf/health`)).json();

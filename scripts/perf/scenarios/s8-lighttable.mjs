@@ -5,7 +5,7 @@
 // tile is final again.
 import { byKind, rafGapSummary } from '../lib/metrics.mjs';
 import { median } from '../lib/stats.mjs';
-import { bootApp, recordMemory, dragSlider, sleep, pageNow, clickElement, longTasks, round } from './common.mjs';
+import { bootApp, recordRollRoutes, recordMemory, dragSlider, sleep, pageNow, clickElement, longTasks, round } from './common.mjs';
 import { importRoll, waitForRollBackground, waitForPageTime } from './s6-roll.mjs';
 
 const ALL_FINAL = `(() => { const tiles = document.querySelectorAll('.file-list-name'); return tiles.length > 0 && [...tiles].every(tile => tile.dataset.previewState === 'ready'); })()`;
@@ -97,5 +97,6 @@ export default {
     ctx.record('s8.syncColours.librawDecodes', byKind(session.events, 'req').filter(req => req.cls === 'libraw' && req.fn === 'open' && req.t >= syncT).length);
     ctx.raw['s8.medianThumbnailScale'] = median([scale]);
     await recordMemory(ctx, 's8', memoryFrom);
+    await recordRollRoutes(ctx);
   }
 };

@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { HangWatchdog, collectHangDump, hangThresholdMs } from './hang.mjs';
+import { validateHangSelftest } from '../scenarios/selftest-hang.mjs';
 
 assert.equal(hangThresholdMs({}), 30_000);
 assert.equal(hangThresholdMs({ NC_PERF_HANG_S: '10' }), 10_000);
@@ -86,7 +87,22 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
     assert.equal(traceStopped, true);
     assert.equal(dump.trace, 'trace.gz');
     assert.equal(dump.processes[0].id, 42);
-    assert.equal(JSON.parse(readFileSync(join(dir, 'hang-selftest.json'), 'utf8')).label, 'selftest');
+    assert.equal(JSON.parse(readFileSync(dump.file, 'utf8')).label, 'selftest');
+    const second = await collectHangDump({ connection: { send: async () => ({}) }, sessions: [], dir, label: 'selftest', platform: 'test', info: { silentMs: 35_000 } });
+    assert.notEqual(dump.file, second.file, 'two stalls never overwrite each other');
+    assert.equal(JSON.parse(readFileSync(dump.file, 'utf8')).info.silentMs, 30_000);
+    assert.equal(JSON.parse(readFileSync(second.file, 'utf8')).info.silentMs, 35_000);
+
+    const good = { stacks: [{ kind: 'page', frames: [{ function: 'ncInjectedHang' }] },
+      { kind: 'worker', busy: true, frames: [{ function: 'ncInjectedWorkerHang' }] }, { kind: 'worker', busy: false, error: 'idle' }],
+      ring: { ring: [1] }, trace: 'trace.gz', processIds: { renderer: [1, 2], gpu: [3] },
+      processes: [{ type: 'renderer', id: 1 }], samples: [1, 2, 3].map(pid => ({ pid, file: `sample${pid}` })) };
+    const validate = (testDump, detectedMs = 35_000) => validateHangSelftest({ dump: testDump, status: 'hang', detectedMs, platform: 'darwin', fileExists: () => true });
+    assert.ok(Object.values(validate(good).checks).every(Boolean));
+    assert.equal(validate(good).idleWorkers.length, 1);
+    assert.equal(validate(good, 35_001).checks.detectedWithinBudget, false);
+    assert.equal(validate({ ...good, samples: [{ pid: 3, file: 'gpu-only' }] }).checks.nativeSamples, false);
+    assert.equal(validate({ ...good, stacks: [{ kind: 'worker', busy: true, error: 'pause failed' }] }).checks.workerStacks, false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

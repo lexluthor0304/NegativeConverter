@@ -13,7 +13,7 @@
 import { rangesOverlap, formatSummary, round } from './stats.mjs';
 
 export const DEFAULT_TOLERANCE = Object.freeze({ rel: 0.10, abs: 0 });
-export const FAILING_STATUSES = new Set(['regressed', 'broke-budget', 'pixels-changed']);
+export const FAILING_STATUSES = new Set(['regressed', 'broke-budget', 'pixels-changed', 'missing-after', 'scenario-failed', 'recipe-changed']);
 
 function segmentsMatch(pattern, key) {
   const a = pattern.split('.');
@@ -67,25 +67,35 @@ export function isRouteKey(key) {
   return /(^|\.)route(s)?(\.|$)/.test(base) || /\.filmType$/.test(base);
 }
 
+function recipeValue(value) {
+  if (typeof value === 'string') { try { value = JSON.parse(value); } catch {} }
+  const canonical = item => Array.isArray(item) ? item.map(canonical)
+    : item && typeof item === 'object' ? Object.fromEntries(Object.keys(item).sort().map(key => [key, canonical(item[key])])) : item;
+  return JSON.stringify(canonical(value));
+}
+
 /** One row of the compare table. */
 export function compareMetric(key, def, before, after) {
   const row = { key, def, before, after, deltaPct: null, status: 'pass', note: '' };
   if (!before || !after) {
-    row.status = 'missing';
+    row.status = before && !/\.status(?:@|$)/.test(key) ? 'missing-after' : 'missing';
     row.note = before ? 'not measured after' : 'not measured before';
     return row;
   }
   if (isStringSummary(before) || isStringSummary(after)) {
     const same = isStringSummary(before) && isStringSummary(after)
       && before.value === after.value && before.value !== 'mixed';
-    if (isPixelHashKey(key)) row.status = same ? 'identical' : 'pixels-changed';
+    if (/\.status(?:@|$)/.test(key)) row.status = after.value === 'ok' ? 'pass' : 'scenario-failed';
+    else if (/\.(rotationAngle|mirrored|cropRegion)(?:@|$)/.test(key)) row.status = isStringSummary(before) && isStringSummary(after)
+      && before.value !== 'mixed' && recipeValue(before.value) === recipeValue(after.value) ? 'identical' : 'recipe-changed';
+    else if (isPixelHashKey(key)) row.status = same ? 'identical' : 'pixels-changed';
     else if (isRouteKey(key)) row.status = same ? 'identical' : 'route-changed';
     else row.status = same ? 'identical' : 'differs';
     return row;
   }
   const b = before.median, a = after.median;
   if (!Number.isFinite(b) || !Number.isFinite(a)) {
-    row.status = 'missing';
+    row.status = Number.isFinite(b) && !Number.isFinite(a) ? 'missing-after' : 'missing';
     row.note = 'no numeric value';
     return row;
   }
@@ -121,6 +131,17 @@ export function compareMetric(key, def, before, after) {
 export function compareRuns({ budgets, before, after, allowPixelChange = false }) {
   const keys = [...new Set([...Object.keys(before || {}), ...Object.keys(after || {})])].sort();
   const rows = keys.map(key => compareMetric(key, findMetricDef(budgets, key), before?.[key], after?.[key]));
+  // Scenario failures on a newly added scenario fail even without a base.
+  for (const row of rows) if (/\.status(?:@|$)/.test(row.key) && row.after?.value && row.after.value !== 'ok') row.status = 'scenario-failed';
+  const recipes = rows.filter(row => row.status === 'recipe-changed');
+  for (const row of rows) {
+    if (!isPixelHashKey(row.key)) continue;
+    const prefix = baseKey(row.key).replace(/\.(entry\d+\.)?[^.]*Sha256$/, '');
+    if (recipes.some(recipe => baseKey(recipe.key).startsWith(`${prefix}.`) && recipe.key.split('@')[1] === row.key.split('@')[1])) {
+      row.status = 'recipe-mismatch'; row.note = 'recipe differs; pixel comparison is inconclusive';
+    }
+  }
+  rows.sort((a, b) => Number(/Sha256/.test(a.key)) - Number(/Sha256/.test(b.key)) || a.key.localeCompare(b.key));
   const failing = rows.filter(row => FAILING_STATUSES.has(row.status)
     && !(allowPixelChange && row.status === 'pixels-changed'));
   return {
@@ -154,7 +175,8 @@ export function renderCompareMarkdown(result, { baseLabel = 'before', headLabel 
   lines.push(`| metric | target | ${baseLabel} median (min–max) | ${headLabel} median (min–max) | Δ % | status | export pixels |`);
   lines.push('|---|---|---|---|---|---|---|');
   for (const row of result.rows) {
-    const pixels = isPixelHashKey(row.key) ? (row.status === 'identical' ? 'identical' : 'differ') : '–';
+    const pixels = isPixelHashKey(row.key) ? (row.status === 'identical' ? 'identical'
+      : row.status === 'pixels-changed' ? 'differ' : 'inconclusive') : '–';
     const status = row.note ? `${row.status} (${row.note})` : row.status;
     const shorten = summary => {
       if (!summary) return '–';
@@ -169,7 +191,11 @@ export function renderCompareMarkdown(result, { baseLabel = 'before', headLabel 
   const counts = {};
   for (const row of result.rows) counts[row.status] = (counts[row.status] || 0) + 1;
   lines.push(`Statuses: ${Object.entries(counts).map(([status, n]) => `${status} ${n}`).join(', ') || 'none'}.`);
-  if (result.pixelsIdentical !== null) lines.push(`Export pixels identical: ${result.pixelsIdentical ? 'yes' : 'no'}.`);
+  if (result.pixelsIdentical !== null) {
+    const inconclusive = result.rows.some(row => isPixelHashKey(row.key) && !['identical', 'pixels-changed'].includes(row.status));
+    lines.push(inconclusive ? 'Export pixel comparison: inconclusive (missing measurement or different recipe).'
+      : `Export pixels identical: ${result.pixelsIdentical ? 'yes' : 'no'}.`);
+  }
   if (result.routeChanges.length) {
     lines.push(`Conversion route changed: ${result.routeChanges.map(row => `\`${row.key}\` ${row.before?.value} → ${row.after?.value}`).join('; ')}.`);
   }
@@ -184,7 +210,8 @@ export function renderCompareMarkdown(result, { baseLabel = 'before', headLabel 
  */
 export function collectRunSummaries(run) {
   const out = {};
-  for (const scenario of Object.values(run?.scenarios || {})) {
+  for (const [id, scenario] of Object.entries(run?.scenarios || {})) {
+    out[`${id}.status`] = { value: scenario.status || 'ok', n: 1 };
     for (const [fixture, group] of Object.entries(scenario.fixtures || {})) {
       for (const [key, summary] of Object.entries(group.summary || {})) out[`${key}@${fixture}`] = summary;
     }

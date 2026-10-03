@@ -4,7 +4,7 @@
 // metric keys as Chrome.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -26,19 +26,40 @@ for (const id of ALL_SCENARIOS) {
   assert.ok(scenario, `scenario ${id} is registered`);
   assert.equal(scenario.id, id);
   assert.equal(typeof scenario.run, 'function');
-  assert.ok(['singles', 'interactive', 'roll', 'export', 'hang', 'smoke'].includes(scenario.fixtureGroup), `${id} fixture group`);
+  assert.ok(['singles', 'interactive', 'roll', 'export', 'export-parallel', 'dust', 'hang', 'smoke'].includes(scenario.fixtureGroup), `${id} fixture group`);
 }
 assert.equal(selectScenarios(['s1'], { injectHang: true })[0].id, 'selftest-hang', 'the hang self-test runs first');
 assert.ok(SCENARIOS.s9.extraReps.some(extra => extra.perfFlag === false), 'S9 verifies pixels with ?perf=1 off too');
 
 // Fixture groups resolve for the synthetic set.
-const synthetic = Object.fromEntries(syntheticNamesFor(['singles', 'interactive', 'roll', 'export', 'hang'], { rollSize: 12 })
-  .map(name => [name, { path: `/fixtures/${name}`, width: 9536, height: 6336, sha256: 'x' }]));
+const synthetic = Object.fromEntries(syntheticNamesFor(['singles', 'interactive', 'roll', 'export', 'export-parallel', 'dust', 'hang'], { rollSize: 12 })
+  .map(name => [name, { path: `/fixtures/${name}`, width: /24/.test(name) ? 6000 : 9536, height: /24/.test(name) ? 4000 : 6336, sha256: 'x' }]));
 const groups = resolveFixtureGroups({ set: 'synthetic', synthetic, rollSize: 12, repoRoot, env: {} });
 assert.equal(groups.singles.length, 5);
 assert.equal(groups.interactive[0].name, 'synthetic-60mp-cfa.dng');
 assert.equal(groups.roll.length, 12);
 assert.deepEqual(groups.export.map(entry => entry.name), ['synthetic-60mp-cfa.dng', 'synthetic-roll-01.dng', 'synthetic-roll-02.dng', 'synthetic-roll-03.dng']);
+assert.equal(groups['export-parallel'].length, 4);
+const acceptanceGroups = resolveFixtureGroups({ set: 'synthetic', synthetic, rollSize: 4, exportCount: 10, repoRoot, env: {} });
+assert.equal(acceptanceGroups.roll.length, 4);
+assert.equal(acceptanceGroups.export.length, 11, 'ten non-current 60 MP export files, without extending navigation rolls');
+assert.ok(acceptanceGroups.export.every(entry => entry.width * entry.height >= 60_000_000));
+assert.equal(syntheticNamesFor(['export'], { rollSize: 4, exportCount: 10 }).length, 11);
+assert.equal(resolveFixtureGroups({ set: 'synthetic', synthetic, exportCount: 20, repoRoot, env: {} }).export.length, 0,
+  'insufficient cached fixtures cannot silently run a shorter acceptance batch');
+const realDir = mkdtempSync(join(tmpdir(), 'nc-perf-fixture-selection-'));
+try {
+  const rollDir = join(realDir, 'roll'); mkdirSync(rollDir);
+  writeFileSync(join(realDir, 'current.dng'), 'stub');
+  for (let index = 0; index < 10; index++) writeFileSync(join(rollDir, `frame${index}.dng`), 'stub');
+  const real = resolveFixtureGroups({ set: 'real', rollSize: 4, exportCount: 10, repoRoot,
+    env: { NC_PERF_RAW_DIR: realDir, NC_PERF_ROLL_DIR: rollDir } });
+  assert.equal(real.roll.length, 4);
+  assert.equal(real.export.length, 11);
+} finally { rmSync(realDir, { recursive: true, force: true }); }
+assert.ok(groups['export-parallel'].every(entry => entry.width * entry.height === 24_000_000));
+assert.deepEqual(groups.dust.map(entry => entry.name), ['synthetic-60mp-cfa.dng']);
+assert.deepEqual(selectScenarios(['s9', 's9-parallel']).map(scenario => scenario.id), ['s9', 's9-parallel']);
 assert.match(groups.hang[0].label, /synthetic stand-in for _DSC3111\.NEF/, 'H falls back to the synthetic 24 MP DNG, labelled');
 assert.equal(resolveFixtureGroups({ set: 'synthetic', synthetic, quick: true, repoRoot, env: {} }).singles.length, 1, '--quick uses one fixture');
 assert.throws(() => resolveFixtureGroups({ set: 'real', synthetic, repoRoot, env: {} }), /NC_PERF_RAW_DIR/);
@@ -54,7 +75,8 @@ const reps = [
   { status: 'ok', extra: 'verify-noflag', metrics: {}, hashes: { 's9.single.png8.imported.pixelsSha256': 'aa' } }
 ];
 const summary = summarizeGroup(reps);
-assert.equal(summary['s9.single.png8.imported.totalMs'].median, 20, 'profiled, failed and extra reps are not in the medians');
+assert.equal(summary['s9.single.png8.imported.totalMs'].median, 30, 'completed metrics from aborted reps stay; profiled and extra reps are separate');
+assert.equal(summary['s9.single.png8.imported.totalMs'].max, 999);
 assert.equal(summary['s9.single.png8.imported.pixelsSha256'].value, 'aa');
 assert.equal(summary['s9.single.tiff16.imported.bitDepth'].median, 16);
 assert.equal(summary['s9.perfFlagParity'].value, 'identical');
@@ -98,6 +120,24 @@ const config = JSON.parse(tauri[4]);
 assert.equal(config.build.beforeDevCommand, '', 'no dev server is started');
 assert.match(config.build.devUrl, /^http:\/\/127\.0\.0\.1:5297\/\?lang=en&perf=1&scenario=s1&fixtures=L1000617\.DNG/);
 assert.deepEqual(WEBKIT_SCENARIOS.safari, ['s1', 's2', 's4', 's7']);
+assert.ok(WEBKIT_SCENARIOS.tauri.includes('s9') && WEBKIT_SCENARIOS.tauri.includes('s9-parallel'));
+const exportReport = { scenario: 's9', parts: [{ name: 'export:zip.dng', start: 10, spec: { id: 'zip.dng', format: 'dng', bitDepth: 16 },
+  window: { start: 10, end: 500, frames: [], ticks: [] }, events: [
+    { k: 'um', t: 400, n: 'nc:linearDngBatch', d: 380, detail: { stages: [{ stage: 'build', ms: 360 }], blobMs: 20 } },
+    { k: 'invoke.end', t: 500, cmd: 'finish_export_write', writeStart: 12, error: false }
+  ] }] };
+const exportMapped = metricsFromSelfDriven(exportReport);
+assert.equal(exportMapped['s9.zip.dng.linearDngBuildMs'], 360);
+assert.equal(exportMapped['s9.zip.dng.blobMs'], 20);
+assert.equal(exportMapped['s9.zip.dng.desktopWriteMs'], 488);
+assert.throws(() => metricsFromSelfDriven({ ...exportReport, parts: [{ ...exportReport.parts[0], events: [] }] }), /no completed native export write/);
+const completedNative = {};
+assert.throws(() => metricsFromSelfDriven({ ...exportReport, parts: [exportReport.parts[0], {
+  ...exportReport.parts[0], spec: { id: 'single.png16.imported', format: 'png', bitDepth: 16 }, events: []
+}] }, { record: (key, value) => { completedNative[key] = value; } }), /no completed native export write/);
+assert.equal(completedNative['s9.zip.dng.desktopWriteMs'], 488, 'a later native export error retains completed metrics');
+const exportArgs = tauriDevArgs({ port: 5297, scenario: 's9', fixtures: ['a.dng', 'b.dng'], exports: [{ id: 'single.png16.imported', format: 'png', bitDepth: 16 }] });
+assert.equal(JSON.parse(new URL(JSON.parse(exportArgs[4]).build.devUrl).searchParams.get('exports'))[0].bitDepth, 16);
 assert.equal(webkitWindowMetrics({ start: 0, end: 20, frames: [0, 16], ticks: [0, 5, 10, 15, 20] }).mainBusyPct, 0);
 
 // CLI: usage errors exit 2; --help exits 0; a held lock exits 3 within about

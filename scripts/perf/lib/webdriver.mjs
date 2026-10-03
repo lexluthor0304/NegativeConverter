@@ -3,6 +3,7 @@
 // Setup once: `safaridriver --enable` and Develop → Allow Remote Automation.
 
 import { spawn } from 'node:child_process';
+import { registerProcess, killProcess } from './resources.mjs';
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -17,7 +18,9 @@ export class WebDriverError extends Error {
 }
 
 export async function startSafariDriver({ port, log = () => {} }) {
-  const child = spawn('safaridriver', ['-p', String(port)], { stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn('safaridriver', ['-p', String(port)], { stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+  const unregister = registerProcess(child);
+  const stop = () => { killProcess(child); unregister(); };
   let output = '';
   child.stdout.on('data', chunk => { output += chunk; });
   child.stderr.on('data', chunk => { output += chunk; });
@@ -26,11 +29,11 @@ export async function startSafariDriver({ port, log = () => {} }) {
   for (let i = 0; i < 80 && exited === null; i++) {
     try {
       const response = await fetch(`http://127.0.0.1:${port}/status`);
-      if (response.ok) { log(`safaridriver on port ${port}`); return { child, url: `http://127.0.0.1:${port}`, stop: () => { try { child.kill(); } catch {} } }; }
+      if (response.ok) { log(`safaridriver on port ${port}`); return { child, url: `http://127.0.0.1:${port}`, stop }; }
     } catch {}
     await sleep(250);
   }
-  try { child.kill(); } catch {}
+  stop();
   throw new Error(`safaridriver did not start (run \`safaridriver --enable\` once and allow remote automation): ${output.slice(-500)}`);
 }
 

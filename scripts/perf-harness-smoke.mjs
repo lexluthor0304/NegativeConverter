@@ -87,6 +87,38 @@ export async function runPerfHarnessSmoke({ send, evaluate, waitFor, wait, fail,
     if (decoded.w !== 1200 || decoded.h !== 800) fail(`LibRaw decoded the synthetic DNG at ${decoded.w}x${decoded.h}, expected 1200x800`);
     const status = await evaluate(`document.getElementById('filmTypeDetectionStatus')?.textContent || ''`);
     console.log(`ok: synthetic CFA DNG decoded through LibRaw at 1200x800 (${status})`);
+
+    // Current dust message classes, using a tiny echo worker in this real
+    // cross-origin-isolated page. No detector/model or large fixture runs.
+    const protocol = await evaluate(`(async () => {
+      const url = URL.createObjectURL(new Blob(['onmessage = e => postMessage({id:e.data.id, type:e.data.type + "Result", patch:new Uint8Array(64)});'], {type:'text/javascript'}));
+      const worker = new Worker(url, {name:'nc-perf-protocol-smoke'});
+      try {
+        globalThis.__ncPerf.drain();
+        for (const [i,type] of ['stroke','plane','maskDelta','refine'].entries()) {
+          await new Promise((resolve,reject) => {
+            const timer = setTimeout(() => reject(new Error('protocol smoke timeout')), 5000);
+            worker.onmessage = () => { clearTimeout(timer); resolve(); };
+            worker.postMessage({id:10000+i,type,data:new Uint8Array(128)});
+          });
+        }
+        return globalThis.__ncPerf.drain().events.filter(e => (e.k === 'req' || e.k === 'res') && e.id >= 10000);
+      } finally { worker.terminate(); URL.revokeObjectURL(url); }
+    })()`);
+    const dustRequests = protocol.filter(event => event.k === 'req');
+    if (dustRequests.map(event => event.cls).join(',') !== 'dust,dust,dust,refine') fail('dust protocol classes: ' + JSON.stringify(protocol));
+    if (!dustRequests.slice(0, 3).every(event => event.bytes >= 128 && event.bytes < 512)) fail('dust payload sizes missing: ' + JSON.stringify(protocol));
+    console.log('ok: small dust protocol messages classified and sized; refine kept separate');
+
+    // ZIP JPEG entries call this same byte decoder after extraction in Node.
+    const jpeg = await evaluate(`(async () => {
+      const canvas = new OffscreenCanvas(4,3);
+      const ctx = canvas.getContext('2d'); ctx.fillStyle = '#92703c'; ctx.fillRect(0,0,4,3);
+      const bytes = new Uint8Array(await (await canvas.convertToBlob({type:'image/jpeg'})).arrayBuffer());
+      return globalThis.__ncPerf.exports.jpegBytesSha256(btoa(String.fromCharCode(...bytes)));
+    })()`);
+    if (jpeg.width !== 4 || jpeg.height !== 3 || !/^[a-f0-9]{64}$/.test(jpeg.sha256)) fail('ZIP JPEG byte decoder: ' + JSON.stringify(jpeg));
+    console.log('ok: ZIP JPEG byte decoder hashes actual decoded 4x3 pixels');
   } finally {
     await send('Page.removeScriptToEvaluateOnNewDocument', { identifier });
     rmSync(dir, { recursive: true, force: true });

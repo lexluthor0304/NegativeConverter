@@ -3,10 +3,11 @@
 // group so the memory ceiling and the hang watchdog can SIGKILL the browser
 // and every child (renderer, GPU, utility) at once.
 
-import { spawn, execFileSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { registerProcess, killProcess } from './resources.mjs';
 
 export const WINDOW = Object.freeze({ width: 1440, height: 900 });
 
@@ -25,7 +26,7 @@ export function findChrome(env = process.env, platform = process.platform) {
   return candidates.find(path => existsSync(path)) || null;
 }
 
-export function chromeArgs({ port, profileDir, headful = false, window = WINDOW }) {
+export function chromeArgs({ port, profileDir, headful = false, window = WINDOW, fakeCamera = false }) {
   return [
     ...(headful ? [] : ['--headless=new']),
     `--remote-debugging-port=${port}`,
@@ -41,18 +42,20 @@ export function chromeArgs({ port, profileDir, headful = false, window = WINDOW 
     '--disable-extensions',
     '--disable-component-update',
     '--disable-features=Translate,MediaRouter,OptimizationHints',
+    ...(fakeCamera ? ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'] : []),
     'about:blank'
   ];
 }
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-export async function launchChrome({ bin, port, headful = false, log = () => {} }) {
+export async function launchChrome({ bin, port, headful = false, log = () => {}, fakeCamera = false }) {
   const profileDir = mkdtempSync(join(tmpdir(), 'nc-perf-chrome-'));
-  const child = spawn(bin, chromeArgs({ port, profileDir, headful }), {
+  const child = spawn(bin, chromeArgs({ port, profileDir, headful, fakeCamera }), {
     stdio: ['ignore', 'ignore', 'pipe'],
     detached: process.platform !== 'win32'
   });
+  const unregister = registerProcess(child);
   let stderr = '';
   child.stderr.on('data', chunk => { stderr = (stderr + chunk).slice(-8000); });
   let exited = null;
@@ -74,13 +77,9 @@ export async function launchChrome({ bin, port, headful = false, log = () => {} 
     stderr: () => stderr,
     exited: () => exited,
     async kill() {
+      killProcess(child);
+      unregister();
       if (!exited) {
-        try {
-          if (process.platform === 'win32') execFileSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
-          else process.kill(-child.pid, 'SIGKILL');
-        } catch {
-          try { child.kill('SIGKILL'); } catch {}
-        }
         for (let i = 0; i < 40 && !exited; i++) await sleep(25);
       }
       try { rmSync(profileDir, { recursive: true, force: true, maxRetries: 3 }); } catch {}

@@ -11,6 +11,7 @@ export default {
   id: 's2',
   title: 'Slider drags',
   fixtureGroup: 'interactive',
+  debugCounters: true,
   async run(ctx) {
     const { session } = ctx;
     await bootApp(ctx);

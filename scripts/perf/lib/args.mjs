@@ -1,11 +1,11 @@
 // Command line of `npm run bench:interactive -- …` (docs/performance-benchmark.md).
 
-export const ALL_SCENARIOS = ['s1', 's2', 's3', 's4', 's5', 's6', 's7', 's8', 's9', 'h'];
+export const ALL_SCENARIOS = ['s1', 's2', 's3', 's4', 's5', 's6', 's7', 's8', 's9', 's9-parallel', 'dust-brush', 'overlay-idle', 'loupe', 'h'];
 export const QUICK_SCENARIOS = ['s1', 's2', 's4', 's7'];
 
 const VALUE_FLAGS = new Set([
   '--ref', '--head', '--against', '--scenarios', '--fixtures', '--film-type', '--reps', '--dpr',
-  '--browser', '--roll-size', '--port', '--cdp-port', '--out', '--fixture', '--label'
+  '--browser', '--roll-size', '--export-count', '--port', '--cdp-port', '--out', '--fixture', '--label'
 ]);
 const BOOLEAN_FLAGS = new Set([
   '--quick', '--no-profile', '--no-probe', '--headful', '--allow-software-gl', '--inject-hang',
@@ -73,6 +73,8 @@ export function parseArgs(argv, env = process.env) {
   // needs 3) so the roll analysis it waits for stays short.
   const rollSize = flags['roll-size'] === undefined ? (quick ? 4 : 12) : Number(flags['roll-size']);
   if (!Number.isInteger(rollSize) || rollSize < 2) throw new UsageError('--roll-size must be an integer >= 2');
+  const exportCount = flags['export-count'] === undefined ? 3 : Number(flags['export-count']);
+  if (!Number.isInteger(exportCount) || exportCount < 1) throw new UsageError('--export-count must be a positive integer');
   if (flags['no-probe'] && scenarios.some(id => !['s1', 's2'].includes(id))) {
     throw new UsageError('--no-probe control runs cover s1 and s2 (their probe-free control.* metrics); pass --scenarios s1,s2');
   }
@@ -98,6 +100,7 @@ export function parseArgs(argv, env = process.env) {
     reps,
     dprs,
     rollSize,
+    exportCount,
     profile: !flags['no-profile'] && !quick,
     probe: !flags['no-probe'],
     headful: Boolean(flags.headful),
@@ -132,6 +135,7 @@ export const USAGE = `Usage: npm run bench:interactive -- [options]
   --against results.json  compare this run with a saved one
   --browser chrome|safari|tauri
   --roll-size N           roll scenarios (default 12)
+  --export-count N        S9 non-current files in each ZIP (default 3; #257 acceptance: 10)
   --headful               headful Chrome
   --allow-software-gl     run (and label) on SwiftShader / software GL
   --inject-hang           prepend a hang self-test (60 s busy loop) to prove the watchdog

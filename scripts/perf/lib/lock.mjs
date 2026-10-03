@@ -7,6 +7,7 @@
 // whose PID is dead is reclaimed.
 
 import { closeSync, openSync, readFileSync, statSync, unlinkSync, writeSync } from 'node:fs';
+import { cleanupResources } from './resources.mjs';
 import { hostname } from 'node:os';
 import { join } from 'node:path';
 
@@ -69,42 +70,68 @@ export function acquireLock({
   isAlive = isProcessAlive
 } = {}) {
   const record = { pid, startedAt: now().toISOString(), argv, host: hostname() };
+  const staleRecord = () => {
+    const holder = readLock(path);
+    let age = 0;
+    if (!holder) { try { age = now().getTime() - statSync(path).mtimeMs; } catch { age = Infinity; } }
+    return { holder, stale: holder ? !isAlive(holder.pid) : age > 60_000 };
+  };
   let reclaimed = null;
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      tryCreate(path, record);
-      let released = false;
-      const release = () => {
-        if (released) return;
-        released = true;
-        // Never delete a lock that another run has since taken over.
-        const current = readLock(path);
-        if (current && current.pid === pid && current.startedAt === record.startedAt) {
-          try { unlinkSync(path); } catch { /* already gone */ }
-        }
-      };
-      return { path, record, release, reclaimed };
-    } catch (error) {
-      if (error.code !== 'EEXIST') throw error;
-      const holder = readLock(path);
-      // An unreadable file older than a minute is a crash mid-write.
-      let unreadableAgeMs = 0;
-      if (!holder) { try { unreadableAgeMs = now().getTime() - statSync(path).mtimeMs; } catch { unreadableAgeMs = Infinity; } }
-      const stale = holder ? !isAlive(holder.pid) : unreadableAgeMs > 60_000;
-      if (!stale || attempt > 0) throw new LockHeldError(path, holder);
-      reclaimed = holder;
-      try { unlinkSync(path); } catch { /* a concurrent reclaimer removed it */ }
-    }
+  const held = () => {
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      const current = readLock(path);
+      if (current && current.pid === pid && current.startedAt === record.startedAt) {
+        try { unlinkSync(path); } catch { /* already gone */ }
+      }
+    };
+    return { path, record, release, reclaimed };
+  };
+  try {
+    tryCreate(path, record);
+    return held();
+  } catch (error) {
+    if (error.code !== 'EEXIST') throw error;
   }
-  throw new LockHeldError(path, readLock(path));
+  const { holder, stale } = staleRecord();
+  if (!stale) throw new LockHeldError(path, holder);
+  // Serialize reclaimers, then re-read and replace while holding the mutex.
+  // A crashed reclaim mutex fails closed instead of risking two heavy runs.
+  const reclaimPath = `${path}.reclaim`;
+  try { tryCreate(reclaimPath, record); } catch (error) {
+    if (error.code !== 'EEXIST') throw error;
+    throw new LockHeldError(path, readLock(path));
+  }
+  try {
+    const current = staleRecord();
+    if (!current.stale) throw new LockHeldError(path, current.holder);
+    reclaimed = current.holder;
+    try { unlinkSync(path); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    // An ordinary creator may win the empty-path window. Never unlink again.
+    try { tryCreate(path, record); } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      throw new LockHeldError(path, readLock(path));
+    }
+    return held();
+  } finally { unlinkSync(reclaimPath); }
 }
 
 /** Release on every way out of the process, including Ctrl-C. */
-export function releaseOnExit(lock) {
-  const release = () => lock.release();
-  process.once('exit', release);
-  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
-    process.once(signal, () => { release(); process.exit(130); });
+export function releaseOnExit(lock, { cleanup = cleanupResources } = {}) {
+  const handlers = new Map();
+  const onExit = () => { try { cleanup(); } finally { lock.release(); } };
+  const release = () => {
+    process.removeListener('exit', onExit);
+    for (const [signal, handler] of handlers) process.removeListener(signal, handler);
+    lock.release();
+  };
+  process.once('exit', onExit);
+  for (const [signal, code] of [['SIGINT', 130], ['SIGTERM', 143], ['SIGHUP', 129]]) {
+    const handler = () => { try { cleanup(); } finally { release(); process.exit(code); } };
+    handlers.set(signal, handler);
+    process.once(signal, handler);
   }
-  return lock;
+  return { ...lock, release };
 }

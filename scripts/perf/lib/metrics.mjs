@@ -41,6 +41,15 @@ export function conversionResultIndex(events) {
 
 export const SOURCE_TEXTURE_MIN_PX = 65536;
 
+export function isDisplayUpload(upload, result = null) {
+  const rgba8 = (upload.format === undefined || upload.format === 0x1908)
+    && (upload.type === undefined || upload.type === 0x1401);
+  // RGBA_INTEGER, R16UI, LUTs and mask planes are shader inputs, not a
+  // newly converted display image. Old recordings lack format/type.
+  return rgba8 && (upload.w * upload.h > SOURCE_TEXTURE_MIN_PX
+    || (result && upload.w === result.w && upload.h === result.h));
+}
+
 /**
  * New pictures on one canvas. Each carries its cause time, the conversion
  * result it shows (`res`), when its content arrived (`contentT`) and whether
@@ -93,10 +102,10 @@ export function pictures(events, canvasId = GL_CANVAS) {
     lastDrawT = event.t;
     if (sig !== undefined && sig === lastSig) continue;
     lastSig = sig;
-    const source = since.filter(upload => upload.w * upload.h >= SOURCE_TEXTURE_MIN_PX).pop() || null;
+    const source = since.filter(upload => isDisplayUpload(upload, results.get(upload.hash))).pop() || null;
     let res = null;
     for (const upload of since) {
-      const match = results.get(upload.hash);
+      const match = isDisplayUpload(upload, results.get(upload.hash)) ? results.get(upload.hash) : null;
       if (match && (!res || match.rt > res.rt)) res = match;
     }
     let matchedBy = res ? 'hash' : null;

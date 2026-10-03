@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { verifyExport, zipEntries, jpegGainMap, sniffFormat, tiffPixels } from './export-verify.mjs';
-import { encodeTiffBlob } from '../../../negative2positive/src/workers/imageEncoders.js';
+import { verifyExport, verifyDecodedExport, zipEntries, jpegGainMap, sniffFormat, tiffPixels } from './export-verify.mjs';
+import { encodePng16Blob, encodeTiffBlob } from '../../../negative2positive/src/workers/imageEncoders.js';
+import * as pako from 'pako';
 import { ZipStoreWriter } from '../../../negative2positive/src/app/zipStoreWriter.js';
 
 const UPNG = createRequire(import.meta.url)('upng-js');
@@ -25,6 +26,15 @@ const pngA = new Uint8Array(UPNG.encode([rgba8.buffer], width, height, 0));
 const pngB = new Uint8Array(UPNG.encode([rgba8.slice().buffer], width, height, 0));
 assert.equal(verifyExport(pngA).sha256, verifyExport(pngB).sha256);
 assert.ok(Number.isInteger(verifyExport(pngA).bitDepth), 'PNG bit depth is reported');
+
+// PNG16 hashes all decoded 16-bit samples, including their low bits. A zlib
+// level change affects file bytes but must leave the sample comparison equal.
+const png16A = new Uint8Array(await encodePng16Blob(rgba16, width, height, pako, { level: 1 }).arrayBuffer());
+const png16B = new Uint8Array(await encodePng16Blob(rgba16, width, height, pako, { level: 6 }).arrayBuffer());
+const png16Changed = new Uint8Array(await encodePng16Blob(changed, width, height, pako).arrayBuffer());
+assert.equal(verifyExport(png16A).bitDepth, 16);
+assert.equal(verifyExport(png16A).sha256, verifyExport(png16B).sha256);
+assert.notEqual(verifyExport(png16A).sha256, verifyExport(png16Changed).sha256);
 
 // JPEG with an MPF index: the gain map is the secondary image.
 function app2Mpf(primarySize, secondarySize) {
@@ -59,14 +69,22 @@ const chunks = [];
 const writer = new ZipStoreWriter({ write: async chunk => { chunks.push(new Uint8Array(chunk)); } }, { now: new Date('2026-09-23T00:00:00Z') });
 await writer.addBlob('a.tif', tiffBlob);
 await writer.addBlob('b.png', new Blob([pngA]));
+await writer.addBlob('c.jpg', new Blob([jpeg]));
 await writer.close();
 const zip = new Uint8Array(chunks.reduce((n, c) => n + c.length, 0));
 let at = 0; for (const c of chunks) { zip.set(c, at); at += c.length; }
 const entries = zipEntries(zip);
-assert.deepEqual(entries.map(entry => [entry.name, entry.method]), [['a.tif', 0], ['b.png', 0]]);
+assert.deepEqual(entries.map(entry => [entry.name, entry.method]), [['a.tif', 0], ['b.png', 0], ['c.jpg', 0]]);
 const zipInfo = verifyExport(zip, 'roll.zip');
 assert.equal(zipInfo.entries[0].sha256, tiffInfo.sha256, 'a ZIP entry hashes like the single export');
 assert.equal(zipInfo.entries[1].sha256, verifyExport(pngA).sha256);
+let jpegDecodes = 0;
+const decodedZip = await verifyDecodedExport(zip, 'roll.zip', async bytes => {
+  assert.deepEqual(bytes, jpeg); jpegDecodes++; return { sha256: 'page-decoded-primary', width: 5, height: 3 };
+});
+assert.equal(jpegDecodes, 1);
+assert.equal(decodedZip.entries[2].sha256, 'page-decoded-primary');
+assert.equal(decodedZip.entries[2].gainMap.sha256, gain.sha256);
 // ZIP64 records are read too.
 const chunks64 = [];
 const writer64 = new ZipStoreWriter({ write: async chunk => { chunks64.push(new Uint8Array(chunk)); } }, { forceZip64: true });

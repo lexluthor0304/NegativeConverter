@@ -10,6 +10,8 @@ assert.equal(defaults.reps, 3);
 assert.deepEqual(defaults.dprs, [1, 2]);
 assert.equal(defaults.profile, true);
 assert.equal(defaults.probe, true);
+assert.equal(defaults.exportCount, 3);
+assert.equal(parseArgs(['--scenarios', 's9', '--export-count', '10'], {}).exportCount, 10);
 assert.equal(defaults.port, 5297, 'defaults differ from the smoke test (5197 / 9224)');
 assert.equal(defaults.cdpPort, 9324);
 
@@ -38,7 +40,7 @@ assert.equal(parseArgs([], { NC_PERF_PORT: '6000' }).port, 6000);
 
 for (const bad of [['--compare', 'a'], ['--scenarios', 's10'], ['--fixtures', 'x'], ['--reps', '0'], ['--dpr', '3'],
   ['--browser', 'firefox'], ['--bogus'], ['stray'], ['--compare', 'a', 'b', '--against', 'r.json'],
-  ['--browser', 'safari', '--dpr', '1'], ['--roll-size', '1']]) {
+  ['--browser', 'safari', '--dpr', '1'], ['--roll-size', '1'], ['--export-count', '0'], ['--export-count', '1.5']]) {
   assert.throws(() => parseArgs(bad, {}), UsageError, bad.join(' '));
 }
 

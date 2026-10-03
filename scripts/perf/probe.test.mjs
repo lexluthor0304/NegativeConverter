@@ -10,7 +10,7 @@ import { dragMetrics, pictures } from './lib/metrics.mjs';
 const here = dirname(fileURLToPath(import.meta.url));
 const source = readFileSync(join(here, 'probe.js'), 'utf8');
 
-function createEnvironment() {
+function createEnvironment({ invoke } = {}) {
   const calls = { readPixels: 0, getError: 0, getImageData: 0, texImage2D: 0, drawArrays: 0 };
   // As in browsers, WebGL2RenderingContext does not inherit from WebGLRenderingContext.
   const makeGl = () => class {
@@ -71,6 +71,7 @@ function createEnvironment() {
     PerformanceObserver: FakePerformanceObserver, devicePixelRatio: 2,
     addEventListener: (type, listener, options) => { (listeners[type] ||= []).push({ listener, options }); }
   };
+  if (invoke) global.__TAURI_INTERNALS__ = { invoke };
   const bindings = {
     document, requestAnimationFrame: callback => rafQueue.push(callback),
     setInterval: (fn, ms) => { intervals.push({ fn, ms }); return intervals.length; },
@@ -119,6 +120,8 @@ const draws = drained.events.filter(event => event.k === 'gl.draw');
 assert.equal(uploads.length, 2);
 assert.equal(uploads[0].c, 'glCanvas');
 assert.equal(uploads[0].w, 1809);
+assert.equal(uploads[0].format, 0x1908);
+assert.equal(uploads[0].type, 0x1401);
 assert.equal(uploads[0].hash, probe.hash(pixels));
 assert.equal(uploads[1].ctx, 'webgl2', 'WebGL2 contexts are wrapped too');
 assert.equal(draws.length, 4);
@@ -174,6 +177,67 @@ assert.equal(drained.counters['libraw.decodes'], 1);
 assert.equal(drained.events.filter(event => event.k === 'w.new').length, 3);
 assert.equal(drained.events.filter(event => event.k === 'w.end').length, 1);
 assert.equal(drained.events.filter(event => event.k === 'w.ready').length, 1);
+
+// GPU preparation updates the recipe; cacheRecipe/reuseRecipe omits settings
+// on a later message, without changing its film type or geometry evidence.
+worker.postMessage({ type: 'prepare', id: 8, cacheInput: true,
+  settings: { filmType: 'positive', rotationAngle: 91.5, mirrored: true, cropRegion: { left: 5, top: 7, width: 80, height: 60 } } });
+worker.emit({ id: 8 });
+worker.postMessage({ type: 'convert', id: 9, cacheInput: true, reuseRecipe: true });
+worker.emit({ id: 9 });
+const reused = probe.drain().events.filter(event => event.k === 'req');
+assert.equal(reused[0].cls, 'prepare');
+assert.equal(reused[1].ft, 'positive');
+assert.equal(reused[1].geometry.rotationAngle, 91.5);
+assert.equal(reused[1].geometry.mirrored, true);
+assert.deepEqual(reused[1].geometry.cropRegion, { left: 5, top: 7, width: 80, height: 60 });
+
+// The current dust protocol is attributed even when a plane/maskDelta does
+// not carry reuseSource; removed refine messages retain their own class.
+{
+  const dust = new env.global.Worker('/assets/dustWorker.js');
+  for (const [index, type] of ['stroke', 'plane', 'maskDelta', 'refine'].entries()) {
+    const message = { type, id: index + 100, data: new Uint8Array(1024) };
+    assert.equal(dust.postMessage(message), 'posted');
+    assert.equal(dust.posted.at(-1), message, 'no payload is copied or replaced');
+    dust.emit({ id: message.id, type: `${type}Result`, patch: new Uint8Array(2048) });
+  }
+  const dustEvents = probe.drain().events;
+  const reqs = dustEvents.filter(event => event.k === 'req');
+  assert.deepEqual(reqs.map(event => event.cls), ['dust', 'dust', 'dust', 'refine']);
+  assert.deepEqual(reqs.map(event => event.fn), ['stroke', 'plane', 'maskDelta', 'refine']);
+  assert.ok(reqs.slice(0, 3).every(event => event.bytes >= 1024 && event.bytes < 1200));
+  assert.ok(dustEvents.filter(event => event.k === 'res' && event.cls === 'dust').every(event => event.bytes >= 2048));
+  const backing = new ArrayBuffer(8192);
+  dust.postMessage({ type: 'stroke', id: 199, patch: new Uint8Array(backing, 0, 16), alias: new Uint8Array(backing, 16, 32) });
+  const sliced = probe.drain().events.find(event => event.k === 'req');
+  assert.ok(sliced.bytes >= 8192 && sliced.bytes < 8400, 'the full backing buffer is counted once, not just the subarray lengths');
+  if (typeof SharedArrayBuffer === 'function') {
+    dust.postMessage({ type: 'plane', id: 200, data: new Uint8Array(new SharedArrayBuffer(4096)) });
+    const shared = probe.drain().events.find(event => event.k === 'req');
+    assert.equal(shared.sharedBytes, 4096);
+    assert.ok(shared.bytes < 100, 'a shared view never counts as a copied 4 KB plane');
+  }
+}
+
+// Native write timing follows the matching begin through finish resolution,
+// without changing return identity or recording path/capability arguments.
+{
+  let finish;
+  const nativePromise = new Promise(resolve => { finish = resolve; });
+  const native = createEnvironment({ invoke: cmd => cmd === 'begin_export_write' ? Promise.resolve('private-capability') : nativePromise });
+  const ipc = native.global.__TAURI_INTERNALS__;
+  await ipc.invoke('begin_export_write', { path: '/private/export.tif' });
+  assert.equal(ipc.invoke('finish_export_write', { id: 'private-capability' }), nativePromise);
+  finish({ bytes: 80 });
+  await nativePromise; await Promise.resolve();
+  const events = native.global.__ncPerf.drain().events;
+  const begin = events.find(event => event.k === 'invoke' && event.cmd === 'begin_export_write');
+  const end = events.find(event => event.k === 'invoke.end' && event.cmd === 'finish_export_write');
+  assert.equal(end.writeStart, begin.t);
+  assert.ok(end.t >= end.writeStart);
+  assert.doesNotMatch(JSON.stringify(events), /private-capability|private\/export/);
+}
 
 // ---- file reads ----
 const file = new env.global.File([new Uint8Array(10)], 'L1000617.DNG');
@@ -259,7 +323,7 @@ assert.ok(probe.selfMs() >= 0);
       w.emit({ type: 'result', id: value, width: 64, height: 64, rgba: frame(value).buffer });
       clock += 1;
       ctx.bindTexture(0x0DE1, {});
-      ctx.texImage2D(0x0DE1, 0, 0, 64, 64, 0, 0, 0, frame(value));
+      ctx.texImage2D(0x0DE1, 0, 0x1908, 64, 64, 0, 0x1908, 0x1401, frame(value));
       clock += 2;
       ctx.drawArrays(5, 0, 4);
     }

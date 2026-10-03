@@ -9,15 +9,20 @@ import s5 from './s5-geometry.mjs';
 import s6 from './s6-roll.mjs';
 import s7 from './s7-navigation.mjs';
 import s8 from './s8-lighttable.mjs';
-import s9 from './s9-export.mjs';
+import s9, { s9Parallel } from './s9-export.mjs';
+import dustBrush from './dust-brush.mjs';
+import overlayIdle from './overlay-idle.mjs';
+import loupe from './loupe.mjs';
 import h from './h-hang.mjs';
 import selftestHang from './selftest-hang.mjs';
 
-export const SCENARIOS = Object.freeze({ s1, s2, s3, s4, s5, s6, s7, s8, s9, h, 'selftest-hang': selftestHang });
+export const SCENARIOS = Object.freeze({ s1, s2, s3, s4, s5, s6, s7, s8, s9, 's9-parallel': s9Parallel,
+  'dust-brush': dustBrush, 'overlay-idle': overlayIdle, loupe, h, 'selftest-hang': selftestHang });
 
 /** Scenario objects in run order; the hang self-test first when asked for. */
 export function selectScenarios(ids, { injectHang = false } = {}) {
-  const list = ids.map(id => {
+  const expanded = [...new Set(ids.flatMap(id => id === 's9' ? ['s9', 's9-parallel'] : [id]))];
+  const list = expanded.map(id => {
     const scenario = SCENARIOS[id];
     if (!scenario) throw new Error(`unknown scenario ${id}`);
     return scenario;

@@ -20,20 +20,22 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync }
 import { loadavg, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WebDriverSession, startSafariDriver, KEY } from './webdriver.mjs';
-import { FootprintReader, MemorySampler, findWebKitProcesses } from './memory.mjs';
+import { FootprintReader, MemorySampler, listProcesses, webkitProcessScope } from './memory.mjs';
 import {
   byKind, dragMetrics, importMetrics, switchMetrics, zoomStepMetrics, panMetrics, busyFromTimerTicks, timerGapSummary,
   rafGapSummary, eventTimingP95, settledAt
 } from './metrics.mjs';
 import { summarizeRepetitions, median, round } from './stats.mjs';
 import { compareRuns, collectRunSummaries, renderCompareMarkdown } from './compare.mjs';
-import { readSwapUsage, readPowerConditions } from './guards.mjs';
+import { readSwapUsage, readPowerConditions, evaluateRunGuards, memoryCeilingBytes, freeDiskBytes } from './guards.mjs';
+import { registerProcess, killProcess } from './resources.mjs';
 import { git } from './worktree.mjs';
 import { S2_SLIDERS } from '../scenarios/s2-sliders.mjs';
+import { SINGLE_EXPORTS, ZIP_EXPORTS, PARALLEL_EXPORTS, exportStageMetrics } from '../scenarios/s9-export.mjs';
 
 import { sleep } from '../scenarios/common.mjs';
 
-export const WEBKIT_SCENARIOS = { safari: ['s1', 's2', 's4', 's7'], tauri: ['s1', 's2', 's7'] };
+export const WEBKIT_SCENARIOS = { safari: ['s1', 's2', 's4', 's7'], tauri: ['s1', 's2', 's7', 's9', 's9-parallel'] };
 
 const REVEAL = `
   const element = document.getElementById(arguments[0]);
@@ -58,9 +60,14 @@ export function webkitWindowMetrics(window) {
 }
 
 /** Metrics of a self-driven (Tauri) report, keyed like the Chrome scenarios. */
-export function metricsFromSelfDriven(report) {
+export function metricsFromSelfDriven(report, { record } = {}) {
   const metrics = {};
-  const put = (key, value) => { if (value !== null && value !== undefined && !(typeof value === 'number' && !Number.isFinite(value))) metrics[key] = value; };
+  const put = (key, value) => {
+    if (value !== null && value !== undefined && !(typeof value === 'number' && !Number.isFinite(value))) {
+      metrics[key] = value;
+      if (!key.includes('#')) record?.(key, value);
+    }
+  };
   const scenario = report.scenario;
   for (const part of report.parts || []) {
     const events = (part.events || []).slice().sort((a, b) => a.t - b.t);
@@ -77,6 +84,14 @@ export function metricsFromSelfDriven(report) {
     } else if (part.name.startsWith('switch:')) {
       const m = switchMetrics(events, { keyT: part.keyT, target: part.target, until: Infinity });
       for (const key of ['firstPixelsMs', 'firstDisplayPositiveMs', 'readyMs', 'librawDecodes']) put(`s7.${part.cls}.${key}#${part.index}`, m[key]);
+    } else if (part.name.startsWith('export:')) {
+      const prefix = `s9.${part.spec.id}`;
+      const stages = exportStageMetrics(events, { start: part.start, end: window.end, spec: part.spec });
+      for (const [key, value] of Object.entries({ ...stages, ...webkitWindowMetrics(window) })) put(`${prefix}.${key}`, value);
+      if (!Number.isFinite(stages.desktopWriteMs)) throw new Error(`${prefix}: no completed native export write`);
+      if (part.spec.lanes && (stages.lanes === undefined || (part.spec.lanes === 1 ? stages.lanes !== 1 : stages.lanes < part.spec.lanes))) {
+        throw new Error(`${prefix}: requested batch lane coverage was not measured`);
+      }
     }
   }
   // Several samples of one switch class: the median, like the Chrome S7.
@@ -87,25 +102,67 @@ export function metricsFromSelfDriven(report) {
     (grouped[key.slice(0, at)] ||= []).push(value);
     delete metrics[key];
   }
-  for (const [key, values] of Object.entries(grouped)) metrics[key] = round(median(values));
+  for (const [key, values] of Object.entries(grouped)) put(key, round(median(values)));
   return metrics;
 }
 
-async function webkitMemory(label) {
-  const reader = new FootprintReader();
+export async function webkitMemory({ label, port, outDir, args, swapAtStart, freeDiskAtStart, onAbort,
+  reader = new FootprintReader(), list = listProcesses, connected, readSwap = readSwapUsage, readDisk = freeDiskBytes,
+  ceilingBytes = memoryCeilingBytes(), start = true }) {
+  const scope = webkitProcessScope({ before: await list(), port, list, connected });
   await reader.start();
+  let verdict = null, pids = {}, ownedProcess = null, stopped = false;
+  const registrations = new Map();
+  const abort = async reason => {
+    if (verdict) return;
+    verdict = reason;
+    // WebContent may be an XPC service outside the driver's process group.
+    for (const pid of [...(pids.renderer || []), ...(pids.gpu || [])]) {
+      try { process.kill(pid, 'SIGKILL'); } catch {}
+    }
+    if (ownedProcess) killProcess(ownedProcess);
+    await onAbort?.(reason);
+  };
   const sampler = new MemorySampler({
     reader,
     resolvePids: async () => {
-      const found = await findWebKitProcesses();
-      return { renderer: found.webContent, gpu: found.gpu, other: found.networking };
+      if (stopped) return { renderer: [], gpu: [], other: [] };
+      try {
+        pids = await scope.resolve();
+        if (stopped) return { renderer: [], gpu: [], other: [] };
+        const current = new Set([...pids.renderer, ...pids.gpu]);
+        for (const [pid, unregister] of registrations) if (!current.has(pid)) { unregister(); registrations.delete(pid); }
+        for (const pid of [...pids.renderer, ...pids.gpu]) {
+          if (!registrations.has(pid)) registrations.set(pid, registerProcess({ pid }, { detached: false }));
+        }
+        return pids;
+      } catch (error) {
+        await abort({ reason: 'error', detail: error.message });
+        return { renderer: [], gpu: [], other: [] };
+      }
+    },
+    onSample: async sample => {
+      if (stopped) return;
+      const reason = evaluateRunGuards({ browserBytes: sample.totalBytes, ceilingBytes,
+        swapUsed: (await readSwap()).used, swapUsedAtStart: swapAtStart,
+        freeDisk: readDisk(outDir), force: args.force, freeDiskAtStart });
+      if (reason) await abort(reason);
     }
   });
-  sampler.start();
+  if (start) sampler.start();
   return {
     summary: () => sampler.summary(),
-    stop: () => { sampler.stop(); reader.stop(); },
-    label
+    stop: () => {
+      stopped = true;
+      sampler.stop(); reader.stop();
+      for (const [pid, unregister] of registrations) { killProcess({ pid }, { detached: false }); unregister(); }
+      registrations.clear();
+    },
+    assertScope: () => scope.assert(),
+    processIds: () => pids,
+    bindProcess: child => { ownedProcess = child; },
+    get verdict() { return verdict; },
+    sampler, label
   };
 }
 
@@ -122,9 +179,8 @@ function watchHeartbeats(resultsDir, onSilence) {
   return () => clearInterval(timer);
 }
 
-async function sampleWebContent(outDir, label) {
-  const { webContent } = await findWebKitProcesses();
-  return Promise.all(webContent.map(pid => new Promise(resolve => {
+async function sampleWebContent(outDir, label, pids) {
+  return Promise.all((pids.renderer || []).map(pid => new Promise(resolve => {
     const file = join(outDir, `hang-${label}-sample-${pid}.txt`);
     execFile('sample', [String(pid), '3', '-file', file], { timeout: 30_000 }, error => resolve(error ? { pid, error: error.message } : { pid, file }));
   })));
@@ -294,17 +350,22 @@ export async function safariScenario(id, { wd, origin, fixture, roll, record, no
 
 // ---- Tauri ----
 
-export function tauriDevArgs({ port, scenario, fixtures, sliders = S2_SLIDERS }) {
-  const url = `http://127.0.0.1:${port}/?lang=en&perf=1&scenario=${scenario}&fixtures=${encodeURIComponent(fixtures.join(','))}&sliders=${sliders.join(',')}`;
+export function tauriDevArgs({ port, scenario, fixtures, sliders = S2_SLIDERS, exports = [] }) {
+  const url = `http://127.0.0.1:${port}/?lang=en&perf=1&scenario=${scenario}&fixtures=${encodeURIComponent(fixtures.join(','))}&sliders=${sliders.join(',')}&exports=${encodeURIComponent(JSON.stringify(exports))}`;
   return ['dev', '--release', '--no-watch', '--config', JSON.stringify({ build: { beforeDevCommand: '', devUrl: url } })];
 }
 
-async function tauriScenario(id, { ref, fixtureNames, record, note, log, outDir, label }) {
+async function tauriScenario(id, { ref, fixtureNames, record, note, log, outDir, label, memory }) {
   const bin = join(ref.worktree.path, 'node_modules', '.bin', process.platform === 'win32' ? 'tauri.cmd' : 'tauri');
   const before = new Set(existsSync(ref.resultsDir) ? readdirSync(ref.resultsDir) : []);
-  const child = spawn(bin, tauriDevArgs({ port: ref.port, scenario: id, fixtures: fixtureNames }), {
+  const exports = id === 's9-parallel' ? PARALLEL_EXPORTS.map(spec => ({ ...spec, id: `zip.${spec.id}`, zip: true }))
+    : id === 's9' ? [...SINGLE_EXPORTS.map(spec => ({ ...spec, id: `single.${spec.id}.imported` })),
+      ...ZIP_EXPORTS.map(spec => ({ ...spec, id: `zip.${spec.id}`, zip: true }))] : [];
+  const child = spawn(bin, tauriDevArgs({ port: ref.port, scenario: id, fixtures: fixtureNames, exports }), {
     cwd: ref.worktree.path, stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32', env: process.env
   });
+  const unregister = registerProcess(child);
+  memory.bindProcess(child);
   let output = '';
   child.stdout.on('data', chunk => { output = (output + chunk).slice(-8000); });
   child.stderr.on('data', chunk => { output = (output + chunk).slice(-8000); });
@@ -312,17 +373,18 @@ async function tauriScenario(id, { ref, fixtureNames, record, note, log, outDir,
   child.once('exit', code => { exited = code; });
   const stopHeartbeats = watchHeartbeats(ref.resultsDir, async beat => {
     note(`main thread silent ${Math.round(beat.gapMs / 1000)} s; sampling WebContent`);
-    const samples = await sampleWebContent(outDir, label);
+    const samples = await sampleWebContent(outDir, `${label}-${Date.now()}`, memory.processIds());
     note(`samples: ${samples.map(sample => sample.file || sample.error).join(', ')}`);
   });
   try {
     const deadline = Date.now() + 90 * 60 * 1000; // includes the first cargo build
     while (Date.now() < deadline && exited === null) {
+      if (memory.verdict) throw new Error(memory.verdict.detail);
       const fresh = (existsSync(ref.resultsDir) ? readdirSync(ref.resultsDir) : []).filter(file => file.startsWith('result-') && !before.has(file));
       if (fresh.length) {
         const report = JSON.parse(readFileSync(join(ref.resultsDir, fresh.sort().at(-1)), 'utf8'));
-        if (report.error) note(`self-drive: ${report.error}`);
-        for (const [key, value] of Object.entries(metricsFromSelfDriven(report))) record(key, value);
+        metricsFromSelfDriven(report, { record });
+        if (report.error) throw new Error(`self-drive: ${report.error}`);
         record(`${id}.inputMode`, 'synthetic');
         return report;
       }
@@ -334,20 +396,23 @@ async function tauriScenario(id, { ref, fixtureNames, record, note, log, outDir,
     try { process.kill(process.platform === 'win32' ? child.pid : -child.pid, 'SIGTERM'); } catch {}
     await sleep(1000);
     try { process.kill(process.platform === 'win32' ? child.pid : -child.pid, 'SIGKILL'); } catch {}
+    unregister();
     log(`${label}: tauri dev stopped`);
   }
 }
 
-export async function runWebKit({ args, repo, outBase, noisy, log, prepareRef, prepareFixtures, writeOutputs, fixtureConditions }) {
+export async function runWebKit({ args, repo, outBase, noisy, log, prepareRef, prepareFixtures, writeOutputs, fixtureConditions, freeDiskAtStart }) {
   if (process.platform !== 'darwin') throw new Error(`--browser ${args.browser} needs macOS (WKWebView)`);
-  const ids = args.scenarios.filter(id => WEBKIT_SCENARIOS[args.browser].includes(id));
+  const ids = [...new Set(args.scenarios.flatMap(id => id === 's9' ? ['s9', 's9-parallel'] : [id]))]
+    .filter(id => WEBKIT_SCENARIOS[args.browser].includes(id));
   if (!ids.length) { console.error(`--browser ${args.browser} runs ${WEBKIT_SCENARIOS[args.browser].join(', ')}`); return 2; }
   const headSha = (await git(repo, ['rev-parse', 'HEAD'])).slice(0, 12);
   const outDir = join(outBase, `${new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z')}-${headSha}-${args.browser}`);
   mkdirSync(outDir, { recursive: true });
   const tmpRoot = mkdtempSync(join(tmpdir(), 'nc-perf-webkit-'));
   const { findChrome } = await import('./chrome.mjs');
-  const scenarios = ids.map(id => ({ id, fixtureGroup: id === 's7' ? 'roll' : id === 's1' ? 'singles' : 'interactive' }));
+  const scenarios = ids.map(id => ({ id, fixtureGroup: id === 's9-parallel' ? 'export-parallel' : id === 's9' ? 'export'
+    : id === 's7' ? 'roll' : id === 's1' ? 'singles' : 'interactive' }));
   const groups = await prepareFixtures({ args, scenarios, repo, chromeBin: findChrome() });
   const fixtureMap = Object.fromEntries(Object.values(groups).flat().filter(Boolean).map(entry => [entry.name, entry.path]));
   const refSpecs = args.mode === 'compare'
@@ -369,10 +434,16 @@ export async function runWebKit({ args, repo, outBase, noisy, log, prepareRef, p
     if (args.browser === 'safari') driver = await startSafariDriver({ port: args.cdpPort + 20, log });
     for (const ref of refs) results.runs.push({ label: ref.label, ref: ref.ref, sha: ref.sha, dirty: ref.dirty, browser: args.browser, scenarios: {} });
     for (const scenario of scenarios) {
-      const list = scenario.fixtureGroup === 'roll' ? [null] : groups[scenario.fixtureGroup];
+      const grouped = scenario.fixtureGroup === 'roll' || scenario.fixtureGroup.startsWith('export');
+      const list = grouped ? [null] : groups[scenario.fixtureGroup];
       for (const run of results.runs) run.scenarios[scenario.id] = { title: scenario.id, status: 'ok', fixtures: {} };
+      if (!groups[scenario.fixtureGroup]?.length) {
+        for (const run of results.runs) Object.assign(run.scenarios[scenario.id], { status: 'skipped', detail: `no ${scenario.fixtureGroup} fixtures` });
+        exitCode = 1;
+        continue;
+      }
       for (const fixture of list) {
-        const fixtureName = fixture ? fixture.name : `roll (${groups.roll.length} files)`;
+        const fixtureName = fixture ? fixture.name : `${scenario.fixtureGroup} (${groups[scenario.fixtureGroup].length} files)`;
         const repsByRef = new Map(refs.map(ref => [ref.label, []]));
         for (let rep = 0; rep < args.reps; rep++) {
           for (const ref of refs) {
@@ -380,7 +451,8 @@ export async function runWebKit({ args, repo, outBase, noisy, log, prepareRef, p
             const result = { label, status: 'ok', metrics: {}, notes: [] };
             const record = (key, value) => { if (value !== null && value !== undefined && !(typeof value === 'number' && !Number.isFinite(value))) result.metrics[key] = value; };
             const note = text => { result.notes.push(text); log(`${label}: ${text}`); };
-            const memory = await webkitMemory(label);
+            const memory = await webkitMemory({ label, port: ref.port, outDir, args, swapAtStart: swapStart, freeDiskAtStart,
+              onAbort: verdict => { result.status = verdict.reason; result.detail = verdict.detail; driver?.stop(); } });
             log(`${label}`);
             try {
               if (args.browser === 'safari') {
@@ -388,7 +460,7 @@ export async function runWebKit({ args, repo, outBase, noisy, log, prepareRef, p
                 const stopHeartbeats = watchHeartbeats(ref.resultsDir, async beat => {
                   note(`main thread silent ${Math.round(beat.gapMs / 1000)} s; sampling WebContent`);
                   result.status = 'hang';
-                  results.hangs.push({ label, info: { silentMs: beat.gapMs }, file: (await sampleWebContent(outDir, label)).map(sample => sample.file).join(', ') });
+                  results.hangs.push({ label, info: { silentMs: beat.gapMs }, file: (await sampleWebContent(outDir, `${label}-${Date.now()}`, memory.processIds())).map(sample => sample.file).join(', ') });
                 });
                 try {
                   await wd.setWindowRect({ width: 1440, height: 900, x: 0, y: 0 });
@@ -398,9 +470,11 @@ export async function runWebKit({ args, repo, outBase, noisy, log, prepareRef, p
                   await wd.close();
                 }
               } else {
-                const names = fixture ? [fixture.name] : groups.roll.map(entry => entry.name);
-                await tauriScenario(scenario.id, { ref, fixtureNames: names, record, note, log, outDir, label });
+                const names = fixture ? [fixture.name] : groups[scenario.fixtureGroup].map(entry => entry.name);
+                await tauriScenario(scenario.id, { ref, fixtureNames: names, record, note, log, outDir, label, memory });
               }
+              memory.assertScope();
+              if (memory.verdict) throw new Error(memory.verdict.detail);
             } catch (error) {
               result.status = result.status === 'ok' ? 'error' : result.status;
               result.detail = String(error.message || error);
@@ -412,7 +486,6 @@ export async function runWebKit({ args, repo, outBase, noisy, log, prepareRef, p
                 record(`${scenario.id}.memory.webContentPeakMB`, summary.rendererPeakMB);
                 record(`${scenario.id}.memory.webContentLifetimePeakMB`, summary.rendererLifetimePeakMB);
                 record(`${scenario.id}.memory.webkitGpuPeakMB`, summary.gpuPeakMB);
-                record(`${scenario.id}.memory.rendererPeakMB`, summary.rendererPeakMB);
               }
               record(`${scenario.id}.fixtureImport`, 'memory-backed File via /__perf/fixtures (adds the file size to WebContent)');
             }
@@ -423,11 +496,14 @@ export async function runWebKit({ args, repo, outBase, noisy, log, prepareRef, p
           const reps = repsByRef.get(run.label);
           run.scenarios[scenario.id].fixtures[fixtureName] = {
             fixture: { name: fixtureName },
-            summary: summarizeRepetitions(reps.filter(rep => rep.status === 'ok').map(rep => rep.metrics)),
+            summary: summarizeRepetitions(reps.map(rep => rep.metrics)),
             notes: reps.flatMap(rep => rep.notes.map(text => `${rep.label}: ${text}`)),
             reps: reps.map(rep => ({ label: rep.label, status: rep.status, detail: rep.detail }))
           };
-          if (reps.some(rep => rep.status !== 'ok')) run.scenarios[scenario.id].status = reps.find(rep => rep.status !== 'ok').status;
+          if (reps.some(rep => rep.status !== 'ok')) {
+            run.scenarios[scenario.id].status = reps.find(rep => rep.status !== 'ok').status;
+            if (args.mode !== 'compare' || run.label === 'head') exitCode = 1;
+          }
         }
         writeOutputs(outDir, results, refs, { args, collector, loadStart, swapStart, power, noisy });
       }
@@ -442,7 +518,7 @@ export async function runWebKit({ args, repo, outBase, noisy, log, prepareRef, p
       compare.headLabel = saved ? after.sha?.slice(0, 7) : args.compare[1];
       results.compare = compare;
       console.log(`\n${renderCompareMarkdown(compare, { baseLabel: compare.baseLabel, headLabel: compare.headLabel })}\n`);
-      exitCode = compare.exitCode;
+      exitCode = Math.max(exitCode, compare.exitCode);
     }
     results.finishedAt = new Date().toISOString();
     writeOutputs(outDir, results, refs, { args, collector, loadStart, swapStart, swapEnd: (await readSwapUsage()).used, power, noisy });
