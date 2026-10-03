@@ -59,6 +59,7 @@ function hiddenWindow(f, { budgetBytes = 1e15, itemBytes = 0, park = false } = {
     activeLongJobs: 0, automaticRollAnalysisRunning: false, hiddenJobSeen: false, parkedPhoto: null, parkingPhoto: false, manualEditRevision: 0,
     dustHistoryArchive: createDustHistoryArchive({ indexedDB: archiveDatabaseFixture().indexedDB }),
     repairStamps: { recipeOf: () => null }, clearRepairedPreview() {}, previewRepairWorker: { dispose() {} },
+    convertPreviewFrameInWorker: { dispose() {} },
     dustRefreshRepairMask: null, dustTint: {}, displayOverlayState: {}, unpinDustWorker() {}, disposeDustWorker() {}, noteDustReplaced() {},
     undoStack: [], redoStack: [], settledAdjustedBuffer: null, previewAdjustedBuffer: null, workerResidents: new Map(),
     exportWorkerPendingCount: () => 0,

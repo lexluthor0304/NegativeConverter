@@ -11395,6 +11395,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       releaseGlBorder();
       unpinDustWorker();
       disposeDustWorker();
+      // Its cached source, analysis and private worker planes are no longer
+      // needed by this settled, archived photo. Respawn on the next preview.
+      convertPreviewFrameInWorker.dispose();
       // The GPU preview's copy of the photo (#239) goes too; it is prepared again
       // with the next exact frame.
       gpuPreview.prepared = null;
