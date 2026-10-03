@@ -20809,6 +20809,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
     function adoptFrameExpiredAnalysis(item, settings, options) {
       if (!item?.settings || !settings.expiredAnalysis || options.updateItemSettings === false) return;
+      // Contact sheets and reduced previews cannot install a measurement for
+      // later full-resolution exports.
+      if (options.tileMaxDimension || options.previewMaxDimension || options.halfSizeDecode) return;
       if (!state.fileQueue.includes(item)) return;
       const current = cloneSettings(item.settings);
       const measured = cloneSettings(settings);
