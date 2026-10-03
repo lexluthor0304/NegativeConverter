@@ -220,8 +220,9 @@ quiet.
   plus the user's window edits. A photo without a recipe keeps only those
   edits as `item.pendingEdits`. Switch-back (`prepareStudioPhoto`), batch
   export (`processFileWithSettings`), roll analysis, Auto Frame Selected and
-  the flat field compute the automatic fields as for a fresh file. They apply
-  the user's geometry before the detections and the other edits on top.
+  the flat field compute the automatic fields as for a fresh file. Geometry
+  without an analysis edit is applied before detections; a crop/confirmation
+  first rebuilds the full decode's diagnostics, then replays the user intent.
   That fresh recipe decides as the window's pass began: leaving records the
   pass's `userEdited` as `item.pendingUserEdited`, which `importUserEdited`
   hands to the recipe's learned-default and film-type steps until the photo
@@ -229,11 +230,14 @@ quiet.
   (`item.userEdited` stays set): the automatic roll import leaves it alone,
   as after one decode, and never builds it a recipe without its pending
   edits; the roll's decisions for other frames treat it as edited.
-  `photoSettingsKey` includes the edits of a photo without a recipe. An
-  image area confirmed in the window is one of those edits. With a geometry
-  or analysis-area edit, the window's `autoFrameMeta` is kept as the window
-  had it, the stand-in's auto-frame result and crop-area detection included:
-  no full decode is left to replay them on (audit backlog). The photo's tile
+  `photoSettingsKey` includes the edits of a photo without a recipe. A
+  geometry/analysis edit also stores `item.pendingFrameEdit`: the confirmed
+  area, crop-analysis intent and any existing full-base recipe. Stand-in
+  `autoFrameMeta` is discarded. Reopening, Export All and the full-decode
+  settle replay that intent on the full base; crops run crop-area detection
+  again before conversion, while confirmed areas keep their normalized
+  coordinates (R2-052). Pending geometry cannot suppress that full-base
+  analysis. The photo's tile
   keeps the stand-in's render without its settings key, so the lane renders
   the photo again.
 
@@ -246,6 +250,13 @@ quiet.
   few pixels, and the film base and WB slightly. The settled view is exact.
 
 ## Tests
+
+The targeted `TWO_STAGE_SCENES=crop-leave` browser scene holds stage 2,
+confirms an area, crops, requires the stand-in detector to hit, then leaves
+before full installation. Export All's decoded samples (including 16-bit
+PNG/TIFF and linear DNG) must match the same edits after a single decode.
+Node regressions exercise full-base replay after early leaving for fresh and
+previously configured photos, hits, misses and manual confirmations.
 
 - `imageDimensions.plan.test.mjs`: the plan on synthetic headers (CFA ≥ / <
   40 MP, LinearRaw, iPhone, `.tif`, unreadable above and below 100 MiB, the

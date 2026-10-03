@@ -42,7 +42,7 @@
 //   its stand-in is persisted, and an export then decodes again (#255 review
 //   R2-033).
 //
-// TWO_STAGE_SCENES (comma-separated: settle, during, crop, failure, leave,
+// TWO_STAGE_SCENES (comma-separated: settle, during, crop, crop-leave, failure, leave,
 // roll, adopt, failure-lanes) runs only those scenes.
 //
 // Opt-in, real files (never in the repo): TWO_STAGE_PARITY_FILES=/abs/a.DNG:/abs/b.dng
@@ -501,6 +501,56 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
       }
       same(`${label}: automaticDefaults after Export All`, await automaticDefaults(), reference.allDefaults);
       console.log(`ok: ${label}: leaving before stage 2 aborts it, and Export All matches the single decodes`);
+    }
+
+    // R2-052: the stand-in's crop detector hits, then the photo is left
+    // before the full base installs. Export All must replay the same edits
+    // and measure the image window on the full base, as one decode does.
+    if (runs('crop-leave')) {
+      const cropMode = `document.getElementById('canvasContainer').classList.contains('crop-mode')`;
+      const flow = async (held, cropRecipe = null) => {
+        const scene = `${label} crop then leave, ${held ? 'two stages' : 'one stage'}`;
+        await boot(held ? two : one, { holdSemantic: true });
+        await evaluate(`(() => { const el = document.getElementById('studioImportAutoCrop'); if (el.checked) el.click(); })()`);
+        if (held) await evaluate('window.__ncTwoStage.holdFullDecodes()');
+        await importFiles([a, b]);
+        await waitFor(scene + ': first photo', `${ready} && ${filename(nameA)} && ${held ? `${status}.pending` : exact}`, 150_000);
+        const base = (await evaluate(status)).base;
+        const scale = held ? base.scale : 1;
+        const confirm = cropRecipe?.confirm || {
+          left: 0, top: 0, width: Math.floor(base.width * 0.35) / scale, height: Math.floor(base.height * 0.35) / scale
+        };
+        const crop = cropRecipe?.crop || {
+          left: 0, top: 0, width: (base.width - 2) / scale, height: (base.height - 2) / scale
+        };
+        const project = rect => Object.fromEntries(Object.entries(rect).map(([key, value]) => [key, value * scale + (key === 'width' || key === 'height' ? 0.01 : 0)]));
+        for (const [analysisOnly, rect] of [[true, confirm], [false, crop]]) {
+          await evaluate(`document.getElementById('studioTab-composition').click(); document.getElementById('${analysisOnly ? 'studioConfirmAnalysis' : 'cropBtn'}').click()`);
+          await waitFor(scene + ': crop mode', cropMode, 30_000);
+          await wait(300);
+          await evaluate(`window.__ncAnalysis.setDraftRect(${JSON.stringify(project(rect))}); document.getElementById('applyCropBtn').click()`);
+          await waitFor(scene + ': crop applied', `${ready} && !${cropMode} && !window.__ncAnalysis.converting()`, 120_000);
+          await evaluate('window.__ncAnalysis.settle()');
+        }
+        const diagnostics = await evaluate('window.__ncAnalysis.diagnostics()');
+        if (diagnostics?.method !== 'manual-image-window' || diagnostics.analysisNeedsReview) fail(scene + ': the crop detector must hit: ' + JSON.stringify(diagnostics));
+        if (held && !(await evaluate(`${status}.pending && !${status}.swapped`))) fail(scene + ': stage 2 installed before leaving');
+        const geometry = (await evaluate(status)).settings;
+        const abandoned = await evaluate('window.__ncTwoStage.diagnostics.abandoned');
+        await clickStrip(nameB);
+        await waitFor(scene + ': left cropped photo', `${filename(nameB)}${held ? ` && window.__ncTwoStage.diagnostics.abandoned > ${abandoned}` : ''}`, 60_000);
+        if (held) await evaluate('window.__ncTwoStage.releaseFullDecodes()');
+        await evaluate(releaseSemantic);
+        await waitFor(scene + ': second photo exact', `${ready} && ${filename(nameB)} && ${exact} && ${lanesReady}`, 150_000);
+        await settledRecipe();
+        const all = await exportAllFormats(2, scene);
+        return { all, geometry: { cropRegion: geometry.cropRegion, rotationAngle: geometry.rotationAngle, mirrored: geometry.mirrored }, recipe: { confirm, crop } };
+      };
+      const staged = await flow(true);
+      const single = await flow(false, staged.recipe);
+      same(label + ': crop geometry before leaving', staged.geometry, single.geometry);
+      for (const format of Object.keys(single.all)) sameExports(`${label}: crop then leave Export All ${format}`, staged.all[format], single.all[format]);
+      console.log(`ok: ${label}: crop-hit then leave before stage 2 exports one stage's decoded samples in every format`);
     }
 
     // 6. Analyze roll during stage 2 (#255 review R2-029): the stand-in gets an

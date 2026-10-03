@@ -50,7 +50,7 @@ import {
   geometryEdits, hasWindowEdits, analysisAreaEdited, confirmedImageArea
 } from './provisionalPhoto.js';
 import { imageAreaFromWorkingRect, imageAreaFromDetection, resolveAnalysisRegion } from './analysisRegion.js';
-import { isSameAnalysisFrame } from './cropColorAnalysis.js';
+import { isSameAnalysisFrame, workingPointsToBase, buildCropDetectionInput } from './cropColorAnalysis.js';
 import { rotatedDimensions, sanitizeCropRect, normalizeAngleDegrees } from './imageGeometry.js';
 import { mergeStudioColors } from './studioSettings.js';
 import { MEMORY_FUNCTIONS, memoryGlobals } from './memoryHarness.mjs';
@@ -141,7 +141,7 @@ function fixture({ search = '?twoStageMinMp=40&twoStageMode=sequential', settled
     createPerfTrace: () => ({ mark() {}, end() {} }),
     rawDecodePlan, twoStageMinPixels, stageTwoStartMode, createExactGeometry, windowEdits, overlayWindowEdits,
     geometryEdits, hasWindowEdits, TWO_STAGE_MIN_MP_DEFAULT, mergeStudioColors, rotatedDimensions, normalizeAngleDegrees,
-    analysisAreaEdited, confirmedImageArea, imageAreaFromWorkingRect, isSameAnalysisFrame,
+    analysisAreaEdited, confirmedImageArea, imageAreaFromWorkingRect, isSameAnalysisFrame, workingPointsToBase, buildCropDetectionInput,
     BACKGROUND_INPUT_QUIET_MS: 400, BACKGROUND_BUSY_POLL_MS: 250,
     backgroundGate: { lastInputAt: -Infinity, bump() {} },
     coreReprocessBusy: () => false, hasPendingCropDetection: () => false, settlePendingCropDetection: async () => {},
@@ -218,7 +218,8 @@ function fixture({ search = '?twoStageMinMp=40&twoStageMode=sequential', settled
     'createFullDecode', 'beginFullDecodeAttempt', 'noteFullDecodeChange', 'nextFullDecodeChange', 'failFullDecode', 'reportFullDecodeFailure',
     'retryFullDecode', 'beginProvisionalPhoto', 'abandonFullDecode', 'currentPhotoExact', 'ensureFullDecode',
     'ensureFullDecodeWithNotice', 'whenCropModeClosed', 'startProvisionalSettle', 'waitForProvisionalSwap',
-    'settledImportSettings', 'rebaseProvisionalHistory', 'windowFrameMetaOnFull', 'appliedCropDiagnostics', 'geometryFrameSize',
+    'settledImportSettings', 'rebaseProvisionalHistory', 'windowFrameMetaOnFull', 'windowFrameIntent', 'frameMetaWithWindowIntent',
+    'resolvePendingFrameEdits', 'appliedCropDiagnostics', 'geometryFrameSize',
     'effectiveGeometryAngle', 'installFullDecode', 'settleProvisionalPhoto',
     'leaveProvisionalPhoto', 'withPendingEdits', 'pendingGeometryEdits', 'extractCurrentSettings', 'restoreSettings',
     'persistCurrentFileSettings', 'canReuseLoadedRollSource', 'studioBackgroundReady', 'rememberPhotoBase',
@@ -1289,6 +1290,58 @@ const double = r => ({ left: r.left * 2, top: r.top * 2, width: r.width * 2, hei
   assert.equal(canon(restored.f.state.autoFrame.lastDiagnostics), canon(reference.state.autoFrame.lastDiagnostics), 'Restore full frame in the window: one decode\'s diagnostics');
   const control = await windowFlow(rotate, { control: g => { g.target.windowFrameMetaOnFull = (_settled, merged) => ({ meta: merged.autoFrameMeta, detect: false }); } });
   assert.equal(control.f.state.autoFrame.lastDiagnostics.confidence, 0.88, 'control: the stand-in\'s auto-frame result');
+}
+
+// Crop / confirmation followed by leaving while stage 2 is held (R2-052).
+// Export All's real processFileWithSettings recomputes full-base diagnostics,
+// even after the stand-in's detector hit. The import metadata fixtures above
+// allocate four bytes; the detector input here is only 80 x 56 pixels.
+for (const operation of ['crop-hit', 'crop-miss', 'confirm']) {
+  for (const saved of [false, true]) {
+    const f = areaFixture({ twoStage: true });
+    await loadedStandIn(f);
+    await importFrame(f);
+    if (saved) f.item.settings = await f.target.analyzeStudioImportFrame(image(FULL), f.target.createDefaultSettings(image(FULL)));
+    const analysisOnly = operation === 'confirm';
+    const detection = applyCrop(f, { rect: analysisOnly ? WINDOW_AREA : WINDOW_CROP, analysisOnly });
+    if (detection) {
+      f.land(detection, imageAreaFromDetection({ cropRegion: { left: 202, top: 131, width: 1798, height: 1369 }, angle: 0.5 }, HALF));
+    }
+    const provisionalArea = canon(f.state.autoFrame.lastDiagnostics.imageArea);
+    f.context.leaveProvisionalPhoto(f.item);
+    assert.ok(f.item.pendingFrameEdit, 'the user intent survives leaving');
+    assert.ok(!f.item.pendingEdits?.autoFrameMeta, 'stand-in detector output is not stored in pending edits');
+    if (saved && !analysisOnly) assert.notEqual(canon(f.item.settings.autoFrameMeta.imageArea), provisionalArea, 'a saved full-base area is not replaced by the stand-in hit');
+    const sample = { width: 80, height: 56, data: new Uint8ClampedArray(80 * 56 * 4).fill(90) };
+    const points = [{ x: 400, y: 260 }, { x: 4000, y: 260 }, { x: 4000, y: 3000 }, { x: 400, y: 3000 }];
+    let cropCalls = 0;
+    f.target.renderFrameSample = (_max, options) => {
+      assert.equal(options.base.width, FULL.width, 'redetection samples the full base');
+      return sample;
+    };
+    if (!globalThis.ImageData) globalThis.ImageData = class ImageData {
+      constructor(data, width, height) { Object.assign(this, { data, width, height }); }
+    };
+    f.target.runOpenCvTask = async (type, task) => {
+      assert.equal(type, 'detect-crop-area');
+      const input = await task.build();
+      assert.ok(input.region.width > 0 && input.region.height > 0);
+      cropCalls++;
+      return operation === 'crop-miss' ? null : points;
+    };
+    vm.runInContext(functionSource('processFileWithSettings'), f.context);
+    const result = await f.context.processFileWithSettings(f.item.file, f.item.settings, {
+      sourceImageData: image(FULL), stage: 'settings', updateItemSettings: false
+    });
+    const one = await singleFlow(async g => {
+      const fullDetection = applyCrop(g, { rect: double(analysisOnly ? WINDOW_AREA : WINDOW_CROP), analysisOnly });
+      if (fullDetection && operation !== 'crop-miss') g.land(fullDetection, workingPointsToBase(points, g.state, FULL));
+    });
+    assert.equal(canon(result.settings.autoFrameMeta), canon(one.state.autoFrame.lastDiagnostics), `${operation}, saved=${saved}: full-base diagnostics match one stage`);
+    assert.equal(canon(result.settings.cropRegion), canon(one.context.extractCurrentSettings().cropRegion));
+    assert.equal(cropCalls, analysisOnly ? 0 : 1, 'confirmations keep their area; crops are detected again');
+    if (!saved) assert.ok(f.detections.some(call => call.width === FULL.width && call.options.frame), 'pending crop geometry does not suppress the full import detection');
+  }
 }
 
 // ---- Apply flat field to selected in the window (#255 review R2-034) -----------------------------
