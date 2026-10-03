@@ -193,6 +193,17 @@ instead (step 4 runs it on the full base). It then swaps in one task:
    may already have finished while conversion or WB replay still waits;
    entries captured by edits, Undo or Redo remain cold for the whole history
    barrier and carry the same WB event into later restoration.
+   That binding belongs only to the current restore operation. A hot or cold
+   restore, saved-settings replacement, new geometry or photo activation
+   invalidates the superseded live binding through geometry cancellation.
+   Saved entries retain their completed measurements and intent. The old
+   finalizer compares its promise identity and cannot clear a newer restore.
+   Conversion replies also compare the operation token after geometry/source
+   preparation, even when a hot restore reuses identical source objects.
+   The full-swap WB event has its own installed operation token: after
+   superseding history, it no longer supplies snapshots or automatic WB, and
+   its obsolete replay cannot overwrite the newer recipe. The full decode
+   still completes admission; the immutable saved measurement remains valid.
    Other automatic conversion measurements, including expired-film analysis,
    still run before that WB replay, preserving user rescue strengths.
    Pending restoration joins the crop-analysis barrier, so exports and saved
@@ -394,6 +405,13 @@ previously configured photos, hits, misses and manual confirmations.
   cold Redo entry through the actual history caller. The barrier must stay
   pending until the worker reply is released; no history/capture function is
   replaced.
+  The ownership-wb and ownership-conversion scenes then Confirm a later
+  full-base area, Undo into a cold rebuild, hot Redo twice while its reply is
+  held, and create a new exposure edit. The WB-only scene proves that live
+  conversion, geometry and detection finished before the held reply. Both
+  scenes compare live and repeated Undo/Redo PNG8/TIFF16 decoded samples and
+  file bytes with one stage. `TWO_STAGE_HISTORY_TIMINGS` can select individual
+  timings during development; the default crop-history gate runs all eight.
 
 ## Verification on real files (not in the repository)
 

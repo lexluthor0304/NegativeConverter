@@ -3064,7 +3064,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       settings.frameMetadata = sanitizeFrameMetadata(state.frameMetadata);
       settings.autoFrameMeta = state.autoFrame.lastDiagnostics ? structuredClone(state.autoFrame.lastDiagnostics) : null;
       if (state.fullBaseHistoryPending && state.fullBaseFrameEdit) settings.fullBaseFrameEdit = { ...state.fullBaseFrameEdit };
-      const provisionalWb = state.provisional?.swapped && state.provisional.fullBaseWhiteBalance;
+      const provisionalWb = state.provisional?.swapped && state.provisional.fullBaseWhiteBalanceToken === geometryToken
+        && state.provisional.fullBaseWhiteBalance;
       const wbBaseline = state.provisional?.swapBaseline;
       // The detector may finish before its conversion. Entries captured in
       // that interval still share the event whose reply will supply WB.
@@ -7655,7 +7656,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // The hit also belongs to history captured before a manual WB edit.
       // Estimate from the same positive even when the live user's gains now
       // suppress automatic WB; only matching pre-override entries adopt it.
-      const event = cropDetection?.whiteBalanceMeasurement || (state.provisional?.swapped
+      const event = cropDetection?.whiteBalanceMeasurement || (state.provisional?.swapped && state.provisional.fullBaseWhiteBalanceToken === geometryToken
         ? state.provisional.fullBaseWhiteBalance : state.fullBaseFrameEdit?.whiteBalance);
       const before = event?.pending && !event.measurement ? event.before : cropDetection?.whiteBalance;
       const hit = cropDetection?.token.hit || (event?.hit && isCurrentLoad(event.hit.generation)
@@ -9620,9 +9621,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           }
         }
         if (!sourceData && !proxy) return;
+        const conversionGeometryToken = geometryToken;
         const pendingSource = state.sourcePending;
         const isCurrentConversion = () => isCurrentLoad(generation)
           && processingGeneration === coreReprocessGeneration
+          && conversionGeometryToken === geometryToken
           && (proxy ? state.sourcePending === pendingSource && state.displayLevelImageData === proxy
             : sourceData === (state.croppedImageData || state.originalImageData));
         const trace = createPerfTrace('processNegative', {
@@ -14473,6 +14476,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           cropRegion: { ...state.cropRegion }, ready: whenGeometrySettled(), whiteBalanceMeasurement: provisional.fullBaseWhiteBalance
         });
       }
+      provisional.fullBaseWhiteBalanceToken = geometryToken;
       provisional.swapBaseline = extractCurrentSettings();
       noteFullDecodeChange(record);
     }
@@ -14523,7 +14527,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         // the photo is exact once it has landed.
         await settlePendingCropDetection();
         if (!current()) return;
-        if (step >= 3 && provisional.fullBaseWhiteBalance) await restorePromotedWhiteBalance(provisional.fullBaseWhiteBalance, current);
+        const currentWhiteBalance = () => current() && provisional.fullBaseWhiteBalanceToken === geometryToken;
+        if (step >= 3 && provisional.fullBaseWhiteBalance) await restorePromotedWhiteBalance(provisional.fullBaseWhiteBalance, currentWhiteBalance);
         if (!current()) return;
         trace.mark('converted');
         record.status = 'installed';
@@ -16485,6 +16490,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // is dropped. Undo, redo, file switches and new edits call this.
     function cancelGeometryJob({ keepInterim = false } = {}) {
       geometryToken++;
+      // The superseded restore no longer owns live WB or the export barrier.
+      // Saved entries keep their event; its finalizer only releases its own
+      // promise, never a newer restore's binding.
+      state.fullBaseHistoryPending = null;
+      state.fullBaseFrameEdit = null;
       const job = geometryJob;
       if (job) {
         endGeometryJob(job);
@@ -22897,6 +22907,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     function restoreSettings(settings, { refreshDisplay = true, holdBusy = true } = {}) {
       if (!settings) return;
       const safe = sanitizeSettings(settings, { fallbackSettings: state });
+      // Even a matching geometry job belongs to the history recipe replaced
+      // here; the saved settings start their own geometry/measurement work.
+      if (state.fullBaseHistoryPending) cancelGeometryJob();
       // The measured interpretation of the converted photo these settings
       // replace (the expired rescue's, below).
       const measuredInterpretation = state.expiredAnalysis && state.processedImageData ? expiredInterpretation() : null;

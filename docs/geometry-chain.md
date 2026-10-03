@@ -76,6 +76,10 @@ In `main.js` the scalars change synchronously and the planes follow:
   (Studio then makes the panel, the preview toolbar and the photo's brushes
   inert, as for any `studioBusy`), except the swap to a two-stage import's
   full decode (`holdBusy: false`), which never locks editing.
+  Cancellation also detaches a full-base history restore's live promise and
+  WB event. It leaves the measurements saved entries own intact; an obsolete
+  finalizer cannot clear the next operation's binding. A settings replacement
+  cancels an owned restore even when its geometry key matches a pending job.
 - Rotate 90° and mirror turn or flip the current display with CSS at once
   (UI only; composed when edits follow each other); the first paint of the
   new planes removes it, on the GL display or on `#canvas`, with the film

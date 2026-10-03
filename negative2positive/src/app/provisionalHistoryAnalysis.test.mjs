@@ -58,7 +58,11 @@ function fixture(staged, manualWb = false) {
         { filmBase: settings.filmBase, colorModel: 'standard', filmPreset: 'none', borderBuffer: 0, exposure: settings.coreExposure },
         { analysisImageData: c.getColorAnalysisSample(settings === state ? { ...settings, autoFrameMeta: state.autoFrame.lastDiagnostics } : settings) });
       dispatched.push(recipe);
-      if (target.conversionHold && (!target.measurementHold || settings !== state)) await new Promise(resolve => conversionReplies.push(resolve));
+      if (target.holdConversion?.({ live: settings === state, recipe })
+        || target.conversionHold && (!target.measurementHold || settings !== state)) await new Promise(resolve => {
+        Object.assign(resolve, { live: settings === state, recipe });
+        conversionReplies.push(resolve);
+      });
       return processed;
     },
     buildRouterSettings: settings => settings,
@@ -82,6 +86,7 @@ function fixture(staged, manualWb = false) {
     'installFullDecode', 'restoreAutoFrameDiagnostics', 'automaticWhiteBalanceResult', 'maybeAutoWhiteBalance', 'analysisRegionSample',
     'whiteBalanceMeasurementSettings', 'provisionalWhiteBalanceMeasurement', 'promoteWhiteBalanceMeasurement', 'restorePromotedWhiteBalance',
     'restoreColdSnapshotPixels', 'hasPendingCropDetection', 'settlePendingCropDetection',
+    'cancelGeometryJob', 'restoreSettings',
     'waitForProvisionalSwap', 'startCropDetection', 'applyCropDetectionOutcome', 'resolvePendingFrameEdits', 'cloneSettings', 'renderGeometryChain',
     'buildAdjustmentSettings', 'processNegative', 'captureSnapshot', 'restoreSnapshot'].map(fn).join('\n'), c);
   c.restoreAutoFrameDiagnostics(staged ? standInMeta : fullMeta);
@@ -522,6 +527,354 @@ if (selected === 'all' || selected === 'parking-barrier') {
   assert.equal(client.holds(outgoing), false);
   assert.equal(worker.terminated, true);
   client.dispose(); cases++;
+}
+// Supersession uses actual history entries created by promotion and later
+// Confirm/slider edits. Only conversion replies are held; capture, clone,
+// geometry and history callers always run their production implementations.
+async function ownershipFixture() {
+  const h = fixture(true), reference = fixture(false), { context: c, state, target } = h;
+  const baseline = target.extractCurrentSettings();
+  const record = { decodedImage: full, status: 'decoded', urgent: true };
+  const provisional = { size: { width: 32, height: 24 }, fullSize: { width: 64, height: 48 },
+    geometry: createExactGeometry({ size: { width: 32, height: 24 }, fullSize: { width: 64, height: 48 } }), settledSnapshot: baseline, record };
+  state.provisional = provisional;
+  for (const item of [h, reference]) {
+    await item.context.processNegative();
+    await apply(item, item === h ? rect : fullRect, { held: true });
+    for (let i = 0; i < 32 && !item.held.length; i++) await new Promise(setImmediate);
+    assert.equal(item.held.length, 1, 'unanswered preview/reference detector');
+    item.context.pushUndo('exposure');
+    item.state.coreExposure = 15;
+    await item.context.processNegative({ automatic: false });
+  }
+  const old = target.cropDetection;
+  await c.waitForProvisionalSwap(record, provisional, () => true);
+  assert.equal(old.token.hit, null, 'preview has no hit through promotion');
+  target.cropHitHold = false;
+  c.installFullDecode(record, provisional, full, { ...baseline, autoFrameMeta: structuredClone(fullMeta), filmBase: { ...fullFilmBase }, cropRegion: null });
+  await c.whenGeometrySettled(); await c.settlePendingCropDetection();
+  target.conversionHold = reference.target.conversionHold = true;
+  const converting = c.processNegative(), referenceLanding = land(reference);
+  for (let i = 0; i < 32 && (!h.conversionReplies.length || !reference.conversionReplies.length); i++) await new Promise(setImmediate);
+  assert.equal(h.conversionReplies.length, 1, 'full-base immutable dispatch held');
+  assert.equal(reference.conversionReplies.length, 1, 'reference immutable dispatch held');
+  for (const item of [h, reference]) {
+    item.context.pushUndo('in-flight-exposure');
+    item.state.coreExposure = 0;
+    item.target.conversionHold = false;
+    item.conversionReplies.splice(0).forEach(resolve => resolve());
+  }
+  await converting; await referenceLanding;
+  await c.restorePromotedWhiteBalance(provisional.fullBaseWhiteBalance, () => true);
+  state.provisional = null; record.status = 'installed';
+  h.held.splice(0).forEach(resolve => resolve()); await old.done;
+  for (const item of [h, reference]) {
+    await item.context.processNegative({ automatic: false });
+    await apply(item, null, { analysisOnly: true, selectedArea: area(.2, .25, .8, .75) });
+    await item.context.settlePendingCropDetection();
+  }
+  return { h, reference, event: provisional.fullBaseWhiteBalance };
+}
+async function waitReply(h, live, label, exclude = []) {
+  const matches = reply => reply.live === live && !exclude.includes(reply);
+  for (let i = 0; i < 64 && !h.conversionReplies.some(matches); i++) await new Promise(setImmediate);
+  const reply = h.conversionReplies.find(matches);
+  assert.ok(reply, label + ': requested conversion phase held');
+  assert.equal(h.state.geometryPending, false, label + ': geometry already finished');
+  assert.equal(Boolean(h.target.cropDetection), false, label + ': detector already finished');
+  assert.ok(h.state.fullBaseHistoryPending, label + ': restoration owns a live barrier');
+  if (!live) assert.equal(h.target.processNegativeInFlight, null, label + ': only off-state WB is held, never live pixels');
+  return reply;
+}
+function releaseReply(h, reply) {
+  h.conversionReplies.splice(h.conversionReplies.indexOf(reply), 1);
+  reply();
+}
+for (const phase of ['wb', 'conversion']) {
+  if (selected !== 'all' && selected !== 'ownership' && selected !== `ownership-${phase}`) continue;
+  const { h, reference, event } = await ownershipFixture(), { context: c, state, target } = h;
+  for (const item of [h, reference]) await item.context.performUndo(); // Hot Confirm.
+  target.holdConversion = ({ live }) => live === (phase === 'conversion');
+  const obsolete = c.performUndo();
+  const reply = await waitReply(h, phase === 'conversion', 'cold Undo');
+  const oldPending = state.fullBaseHistoryPending, oldEvent = state.fullBaseFrameEdit;
+  const sourceBefore = state.croppedImageData || state.originalImageData;
+  await reference.context.performUndo();
+  await c.performRedo(); await c.performRedo();
+  await reference.context.performRedo(); await reference.context.performRedo();
+  assert.equal(state.croppedImageData || state.originalImageData, sourceBefore, 'identical source planes cannot prove current ownership');
+  const captured = c.pushUndo('superseding-exposure');
+  reference.context.pushUndo('superseding-exposure');
+  for (const item of [h, reference]) item.state.coreExposure = 15;
+  console.log(`ownership-${phase} captured`, JSON.stringify({ cold: !!captured.refs.cold,
+    staleBarrier: state.fullBaseHistoryPending === oldPending, staleEvent: captured.settings.fullBaseFrameEdit?.whiteBalance === oldEvent.whiteBalance,
+    measurementExposure: event.measurement.settings.coreExposure, heldLivePixels: reply.live }));
+  target.holdConversion = null;
+  releaseReply(h, reply); await obsolete; await c.settlePendingCropDetection();
+  const failures = [];
+  const check = async label => {
+    await c.processNegative({ automatic: false }); await reference.context.processNegative({ automatic: false });
+    const hashes = item => Object.fromEntries([8, 16].map(depth => [depth,
+      createHash('sha256').update(Buffer.from(new Uint16Array(samples(item, depth)).buffer)).digest('hex')]));
+    const actual = hashes(h), expected = hashes(reference);
+    console.log(`ownership-${phase}/${label}`, JSON.stringify({ actual, expected,
+      wb: [state.wbR, state.wbG, state.wbB], referenceWb: [reference.state.wbR, reference.state.wbG, reference.state.wbB] }));
+    for (const depth of [8, 16]) if (actual[depth] !== expected[depth]) failures.push(`${label}: strict ${depth}-bit samples differ`);
+    if (JSON.stringify([state.wbR, state.wbG, state.wbB]) !== JSON.stringify([reference.state.wbR, reference.state.wbG, reference.state.wbB])) failures.push(label + ': WB differs');
+    samePixels(state.processedImageData, reference.state.processedImageData, label + ': live Silver pixels equal');
+    assert.equal(event.measurement.settings.coreExposure, 15, 'completed event retains its immutable dispatch recipe');
+  };
+  await check('live');
+  for (const action of ['Undo', 'Redo', 'Undo', 'Redo']) {
+    await c[`perform${action}`](); await c.settlePendingCropDetection();
+    await reference.context[`perform${action}`](); await check(action);
+  }
+  h.pool.dispose(); reference.pool.dispose();
+  assert.equal(failures.length, 0, failures.join('\n')); cases++;
+}
+const ownershipSchedules = [
+  { name: 'Undo-hot-Redo', start: 'Undo', actions: ['Redo', 'Redo'], cold: false },
+  { name: 'Undo-cold-Undo', start: 'Undo', actions: ['Undo'], cold: true },
+  { name: 'Undo-nested-cold-Redo', start: 'Undo', actions: ['Undo', 'Redo'], cold: true },
+  { name: 'Redo-hot-Undo', start: 'Redo', actions: ['Undo'], cold: false },
+  { name: 'Redo-hot-Redo', start: 'Redo', actions: ['Redo', 'Redo'], cold: false },
+  { name: 'Redo-nested-cold-Undo', start: 'Redo', actions: ['Undo', 'Undo'], cold: true },
+  { name: 'Redo-cold-Redo', start: 'Redo', preparationUndos: 3, actions: ['Redo'], cold: true }
+];
+for (const schedule of ownershipSchedules) for (const phase of ['wb', 'conversion'])
+  for (const order of phase === 'wb' && schedule.cold ? ['old-first', 'new-first'] : ['old-first']) {
+  if (selected !== 'all' && selected !== 'ownership-matrix') continue;
+  const label = `${schedule.name}/${phase}/${order}`;
+  const { h, reference, event } = await ownershipFixture(), { context: c, state, target } = h;
+  for (const item of [h, reference]) await item.context.performUndo();
+  if (schedule.start === 'Redo') {
+    // Nested Undo captures a real cold Redo entry, with its legitimate event.
+    target.holdConversion = ({ live }) => !live;
+    const preparing = [c.performUndo()];
+    const first = await waitReply(h, false, label + '/prepare');
+    for (let i = 1; i < (schedule.preparationUndos || 2); i++) {
+      const previous = h.conversionReplies.slice();
+      preparing.push(c.performUndo());
+      await waitReply(h, false, label + '/prepare nested', previous);
+    }
+    target.holdConversion = null;
+    h.conversionReplies.splice(0).forEach(resolve => resolve());
+    await Promise.all(preparing); await c.settlePendingCropDetection();
+    for (let i = 0; i < (schedule.preparationUndos || 2); i++) await reference.context.performUndo();
+    assert.ok(first.recipe, 'preparation used an actual WB conversion');
+    assert.equal(target.redoStack.at(-1).refs.cold, true, label + ': pending Undo captured a cold Redo entry');
+  }
+  target.holdConversion = ({ live }) => live === (phase === 'conversion');
+  const restoring = [c[`perform${schedule.start}`]()];
+  const oldReply = await waitReply(h, phase === 'conversion', label + '/old');
+  const oldPending = state.fullBaseHistoryPending;
+  await reference.context[`perform${schedule.start}`]();
+  for (const [i, action] of schedule.actions.entries()) {
+    const previous = h.conversionReplies.slice();
+    restoring.push(c[`perform${action}`]());
+    await reference.context[`perform${action}`]();
+    if (phase === 'wb' && state.fullBaseHistoryPending) await waitReply(h, false, label + '/successor', previous);
+    if (i === 0) assert.notEqual(state.fullBaseHistoryPending, oldPending, label + ': superseded promise is not live');
+  }
+  const newest = state.fullBaseHistoryPending, newestEvent = state.fullBaseFrameEdit;
+  assert.equal(Boolean(newest), schedule.cold, label + ': target has the expected hot/cold ownership');
+  if (schedule.cold) assert.ok(newestEvent.whiteBalance, label + ': cold successor retains valid saved measurement');
+  const captured = c.pushUndo('matrix-exposure'); reference.context.pushUndo('matrix-exposure');
+  assert.equal(Boolean(captured.refs.cold), schedule.cold, label + ': edit captures the current operation kind');
+  if (schedule.cold) assert.equal(captured.settings.fullBaseFrameEdit.whiteBalance, newestEvent.whiteBalance,
+    label + ': edit binds the actual current event');
+  else assert.equal(captured.settings.fullBaseFrameEdit, undefined, label + ': hot edit has no obsolete event');
+  for (const item of [h, reference]) item.state.coreExposure = item.state.coreExposure === 15 ? 0 : 15;
+  if (phase === 'conversion') {
+    // Live conversions serialize. The old reply must release the slot while
+    // leaving the successor's barrier intact for its own conversion/WB.
+    releaseReply(h, oldReply); await restoring[0];
+    if (newest) {
+      assert.equal(state.fullBaseHistoryPending, newest, label + ': old completion cannot clear the new barrier');
+      assert.equal(state.fullBaseFrameEdit, newestEvent, label + ': old completion cannot clear the new event');
+      await waitReply(h, true, label + '/new');
+    }
+    target.holdConversion = null;
+    h.conversionReplies.splice(0).forEach(resolve => resolve());
+  } else if (order === 'old-first') {
+    releaseReply(h, oldReply); await restoring[0];
+    if (newest) {
+      assert.equal(state.fullBaseHistoryPending, newest, label + ': obsolete WB completion cannot clear the newer pending operation');
+      assert.equal(state.fullBaseFrameEdit, newestEvent, label + ': newer binding survives old finalizer');
+    }
+    target.holdConversion = null;
+    h.conversionReplies.splice(0).forEach(resolve => resolve());
+  } else {
+    const newerReplies = h.conversionReplies.filter(reply => reply !== oldReply);
+    assert.ok(newerReplies.length, label + ': independent newer WB reply is held too');
+    target.holdConversion = null;
+    for (const reply of newerReplies.reverse()) releaseReply(h, reply);
+    await Promise.all(restoring.slice(1));
+    assert.equal(state.fullBaseHistoryPending, null, label + ': new completion releases only its own binding');
+    const wbBefore = [state.wbR, state.wbG, state.wbB];
+    releaseReply(h, oldReply); await restoring[0];
+    assert.deepEqual([state.wbR, state.wbG, state.wbB], wbBefore, label + ': old WB cannot overwrite the completed successor');
+  }
+  await Promise.all(restoring); await c.settlePendingCropDetection();
+  assert.equal(state.fullBaseHistoryPending, null, label + ': final barrier released');
+  assert.equal(state.fullBaseFrameEdit, null, label + ': final live event released');
+  const check = async name => {
+    await c.processNegative({ automatic: false }); await reference.context.processNegative({ automatic: false });
+    assert.deepEqual([state.wbR, state.wbG, state.wbB, state.coreExposure],
+      [reference.state.wbR, reference.state.wbG, reference.state.wbB, reference.state.coreExposure], label + '/' + name + ': WB/strengths');
+    assert.deepEqual(canon(state.autoFrame.lastDiagnostics), canon(reference.state.autoFrame.lastDiagnostics), label + '/' + name + ': diagnostics');
+    samePixels(state.processedImageData, reference.state.processedImageData, label + '/' + name + ': Silver samples');
+    for (const depth of [8, 16]) assert.deepEqual(samples(h, depth), samples(reference, depth), label + '/' + name + `: strict ${depth}-bit samples`);
+    assert.equal(event.measurement.settings.coreExposure, 15, label + ': shared completed dispatch is immutable');
+  };
+  await check('live');
+  for (const action of ['Undo', 'Redo', 'Undo', 'Redo']) {
+    await c[`perform${action}`](); await c.settlePendingCropDetection();
+    await reference.context[`perform${action}`](); await check(action);
+  }
+  console.log('ownership matrix passed:', label);
+  h.pool.dispose(); reference.pool.dispose(); cases++;
+}
+for (const operation of ['snapshot-hot', 'snapshot-cold', 'settings', 'activation', 'release']) for (const phase of ['wb', 'conversion']) {
+  if (selected !== 'all' && selected !== 'ownership-lifecycle') continue;
+  const label = `${operation}/${phase}`;
+  const { h, reference, event } = await ownershipFixture(), { context: c, state, target } = h;
+  const saved = c.captureSnapshot('saved-confirm'), savedReference = reference.context.captureSnapshot('saved-confirm');
+  const measuredEvent = event.measurement, measuredRecipe = canon(measuredEvent.settings);
+  for (const item of [h, reference]) await item.context.performUndo();
+  target.holdConversion = ({ live }) => live === (phase === 'conversion');
+  const obsolete = c.performUndo();
+  const reply = await waitReply(h, phase === 'conversion', label + '/old');
+  await reference.context.performUndo();
+  target.holdConversion = null;
+  const cold = target.undoStack.at(-1), coldReference = reference.target.undoStack.at(-1);
+  assert.equal(cold.refs.cold, true, label + ': saved cold entry is real promoted history');
+  let newer;
+  if (operation === 'snapshot-cold') {
+    newer = c.restoreSnapshot(cold);
+    await reference.context.restoreSnapshot(coldReference);
+  } else if (operation === 'settings') {
+    c.restoreSettings(saved.settings);
+    reference.context.restoreSettings(savedReference.settings);
+  } else {
+    if (operation === 'activation') { c.invalidatePhotoActivation(); reference.context.invalidatePhotoActivation(); }
+    if (operation === 'release') { c.releaseOutgoingPhotoPlanes(); reference.context.releaseOutgoingPhotoPlanes(); }
+    newer = c.restoreSnapshot(saved);
+    await reference.context.restoreSnapshot(savedReference);
+  }
+  assert.equal(state.fullBaseFrameEdit?.whiteBalance || null, operation === 'snapshot-cold' ? cold.settings.fullBaseFrameEdit.whiteBalance : null,
+    label + ': only the newly restored entry can own live WB');
+  // A conversion successor serializes behind the old request. A WB successor
+  // can already be finished, but either completion order keeps its identity.
+  releaseReply(h, reply); await obsolete; await newer; await c.settlePendingCropDetection();
+  assert.equal(state.fullBaseHistoryPending, null, label + ': old operation leaves no live barrier');
+  assert.equal(state.fullBaseFrameEdit, null, label + ': old operation leaves no live event');
+  assert.equal(event.measurement, measuredEvent, label + ': saved entries still own their shared completed measurement');
+  assert.deepEqual(canon(event.measurement.settings), measuredRecipe, label + ': completed analysis recipe is not erased or rewritten');
+  for (const item of [h, reference]) {
+    await item.context.processNegative({ automatic: false });
+    item.context.pushUndo('lifecycle-exposure'); item.state.coreExposure = item.state.coreExposure === 15 ? 0 : 15;
+  }
+  for (const action of ['live', 'Undo', 'Redo', 'Undo', 'Redo']) {
+    if (action !== 'live') {
+      await c[`perform${action}`](); await c.settlePendingCropDetection(); await reference.context[`perform${action}`]();
+    }
+    await c.processNegative({ automatic: false }); await reference.context.processNegative({ automatic: false });
+    assert.deepEqual([state.wbR, state.wbG, state.wbB, state.coreExposure],
+      [reference.state.wbR, reference.state.wbG, reference.state.wbB, reference.state.coreExposure], label + '/' + action + ': current WB/recipe');
+    for (const depth of [8, 16]) assert.deepEqual(samples(h, depth), samples(reference, depth), label + '/' + action + `: strict ${depth}-bit samples`);
+  }
+  console.log('ownership lifecycle passed:', label);
+  h.pool.dispose(); reference.pool.dispose(); cases++;
+}
+if (selected === 'all' || selected === 'ownership-geometry-settings') {
+  const { h, reference, event } = await ownershipFixture(), { context: c, state, target } = h;
+  for (const item of [h, reference]) await item.context.performUndo();
+  target.holdConversion = ({ live }) => !live;
+  const preparing = [];
+  for (let i = 0; i < 3; i++) {
+    const previous = h.conversionReplies.slice();
+    preparing.push(c.performUndo());
+    await waitReply(h, false, 'geometry settings/prepare', previous);
+    await reference.context.performUndo();
+  }
+  target.holdConversion = null;
+  h.conversionReplies.splice(0).forEach(resolve => resolve());
+  await Promise.all(preparing); await c.settlePendingCropDetection();
+  const obsolete = c.performRedo();
+  const obsoleteReference = reference.context.performRedo();
+  assert.equal(state.geometryPending, true, 'actual cold Redo is rebuilding a different geometry');
+  assert.ok(state.fullBaseHistoryPending, 'geometry-phase history owner installed synchronously');
+  const settings = { ...target.extractCurrentSettings(), coreExposure: 31, filmBase: { ...manualFilmBase } };
+  const referenceSettings = { ...reference.target.extractCurrentSettings(), coreExposure: 31, filmBase: { ...manualFilmBase } };
+  c.restoreSettings(settings); reference.context.restoreSettings(referenceSettings);
+  assert.equal(Boolean(state.fullBaseHistoryPending), false, 'saved settings replace the owner even when a pending job has the same geometry key');
+  assert.equal(state.fullBaseFrameEdit, null, 'direct settings do not adopt the replaced restore event');
+  await obsolete; await obsoleteReference; await c.whenGeometrySettled(); await reference.context.whenGeometrySettled();
+  await c.processNegative(); await reference.context.processNegative();
+  assert.deepEqual([state.wbR, state.wbG, state.wbB], [reference.state.wbR, reference.state.wbG, reference.state.wbB], 'new saved recipe owns automatic WB');
+  for (const depth of [8, 16]) assert.deepEqual(samples(h, depth), samples(reference, depth), `geometry settings: strict ${depth}-bit samples`);
+  assert.equal(event.measurement.settings.coreExposure, 15, 'the saved old dispatch remains valid for its entries');
+  h.pool.dispose(); reference.pool.dispose(); cases++;
+}
+if (selected === 'all' || selected === 'ownership-swap-completion') {
+  const h = fixture(true), reference = fixture(false), { context: c, state, target } = h;
+  const baseline = target.extractCurrentSettings();
+  const record = { file: { name: 'ownership.dng' }, decodedImage: full, status: 'decoded', urgent: true, decoded: async () => full };
+  const provisional = { size: { width: 32, height: 24 }, fullSize: { width: 64, height: 48 },
+    geometry: createExactGeometry({ size: { width: 32, height: 24 }, fullSize: { width: 64, height: 48 } }), settledSnapshot: baseline, record };
+  state.provisional = provisional; state.fullDecode = record;
+  target.backgroundGate = { bump() {} };
+  target.settledImportSettings = async image => ({ image,
+    settings: { ...baseline, autoFrameMeta: structuredClone(fullMeta), filmBase: { ...fullFilmBase }, cropRegion: null } });
+  vm.runInContext(fn('settleProvisionalPhoto'), c);
+  for (const item of [h, reference]) {
+    await item.context.processNegative(); await apply(item, item === h ? rect : fullRect, { held: true });
+    item.context.pushUndo('exposure'); item.state.coreExposure = 15;
+    await item.context.processNegative({ automatic: false });
+    item.target.conversionHold = true;
+  }
+  const oldDetector = target.cropDetection;
+  target.cropHitHold = false;
+  const settling = c.settleProvisionalPhoto(record, target.loadGeneration), referenceLanding = land(reference);
+  for (let i = 0; i < 64 && (!h.conversionReplies.length || !reference.conversionReplies.length); i++) await new Promise(setImmediate);
+  assert.equal(h.conversionReplies.length, 1, 'actual full-settle dispatch held');
+  assert.equal(reference.conversionReplies.length, 1, 'single-stage dispatch held');
+  target.holdConversion = ({ live }) => !live;
+  for (const item of [h, reference]) {
+    item.context.pushUndo('in-flight-exposure'); item.state.coreExposure = 0; item.target.conversionHold = false;
+    item.conversionReplies.splice(0).forEach(resolve => resolve());
+  }
+  await referenceLanding;
+  for (let i = 0; i < 64 && !h.conversionReplies.length; i++) await new Promise(setImmediate);
+  assert.equal(h.conversionReplies.length, 1, 'only full-settle off-state WB reply remains held');
+  assert.equal(h.conversionReplies[0].live, false, 'held full-settle replay cannot install late pixels');
+  assert.equal(target.processNegativeInFlight, null, 'live conversion already finished');
+  assert.equal(state.provisional, provisional, 'actual settlement still owns its record while WB waits');
+  const event = provisional.fullBaseWhiteBalance, measurement = event.measurement;
+  for (const item of [h, reference]) {
+    await item.context.processNegative({ automatic: false });
+    await apply(item, null, { analysisOnly: true, selectedArea: area(.2, .25, .8, .75) });
+    await item.context.performUndo(); await item.context.performRedo();
+  }
+  const wb = [state.wbR, state.wbG, state.wbB];
+  c.pushUndo('after-swap-history'); reference.context.pushUndo('after-swap-history');
+  for (const item of [h, reference]) item.state.coreExposure = 15;
+  target.holdConversion = null;
+  h.conversionReplies.splice(0).forEach(resolve => resolve()); await settling;
+  assert.deepEqual([state.wbR, state.wbG, state.wbB], wb, 'superseded full-settle WB cannot overwrite hot restored history');
+  assert.equal(state.provisional, null, 'superseded measurement still finishes full-decode admission');
+  assert.equal(record.status, 'installed', 'full decode does not remain permanently provisional');
+  assert.equal(event.measurement, measurement, 'saved entries retain their immutable completed event');
+  h.held.splice(0).forEach(resolve => resolve()); await oldDetector.done;
+  for (const action of ['live', 'Undo', 'Redo', 'Undo', 'Redo']) {
+    if (action !== 'live') {
+      await c[`perform${action}`](); await c.settlePendingCropDetection(); await reference.context[`perform${action}`]();
+    }
+    await c.processNegative({ automatic: false }); await reference.context.processNegative({ automatic: false });
+    for (const depth of [8, 16]) assert.deepEqual(samples(h, depth), samples(reference, depth), `swap completion/${action}: strict ${depth}-bit samples`);
+  }
+  h.pool.dispose(); reference.pool.dispose(); cases++;
 }
 if (selected === 'parking-barrier') console.log('provisionalHistoryAnalysis: real promoted history keeps the cached worker until full-base detection settles, then parking releases ownership');
 else console.log(`provisionalHistoryAnalysis: ${cases} history/rescue cases; pending/completed/cancelled-at-swap hits, confirmations and edits during cold Undo/Redo promote full-base recipe/diagnostics/WB at the original event; manual WB/base, rescue strengths and exact Silver/8/16 samples preserved`);
