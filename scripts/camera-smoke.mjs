@@ -14,6 +14,44 @@ export async function runCameraSmoke({ send, evaluate, waitFor, wait, fail, inst
   await waitFor('camera workspace boot', `!!document.getElementById('studioImportAutoCrop') && (!!document.getElementById('fileInput') && !!document.getElementById('flatFieldUseCurrentBtn'))`);
   await installDialogAutoAccept();
   await wait(300);
+  // Exercise the actual browser module's HEIF fallback. Only the native
+  // unsupported-format boundaries and worker are faked; cancellation must
+  // cross loadStandardImage -> decodeHeifInWorker and dispose the worker.
+  const heifCancel = await evaluate(`(async () => {
+    const { loadStandardImage } = await import('/src/app/imageFileLoaders.js');
+    const original = { bitmap: window.createImageBitmap, Image: window.Image, Worker: window.Worker };
+    const controller = new AbortController();
+    let posted = 0, terminated = 0, worker, lateReply, timer;
+    try {
+      window.createImageBitmap = async () => { throw new Error('unsupported test HEIF'); };
+      window.Image = class {
+        set src(value) { if (value) queueMicrotask(() => this.onerror?.()); }
+      };
+      window.Worker = function(url, options) {
+        if (!String(url).includes('codecs/heif-worker.js')) return new original.Worker(url, options);
+        worker = {
+          postMessage() { posted++; lateReply = this.onmessage; queueMicrotask(() => controller.abort()); },
+          terminate() { terminated++; }
+        };
+        return worker;
+      };
+      const bytes = new Uint8Array(16);
+      bytes.set([102, 116, 121, 112, 104, 101, 105, 99], 4);
+      timer = setTimeout(() => controller.abort(), 3000);
+      let errorName;
+      try { await loadStandardImage(new File([bytes], 'abort.heic', { type: 'image/heic' }), { signal: controller.signal }); }
+      catch (error) { errorName = error.name; }
+      lateReply?.({ data: { width: 1, height: 1, data: new Uint8ClampedArray(4) } });
+      return { errorName, posted, terminated, detached: worker?.onmessage === null };
+    } finally {
+      clearTimeout(timer);
+      window.createImageBitmap = original.bitmap; window.Image = original.Image; window.Worker = original.Worker;
+    }
+  })()`);
+  if (heifCancel.errorName !== 'AbortError' || heifCancel.posted !== 1 || heifCancel.terminated !== 1 || !heifCancel.detached) {
+    fail('standard-image HEIF cancellation did not release its decoder: ' + JSON.stringify(heifCancel));
+  }
+  console.log('ok: cancelling the standard-image HEIF fallback terminates its worker once, ignores late replies, and preserves AbortError');
   // Flat-field regression measures negative inversion on known synthetic input.
   // Automatic mixed-film import behavior has its own browser scenario.
   await evaluate(`document.getElementById('importFilmTypeAuto').checked && document.getElementById('importFilmTypeAuto').click()`);

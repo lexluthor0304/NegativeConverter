@@ -151,7 +151,7 @@ export async function loadPngImageData(buffer, { signal = null, sharedPlanes = f
 
   if (!sixteenBit && typeof createImageBitmap === 'function' && typeof Blob === 'function') {
     try {
-      const image = await loadStandardImage(new Blob([buffer], { type: 'image/png' }));
+      const image = await loadStandardImage(new Blob([buffer], { type: 'image/png' }), { signal });
       if (signal?.aborted) throw aborted();
       return image;
     } catch (err) {
@@ -218,12 +218,19 @@ async function sniffBlobHeader(file) {
   }
 }
 
-export async function loadStandardImage(file) {
+export async function loadStandardImage(file, { signal = null, sharedPlanes = false } = {}) {
+  const aborted = () => signal?.reason?.name === 'AbortError' ? signal.reason
+    : new DOMException('Image decode was aborted', 'AbortError');
+  const checkAbort = () => { if (signal?.aborted) throw aborted(); };
+  checkAbort();
   // Route by content, not by name: a 16-bit PNG whose File.type is empty would
   // otherwise be flattened to 8 bits here without any warning.
   const sniffed = await sniffBlobHeader(file);
+  checkAbort();
   if (sniffed?.kind === 'png' && sniffed.depth === 16) {
-    return loadPngImageData(await file.arrayBuffer());
+    const buffer = await file.arrayBuffer();
+    checkAbort();
+    return loadPngImageData(buffer, { signal, sharedPlanes });
   }
 
   // Preferred path. Chromium decodes Blob-sourced ImageBitmaps off the main
@@ -233,11 +240,16 @@ export async function loadStandardImage(file) {
     try {
       const bitmap = await createImageBitmap(file);
       try {
+        // The native bitmap API cannot be interrupted. Close its late result
+        // without a canvas allocation/readback or another decoder fallback.
+        checkAbort();
         return imageSourceToImageData(bitmap, bitmap.width, bitmap.height);
       } finally {
         bitmap.close();
       }
     } catch (err) {
+      checkAbort();
+      if (err?.name === 'AbortError') throw err;
       if (err?.code === 'IMAGE_TOO_LARGE') throw err;
       // Fall through to the <img> path (unsupported format edge cases).
     }
@@ -246,33 +258,50 @@ export async function loadStandardImage(file) {
   const nativeImage = new Promise((resolve, reject) => {
     const img = new Image();
     let objectUrl = null;
+    let finished = false;
+    const finish = (error, image) => {
+      if (finished) return;
+      finished = true;
+      signal?.removeEventListener('abort', onAbort);
+      img.onload = img.onerror = null;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      img.src = '';
+      if (error) reject(error); else resolve(image);
+    };
+    const onAbort = () => finish(aborted());
 
     img.onload = () => {
       try {
-        resolve(imageSourceToImageData(img, img.width, img.height));
+        checkAbort();
+        finish(null, imageSourceToImageData(img, img.width, img.height));
       } catch (err) {
-        reject(err);
-      } finally {
-        if (objectUrl) URL.revokeObjectURL(objectUrl);
+        finish(err);
       }
     };
 
     img.onerror = () => {
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
       // The raw event stringifies to "[object Event]"; reject with something
       // the UI can actually translate.
-      reject(decodeFailureError(file));
+      finish(signal?.aborted ? aborted() : decodeFailureError(file));
     };
 
-    objectUrl = URL.createObjectURL(file);
-    img.src = objectUrl;
+    signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted) { onAbort(); return; }
+    try {
+      objectUrl = URL.createObjectURL(file);
+      img.src = objectUrl;
+    } catch (error) { finish(error); }
   });
   try { return await nativeImage; }
   catch (error) {
+    checkAbort();
+    if (error?.name === 'AbortError') throw error;
     if (error?.code === 'IMAGE_TOO_LARGE') throw error;
     if (sniffed?.kind !== 'heif' && !/\.(heic|heif|hif)$/i.test(file?.name || '') && !/hei[cf]/i.test(file?.type || '')) throw error;
     const { decodeHeifInWorker } = await import('./heifLoader.js');
-    const decoded = await decodeHeifInWorker(file);
+    checkAbort();
+    const decoded = await decodeHeifInWorker(file, { signal });
+    checkAbort();
     assertCanvasSize(decoded.width, decoded.height);
     return new ImageData(new Uint8ClampedArray(decoded.data), decoded.width, decoded.height);
   }

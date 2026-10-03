@@ -19833,7 +19833,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           image = await loadPngImageData(arrayBuffer, { signal, sharedPlanes: sharedPlanes && sharedPlanesAvailable() });
         } else {
           await memoryClaim.atDecode({ kind: 'scan' });
-          image = await loadStandardImage(file);
+          if (signal?.aborted) throw aborted();
+          image = await loadStandardImage(file, { signal, sharedPlanes: sharedPlanes && sharedPlanesAvailable() });
           if (signal?.aborted) throw aborted();
         }
       } finally {
@@ -27796,8 +27797,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         delete document.body.dataset.studioBusy;
         studioWorkspace?.sync();
       };
-      // Cancel also withdraws a queued reservation and aborts the current RAW
-      // decode (both LibRaw and its post-decode worker), before releasing UI.
+      // Cancel withdraws a queued reservation, aborts decoder workers and
+      // prevents late native image decodes from copying pixels into a canvas.
       setBatchProgressCancel(() => { job?.cancel(); closeUi(); });
       showBatchProgress(true);
       let result = null; let decodeSkipped = 0; let failure = null;

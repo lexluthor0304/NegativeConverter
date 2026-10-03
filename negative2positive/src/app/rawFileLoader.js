@@ -278,7 +278,7 @@ export async function loadRawFile(buffer, fileName, options = {}) {
       console.warn(`[TIFF] ${fileName} is actually ${sniffed.kind}; decoding it as such`);
       if (onMetadata) onMetadata(null);
       if (sniffed.kind === 'png') return await loadPngImageData(buffer, { signal, sharedPlanes: options.sharedPlanes === true });
-      const image = await loadStandardImage(new Blob([buffer]));
+      const image = await loadStandardImage(new Blob([buffer]), { signal });
       throwIfAborted(signal);
       return image;
     }

@@ -121,8 +121,11 @@ The worker posts progress after each stage (align, warp, exposure, each
 merge band, encode); the progress modal shows the stage and a fraction and
 has a **Cancel** button, which terminates the worker and releases the Studio
 at once. It also aborts the current decode through its signal, disposing the
-LibRaw and post-decode workers, or withdraws a reservation still waiting for
-memory. The
+LibRaw, post-decode and HEIF workers, or withdraws a reservation still waiting
+for memory. Ordinary JPEG/PNG browser decodes also receive the signal: an
+`<img>` decode releases its URL and handlers, and a late `ImageBitmap` is closed
+without copying its pixels or starting a fallback. The native bitmap API
+cannot interrupt a decode already executing inside the browser. The merge
 worker is terminated after the result, on any failure and on Cancel, which
 releases its heap and planes.
 
