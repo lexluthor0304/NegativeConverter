@@ -1298,8 +1298,8 @@ for (const [tier, area, decodes] of [['A', AREA, 0], ['A', AREA3, 1], ['B', AREA
 // ---- Failure paths that lose work (R1-065, R2-005, R2-002) ----
 // A Tier A photo back from another one, on the real switch: the recipe saved
 // on leaving holds its sliders as well as its geometry.
-async function returnedTierA({ tier = 'A', conversionRequests = false } = {}) {
-  const photo = await convertedPhoto({ sessionBudget: 1 << 30, conversionRequests });
+async function returnedTierA({ tier = 'A', conversionRequests = false, name = 'a.dng' } = {}) {
+  const photo = await convertedPhoto({ sessionBudget: 1 << 30, conversionRequests, name });
   const { h, c, item } = photo;
   const itemB = { id: 2, file: { name: 'b.dng' }, settings: null };
   wireSwitching(h, [item, itemB]);
@@ -1321,7 +1321,9 @@ const NO_TURN = 'matrix(1, 0, 0, 1, 0, 0)';
 // a Tier B source. A differing original must defer the reopen, preserve the
 // current item for persistence, and never write a stand-in export.
 for (const mismatch of ['size', 'depth', 'route']) {
-  const { h, c, base, item } = await returnedTierA({ tier: 'B' });
+  // A PNG can successfully decode at either depth. An 8-bit RAW is the
+  // embedded-preview failure path, covered separately below.
+  const { h, c, base, item } = await returnedTierA({ tier: 'B', name: mismatch === 'depth' ? 'a.png' : 'a.dng' });
   c.pushUndo('exposure');
   h.state.exposure = 7;
   let resolveDecode;
@@ -1362,6 +1364,7 @@ for (const mismatch of ['size', 'depth', 'route']) {
   await exporting;
   for (let i = 0; i < 4; i++) { await settle(); await h.state.geometryReady; }
   assert.equal(written, 0, `${mismatch}: no file is written from the mismatched session`);
+  assert.equal(h.target.displaySessionDiagnostics.baseMismatches, 1, `${mismatch}: a supported decode changed`);
   assert.equal(reopened, 1, `${mismatch}: the queued activation runs after unlock`);
   assert.equal(h.state.loadedFile, item.file, 'the live identity survives');
   assert.equal(h.target.getCurrentQueueItem(), item);

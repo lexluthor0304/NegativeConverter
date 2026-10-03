@@ -1334,10 +1334,16 @@ for (const operation of ['crop-hit', 'crop-miss', 'confirm']) {
       sourceImageData: image(FULL), stage: 'settings', updateItemSettings: false
     });
     const one = await singleFlow(async g => {
-      const fullDetection = applyCrop(g, { rect: double(analysisOnly ? WINDOW_AREA : WINDOW_CROP), analysisOnly });
+      const fullDetection = applyCrop(g, {
+        rect: double(WINDOW_CROP), analysisOnly,
+        selectedArea: analysisOnly ? f.item.pendingFrameEdit.intent.confirmed.imageArea : null
+      });
       if (fullDetection && operation !== 'crop-miss') g.land(fullDetection, workingPointsToBase(points, g.state, FULL));
     });
-    assert.equal(canon(result.settings.autoFrameMeta), canon(one.state.autoFrame.lastDiagnostics), `${operation}, saved=${saved}: full-base diagnostics match one stage`);
+    // Reopening restores these detached settings through the same normalizer
+    // as the one-stage import (it supplies false for optional status flags).
+    f.context.restoreAutoFrameDiagnostics(result.settings.autoFrameMeta);
+    assert.equal(canon(f.state.autoFrame.lastDiagnostics), canon(one.state.autoFrame.lastDiagnostics), `${operation}, saved=${saved}: full-base diagnostics match one stage`);
     assert.equal(canon(result.settings.cropRegion), canon(one.context.extractCurrentSettings().cropRegion));
     assert.equal(cropCalls, analysisOnly ? 0 : 1, 'confirmations keep their area; crops are detected again');
     if (!saved) assert.ok(f.detections.some(call => call.width === FULL.width && call.options.frame), 'pending crop geometry does not suppress the full import detection');
