@@ -301,6 +301,11 @@ async function runEditWhileDetecting({ send, evaluate, waitFor, wait, fail, inst
   const run = async (atOnce, manualWb = false) => {
     const label = (atOnce ? 'edit at once' : 'edit after the hit') + (manualWb ? ', exposure and manual WB' : '');
     const editedSlider = manualWb ? 'coreExposure' : 'magenta';
+    const setManualWb = async () => {
+      for (const [id, gain] of [['wbR', 1.3], ['wbG', 1.1], ['wbB', 0.9]]) {
+        await slider(['pointerdown', 'input', 'change'], gain, id);
+      }
+    };
     await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en` });
     await waitFor(label + ': boot', `!!document.getElementById('studioImportAutoCrop') && !!window.__ncAnalysis && !!window.__ncGeometry`);
     await installDialogAutoAccept();
@@ -355,7 +360,7 @@ async function runEditWhileDetecting({ send, evaluate, waitFor, wait, fail, inst
       await slider(['pointerdown', 'input'], 12, editedSlider);
       if (manualWb) {
         await slider(['change'], null, editedSlider);
-        await slider(['pointerdown', 'input', 'change'], 1.3, 'wbR');
+        await setManualWb();
       }
       await evaluate(`window.__cropEditProbe.release()`);
       await evaluate(`window.__ncAnalysis.settle()`);
@@ -364,7 +369,7 @@ async function runEditWhileDetecting({ send, evaluate, waitFor, wait, fail, inst
       await waitFor(label + ': applied', `${READY} && !${cropMode} && !window.__ncAnalysis.converting()`, 120_000);
       await evaluate(`window.__ncAnalysis.settle()`);
       await slider(['pointerdown', 'input', 'change'], 12, editedSlider);
-      if (manualWb) await slider(['pointerdown', 'input', 'change'], 1.3, 'wbR');
+      if (manualWb) await setManualWb();
     }
     const edited = await evaluate(view);
     if (edited.diagnostics?.method !== 'manual-image-window' || edited.diagnostics?.analysisNeedsReview) fail(label + ': the detection did not hit: ' + JSON.stringify(edited));
@@ -376,8 +381,10 @@ async function runEditWhileDetecting({ send, evaluate, waitFor, wait, fail, inst
     const editedFiles = await exportBoth(label);
     let wbUndone = null, wbUndoneFiles = null;
     if (manualWb) {
-      await evaluate(`document.getElementById('undoBtn').click()`);
-      await waitFor(label + ': manual WB undone', `${READY} && !window.__ncAnalysis.converting()`, 60_000);
+      for (let channel = 0; channel < 3; channel++) {
+        await evaluate(`document.getElementById('undoBtn').click()`);
+        await waitFor(label + ': manual WB channel undone', `${READY} && !window.__ncAnalysis.converting()`, 60_000);
+      }
       wbUndoneFiles = await exportBoth(label + ' after undo WB');
       wbUndone = await evaluate(view);
     }

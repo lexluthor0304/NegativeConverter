@@ -221,8 +221,8 @@ quiet.
   edits as `item.pendingEdits`. Switch-back (`prepareStudioPhoto`), batch
   export (`processFileWithSettings`), roll analysis, Auto Frame Selected and
   the flat field compute the automatic fields as for a fresh file. Geometry
-  without an analysis edit is applied before detections; a crop/confirmation
-  first rebuilds the full decode's diagnostics, then replays the user intent.
+  and analysis-area edits first rebuild the full decode's diagnostics, then
+  replay the user intent; other window edits are applied on top.
   That fresh recipe decides as the window's pass began: leaving records the
   pass's `userEdited` as `item.pendingUserEdited`, which `importUserEdited`
   hands to the recipe's learned-default and film-type steps until the photo

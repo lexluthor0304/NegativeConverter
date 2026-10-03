@@ -504,7 +504,9 @@ const view = state => ({ exposure: state.exposure, wb: whiteBalanceOf(state), me
     t.h.state.exposure = 0.5;
     if (manualWb) {
       t.c.pushUndo('wbR');
-      Object.assign(t.h.state, { wbR: 1.3, wbUserOverride: true, wbAutoConfidence: null });
+      // The same explicit RGB recipe in both runs: a one-channel edit owns
+      // the untouched channels too, whose starting gains differ meanwhile.
+      Object.assign(t.h.state, { wbR: 1.3, wbG: 1.1, wbB: 0.9, wbUserOverride: true, wbAutoConfidence: null });
     }
     if (immediate) await hitLands(t);
     const states = [view(t.h.state)];
