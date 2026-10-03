@@ -25,7 +25,8 @@ a kill recoverable.
   `yieldForJob`): rAF then `setTimeout(0)` while visible, a `MessageChannel`
   task while hidden, and the hidden branch when the page hides mid-wait.
   `yieldTaskForJob` is the task-only variant for the ZIP CRC loop and the
-  roll-analysis frame loop. Batch exports call `processFileWithSettings` with
+  roll-analysis frame loop, and for AI repair’s chunked frame copy when
+  `scheduler.yield()` is unavailable. Batch exports call `processFileWithSettings` with
   `silent: true`, so a never-analysed frame is detected without the blocking
   overlay and its frame wait; detection inputs and geometry are unchanged.
   Readiness polls (the background photo lanes, roll-analysis retries) stay on timers.

@@ -1,3 +1,4 @@
+import { yieldTaskForJob } from './yieldToPaint.js';
 import { loadInferenceRuntime } from './inferenceRuntime.js';
 import { defaultInferencePreference } from './inferenceBackend.js';
 import { murmurHash3x86_128 } from './contentHash.js';
@@ -202,7 +203,7 @@ export function createSparseBlendWeights(width, { blockSize = 64 } = {}) {
 }
 
 const yieldToEventLoop = () => (typeof globalThis.scheduler?.yield === 'function'
-  ? globalThis.scheduler.yield() : new Promise((resolve) => setTimeout(resolve, 0)));
+  ? globalThis.scheduler.yield() : yieldTaskForJob());
 
 async function copyInChunks(target, source, chunkBytes, check) {
   const step = Math.max(1, Math.floor(chunkBytes / source.BYTES_PER_ELEMENT));
