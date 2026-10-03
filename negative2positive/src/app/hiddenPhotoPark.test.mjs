@@ -10,6 +10,10 @@ import { createDustHistoryArchive } from './dustHistoryArchive.js';
 import { archiveDatabaseFixture } from './dustHistoryArchiveHarness.mjs';
 import { applyStrokePatch, applyDustDelta } from './dustStrokeHistory.js';
 import { createMemoryBudget, createRetainedLedger } from './memoryBudget.js';
+import { createDustWorkerClient } from './dustWorkerClient.js';
+import { createHiddenJobGate } from './hiddenJobGate.js';
+import { ROLL_OPENCV_REALM_BYTES } from './batchExportScheduler.js';
+import { isSharedPlane } from './crossOriginIsolation.js';
 
 const source = readFileSync(new URL('./main.js', import.meta.url), 'utf8');
 function functionSource(name) {
@@ -91,7 +95,8 @@ function fixture({ enabled = true, hidden = true, brush = true } = {}) {
   vm.runInContext(['hiddenParkEnabled', 'parkOpenPhotoForHiddenJob', 'unparkOpenPhoto', 'performUndo', 'performRedo', 'releaseGlBorder', 'openPhotoMemoryRoots'].map(functionSource).join('\n'), c);
   const ledger = createRetainedLedger([
     { name: 'editor', roots: () => c.openPhotoMemoryRoots() },
-    { name: 'history', roots: () => [undoStack, redoStack] }
+    { name: 'history', roots: () => [undoStack, redoStack] },
+    { name: 'workers', bytes: () => c.workerResidentBytes?.() || 0 }
   ]);
   return { c, state, item, base, file, calls, undoStack, redoStack, stroke, db, target, ledger };
 }
@@ -242,4 +247,58 @@ for (const change of ['visible', 'edit', 'plane']) {
   assert.equal(f.c.memoryBudget.idle, true);
   assert.equal(f.db.records.size, 0);
 }
+// The combined background/display/roll contract: no tag or pending request
+// is needed for a live worker's bytes to remain counted. A failed archive
+// keeps that ownership. Only actual worker and plane release lets the held
+// hidden item start. Both private and shared 16-bit inputs use tiny planes.
+for (const shared of [false, true]) {
+  const f = fixture();
+  let terminated = 0;
+  const dust = createDustWorkerClient({ workerFactory: () => ({
+    postMessage(message) { queueMicrotask(() => this.onmessage?.({ data: { id: message.id } })); },
+    terminate() { terminated++; }
+  }) });
+  const clean = f.state.dustRemoval.cleanSource, mask = f.state.dustRemoval.mask;
+  clean.__image16 = { width: 2, height: 2,
+    data: new Uint16Array(shared ? new SharedArrayBuffer(32) : new ArrayBuffer(32)) };
+  clean.__image16.data.fill(7723);
+  Object.assign(f.c, { workerResidents: new Map(), dustWorkerPlaneBytes: 0, dustWorker: dust,
+    ROLL_OPENCV_REALM_BYTES, isSharedPlane, disposeDustWorker: dust.dispose, unpinDustWorker: dust.unpin });
+  const start = source.indexOf("    workerResidents.set('dust', {");
+  assert.ok(start >= 0, 'the real dust resident registration exists');
+  const registration = source.slice(start, source.indexOf('\n    });', start) + 8);
+  vm.runInContext(['noteDustWorkerMemory', 'workerResidentBytes'].map(functionSource).join('\n') + '\n' + registration, f.c);
+  f.c.noteDustWorkerMemory(clean, mask);
+  await dust.pin(clean, { mask, tag: null });
+  assert.equal(dust.pendingCount, 0);
+  assert.equal(dust.maskTag, null, 'the seeded worker deliberately has no reuse tag');
+  const opaque = clean.data.byteLength + (shared ? 0 : clean.__image16.data.byteLength) + mask.byteLength + ROLL_OPENCV_REALM_BYTES;
+  assert.equal(f.c.workerResidentBytes(), opaque, 'every live tagless worker byte remains counted');
+  const before = f.ledger.retained();
+  const gate = createHiddenJobGate({ isHidden: () => true, limitsApply: () => true,
+    graceMs: 0, budgetBytes: f.base.data.byteLength + 32, residentBytes: f.ledger.retained });
+  let admitted = false;
+  const admission = gate.admit({ bytes: 32 }).then(release => { admitted = true; return release; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(gate.waiting, 1);
+  assert.equal(admitted, false, 'the live worker and brush planes hold the item back');
+  f.db.failures.write = true;
+  assert.equal(await f.c.parkOpenPhotoForHiddenJob(), false);
+  gate.recheck();
+  assert.equal(terminated, 0, 'a failed archive retains the actual worker');
+  assert.equal(f.c.workerResidentBytes(), opaque);
+  assert.equal(f.ledger.retained(), before, 'no accounting is hidden to pass the budget');
+  assert.equal(admitted, false);
+  f.db.failures.write = false;
+  assert.equal(await f.c.parkOpenPhotoForHiddenJob(), true);
+  assert.equal(terminated, 1, 'committed parking actually terminates the unused worker');
+  assert.equal(dust.holds(clean), false, 'the client also relinquishes its source reference');
+  assert.equal(f.c.workerResidentBytes(), 0, 'worker accounting disappears only after termination');
+  assert.equal(f.ledger.retained(), f.base.data.byteLength, 'archived page/brush/border planes are also relinquished');
+  gate.recheck();
+  const release = await admission;
+  assert.equal(admitted, true, 'the waiting hidden item resumes on the real ownership drop');
+  release(); gate.dispose();
+}
+
 console.log('hiddenPhotoPark: exact brush restoration, ordinary cold history, storage races/failures and shared foreground restoration passed');
