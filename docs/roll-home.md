@@ -56,10 +56,12 @@ the layout maths (tested) and draws through any 2D context. A sheet renders
 in about half a second once the frames are converted.
 
 **Proof-sheet approximation (a flagged quality trade-off).** The conversion
-takes its levels from the full frame's analysis reference and every
-per-pixel stage (conversion, white balance, curves, colour, CMY, look) runs
-unchanged, so without spatial effects a cell equals the nearest-decimated
-full-resolution render (`contactSheetCells.test.mjs`). Spatial effects
+takes its levels from the full frame's analysis reference whenever an image
+area or analysis area exists. Without either area, it measures levels on the
+decimated cell instead; those levels can differ from a full-resolution render.
+With a reference, every per-pixel stage (conversion, white balance, curves,
+colour, CMY, look) runs unchanged, so without spatial effects a cell equals
+the nearest-decimated full-resolution render (`contactSheetCells.test.mjs`). Spatial effects
 (sharpening, glow, the dodge-and-burn raster, the expired fog surface) and
 the measurements that read the converted frame (the automatic gray point of
 a frame without an image area or with a semantic map, the expired-rescue

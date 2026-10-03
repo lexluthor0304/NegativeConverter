@@ -1,5 +1,5 @@
 // Contact-sheet cells at cell size (#247 part 3, a flagged proof-sheet
-// approximation): without spatial effects, a cell's 8-bit pixels equal
+// approximation): with an analysis area and no spatial effects, cell pixels equal
 // nearest-decimating the frame's full-resolution convert + adjust output,
 // because the conversion's levels come from the full-base analysis
 // reference and every later stage is per pixel. Runs the app's
@@ -67,7 +67,8 @@ const adjustments = { saturation: 28, vibrance: 35, contrast: 12, temperature: 6
 
 function run(image, recipe, convertWith, { dust = false } = {}) {
   const file = { name: 'frame.tif', size: 1 };
-  const reference = sampleAnalysisArea(image, area);
+  const analysisArea = recipe.autoFrameMeta?.imageArea || recipe.autoFrameMeta?.analysisArea;
+  const reference = analysisArea ? sampleAnalysisArea(image, analysisArea) : null;
   const adjusted = [];
   const conversions = [];
   const context = vm.createContext({
@@ -141,3 +142,19 @@ for (const [label, convertWith] of [['colour', convertColorWithSilverCore], ['B&
 }
 
 console.log('contactSheetCells: cells equal decimated full-resolution convert + adjust output (colour and B&W, with rotation, mirror and crop)');
+
+// Without an area, levels are measured on the cell, as on any conversion
+// without a reference. This is a documented proof-sheet approximation.
+{
+  const image = negative(1260, 840);
+  const recipe = { filmType: 'color', autoFrameMeta: {}, filmEdge: { checked: true }, repairStrokes: [], lensCorrection: { enabled: false } };
+  const cell = run(image, recipe, convertColorWithSilverCore);
+  const sheet = await cell.context.processFileWithSettings(cell.file, cell.recipe, {
+    tileMaxDimension: 330, updateItemSettings: false, convert: cell.convert
+  });
+  const reduced = downsampleImageDataForMaxDim(image, 330);
+  const direct = run(reduced, recipe, convertColorWithSilverCore);
+  const expected = await direct.context.processFileWithSettings(direct.file, direct.recipe, { convert: direct.convert });
+  assert.deepEqual(sheet.data, expected.data, 'no-area cells use cell-sized analysis');
+  assert.ok(cell.conversions.every(([w, h, force, noReference]) => Math.max(w, h) <= 330 && force && noReference));
+}

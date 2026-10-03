@@ -53,8 +53,10 @@ transfer and the pool encodes its bands in parallel, with the same bytes. Both
 adjustment handlers work in place (the kernels read a pixel's samples before
 writing it), and the worker's TIFF encoder compacts the owned plane RGBA16 →
 RGB16 in place and uses its first 6·w·h bytes as the strip, byte-identical on
-little-endian hosts; the main-thread fallback keeps the copying loop. With
-the sprocket frame the mirror is still built (`needs8`). Tests:
+little-endian hosts; the main-thread fallback keeps the copying loop. The
+8-bit mirror is still built when `planeOnly` is false; enabling
+`exportSprocketHolesEnabled` prevents the PNG16/TIFF16 export from requesting
+the plane-only path because the sprocket frame needs that mirror. Tests:
 `exportWorker.test.mjs` (in-place handlers against fresh-buffer references,
 fused bytes against adjust + encode, the owned strip and its endianness
 guard), `exportPlaneLifecycle.test.mjs` (the export functions of `main.js`
