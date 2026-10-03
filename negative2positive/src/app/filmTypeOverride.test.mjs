@@ -97,3 +97,20 @@ for (const settings of [original, { ...original, wbUserOverride: true }, { ...or
 }
 console.log('filmTypeOverride: isolated film selection, manual WB and unopened project persistence passed');
 console.log('filmTypeOverride: a retype drops the expired measurement of the old interpretation and the strengths it set (R1-017)');
+
+// A completed semantic map must not provide old-interpretation rescue anchors.
+{
+  const semanticMap = { labels: [1, 2], confidence: 0.9 };
+  const settings = { ...original, filmType: 'positive', positiveMode: 'correct', semanticMap,
+    expiredEnabled: true, expiredBrightness: 17, expiredContrast: 23 };
+  const manual = applyFilmTypeOverride(settings, { filmType: 'color' });
+  const automatic = applyAutomaticFilmType(settings, { filmType: 'bw', confidence: 'high', reason: 'rollMonochrome' });
+  const editOnly = applyFilmTypeOverride(settings, { filmType: 'positive', positiveMode: 'edit' });
+  for (const result of [manual, automatic, editOnly]) {
+    assert.equal(result.semanticMap, null, 'retype clears completed old-interpretation anchors');
+    assert.deepEqual([result.expiredBrightness, result.expiredContrast], [17, 23], 'user rescue strengths survive');
+  }
+  assert.equal(applyAutomaticFilmType(settings, { filmType: 'positive', confidence: 'high' }).semanticMap, semanticMap,
+    'confirming the same interpretation keeps its anchors');
+  assert.equal(settings.semanticMap, semanticMap, 'saved history is not mutated');
+}

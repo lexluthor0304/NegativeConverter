@@ -28,6 +28,8 @@ function interpretationOf(settings) {
 }
 
 function withoutFilmTypeAnalysis(previous, next) {
+  // Semantic anchors were measured on the old interpretation's positive too.
+  if (next.semanticMap && interpretationOf(previous) !== interpretationOf(next)) next.semanticMap = null;
   if (next.wbAutoConfidence && !next.wbUserOverride && !next.grayPointSampled) {
     next.wbR = next.wbG = next.wbB = 1;
     next.wbAutoConfidence = null; next.wbSemanticApplied = false;
