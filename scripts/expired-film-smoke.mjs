@@ -430,17 +430,23 @@ async function runExpiredLiveTypeSmoke({ send, evaluate, waitFor, wait, fail, in
   const ready = `document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy`;
   const settings = `window.__ncTwoStage.status().settings`;
   const map = { width: 2, height: 1, labels: [0, 4], confidence: .95, model: 'efficientvit-b1-ade20k-v1' };
+  const previous = await evaluate('performance.timeOrigin');
   await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en&debug=1` });
-  await waitFor('live-type boot', `!!document.getElementById('uploadExpiredBtn') && !!window.__ncTwoStage`);
+  await waitFor('live-type boot', `performance.timeOrigin !== ${previous} && document.readyState === 'complete'
+    && !!document.getElementById('uploadExpiredBtn') && !!window.__ncTwoStage`);
   await installDialogAutoAccept();
   await wait(500);
   await evaluate(`(() => {
+    const probe = window.__liveSemantic = { created: 0, posted: 0, delivered: 0 };
     const NativeWorker = window.Worker;
     window.Worker = class extends NativeWorker {
       constructor(url, options) {
-        if (/semanticWorker/.test(String(url))) return {
-          onmessage: null, terminate() {}, postMessage() { queueMicrotask(() => this.onmessage?.({ data: ${JSON.stringify(map)} })); }
-        };
+        if (/semanticWorker/.test(String(url))) {
+          probe.created++;
+          return { onmessage: null, terminate() {}, postMessage() {
+            probe.posted++; queueMicrotask(() => { if (this.onmessage) { probe.delivered++; this.onmessage({ data: ${JSON.stringify(map)} }); } });
+          } };
+        }
         super(url, options);
       }
     };
@@ -462,6 +468,10 @@ async function runExpiredLiveTypeSmoke({ send, evaluate, waitFor, wait, fail, in
     const dt = new DataTransfer(); dt.items.add(new File([await new Promise(r => canvas.toBlob(r, 'image/png'))], 'live-type-positive.png', { type: 'image/png' }));
     const input = document.getElementById('fileInput'); input.files = dt.files; input.dispatchEvent(new Event('change', { bubbles: true }));
   })()`);
+  await waitFor('live-type imported photo', `${ready} && document.getElementById('studioFilename').textContent === 'live-type-positive.png'`, 120_000);
+  console.log('live-type import:', JSON.stringify(await evaluate(`({ probe: window.__liveSemantic, type: ${settings}.filmType,
+    mode: ${settings}.positiveMode, rescued: ${settings}.expiredEnabled, manualWb: ${settings}.wbUserOverride,
+    map: ${settings}.semanticMap, semanticPending: window.__ncTwoStage.status().semanticPending })`)));
   await waitFor('live-type completed semantic rescue', `${ready} && ${settings}?.semanticMap && ${settings}.expiredAnalysis?.spatial
     && !window.__ncTwoStage.status().semanticPending`, 120_000);
   await evaluate(`(() => {
