@@ -14149,10 +14149,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     // Exact entries: every undo/redo entry was taken in the window (loadFile
-    // cleared the history). They keep their scalars, their crop goes to full
-    // units (the exact crop, or a window edit converted against the real
-    // size) and their pixels are rebuilt from the full base on restore (#244
-    // cold entries). Dust-stroke entries patch the stand-in's planes: they go,
+    // cleared the history). Their own window edits go over the full import's
+    // recipe, as the live state's do: an automatic film base or geometry
+    // measured on the stand-in must not feed the restored conversion/WB.
+    // Pixels are rebuilt from the full base on restore (#244 cold entries).
+    // Dust-stroke entries patch the stand-in's planes: they go,
     // with everything older on their stack.
     function rebaseProvisionalHistory(provisional, realSize, settled = null) {
       for (const stack of [undoStack, redoStack]) {
@@ -14165,9 +14166,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
             const geometry = createExactGeometry({ size: provisional.size, fullSize: provisional.fullSize });
             const live = { cropRegion: s.cropRegion, rotationAngle: s.rotationAngle, mirrored: s.mirrored };
             geometry.restore(s.provisionalGeometry, live);
-            s.cropRegion = geometry.rebase(realSize, live).cropRegion;
+            const exact = { ...s, ...geometry.toExact(live) };
+            const rebased = geometry.rebase(realSize, live);
             if (settled) {
-              const intent = windowFrameIntent(provisional.settledSnapshot, s, s.provisionalFrameEditIntent || null);
+              const intent = windowFrameIntent(provisional.settledSnapshot, exact, s.provisionalFrameEditIntent || null);
+              const edits = provisional.settledSnapshot ? windowEdits(provisional.settledSnapshot, exact) : {};
+              if ('cropRegion' in edits) Object.assign(edits, rebased);
+              Object.assign(s, overlayWindowEdits(settled, edits));
               const applied = frameMetaWithWindowIntent(settled, s, intent, realSize);
               s.autoFrameMeta = applied.meta;
               delete s.cropDetectionToken;
@@ -14177,7 +14182,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
               }
               s.fullBaseFrameEdit = { detect: applied.detect, automatic };
               delete s.provisionalFrameEditIntent;
-            }
+            } else s.cropRegion = rebased.cropRegion;
             delete s.provisionalGeometry;
           }
           entry.refs = { cold: true };

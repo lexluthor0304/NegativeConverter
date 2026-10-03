@@ -644,7 +644,8 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
             // The exact consumer also waits for promoted history's analysis.
             await evaluate('window.__ncAnalysis.settle()');
             await waitFor(scene + ': ' + action, `${ready} && !window.__ncAnalysis.converting() && document.getElementById('coreExposure').value === '${action === 'undo' ? '0' : '15'}'`, 120_000);
-            result[action] = { diagnostics: await evaluate('window.__ncAnalysis.diagnostics()'), wb: await evaluate('window.__ncAnalysis.whiteBalance()'),
+            result[action] = { settings: await evaluate(`${status}.settings`),
+              diagnostics: await evaluate('window.__ncAnalysis.diagnostics()'), wb: await evaluate('window.__ncAnalysis.whiteBalance()'),
               exports: await exportFormats(scene + ' ' + action, [FORMATS[0], FORMATS[2]]) };
           }
           await evaluate(releaseSemantic);
@@ -652,6 +653,11 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
         };
         const staged = await flow(true), single = await flow(false, staged.recipe);
         for (const action of ['undo', 'redo']) {
+          const fields = ['filmBase', 'filmType', 'positiveMode', 'cropRegion', 'rotationAngle', 'mirrored', 'coreExposure', 'wbUserOverride'];
+          const differing = Object.fromEntries(fields.filter(key => JSON.stringify(staged[action].settings[key]) !== JSON.stringify(single[action].settings[key]))
+            .map(key => [key, { staged: staged[action].settings[key], single: single[action].settings[key] }]));
+          if (Object.keys(differing).length) console.log(`${label} ${timing} ${action} recipe differences:`, JSON.stringify(differing));
+          for (const key of fields) same(`${label} ${timing}: ${action} ${key}`, staged[action].settings[key], single[action].settings[key]);
           same(`${label} ${timing}: ${action} diagnostics`, staged[action].diagnostics, single[action].diagnostics);
           same(`${label} ${timing}: ${action} WB`, staged[action].wb, single[action].wb);
           sameExports(`${label} ${timing}: ${action} PNG8/TIFF16`, staged[action].exports, single[action].exports);

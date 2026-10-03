@@ -7,9 +7,10 @@ import { resolveAnalysisRegion, imageAreaFromWorkingRect } from './analysisRegio
 import { workingPointsToBase, buildCropDetectionInput, isSameAnalysisFrame } from './cropColorAnalysis.js';
 import { estimateAutoWhiteBalance } from './autoWhiteBalance.js';
 import { applyPreparedAdjustmentsToBuffer, applyPreparedAdjustmentsToBuffer16 } from './adjustmentPipeline.js';
+import { convertColorWithSilverCore } from '../pipeline/silverAdapter.js';
 
 // Real history capture, source installation, restore, undo/redo, geometry,
-// automatic WB and 8/16 adjustment samples. Only detection/inversion are leaves.
+// Silver conversion, automatic WB and 8/16 adjustment samples. Detection is a leaf.
 const source = readFileSync(process.env.NC229_CALLER_SOURCE || new URL('./main.js', import.meta.url), 'utf8');
 const fn = name => {
   const start = new RegExp(`^    (?:async )?function ${name}\\(`, 'm').exec(source)?.index;
@@ -25,12 +26,16 @@ const fullMeta = { imageArea: area(.08, .06, .92, .94), method: 'hough', confide
 const standInMeta = { imageArea: area(.14, .12, .86, .88), method: 'hough', confidence: .77, appliedMode: 'crop', importAuto: true };
 const rect = { left: 0, top: 0, width: 20, height: 16 };
 const fullRect = { left: 0, top: 0, width: 40, height: 32 };
+const fullFilmBase = { r: 228, g: 194, b: 144, method: 'auto' };
+const standInFilmBase = { r: 210, g: 184, b: 150, method: 'auto' };
+const manualFilmBase = { r: 208, g: 188, b: 156, method: 'manual' };
 function fixture(staged, manualWb = false) {
   const h = createHarness(staged ? standIn : full, { realProcessNegative: true });
   const { context: c, target, state } = h;
   Object.assign(state, { filmType: 'color', positiveMode: 'correct', exposure: 0, coreExposure: 0, expiredEnabled: false,
     wbR: 1, wbG: 1, wbB: 1, wbAutoConfidence: null, wbSemanticApplied: false, wbUserOverride: false, grayPointSampled: false,
-    semanticMap: null, currentStep: 3, autoFrame: { lastDiagnostics: structuredClone(staged ? standInMeta : fullMeta) } });
+    semanticMap: null, filmBase: { ...(staged ? standInFilmBase : fullFilmBase) }, currentStep: 3,
+    autoFrame: { lastDiagnostics: structuredClone(staged ? standInMeta : fullMeta) } });
   if (manualWb) Object.assign(state, { wbR: 1.17, wbG: 1, wbB: .83, wbUserOverride: true });
   const detections = [], held = [];
   Object.assign(target, { createExactGeometry, windowEdits, overlayWindowEdits, analysisAreaEdited, confirmedImageArea,
@@ -38,7 +43,8 @@ function fixture(staged, manualWb = false) {
     estimateAutoWhiteBalance, cropHitHold: false,
     usesSilverCoreConversion: () => true,
     // Use real geometry pixels and WB sampling; no display-sized stand-in.
-    convertFromCurrentSource: async () => state.conversionSourceImageData,
+    convertFromCurrentSource: async () => convertColorWithSilverCore(state.conversionSourceImageData,
+      { filmBase: state.filmBase, colorModel: 'standard', filmPreset: 'none', borderBuffer: 0, exposure: 0 }),
     runOpenCvTask: async (_kind, options) => {
       await options.build();
       detections.push({ base: state.loadedBaseImageData, crop: { ...state.cropRegion } });
@@ -88,7 +94,7 @@ function samples(h, depth) {
 }
 const selected = process.argv[2] || 'all';
 let cases = 0;
-for (const timing of ['pending-hit', 'completed-hit', 'confirmation']) for (const stack of ['undo', 'redo']) for (const manualWb of [false, true]) {
+for (const timing of ['pending-hit', 'completed-hit', 'confirmation']) for (const stack of ['undo', 'redo']) for (const manualWb of [false, true]) for (const manualBase of [false, true]) {
   if (selected !== 'all' && selected !== `${timing}-${stack}`) continue;
   const h = fixture(true, manualWb), { context: c, state } = h;
   const baseline = h.target.extractCurrentSettings();
@@ -98,11 +104,12 @@ for (const timing of ['pending-hit', 'completed-hit', 'confirmation']) for (cons
   state.provisional = provisional;
   const confirmation = timing === 'confirmation' ? area(.2, .25, .8, .75) : null;
   await apply(h, rect, { held: timing === 'pending-hit', analysisOnly: Boolean(confirmation), selectedArea: confirmation });
+  if (manualBase) state.filmBase = { ...manualFilmBase };
   c.pushUndo('exposure');
   state.exposure = 27;
   if (timing === 'pending-hit') await land(h);
   if (stack === 'redo') await c.performUndo();
-  const settled = { ...baseline, autoFrameMeta: structuredClone(fullMeta), cropRegion: null };
+  const settled = { ...baseline, autoFrameMeta: structuredClone(fullMeta), filmBase: { ...fullFilmBase }, cropRegion: null };
   c.installFullDecode(record, provisional, full, settled);
   await c.whenGeometrySettled();
   await c.processNegative();
@@ -112,6 +119,7 @@ for (const timing of ['pending-hit', 'completed-hit', 'confirmation']) for (cons
   const promoted = [...h.target.undoStack, ...h.target.redoStack].filter(s => s.label === 'exposure');
   assert.ok(promoted.length, 'real exposure history survived source promotion');
   const reference = fixture(false, manualWb);
+  if (manualBase) reference.state.filmBase = { ...manualFilmBase };
   await apply(reference, fullRect, { analysisOnly: Boolean(confirmation), selectedArea: confirmation });
   await reference.context.settlePendingCropDetection();
   const restored = stack === 'undo' ? c.performUndo() : c.performRedo();
@@ -120,6 +128,7 @@ for (const timing of ['pending-hit', 'completed-hit', 'confirmation']) for (cons
   await c.settlePendingCropDetection();
   await restored;
   reference.state.exposure = stack === 'undo' ? 0 : 27;
+  assert.deepEqual(canon(state.filmBase), canon(reference.state.filmBase), 'automatic film base promotes; manual film base stays');
   assert.deepEqual(canon(state.autoFrame.lastDiagnostics), canon(reference.state.autoFrame.lastDiagnostics), `${timing}/${stack}: restored full-base diagnostics`);
   assert.deepEqual([state.wbR, state.wbG, state.wbB], [reference.state.wbR, reference.state.wbG, reference.state.wbB], 'full-base automatic WB');
   samePixels(state.processedImageData, reference.state.processedImageData, 'exact restored geometry/conversion samples');
@@ -132,4 +141,4 @@ for (const timing of ['pending-hit', 'completed-hit', 'confirmation']) for (cons
   h.pool.dispose(); reference.pool.dispose();
   cases++;
 }
-console.log(`provisionalHistoryAnalysis: ${cases} pending/completed hits and confirmations on undo/redo stacks promote full-base diagnostics/WB; manual WB and exact 8/16 samples preserved`);
+console.log(`provisionalHistoryAnalysis: ${cases} pending/completed hits and confirmations on undo/redo stacks promote full-base recipe/diagnostics/WB; manual WB/base and exact Silver/8/16 samples preserved`);
