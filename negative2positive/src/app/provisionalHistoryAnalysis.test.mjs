@@ -58,7 +58,7 @@ function fixture(staged, manualWb = false) {
         { filmBase: settings.filmBase, colorModel: 'standard', filmPreset: 'none', borderBuffer: 0, exposure: settings.coreExposure },
         { analysisImageData: c.getColorAnalysisSample(settings === state ? { ...settings, autoFrameMeta: state.autoFrame.lastDiagnostics } : settings) });
       dispatched.push(recipe);
-      if (target.conversionHold) await new Promise(resolve => conversionReplies.push(resolve));
+      if (target.conversionHold && (!target.measurementHold || settings !== state)) await new Promise(resolve => conversionReplies.push(resolve));
       return processed;
     },
     buildRouterSettings: settings => settings,
@@ -335,8 +335,9 @@ for (const stack of ['undo', 'redo']) for (const wbMode of ['automatic', 'manual
   }
   h.pool.dispose(); reference.pool.dispose(); cases++;
 }
-for (const defect of ['conversion-in-flight', 'post-install-history']) for (const wbMode of ['automatic', 'late-manual', 'late-gray-point', 'late-semantic']) {
+for (const defect of ['conversion-in-flight', 'post-install-history', 'cold-undo-edit', 'cold-redo-edit', 'cold-wb-replay-edit']) for (const wbMode of ['automatic', 'late-manual', 'late-gray-point', 'late-semantic']) {
   if (selected !== 'all' && selected !== defect) continue;
+  const historyRestore = defect.startsWith('cold-');
   const h = fixture(true), reference = fixture(false), { context: c, state, target } = h;
   const baseline = target.extractCurrentSettings();
   const record = { decodedImage: full, status: 'decoded', urgent: true };
@@ -372,7 +373,7 @@ for (const defect of ['conversion-in-flight', 'post-install-history']) for (cons
   for (const item of [h, reference]) {
     item.context.pushUndo('in-flight-exposure');
     item.state.coreExposure = 0;
-    if (wbMode !== 'automatic') Object.assign(item.state, { wbR: 1.17, wbG: 1, wbB: .83, wbAutoConfidence: 'high',
+    if (!historyRestore && wbMode !== 'automatic') Object.assign(item.state, { wbR: 1.17, wbG: 1, wbB: .83, wbAutoConfidence: 'high',
       [wbMode === 'late-manual' ? 'wbUserOverride' : wbMode === 'late-gray-point' ? 'grayPointSampled' : 'wbSemanticApplied']: true });
     item.target.conversionHold = false;
     item.conversionReplies.splice(0).forEach(resolve => resolve());
@@ -384,13 +385,71 @@ for (const defect of ['conversion-in-flight', 'post-install-history']) for (cons
   await c.restorePromotedWhiteBalance(provisional.fullBaseWhiteBalance, () => true);
   state.provisional = null; record.status = 'installed';
   h.held.splice(0).forEach(resolve => resolve()); await old.done;
+  let duringRestore = null;
+  if (historyRestore) {
+    const heldRestore = async action => {
+      target.conversionHold = true;
+      const restoring = c[`perform${action}`]();
+      for (let i = 0; i < 32 && !h.conversionReplies.length; i++) await new Promise(setImmediate);
+      assert.equal(h.conversionReplies.length, 1, action + ': cold history conversion reply explicitly held');
+      assert.equal(state.provisional, null, 'promotion has finished before cold history rebuild');
+      assert.ok(state.fullBaseHistoryPending, 'history barrier covers the held conversion');
+      assert.equal(state.geometryPending, false, 'geometry finished before the new edit');
+      assert.equal(target.cropDetection, null, 'detection finished before the new edit');
+      return { restoring };
+    };
+    const release = () => {
+      target.conversionHold = false;
+      h.conversionReplies.splice(0).forEach(resolve => resolve());
+    };
+    if (defect === 'cold-redo-edit') {
+      // A second Undo while the first cold rebuild waits captures its
+      // unfinished state on Redo's stack. No history entry is manufactured.
+      const first = await heldRestore('Undo');
+      const second = c.performUndo();
+      release();
+      await first.restoring; await second; await c.settlePendingCropDetection();
+      await reference.context.performUndo(); await reference.context.performUndo();
+      await reference.context.processNegative({ automatic: false });
+      assert.equal(target.redoStack.at(-1).refs.cold, true, 'Redo entry captured during the superseded cold Undo is cold');
+    }
+    if (defect === 'cold-wb-replay-edit') {
+      await c.performUndo(); await c.settlePendingCropDetection();
+      await reference.context.performUndo();
+      // Only the off-state WB measurement reply is held: the restored
+      // exposure-0 pixels have converted, but the exposure-15 event has not.
+      target.measurementHold = true;
+    }
+    const action = defect === 'cold-redo-edit' ? 'Redo' : 'Undo';
+    const { restoring } = await heldRestore(action);
+    await reference.context[`perform${action}`]();
+    const event = state.fullBaseFrameEdit;
+    duringRestore = c.pushUndo('during-history-exposure');
+    reference.context.pushUndo('during-history-exposure');
+    assert.equal(duringRestore.settings.fullBaseFrameEdit.whiteBalance, event.whiteBalance, 'capture retains the same WB event');
+    if (defect === 'cold-wb-replay-edit') {
+      assert.equal(target.processNegativeInFlight, null, 'live pixels converted before the WB replay reply is held');
+      assert.notDeepEqual([state.wbR, state.wbG, state.wbB], [reference.state.wbR, reference.state.wbG, reference.state.wbB], 'WB still belongs to the intermediate conversion');
+    } else assert.deepEqual([state.wbR, state.wbG, state.wbB], [1, 1, 1], 'the held rebuild has temporary identity WB');
+    for (const item of [h, reference]) {
+      item.state.coreExposure = defect === 'cold-wb-replay-edit' ? 15 : 0;
+      if (wbMode !== 'automatic') Object.assign(item.state, { wbR: 1.17, wbG: 1, wbB: .83, wbAutoConfidence: 'high',
+        [wbMode === 'late-manual' ? 'wbUserOverride' : wbMode === 'late-gray-point' ? 'grayPointSampled' : 'wbSemanticApplied']: true });
+    }
+    release();
+    await restoring; await c.settlePendingCropDetection();
+    assert.equal(state.fullBaseHistoryPending, null, 'restoration releases its barrier');
+    assert.equal(state.fullBaseFrameEdit, null, 'restoration releases its live event');
+    assert.equal(state.coreExposure, defect === 'cold-wb-replay-edit' ? 15 : 0, 'the exposure edited during cold restoration survives');
+  }
   const failures = [];
   const check = async phase => {
     await c.processNegative({ automatic: false });
     await reference.context.processNegative({ automatic: false });
     const actual = Object.fromEntries([8, 16].map(depth => [depth, createHash('sha256').update(Buffer.from(new Uint16Array(samples(h, depth)).buffer)).digest('hex')]));
     const expected = Object.fromEntries([8, 16].map(depth => [depth, createHash('sha256').update(Buffer.from(new Uint16Array(samples(reference, depth)).buffer)).digest('hex')]));
-    console.log(defect, wbMode, phase, JSON.stringify({ dispatchedExposure: 15, recordedExposure: provisional.fullBaseWhiteBalance.measurement.settings.coreExposure,
+    console.log(defect, wbMode, phase, JSON.stringify({ capturedCold: duringRestore?.refs.cold || false,
+      dispatchedExposure: 15, recordedExposure: provisional.fullBaseWhiteBalance.measurement.settings.coreExposure,
       liveExposure: state.coreExposure, wb: [state.wbR, state.wbG, state.wbB], referenceWb: [reference.state.wbR, reference.state.wbG, reference.state.wbB], actual, expected }));
     // Keep exercising real Undo/Redo on the negative control, retaining every
     // strict failure instead of stopping before the other sample depths run.
@@ -408,7 +467,7 @@ for (const defect of ['conversion-in-flight', 'post-install-history']) for (cons
     } catch (error) { failures.push(error); }
   };
   await check('live');
-  for (const action of ['Undo', 'Redo']) {
+  for (const action of historyRestore ? ['Undo', 'Redo', 'Undo', 'Redo'] : ['Undo', 'Redo']) {
     const restoring = c[`perform${action}`](); await c.settlePendingCropDetection(); await restoring;
     await reference.context[`perform${action}`]();
     await check(action);
@@ -465,4 +524,4 @@ if (selected === 'all' || selected === 'parking-barrier') {
   client.dispose(); cases++;
 }
 if (selected === 'parking-barrier') console.log('provisionalHistoryAnalysis: real promoted history keeps the cached worker until full-base detection settles, then parking releases ownership');
-else console.log(`provisionalHistoryAnalysis: ${cases} history/rescue cases; pending/completed/cancelled-at-swap hits and confirmations promote full-base recipe/diagnostics/WB at the original event; manual WB/base, rescue strengths and exact Silver/8/16 samples preserved`);
+else console.log(`provisionalHistoryAnalysis: ${cases} history/rescue cases; pending/completed/cancelled-at-swap hits, confirmations and edits during cold Undo/Redo promote full-base recipe/diagnostics/WB at the original event; manual WB/base, rescue strengths and exact Silver/8/16 samples preserved`);

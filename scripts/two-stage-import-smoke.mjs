@@ -599,7 +599,10 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
     // A separate schedule holds the actual WB conversion reply after dispatch,
     // then creates history by editing exposure while those pixels are pending.
     if (runs('crop-history')) {
-      for (const timing of ['pending-hit', 'completed-hit', 'pending-at-swap', 'conversion-in-flight']) {
+      for (const timing of ['pending-hit', 'completed-hit', 'pending-at-swap', 'conversion-in-flight', 'cold-undo-edit', 'cold-redo-edit']) {
+        const historyRestore = timing.startsWith('cold-');
+        const heldConversion = timing === 'conversion-in-flight' || historyRestore;
+        const unansweredPreview = timing === 'pending-at-swap' || heldConversion;
         const flow = async (staged, recipe = null) => {
           const scene = `${label} ${timing} crop history ${staged ? 'two stages' : 'one stage'}`;
           const wbTimeline = [];
@@ -608,7 +611,7 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
           await evaluate(`(() => {
             const auto = document.getElementById('studioImportAutoCrop'); if (auto.checked) auto.click();
             const probe = window.__historyCropProbe = { hold: false, held: [], answers: 0, replacement: null,
-              once: ${['pending-at-swap', 'conversion-in-flight'].includes(timing)}, geometryOn: false,
+              once: ${unansweredPreview}, geometryOn: false, historyOn: false,
               geometryHeld: [], conversionOn: false, conversionHeld: [], conversionReplies: 0 };
             const post = Worker.prototype.postMessage;
             Worker.prototype.postMessage = function (message, ...args) {
@@ -637,10 +640,12 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
                   const state = window.__ncTwoStage.status();
                   if (geometry && probe.geometryOn && state.swapped) requests.set(message.id, 'geometry');
                   if (conversion && probe.conversionOn && message.wbSample && message.settings?.coreExposure === 15
-                    && window.__ncAnalysis.detection.hits === 1 && (${!staged} || state.swapped)) {
+                    && (probe.historyOn ? !state.pending && !state.provisional
+                      : window.__ncAnalysis.detection.hits === 1 && (${!staged} || state.swapped))) {
                     requests.set(message.id, 'conversion');
                     probe.dispatched = { exposure: message.settings.coreExposure, width: message.width, height: message.height,
                       swapped: state.swapped, base: state.base, detecting: window.__ncAnalysis.pendingDetection(),
+                      geometryPending: window.__ncGeometry.pending(), coldRestores: window.__ncGeometry.diagnostics.coldRestores,
                       diagnostics: window.__ncAnalysis.diagnostics(), heldPreview: probe.held.length, previewAnswers: probe.answers };
                   }
                   return post(message, ...args);
@@ -681,9 +686,9 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
           if (timing !== 'completed-hit') await waitFor(scene + ': detector held', `window.__historyCropProbe.held.length === 1 && window.__ncAnalysis.pendingDetection()`, 60_000);
           await evaluate(`(() => { const el = document.getElementById('coreExposure'); el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
             el.value = '15'; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); })()`);
-          if (timing === 'conversion-in-flight') await evaluate(`window.__historyCropProbe.conversionOn = true;
+          if (heldConversion) await evaluate(`window.__historyCropProbe.conversionOn = true;
             window.__historyCropProbe.geometryOn = ${staged}`);
-          if (staged && ['pending-at-swap', 'conversion-in-flight'].includes(timing)) {
+          if (staged && unansweredPreview) {
             const pending = await evaluate(`({ held: window.__historyCropProbe.held.length, answers: window.__historyCropProbe.answers,
               pending: window.__ncAnalysis.pendingDetection(), detection: { ...window.__ncAnalysis.detection },
               diagnostics: window.__ncAnalysis.diagnostics() })`);
@@ -695,7 +700,7 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
             await noteWb('old detector pending at promotion');
           } else {
             await evaluate('window.__historyCropProbe.release()');
-            if (timing !== 'conversion-in-flight') {
+            if (!heldConversion) {
               await evaluate('window.__ncAnalysis.settle()');
               await noteWb('hit, exposure edited');
               const hit = await evaluate('window.__ncAnalysis.diagnostics()');
@@ -706,7 +711,7 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
             if (!(await evaluate(`${status}.pending && !${status}.swapped`))) fail(scene + ': full base installed before history capture');
             await evaluate('window.__ncTwoStage.releaseFullDecodes()');
           }
-          if (timing === 'conversion-in-flight') {
+          if (heldConversion) {
             if (staged) {
               // The crop detector samples the base independently of the
               // geometry worker. Let its hit finish before conversion starts.
@@ -732,7 +737,7 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
           await evaluate('window.__ncAnalysis.settle()');
           await noteWb('full base');
           const result = { recipe, wbTimeline };
-          if (staged && ['pending-at-swap', 'conversion-in-flight'].includes(timing)) {
+          if (staged && unansweredPreview) {
             const replacement = await evaluate(`({ atSwap: window.__historyCropProbe.replacement,
               held: window.__historyCropProbe.held.length, answers: window.__historyCropProbe.answers,
               previousSettled: !!window.__historyCropProbe.previousSettled,
@@ -745,8 +750,8 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
               || replacement.diagnostics?.method !== 'manual-image-window') fail(scene + ': cancellation/replacement scheduling: ' + JSON.stringify(replacement));
             console.log(scene + ' pending-at-swap proof:', JSON.stringify(replacement));
           }
-          if (['pending-at-swap', 'conversion-in-flight'].includes(timing)) {
-            if ((await evaluate(`${status}.settings.coreExposure`)) !== (timing === 'conversion-in-flight' ? 0 : 15)) fail(scene + ': promotion lost the exposure edit');
+          if (unansweredPreview) {
+            if ((await evaluate(`${status}.settings.coreExposure`)) !== (heldConversion ? 0 : 15)) fail(scene + ': promotion lost the exposure edit');
             result.live = { settings: await evaluate(`${status}.settings`), diagnostics: await evaluate('window.__ncAnalysis.diagnostics()'),
               wb: await evaluate('window.__ncAnalysis.whiteBalance()'), exports: await exportFormats(scene + ' live', [FORMATS[0], FORMATS[2]]) };
             if (staged) {
@@ -757,22 +762,79 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
               same(scene + ': late preview WB', await evaluate('window.__ncAnalysis.whiteBalance()'), result.live.wb);
             }
           }
-          for (const action of ['undo', 'redo']) {
+          if (historyRestore) {
+            const heldRestore = async action => {
+              const before = await evaluate('window.__ncGeometry.diagnostics.coldRestores');
+              await evaluate(`window.__historyCropProbe.historyOn = true; window.__historyCropProbe.conversionOn = true;
+                document.getElementById('${action}Btn').click()`);
+              await waitFor(scene + ': cold ' + action + ' reply held', `window.__historyCropProbe.conversionHeld.length === 1
+                && window.__ncAnalysis.converting() && !window.__ncGeometry.pending()
+                && !window.__ncAnalysis.pendingDetection() && !${status}.provisional && !${status}.pending`, 60_000);
+              // Observe the actual persistence/export barrier while only
+              // the conversion worker's reply is withheld.
+              await evaluate(`window.__historyCropProbe.historySettled = false;
+                void window.__ncAnalysis.settle().then(() => { window.__historyCropProbe.historySettled = true; })`);
+              await wait(50);
+              const proof = await evaluate(`({ ...window.__historyCropProbe.dispatched,
+                settled: window.__historyCropProbe.historySettled, wb: window.__ncAnalysis.whiteBalance(),
+                provisional: ${status}.provisional, pending: ${status}.pending })`);
+              if (proof.coldRestores <= before || proof.settled || proof.provisional || proof.pending || proof.geometryPending
+                || proof.detecting || proof.exposure !== 15 || proof.diagnostics?.analysisNeedsReview
+                || proof.wb.wbR !== 1 || proof.wb.wbG !== 1 || proof.wb.wbB !== 1)
+                fail(scene + ': cold history must hold unfinished WB after geometry/detection: ' + JSON.stringify(proof));
+              console.log(scene + ' cold ' + action + ' dispatch/barrier proof:', JSON.stringify(proof));
+            };
+            const restore = async (action, exposure) => {
+              await evaluate(`document.getElementById('${action}Btn').click()`);
+              await evaluate('window.__ncAnalysis.settle()');
+              await waitFor(scene + ': prepare ' + action, `${ready} && !window.__ncAnalysis.converting()
+                && document.getElementById('coreExposure').value === '${exposure}'`, 120_000);
+            };
+            if (timing === 'cold-redo-edit') {
+              if (staged) {
+                await heldRestore('undo');
+                // The second Undo captures the first rebuild's unfinished
+                // state on Redo's stack through the real history caller.
+                await evaluate(`document.getElementById('undoBtn').click(); window.__historyCropProbe.releaseConversion()`);
+                await evaluate('window.__ncAnalysis.settle()');
+                await waitFor(scene + ': second Undo settled', `${ready} && !window.__ncAnalysis.converting()
+                  && document.getElementById('coreExposure').value === '0'`, 120_000);
+              } else { await restore('undo', 15); await restore('undo', 0); }
+            }
+            const action = timing === 'cold-redo-edit' ? 'redo' : 'undo';
+            if (staged) await heldRestore(action);
+            else await restore(action, 15);
+            await evaluate(`(() => { const el = document.getElementById('coreExposure'); el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+              el.value = '0'; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+            await noteWb('exposure edited during cold ' + action);
+            if (staged) {
+              if (await evaluate('window.__historyCropProbe.historySettled')) fail(scene + ': cold history barrier settled before reply release');
+              await evaluate('window.__historyCropProbe.releaseConversion()');
+            }
+            await evaluate('window.__ncAnalysis.settle()');
+            await waitFor(scene + ': edit during restoration settled', `${ready} && !window.__ncAnalysis.converting()
+              && document.getElementById('coreExposure').value === '0'`, 120_000);
+            result.live = { settings: await evaluate(`${status}.settings`), diagnostics: await evaluate('window.__ncAnalysis.diagnostics()'),
+              wb: await evaluate('window.__ncAnalysis.whiteBalance()'), exports: await exportFormats(scene + ' nested live', [FORMATS[0], FORMATS[2]]) };
+          }
+          for (const phase of historyRestore ? ['undo', 'redo', 'undoRepeat', 'redoRepeat'] : ['undo', 'redo']) {
+            const action = phase.startsWith('undo') ? 'undo' : 'redo';
             await evaluate(`document.getElementById('${action}Btn').click()`);
             // The exact consumer also waits for promoted history's analysis.
             await evaluate('window.__ncAnalysis.settle()');
-            const exposure = timing === 'conversion-in-flight' ? (action === 'undo' ? '15' : '0') : (action === 'undo' ? '0' : '15');
-            await waitFor(scene + ': ' + action, `${ready} && !window.__ncAnalysis.converting() && document.getElementById('coreExposure').value === '${exposure}'`, 120_000);
-            result[action] = { settings: await evaluate(`${status}.settings`),
+            const exposure = heldConversion ? (action === 'undo' ? '15' : '0') : (action === 'undo' ? '0' : '15');
+            await waitFor(scene + ': ' + phase, `${ready} && !window.__ncAnalysis.converting() && document.getElementById('coreExposure').value === '${exposure}'`, 120_000);
+            result[phase] = { settings: await evaluate(`${status}.settings`),
               diagnostics: await evaluate('window.__ncAnalysis.diagnostics()'), wb: await evaluate('window.__ncAnalysis.whiteBalance()'),
-              exports: await exportFormats(scene + ' ' + action, [FORMATS[0], FORMATS[2]]) };
+              exports: await exportFormats(scene + ' ' + phase, [FORMATS[0], FORMATS[2]]) };
           }
           await evaluate(releaseSemantic);
           console.log(scene + ' WB timeline:', JSON.stringify(wbTimeline));
           return result;
         };
         const staged = await flow(true), single = await flow(false, staged.recipe);
-        for (const action of ['pending-at-swap', 'conversion-in-flight'].includes(timing) ? ['live', 'undo', 'redo'] : ['undo', 'redo']) {
+        for (const action of historyRestore ? ['live', 'undo', 'redo', 'undoRepeat', 'redoRepeat']
+          : unansweredPreview ? ['live', 'undo', 'redo'] : ['undo', 'redo']) {
           const fields = ['filmBase', 'filmType', 'positiveMode', 'cropRegion', 'rotationAngle', 'mirrored', 'coreExposure', 'wbUserOverride'];
           const differing = Object.fromEntries(fields.filter(key => JSON.stringify(staged[action].settings[key]) !== JSON.stringify(single[action].settings[key]))
             .map(key => [key, { staged: staged[action].settings[key], single: single[action].settings[key] }]));

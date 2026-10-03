@@ -188,6 +188,11 @@ instead (step 4 runs it on the full base). It then swaps in one task:
    completion shares the same pending event even after the detector finishes.
    Those matching entries are cold, so restoring them rebuilds full-source
    pixels and awaits the event rather than retaining the previous positive.
+   This also applies to snapshots captured during a full-base history
+   restoration after provisional promotion has ended. Geometry and detection
+   may already have finished while conversion or WB replay still waits;
+   entries captured by edits, Undo or Redo remain cold for the whole history
+   barrier and carry the same WB event into later restoration.
    Other automatic conversion measurements, including expired-film analysis,
    still run before that WB replay, preserving user rescue strengths.
    Pending restoration joins the crop-analysis barrier, so exports and saved
@@ -382,6 +387,13 @@ previously configured photos, hits, misses and manual confirmations.
   dispatched at exposure 15. A new history entry edits exposure to 0 before
   release. Live/Undo/Redo PNG8/TIFF16 samples and bytes must match the same
   delayed conversion on a single-stage decode.
+  The cold-undo-edit and cold-redo-edit scenes then hold a cold history
+  restore's conversion reply after geometry/detection finish, edit exposure
+  again, and compare live and repeated Undo/Redo PNG8/TIFF16 samples and file
+  bytes with one stage. A second Undo during the first rebuild creates the
+  cold Redo entry through the actual history caller. The barrier must stay
+  pending until the worker reply is released; no history/capture function is
+  replaced.
 
 ## Verification on real files (not in the repository)
 

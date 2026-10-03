@@ -3091,8 +3091,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // scalars and a restore rebuilds the pixels from them (#244). A Tier B
       // session holds no planes to refer to (#249): a restore converts its
       // display proxy again, or rebuilds from the base when the geometry
-      // differs.
-      if (state.geometryPending || state.sourcePending || pendingWb) return { label, settings, refs: { cold: true } };
+      // differs. Full-base history's pixels and WB remain unfinished after
+      // geometry/detection settle; its shared event above must replay too.
+      if (state.geometryPending || state.sourcePending || state.fullBaseHistoryPending || pendingWb) return { label, settings, refs: { cold: true } };
       const refs = {};
       for (const key of SNAPSHOT_REF_KEYS) {
         refs[key] = state[key];

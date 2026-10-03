@@ -144,7 +144,11 @@ In `main.js` the scalars change synchronously and the planes follow:
   is larger than the budget (a 60 MP crop). A cold entry, or one captured
   while a build was pending, restores its exact scalars and rebuilds its
   planes from the base in the pool, then converts without new automatic
-  measurements. Dust-brush stroke entries (#259, `docs/dust-removal.md`)
+  measurements. Promoted two-stage entries replay their full-base crop/WB
+  event (`docs/two-stage-raw-import.md`). Snapshots captured while that history
+  rebuild or measurement is pending also stay cold and retain the same event,
+  even after geometry/detection finish, so temporary pixels or WB cannot
+  bypass replay on a later Undo or Redo. Dust-brush stroke entries (#259, `docs/dust-removal.md`)
   patch the objects they hold and cannot go cold; only when history is
   still over budget after that is the oldest one dropped, with everything
   older on its stack.
