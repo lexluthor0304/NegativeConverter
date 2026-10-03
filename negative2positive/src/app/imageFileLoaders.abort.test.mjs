@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
-import { loadStandardImage, loadPngImageData } from './imageFileLoaders.js';
+import { loadStandardImage, loadPngImageData, sniffImageKind } from './imageFileLoaders.js';
 
 const deferred = () => { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; };
 const original = new Map(['createImageBitmap', 'document', 'Image', 'Worker'].map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
@@ -93,6 +93,30 @@ try {
       const descriptor = original.get('Worker');
       if (descriptor) Object.defineProperty(globalThis, 'Worker', descriptor); else delete globalThis.Worker;
     }
+  }
+
+  // Without workers, cancellation can arrive during the decoder module
+  // import. Mock only that async boundary in the actual PNG loader body.
+  {
+    const source = fs.readFileSync(new URL('./imageFileLoaders.js', import.meta.url), 'utf8');
+    const start = source.indexOf('export async function loadPngImageData(');
+    const end = source.indexOf('\n}', start) + 2;
+    assert.ok(start >= 0 && end > start);
+    const body = source.slice(start, end).replace('export ', '')
+      .replace("import('./scanDecodeClient.js')", "fakeImport('scan')")
+      .replace("import('./pngFileLoader.js')", "fakeImport('png')");
+    const png = new Uint8Array(33); png.set([137, 80, 78, 71, 13, 10, 26, 10]);
+    png.set([73, 72, 68, 82], 12); png[24] = 16; png[25] = 2;
+    const module = deferred(), c = new AbortController(); let waiting = false, decoded = 0;
+    const load = vm.runInNewContext(`(${body})`, {
+      DOMException, sniffImageKind,
+      fakeImport: name => name === 'scan' ? Promise.resolve({ decodeScanInWorker: async () => null })
+        : (waiting = true, module.promise)
+    });
+    const result = load(png.buffer, { signal: c.signal });
+    await until(() => waiting); c.abort();
+    module.resolve({ loadPngFile() { decoded++; return {}; } });
+    await assert.rejects(result, { name: 'AbortError' }); assert.equal(decoded, 0);
   }
 
   // Exercise the actual shared UI loader used by mergeSelectedShots. The

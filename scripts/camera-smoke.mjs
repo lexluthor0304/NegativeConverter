@@ -52,6 +52,38 @@ export async function runCameraSmoke({ send, evaluate, waitFor, wait, fail, inst
     fail('standard-image HEIF cancellation did not release its decoder: ' + JSON.stringify(heifCancel));
   }
   console.log('ok: cancelling the standard-image HEIF fallback terminates its worker once, ignores late replies, and preserves AbortError');
+  const previewCancel = await evaluate(`(async () => {
+    const { decodeNefPreviewJpeg } = await import('/src/app/nefJpegPreview.js');
+    const { decodeJpegInWorker } = await import('/src/app/scanDecodeClient.js');
+    const controller = new AbortController();
+    let posted = 0, stopped = 0, worker, errorName;
+    const bytes = new Uint8Array([255, 216, 1, 2, 255, 217]);
+    try {
+      await decodeNefPreviewJpeg({ jpegBytes: bytes }, {
+        signal: controller.signal,
+        decodeInWorker: (input, options) => decodeJpegInWorker(input, {
+          ...options,
+          workerFactory: () => {
+            worker = {
+              terminate() { stopped++; },
+              postMessage(message, transfer) {
+                posted++; structuredClone(message, { transfer });
+                controller.abort();
+                this.onerror?.(); // a lost signal must fail promptly
+              }
+            };
+            queueMicrotask(() => worker.onmessage?.({ data: { ready: true, canDecodeImages: true } }));
+            return worker;
+          }
+        })
+      });
+    } catch (error) { errorName = error.name; }
+    return { errorName, posted, stopped, bytes: bytes.byteLength, detached: worker?.onmessage === null };
+  })()`);
+  if (previewCancel.errorName !== 'AbortError' || previewCancel.posted !== 1 || previewCancel.stopped !== 1 || previewCancel.bytes !== 0 || !previewCancel.detached) {
+    fail('embedded RAW preview cancellation lost ownership or fell back: ' + JSON.stringify(previewCancel));
+  }
+  console.log('ok: embedded RAW preview cancellation reaches its JPEG worker after transfer and rejects without a native fallback');
   // Flat-field regression measures negative inversion on known synthetic input.
   // Automatic mixed-film import behavior has its own browser scenario.
   await evaluate(`document.getElementById('importFilmTypeAuto').checked && document.getElementById('importFilmTypeAuto').click()`);

@@ -131,6 +131,10 @@ already closed the merge UI. The merge
 worker is terminated after the result, on any failure and on Cancel, which
 releases its heap and planes.
 
+RAW fallback previews use the same cancellation signal, including the heavy
+IIQ shortcut. An embedded-JPEG worker terminates on abort; cancellation cannot
+be swallowed as an ordinary decoder failure and start a native fallback.
+
 Failures are classified before they leave the worker: OpenCV.js throws C++
 exceptions as numeric pointers, readable only through
 `cv.exceptionFromPtr(ptr).msg` in the realm that owns the heap. `StsNoMem`

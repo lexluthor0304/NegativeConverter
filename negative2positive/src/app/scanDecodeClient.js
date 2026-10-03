@@ -81,6 +81,8 @@ export async function decodeScanInWorker(buffer, format, {
  * image capability it resolves null BEFORE anything is transferred, so the
  * stashed bytes are never detached ahead of that fallback. A decode error hands
  * the bytes back into `extracted.jpegBytes`.
+ * An abort terminates the worker and rejects with AbortError even after the
+ * transfer; it must never be interpreted as permission for a native fallback.
  */
 export async function decodeJpegInWorker(extracted, {
   workerFactory = defaultWorkerFactory,
@@ -91,12 +93,15 @@ export async function decodeJpegInWorker(extracted, {
   const input = extracted?.jpegBytes;
   if (!workerFactory || !input || input.byteLength < 4) return null;
   let worker;
-  try { worker = workerFactory(); } catch { return null; }
+  try { worker = workerFactory(); } catch {
+    if (signal?.aborted) throw abortError(signal);
+    return null;
+  }
   return new Promise((resolve, reject) => {
     let finished = false;
     let dispatched = false;
-    const onAbort = () => finish(null, abortError(signal));
-    const finish = (result, error = null) => {
+    const onAbort = () => finish(abortError(signal));
+    const finish = (error, result = null) => {
       if (finished) return;
       finished = true;
       clearTimeout(timer);
@@ -111,6 +116,7 @@ export async function decodeJpegInWorker(extracted, {
     worker.onerror = () => finish(null);
     worker.onmessageerror = () => finish(null);
     worker.onmessage = ({ data }) => {
+      if (finished) return;
       if (data?.ready) {
         if (dispatched) return;
         if (!data.canDecodeImages) return finish(null);
@@ -130,7 +136,7 @@ export async function decodeJpegInWorker(extracted, {
       try {
         const result = new ImageData(new Uint8ClampedArray(data.data), data.width, data.height);
         result.__image16 = { width: data.width, height: data.height, data: new Uint16Array(data.image16) };
-        finish(result);
+        finish(null, result);
       } catch { finish(null); }
     };
   });

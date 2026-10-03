@@ -315,7 +315,7 @@ export async function loadRawFile(buffer, fileName, options = {}) {
   if (isIIQ && bufBytes > RAW_SIZE_HEAVY) {
     console.info('[RAW] heavy IIQ detected, taking embedded preview shortcut');
     await reserve({ kind: 'scan' });
-    const previewImageData = await tryNefJpegPreview(buffer);
+    const previewImageData = await tryNefJpegPreview(buffer, { signal });
     throwIfAborted(signal);
     if (previewImageData) {
       console.warn('[RAW] embedded preview decoded — precision is downgraded to 8-bit for this file.');
@@ -409,7 +409,10 @@ export async function loadRawFile(buffer, fileName, options = {}) {
   signal?.addEventListener?.('abort', abortDecode, { once: true });
 
   const decodeEmbeddedPreview = async () => {
-    const image = await decodeNefPreviewJpeg(await previewSource.read(), { signal });
+    throwIfAborted(signal);
+    const extracted = await previewSource.read();
+    throwIfAborted(signal);
+    const image = await decodeNefPreviewJpeg(extracted, { signal });
     throwIfAborted(signal);
     return image;
   };
@@ -420,6 +423,7 @@ export async function loadRawFile(buffer, fileName, options = {}) {
     killWorker();
     postDecode.terminate();
     const previewImageData = await decodeEmbeddedPreview();
+    throwIfAborted(signal);
     if (previewImageData) {
       console.warn('[RAW] LibRaw could not decode this file — using embedded preview (8-bit precision).');
       previewImageData.__image16 ||= fromImageData8(previewImageData);
@@ -599,6 +603,7 @@ export async function loadRawFile(buffer, fileName, options = {}) {
     if (outcome.garbled) {
       console.warn('[RAW] decoded output looks un-demosaiced; trying embedded JPEG preview fallback');
       const previewImageData = await decodeEmbeddedPreview();
+      throwIfAborted(signal);
       if (previewImageData) {
         console.warn('[RAW] embedded preview decoded — precision is downgraded to 8-bit for this file.');
         previewImageData.__image16 ||= fromImageData8(previewImageData);

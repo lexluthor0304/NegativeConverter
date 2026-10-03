@@ -267,3 +267,44 @@ for (const stage of ['imageData', 'process']) {
   assert.equal(h.memoryBudget.snapshot().reserved, 0);
 }
 console.log('multi-shot Cancel reaches RAW and post-decode workers');
+
+// A failed RAW decode can already be inside its embedded-JPEG worker when
+// the actual merge UI is cancelled. The fallback must share the same signal.
+{
+  reset({ result: {} });
+  const bytes = container();
+  bytes.set([255, 216, 255, 192, 0, 17, 8, 1080 >> 8, 1080 & 255, 1620 >> 8, 1620 & 255,
+    3, 1, 34, 0, 2, 17, 1, 3, 17, 1], 1024);
+  let jpegWorker, decode;
+  globalThis.Worker = class {
+    constructor(url) {
+      if (!String(url).includes('scanDecodeWorker')) return new FakeWorker(url);
+      jpegWorker = this;
+      this.stops = 0; this.posted = false;
+      queueMicrotask(() => this.onmessage?.({ data: { ready: true, canDecodeImages: true } }));
+    }
+    postMessage(message, transfer) {
+      structuredClone(message, { transfer });
+      this.posted = true;
+      this.lateReply = this.onmessage;
+    }
+    terminate() { this.stops++; }
+  };
+  try {
+    const h = mergeHarness({ decode: (_file, { signal }) => (decode = loadRawFile(bytes.buffer, 'preview.nef', { signal })) });
+    const pending = h.run();
+    await flush();
+    assert.equal(jpegWorker?.posted, true, 'RAW actually reached its JPEG fallback');
+    h.cancel();
+    assert.equal(jpegWorker.stops, 1, 'Cancel terminates embedded-JPEG worker in the same task');
+    await pending;
+    await assert.rejects(decode, { name: 'AbortError' });
+    jpegWorker.lateReply({ data: { id: 1, width: 1, height: 1, data: new ArrayBuffer(4), image16: new ArrayBuffer(8) } });
+    assert.equal(jpegWorker.stops, 1, 'late reply cannot redispose or deliver pixels');
+    assert.equal(jpegWorker.onmessage, null);
+    assert.equal(bitmapDecodes, 0, 'abort cannot start the native JPEG fallback');
+    assert.equal(h.memoryBudget.snapshot().reserved, 0);
+    assert.equal(h.alerts.length, 0);
+  } finally { globalThis.Worker = FakeWorker; }
+}
+console.log('multi-shot Cancel reaches embedded RAW JPEG fallback without a late bitmap decode');

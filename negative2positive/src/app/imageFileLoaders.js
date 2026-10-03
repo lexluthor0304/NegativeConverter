@@ -168,6 +168,7 @@ export async function loadPngImageData(buffer, { signal = null, sharedPlanes = f
   if (decoded) return decoded;
   if (signal?.aborted) throw aborted();
   const { loadPngFile } = await import('./pngFileLoader.js');
+  if (signal?.aborted) throw aborted();
   const alloc = sharedPlanes && sharedPlanesAvailable() ? (length) => allocPlane16(length, { shared: true }) : null;
   const image = loadPngFile(buffer, { alloc });
   if (image.__image16) markDerivedEightBit(image);
