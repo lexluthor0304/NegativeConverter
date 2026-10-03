@@ -15261,12 +15261,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         }
 
         markCurrentFileDirty();
+        // Capture the old conversion token before queuing the new mode.
+        remeasureExpiredAfterRetype();
         if (usesSilverCoreConversion(state)) {
           scheduleSilverSourceRefresh({ commit: true });
         } else {
           schedulePreviewUpdate();
         }
-        remeasureExpiredAfterRetype();
       });
     });
 
@@ -15317,8 +15318,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       Object.assign(state, withoutFilmTypeAnalysis(state, { ...state, positiveMode: event.target.value === 'edit' ? 'edit' : 'correct' }));
       updateWBSliders();
       markCurrentFileDirty();
-      scheduleSilverSourceRefresh({ commit: true });
       remeasureExpiredAfterRetype();
+      scheduleSilverSourceRefresh({ commit: true });
     });
     setFilmTypeButtons(state.filmType);
 

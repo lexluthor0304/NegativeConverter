@@ -35,21 +35,30 @@ function fixture(type, mode, { manualWb = false } = {}) {
     wbR: 1.17, wbG: 1, wbB: 0.86, wbAutoConfidence: 'high', wbSemanticApplied: false,
     wbUserOverride: manualWb, grayPointSampled: false };
   state.expiredAnalysis = analyzeExpiredFilm(image, { anchors: map });
-  const snapshots = [], listeners = {}, inputs = [];
+  const snapshots = [], listeners = {}, inputs = [], timers = [];
   const buttons = ['color', 'bw', 'positive'].map(type => ({ dataset: { type }, addEventListener: (_, cb) => { listeners[type] = cb; } }));
   const target = { ...filmType, state, expiredAnalysisKey: null,
-    document: { querySelectorAll: () => buttons, getElementById: () => ({ addEventListener: (_, cb) => { listeners.mode = cb; } }) },
+    document: { body: { dataset: {} }, querySelectorAll: () => buttons, getElementById: () => ({ addEventListener: (_, cb) => { listeners.mode = cb; } }) },
     pushUndo: label => snapshots.push({ label, settings: structuredClone(state) }),
     requiresFilmBase: () => false, usesSilverCoreConversion: () => true,
     expiredAnalysisSample: processed => ({ image: processed, options: {}, placement: { left: 0, top: 0, width: 1, height: 1 } }),
     baseSizeSource: () => image,
     analyzeExpiredFilm: (processed, options) => { inputs.push(options.anchors); return analyzeExpiredFilm(processed, options); },
     defaultExpiredRescueParams, EXPIRED_RESCUE_DEFAULTS, expiredSourceKey: () => 'new-frame',
-    runExpiredSpatialAnalysis: () => Promise.resolve(false) };
+    runExpiredSpatialAnalysis: () => Promise.resolve(false),
+    coreReprocessToken: 4, displayedFrameToken: 4, loadGeneration: 1, processNegativeInFlight: null, geometryBusyOwner: null,
+    studioWorkspace: { sync() {} }, isCurrentLoad: generation => generation === target.loadGeneration,
+    setTimeout: callback => { timers.push(callback); },
+    // The production schedule advances its token before conversion; flush
+    // lands that exact token. The listener must arm measurement beforehand.
+    scheduleSilverSourceRefresh: () => { target.coreReprocessToken++; },
+    flushScheduledCoreReprocess: async () => { target.displayedFrameToken = target.coreReprocessToken; },
+    settleMeasurementInputs: (measure, current) => { if (current()) measure(); },
+    maybeAnalyzeExpiredRescue: () => context.runExpiredAnalysis(image) };
   const context = vm.createContext(new Proxy(target, { has: () => true, get: (t, key) => key in t ? t[key] : key in globalThis ? globalThis[key] : () => {} }));
   vm.runInContext(source.slice(start, end) + '\n' + source.slice(positiveStart, positiveEnd) + '\n'
-    + ['runExpiredAnalysis', 'applyExpiredAnalysisDefaults'].map(fn).join('\n'), context);
-  return { state, snapshots, listeners, inputs, context };
+    + ['runExpiredAnalysis', 'applyExpiredAnalysisDefaults', 'remeasureExpiredAfterRetype'].map(fn).join('\n'), context);
+  return { state, snapshots, listeners, inputs, timers, context };
 }
 
 let cases = 0;
@@ -66,7 +75,8 @@ for (const [before, after, mode] of [['positive', 'color', 'correct'], ['color',
     assert.deepEqual(f.state.cropRegion, { left: 2, top: 3, width: 40, height: 30 });
     assert.deepEqual(f.snapshots[0].settings.semanticMap, map, 'undo retains the old interpretation and anchors');
     if (manualWb) assert.deepEqual([f.state.wbR, f.state.wbG, f.state.wbB], [1.17, 1, 0.86]);
-    f.context.runExpiredAnalysis(image);
+    assert.equal(f.timers.length, 1, 'actual listener arms new-mode measurement');
+    await f.timers.shift()();
     assert.deepEqual(f.inputs, [null], 'new measurement receives no old anchors');
     const fresh = analyzeExpiredFilm(image, { anchors: null, placement: { left: 0, top: 0, width: 1, height: 1 } });
     assert.deepEqual(f.state.expiredAnalysis, fresh, 'equals a fresh new-interpretation measurement');
