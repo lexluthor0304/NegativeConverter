@@ -37,7 +37,7 @@ function switchFixture() {
   });
   vm.runInContext(['switchToFile', 'rememberPhotoSession', 'displayIsReduced'].map(mainFunction).join('\n'), f.context);
   let switched = false;
-  const switchTo = index => f.context.switchToFile(index).then(
+  const switchTo = (index, options) => f.context.switchToFile(index, options).then(
     () => assert.fail('the switch goes on to the incoming photo'),
     (err) => {
       if (!(err instanceof SwitchStopped)) throw err;
@@ -153,6 +153,37 @@ function switchFixture() {
   await f.context.switchToFile(1);
   assert.equal(f.switched, false, 'an unresolved parked restore keeps the current photo');
   assert.equal(f.stored.length, 0, 'cold brush history is never remembered as a live session');
+}
+
+{
+  // A deferred reactivation of the current file must retain reopen through
+  // both barriers. Losing it on either retry silently takes the same-file
+  // early return and leaves the mismatched session live.
+  const f = switchFixture();
+  await f.context.switchToFile(0);
+  assert.equal(f.switched, false, 'an ordinary click on the live file needs no activation');
+  let restored;
+  const restoring = new Promise(resolve => { restored = resolve; });
+  f.context.parkedPhoto = { file: 'a' };
+  f.context.unparkOpenPhoto = async () => {
+    await restoring;
+    f.context.parkedPhoto = null;
+  };
+  f.state.coreExposure = 50;
+  f.context.scheduleCoreReprocess({ full: false });
+  f.clock.runFrame();
+  const reopening = f.switchTo(0, { reopen: true });
+  await settle();
+  assert.equal(f.conversions.length, 0, 'reactivation first restores the parked pixels');
+  assert.equal(f.state.loadedFile, 'a', 'the identity stays live while restoration waits');
+  restored();
+  await settle();
+  assert.equal(f.conversions.length, 1, 'reactivation also waits for the exact GPU frame');
+  await f.answer();
+  f.commits[0].resolve(new Uint16Array(4));
+  await reopening;
+  assert.equal(f.switched, true, 'the same-file reactivation survives both recursive retries');
+  assert.equal(f.stored.length, 0, 'the invalid outgoing session is not cached during reopening');
 }
 
 console.log('settleOnSwitch: a switch right after a GPU-drawn change or commit settles it first and remembers the photo settled; without a GPU frame, or with a failed settle, it does not wait');
