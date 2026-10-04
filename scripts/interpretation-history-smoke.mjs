@@ -54,10 +54,10 @@ export async function installFrozenHistoryControl({ send, onCdpEvent, root, fail
         seedRoll: async () => {
           const sample = downsampleImageDataForMaxDim(state.loadedBaseImageData, 256);
           const channelData = await analyzeSilverCoreFrame(sample, buildCoreConversionSettings(state), resolveConversionMode(state));
-          const darker = new ImageData(Uint8ClampedArray.from(sample.data, (v, i) => i % 4 === 3 ? v
-            : Math.round(v * Math.pow([.55, .75, .45][i % 4], 1 / 2.2))), sample.width, sample.height);
-          const otherChannels = await analyzeSilverCoreFrame(darker, buildCoreConversionSettings(state), resolveConversionMode(state));
-          const roll = aggregateRollAnalysis([sample, darker, darker].map((image, id) => ({ id,
+          const brighter = new ImageData(Uint8ClampedArray.from(sample.data, (v, i) => i % 4 === 3 ? v
+            : Math.round(v * Math.pow([1.75, 2.1, 1.6][i % 4], 1 / 2.2))), sample.width, sample.height);
+          const otherChannels = await analyzeSilverCoreFrame(brighter, buildCoreConversionSettings(state), resolveConversionMode(state));
+          const roll = aggregateRollAnalysis([sample, brighter, brighter].map((image, id) => ({ id,
             filmBase: state.filmBase, channelData: id ? otherChannels : channelData, negativeMean: measureNegativeMean(image, 0) })));
           state.rollFrame = sanitizeRollFrameForSettings({ rollId: 'history-measured-roll', channelData: roll.channelData,
             ...roll.frames[0], locked: true, equalize: true });
@@ -149,7 +149,7 @@ export async function runInterpretationHistoryCropSmoke(ctx) {
     await open(staged && ownership !== 'gray' ? two : one, seed, staged && ownership !== 'gray');
     if (inputKind === 'rollFrame') {
       const roll = await evaluate('window.__ncHistoryInputs.seedRoll()');
-      if (!roll?.locked || !roll.channelData || !(roll.offsetStops > .5)) fail(scene + ': real measured roll histogram and density offset missing');
+      if (!roll?.locked || !roll.channelData || !(roll.offsetStops < -.5)) fail(scene + ': real measured roll histogram and negative density offset missing');
     }
     if (ownership === 'manual') {
       await setSlider('wbR', 1.42); await setSlider('wbB', .77);
