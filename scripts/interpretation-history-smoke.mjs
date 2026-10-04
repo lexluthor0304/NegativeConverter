@@ -44,6 +44,13 @@ export async function installFrozenHistoryControl({ send, onCdpEvent, root, fail
       const anchor = functions(text).get('processNegative');
       if (!anchor) throw new Error('History input probe scope missing');
       const hook = `window.__ncHistoryInputs = {
+        restoration: () => ({ step: state.currentStep, geometryPending: Boolean(state.geometryPending),
+          historyPending: Boolean(state.fullBaseHistoryPending), converting: Boolean(processNegativeInFlight),
+          reprocessPending: Boolean(coreReprocessTimer || _coreReprocessFullInFlight || _coreReprocessPreviewInFlight || _coreReprocessPending),
+          measuredRescue: Boolean(state.expiredAnalysis),
+          entries: undoStack.slice(-3).map(entry => ({ label: entry.label, step: entry.settings?.currentStep,
+            cold: Boolean(entry.refs?.cold), measuredRescue: Boolean(entry.settings?.expiredAnalysis),
+            cropHit: Boolean(entry.settings?.cropDetectionToken?.hit), automatic: entry.settings?.fullBaseFrameEdit?.automatic })) }),
         edit: (key, value) => {
           if (!['semanticMap', 'rollFrame'].includes(key) || !state.loadedBaseImageData) throw new Error('Invalid bounded history input');
           const next = key === 'semanticMap' ? sanitizeSemanticMap(value) : sanitizeRollFrameForSettings(value);
@@ -272,6 +279,8 @@ export async function runInterpretationHistoryCropSmoke(ctx) {
       console.log('interpretation crop history capture:', scene, phase);
       await evaluate('window.__ncAnalysis.settle()');
       const recipe = await evaluate(`${status}.settings`);
+      if (hitDispatch) console.log('interpretation hit restoration:', JSON.stringify({ scene, phase,
+        ...await evaluate('window.__ncHistoryInputs.restoration()') }));
       if ((middle || hitDispatch) && rescue && !recipe.expiredAnalysis) fail(scene + ' ' + phase + ': settled rescued history has no measurement before export');
       const single = await exportFormats(scene + ' ' + phase, formats);
       const all = await exportAllFormats(1, scene + ' ' + phase + ' batch', formats);
