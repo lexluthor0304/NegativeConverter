@@ -81,7 +81,13 @@ async function cropMeasurementReference(f, settings) {
   const processed = await convertFrameWithRouter({ imageData: source, settings: c.buildRouterSettings(settings, base),
     options: { forceFullProcess: true, includeAnalysisPreview: true, analysisImageData: c.getColorAnalysisSample(settings, base) } });
   const result = c.automaticWhiteBalanceResult(processed, settings, { meta: settings.autoFrameMeta, base, wbSample: null });
-  return { settings: { ...settings, ...result }, result };
+  let expiredAnalysis = settings.expiredAnalysis;
+  if (settings.expiredEnabled) {
+    const sample = c.expiredAnalysisSample(processed, settings, base);
+    expiredAnalysis = f.target.analyzeExpiredFilm(sample.image, { ...sample.options, anchors: settings.semanticMap, placement: sample.placement });
+    assert.ok(expiredAnalysis, 'independent crop-hit rescue measurement exists');
+  }
+  return { settings: { ...settings, ...result, expiredAnalysis }, result };
 }
 async function strictMeasurementPixels(f, reference, label) {
   const { context: c, state } = f;

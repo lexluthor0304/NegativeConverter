@@ -3236,9 +3236,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           applyExpiredAnalysisDefaults(state, structuredClone(expired.analysis));
           expiredAnalysisKey = null;
         }
-        if (pendingRescueFrame && !expired) {
-          // Its saved rescue belongs to the miss, not this hit. Rebuild and
-          // measure this recipe behind the existing owned history barrier.
+        if (state.expiredEnabled && !expired && (!state.expiredAnalysis || pendingRescueFrame)) {
+          // A hit can be captured before its conversion has measured rescue.
+          // Rebuild missing or miss-region analysis behind the owned barrier.
           state.expiredAnalysis = null;
           return restoreColdSnapshotPixels({ ...s, expiredAnalysis: null,
             autoFrameMeta: structuredClone(state.autoFrame.lastDiagnostics),

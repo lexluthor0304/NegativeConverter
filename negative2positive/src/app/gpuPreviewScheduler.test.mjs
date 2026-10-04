@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
+import { withoutFilmTypeAnalysis } from './filmTypeOverride.js';
 import { createGpuPreviewScheduler, GPU_SETTLE_IDLE_MS, GPU_INPUT_RETRY_MS, DISABLED_GPU_PREVIEW_SCHEDULER } from './gpuPreviewScheduler.js';
 import { gpuSettleFixture, mainFunction, mainSource, listenerFunction, settle } from './gpuSettleHarness.mjs';
 
@@ -325,6 +326,7 @@ function studioHandler(marker, name, params) {
 
 const noop = () => {};
 const discreteStubs = {
+  withoutFilmTypeAnalysis,
   pushUndo: noop, markCurrentFileDirty: noop, syncSliderFromState: noop, schedulePreviewUpdate: noop,
   updateEnlargerUI: noop, updateSlidersFromState: noop, updateWBSliders: noop, updateConsoleReadouts: noop,
   showToast: noop, getInterpolatedText: () => '', formatAxisValue: () => '', setTestStripStep: noop,

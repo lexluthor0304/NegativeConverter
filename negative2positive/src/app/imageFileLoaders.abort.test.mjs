@@ -108,7 +108,10 @@ try {
     const png = new Uint8Array(33); png.set([137, 80, 78, 71, 13, 10, 26, 10]);
     png.set([73, 72, 68, 82], 12); png[24] = 16; png[25] = 2;
     const module = deferred(), c = new AbortController(); let waiting = false, decoded = 0;
-    const load = vm.runInNewContext(`(${body})`, {
+    const abortStart = source.indexOf('function throwIfAborted(');
+    const abortEnd = source.indexOf('\n}', abortStart) + 2;
+    assert.ok(abortStart >= 0 && abortEnd > abortStart, 'real PNG abort helper exists');
+    const load = vm.runInNewContext(`${source.slice(abortStart, abortEnd)}\n(${body})`, {
       DOMException, sniffImageKind,
       fakeImport: name => name === 'scan' ? Promise.resolve({ decodeScanInWorker: async () => null })
         : (waiting = true, module.promise)
