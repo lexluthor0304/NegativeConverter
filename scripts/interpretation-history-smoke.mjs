@@ -278,6 +278,7 @@ export async function runInterpretationHistoryCropSmoke(ctx) {
       // with the real full loader, then replay the saved control at exposure 0.
       const measurementExposure = middle ? 0 : 15;
       const recipe = { ...result.recipe, coreExposure: eligible ? measurementExposure : result.recipe.coreExposure,
+        ...(middle && rescue ? { expiredAnalysis: null } : {}),
         ...(eligible ? { wbR: 1, wbG: 1, wbB: 1, wbAutoConfidence: null, wbSemanticApplied: false } : {}) };
       await open(one, recipe);
       if (eligible) {
