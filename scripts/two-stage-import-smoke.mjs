@@ -678,14 +678,15 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
                   }
                   if (geometry && probe.geometryOn && state.swapped) requests.set(message.id, 'geometry');
                   if (conversion && probe.conversionOn && message.wbSample && message.settings?.coreExposure === 15
-                    && (!probe.wbReplayOnly || message.options?.preview === true)
+                    && (!probe.wbReplayOnly || message.options?.preview === true && !window.__ncAnalysis.converting())
                     && (probe.historyOn ? !state.pending && !state.provisional
                       : window.__ncAnalysis.detection.hits === 1 && (${!staged} || state.swapped))) {
                     requests.set(message.id, 'conversion');
                     probe.dispatched = { exposure: message.settings.coreExposure, preview: !!message.options?.preview, width: message.width, height: message.height,
                       swapped: state.swapped, base: state.base, detecting: window.__ncAnalysis.pendingDetection(),
                       geometryPending: window.__ncGeometry.pending(), coldRestores: window.__ncGeometry.diagnostics.coldRestores,
-                      diagnostics: window.__ncAnalysis.diagnostics(), heldPreview: probe.held.length, previewAnswers: probe.answers };
+                      diagnostics: window.__ncAnalysis.diagnostics(), heldPreview: probe.held.length, previewAnswers: probe.answers,
+                      converting: window.__ncAnalysis.converting(), stack: new Error().stack };
                   }
                   return post(message, ...args);
                 };
@@ -898,7 +899,8 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
                 requests: window.__historyCropProbe.historyRequests })`);
               if (proof.coldRestores <= before || proof.settled || proof.replies !== 1 || proof.geometryPending || proof.detecting
                 || proof.exposure !== 15 || proof.converting !== !wbReplayOnly
-                || (wbReplayOnly && !proof.preview)) fail(scene + ': held leaf/old ownership proof: ' + JSON.stringify(proof));
+                || (wbReplayOnly && (!proof.preview || !proof.stack.includes('restorePromotedWhiteBalance'))))
+                fail(scene + ': held leaf/old ownership proof: ' + JSON.stringify(proof));
               console.log(scene + ' held superseded restore proof:', JSON.stringify(proof));
               // Hold only the obsolete reply; successor renders are real.
               await evaluate('window.__historyCropProbe.conversionOn = false');
