@@ -3230,9 +3230,19 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         }
         const expired = cropHit.expiredAnalyses?.find(entry => !filmInterpretationChanged(state, entry)
           && cropMeasurementInputsMatch(state, entry.inputs));
-        if (state.expiredEnabled && !state.expiredAnalysis && expired) {
+        const pendingRescueFrame = state.expiredEnabled && Object.keys(cropHit.fields)
+          .some(key => JSON.stringify(s.autoFrameMeta?.[key]) !== JSON.stringify(cropHit.fields[key]));
+        if (state.expiredEnabled && expired && (!state.expiredAnalysis || pendingRescueFrame)) {
           applyExpiredAnalysisDefaults(state, structuredClone(expired.analysis));
           expiredAnalysisKey = null;
+        }
+        if (pendingRescueFrame && !expired) {
+          // Its saved rescue belongs to the miss, not this hit. Rebuild and
+          // measure this recipe behind the existing owned history barrier.
+          state.expiredAnalysis = null;
+          return restoreColdSnapshotPixels({ ...s, expiredAnalysis: null,
+            autoFrameMeta: structuredClone(state.autoFrame.lastDiagnostics),
+            fullBaseFrameEdit: { ...s.fullBaseFrameEdit, automatic: true } });
         }
       }
 

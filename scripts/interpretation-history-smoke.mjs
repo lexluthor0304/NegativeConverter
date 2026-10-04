@@ -238,6 +238,9 @@ export async function runInterpretationHistoryCropSmoke(ctx) {
       const single = await exportFormats(scene + ' ' + phase, formats);
       const all = await exportAllFormats(1, scene + ' ' + phase + ' batch', formats);
       const batch = Object.fromEntries(Object.entries(all).map(([key, values]) => [key, Object.values(values)[0]]));
+      console.log('interpretation crop history live/batch check:', JSON.stringify({ scene, phase,
+        recipe: { filmType: recipe.filmType, positiveMode: recipe.positiveMode, expiredEnabled: recipe.expiredEnabled,
+          measuredRescue: Boolean(recipe.expiredAnalysis), wb: [recipe.wbR, recipe.wbG, recipe.wbB] }, single, batch }));
       sameExports(scene + ' ' + phase + ' actual single/batch', single, batch);
       if (single.png8.layout?.bits?.[0] !== 8 || single.tiff16.layout?.bits?.[0] !== 16 || !single.tiff16.lowBits) fail(scene + ': exact 8/true16 layout missing');
       const expectedInputs = inputKind ? (phase.startsWith('middle') ? middleInputs : finalInputs) : initial;
