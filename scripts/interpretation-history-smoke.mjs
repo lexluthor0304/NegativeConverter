@@ -125,6 +125,8 @@ export async function runInterpretationHistoryCropSmoke(ctx) {
     ['full-middle-type-on', true, true, 'automatic', ['bw', 'correct'], ['positive', 'correct'], ['color', 'correct']],
     ['warm-middle-mode-on', false, true, 'automatic', ['color', 'correct'], ['bw', 'edit'], ['color', 'edit']],
     ['full-middle-mode-on', true, true, 'automatic', ['color', 'correct'], ['bw', 'edit'], ['color', 'edit']],
+    ['warm-hit-rescue-dispatch', false, true, 'automatic', ['color', 'correct'], ['bw', 'correct'], null, null, true],
+    ['full-hit-rescue-dispatch', true, true, 'automatic', ['color', 'correct'], ['bw', 'correct'], null, null, true],
     ['warm-color-bw-off', false, false, 'automatic', ['color', 'correct'], ['bw', 'correct']],
     ['full-color-bw-off', true, false, 'automatic', ['color', 'correct'], ['bw', 'correct']],
     ['warm-color-mode-off', false, false, 'automatic', ['color', 'correct'], ['color', 'edit']],
@@ -142,7 +144,7 @@ export async function runInterpretationHistoryCropSmoke(ctx) {
     cases.push([`${staged ? 'full' : 'warm'}-middle-${kind}-${rescue ? 'on' : 'off'}`, staged, rescue,
       'automatic', ['color', 'correct'], ['color', 'correct'], ['color', 'correct'], kind]);
   }
-  for (const [scene, staged, rescue, ownership, before, after, middle, inputKind] of cases) {
+  for (const [scene, staged, rescue, ownership, before, after, middle, inputKind, hitDispatch] of cases) {
     if (process.env.NC229_HISTORY_BROWSER_CASE && !process.env.NC229_HISTORY_BROWSER_CASE.split(',').includes(scene)) continue;
     console.log('interpretation crop history scene:', scene);
     const seed = { ...seedRecipe, filmType: before[0], positiveMode: before[1], filmTypeSource: 'manual',
@@ -173,12 +175,24 @@ export async function runInterpretationHistoryCropSmoke(ctx) {
     if (ownership === 'manual' && !initial.wbUserOverride) fail(scene + ': real gain slider did not claim WB');
     if (ownership === 'gray' && !initial.grayPointSampled) fail(scene + ': real canvas click did not claim WB');
     await evaluate(`(() => {
-      const probe = window.__interpretationCropHold = { held: [] }, post = Worker.prototype.postMessage;
+      const probe = window.__interpretationCropHold = { held: [], conversionHeld: [], conversionOn: ${Boolean(hitDispatch)}, conversionCaptured: false }, post = Worker.prototype.postMessage;
       Worker.prototype.postMessage = function(message, ...args) {
         if (message?.type === 'detect-crop-area' && probe.held) { probe.held.push(() => post.call(this, message, ...args)); return; }
+        if (probe.conversionOn && !probe.conversionCaptured && message?.wbSample
+          && window.__ncAnalysis.diagnostics()?.method === 'manual-image-window') {
+          probe.conversionCaptured = true;
+          probe.dispatched = { filmType: message.settings.filmType, positiveMode: message.settings.positiveMode };
+          const receive = event => {
+            if (!probe.conversionOn || event.data?.id !== message.id || event.data?.type !== 'result') return;
+            event.stopImmediatePropagation(); this.removeEventListener('message', receive, true);
+            probe.conversionHeld.push(() => this.dispatchEvent(new MessageEvent('message', { data: event.data })));
+          };
+          this.addEventListener('message', receive, true);
+        }
         return post.call(this, message, ...args);
       };
-      probe.release = () => { const held = probe.held; probe.held = null; for (const deliver of held) deliver(); };
+      probe.release = () => { const held = probe.held || []; probe.held = null; for (const deliver of held) deliver(); };
+      probe.releaseConversion = () => { probe.conversionOn = false; for (const deliver of probe.conversionHeld.splice(0)) deliver(); };
       document.getElementById('studioTab-composition').click(); document.getElementById('cropBtn').click();
     })()`);
     await waitFor(scene + ' draft', `document.getElementById('canvasContainer').classList.contains('crop-mode')`, 30_000);
@@ -186,6 +200,11 @@ export async function runInterpretationHistoryCropSmoke(ctx) {
     await evaluate(`window.__ncAnalysis.setDraftRect({ left: 0, top: 0, width: ${base.width - 2.01}, height: ${base.height - 2.01} });
       document.getElementById('applyCropBtn').click()`);
     await waitFor(scene + ' real detector held', `window.__interpretationCropHold.held.length === 1 && window.__ncAnalysis.pendingDetection()`, 60_000);
+    if (hitDispatch) {
+      await evaluate('window.__interpretationCropHold.release()');
+      await waitFor(scene + ' real hit conversion held', `window.__interpretationCropHold.conversionHeld.length === 1`, 60_000);
+      same(scene + ' immutable hit dispatch', await evaluate('window.__interpretationCropHold.dispatched'), { filmType: 'color', positiveMode: 'correct' });
+    }
     if (!rescue) await waitFor(scene + ' provisional crop converted', `${ready} && !window.__ncAnalysis.converting()`, 120_000);
     const changeInterpretation = (from, to) => evaluate(`(() => {
       ${from[0] !== to[0] ? `document.querySelector('.film-type-btn[data-type="${to[0]}"]').click();` : ''}
@@ -241,7 +260,7 @@ export async function runInterpretationHistoryCropSmoke(ctx) {
         || JSON.stringify(finalInputs[inputKind]) === JSON.stringify(middleInputs[inputKind])) fail(scene + ': all three input recipes must differ');
     } else await changeInterpretation(middle || before, after);
     if (!middle) await setSlider('coreExposure', 15);
-    await evaluate('window.__interpretationCropHold.release(); window.__ncAnalysis.settle()');
+    await evaluate('window.__interpretationCropHold.release(); window.__interpretationCropHold.releaseConversion(); window.__ncAnalysis.settle()');
     await waitFor(scene + ' crop hit', `${ready} && !window.__ncAnalysis.converting() && window.__ncAnalysis.diagnostics()?.method === 'manual-image-window'`, 150_000);
     if (staged) {
       if (!(await evaluate(`${status}.pending && !${status}.swapped`))) fail(scene + ': lost held full source');
@@ -299,7 +318,7 @@ export async function runInterpretationHistoryCropSmoke(ctx) {
       // with the real full loader, then replay the saved control at exposure 0.
       const measurementExposure = middle ? 0 : 15;
       const recipe = { ...result.recipe, coreExposure: eligible ? measurementExposure : result.recipe.coreExposure,
-        ...(middle && rescue ? { expiredAnalysis: null } : {}),
+        ...((middle || hitDispatch) && rescue ? { expiredAnalysis: null } : {}),
         ...(eligible ? { wbR: 1, wbG: 1, wbB: 1, wbAutoConfidence: null, wbSemanticApplied: false } : {}) };
       await open(one, recipe);
       if (eligible) {
@@ -314,7 +333,7 @@ export async function runInterpretationHistoryCropSmoke(ctx) {
       sameExports(scene + ' ' + phase + ' independent exact samples/files', result.single, fresh);
       result.fresh = fresh;
     }
-    console.log('interpretation crop history receipt:', JSON.stringify({ scene, staged, rescue, ownership, before, middle, after, inputKind,
+    console.log('interpretation crop history receipt:', JSON.stringify({ scene, staged, rescue, ownership, before, middle, after, inputKind, hitDispatch,
       inputLeaf: inputKind === 'semanticMap' || inputKind === 'rollFrame' ? 'controlled input; actual measured roll histogram'
         : inputKind === 'filmBase' && rescue ? 'controlled pointer transport; actual canvas sampler' : 'real UI', initial, results }));
     console.log(`ok: ${scene}: held real detector, actual callers, warm/full-swap Undo/Redo, PNG8/TIFF16 samples and bytes`);

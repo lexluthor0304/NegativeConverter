@@ -128,24 +128,28 @@ try {
   const start = source.indexOf('    async function loadFileToImageData(');
   const end = source.indexOf('\n    // PNG16 compression settings.', start);
   assert.ok(start > 0 && end > start);
-  let loaderCalls = 0;
+  let bitmapDecodes = 0;
   const load = vm.runInNewContext(`(${source.slice(start, end).trim()})`, {
     DOMException, isRawLikeFileName: () => false, isPngFile: () => false,
     sharedPlanesAvailable: () => false, rememberImageDimensions() {},
-    loadStandardImage: (...args) => { loaderCalls++; return loadStandardImage(...args); }
+    loadStandardImage
   });
   {
     const c = new AbortController(), grant = deferred();
-    const result = load(jpeg, { signal: c.signal, claim: { atDecode: () => grant.promise } });
+    let admissionStarted = false;
+    globalThis.createImageBitmap = () => { bitmapDecodes++; assert.fail('decode after aborted admission'); };
+    const result = load(jpeg, { signal: c.signal, claim: { atDecode: () => { admissionStarted = true; return grant.promise; } } });
+    await until(() => admissionStarted);
+    assert.equal(bitmapDecodes, 0, 'actual decoder waits for the reservation');
     c.abort(); grant.resolve();
-    await assert.rejects(result, { name: 'AbortError' }); assert.equal(loaderCalls, 0);
+    await assert.rejects(result, { name: 'AbortError' }); assert.equal(bitmapDecodes, 0);
   }
   {
     const c = new AbortController(), decoded = deferred(); let started = false;
-    globalThis.createImageBitmap = () => { started = true; return decoded.promise; };
+    globalThis.createImageBitmap = () => { bitmapDecodes++; started = true; return decoded.promise; };
     const result = load(jpeg, { signal: c.signal, claim: { atDecode: async () => {} } });
     await until(() => started); c.abort(); decoded.resolve(bitmap());
-    await assert.rejects(result, { name: 'AbortError' }); assert.equal(loaderCalls, 1);
+    await assert.rejects(result, { name: 'AbortError' }); assert.equal(bitmapDecodes, 1);
     assert.equal(canvases, 0); assert.equal(copies, 0);
   }
   // TIFF-named JPEGs take the RAW dispatcher's content-sniffed fallback.
