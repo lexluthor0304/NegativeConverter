@@ -53,16 +53,21 @@ export async function installFrozenHistoryControl({ send, onCdpEvent, root, fail
         },
         seedRoll: async () => {
           const sample = downsampleImageDataForMaxDim(state.loadedBaseImageData, 256);
-          const channelData = await analyzeSilverCoreFrame(sample, buildCoreConversionSettings(state), resolveConversionMode(state));
+          const histogramSettings = { ...buildCoreConversionSettings(state), borderBuffer: 15 };
+          const channelData = await analyzeSilverCoreFrame(sample, histogramSettings, resolveConversionMode(state));
           const brighter = new ImageData(Uint8ClampedArray.from(sample.data, (v, i) => i % 4 === 3 ? v
             : Math.round(v * Math.pow([1.75, 2.1, 1.6][i % 4], 1 / 2.2))), sample.width, sample.height);
-          const otherChannels = await analyzeSilverCoreFrame(brighter, buildCoreConversionSettings(state), resolveConversionMode(state));
+          const otherChannels = await analyzeSilverCoreFrame(brighter, histogramSettings, resolveConversionMode(state));
           const roll = aggregateRollAnalysis([sample, brighter, brighter].map((image, id) => ({ id,
             filmBase: state.filmBase, channelData: id ? otherChannels : channelData, negativeMean: measureNegativeMean(image, 0) })));
           state.rollFrame = sanitizeRollFrameForSettings({ rollId: 'history-measured-roll', channelData: roll.channelData,
             ...roll.frames[0], locked: true, equalize: true });
           markCurrentFileDirty(); await processNegative({ automatic: false });
           return structuredClone(state.rollFrame);
+        },
+        wbDiagnostic: () => {
+          const sample = autoWbSampleFor(autoWbSampleKey()) || state.processedImageData;
+          return estimateAutoWhiteBalance(sample, analysisRegionSample(sample, resolveAnalysisRegion(extractCurrentSettings(), baseSizeSource())));
         }
       };\n`;
       text = text.slice(0, anchor.start) + hook + text.slice(anchor.start);
@@ -277,7 +282,8 @@ export async function runInterpretationHistoryCropSmoke(ctx) {
       await open(one, recipe);
       if (eligible) {
         const wb = await evaluate('window.__ncAnalysis.whiteBalance()');
-        console.log('interpretation crop history reference WB:', JSON.stringify({ scene, phase, wb, rollOffset: recipe.rollFrame?.offsetStops }));
+        console.log('interpretation crop history reference WB:', JSON.stringify({ scene, phase, wb, rollOffset: recipe.rollFrame?.offsetStops,
+          diagnostic: inputKind === 'rollFrame' ? await evaluate('window.__ncHistoryInputs.wbDiagnostic()') : null }));
         if (Math.abs(wb.wbR - 1) + Math.abs(wb.wbB - 1) < .0001) fail(scene + ': actual independent color measurement must be nonunit');
         if (result.recipe.coreExposure !== measurementExposure) { await setSlider('coreExposure', result.recipe.coreExposure); await evaluate('window.__ncAnalysis.settle()'); }
       }
