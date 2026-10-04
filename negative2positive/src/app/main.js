@@ -3246,6 +3246,15 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         }
       }
 
+      // Retyping can clear rescue after the crop event has already ended.
+      // Even a hot entry then owes its first measurement, before any render
+      // or settings consumer can treat that converted recipe as settled.
+      if (s.currentStep >= 3 && state.expiredEnabled && !state.expiredAnalysis) {
+        expiredAnalysisKey = null;
+        return restoreColdSnapshotPixels({ ...s,
+          fullBaseFrameEdit: { ...s.fullBaseFrameEdit, automatic: true } });
+      }
+
       // Restore Category B refs
       const r = snapshot.refs;
       if (r.cold) return restoreColdSnapshotPixels(s);
