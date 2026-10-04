@@ -53,7 +53,7 @@ async function measurementFixture(before = ['color', 'correct'], ownership = 'au
   });
   target.convertPreviewFrameInWorker = target.convertFrameOffMainThread;
   vm.runInContext(['processNegative', 'convertFromCurrentSource', 'convertRequestOnMain', 'previewRequestImage',
-    'automaticWhiteBalanceResult', 'maybeAutoWhiteBalance', 'provisionalWhiteBalanceMeasurement', 'autoWbSampleKey',
+    'automaticWhiteBalanceResult', 'maybeAutoWhiteBalance', 'whiteBalanceMeasurementSettings', 'provisionalWhiteBalanceMeasurement', 'autoWbSampleKey',
     'analysisRegionSample', 'getColorAnalysisSample', 'workingPlanes', 'renderGeometryChain', 'assertRepairCurrent',
     'applyProcessedImageToState', 'applyRestoredImageToState', 'routeCoreRequest', 'runCoreReprocess',
     'rerenderWithCoreControls', 'beginFullResolutionConversion', 'endFullResolutionConversion',
@@ -358,7 +358,7 @@ async function historyFixture(before, ownership = 'automatic') {
     }
   });
   vm.runInContext(['liveGeometry', 'rebaseProvisionalHistory', 'promoteWhiteBalanceMeasurement', 'installFullDecode',
-    'provisionalWhiteBalanceMeasurement', 'restorePromotedWhiteBalance', 'automaticWhiteBalanceResult',
+    'whiteBalanceMeasurementSettings', 'provisionalWhiteBalanceMeasurement', 'restorePromotedWhiteBalance', 'automaticWhiteBalanceResult',
     'maybeAutoWhiteBalance', 'analysisRegionSample', 'restoreColdSnapshotPixels', 'getColorAnalysisSample', 'windowFrameMetaOnFull',
     'renderGeometryChain', 'assertRepairCurrent', 'workingPlanes', 'hasPendingCropDetection', 'settlePendingCropDetection'].map(fn).join('\n'), c);
   geometry.installed(c.liveGeometry());

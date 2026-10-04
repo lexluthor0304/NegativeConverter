@@ -31,6 +31,7 @@ function fixture({ repairs = true, locked = false, large = false } = {}) {
     loadedBaseImageData: base, originalImageData: base,
     conversionSourceImageData: base, conversionPreviewImageData: base,
     processedImageData: oldPixels, coreExposure: 24, currentStep: 3,
+    filmType: 'color', positiveMode: 'correct',
     repairStrokes: repairs ? [{ points: [1] }] : [],
     dustRemoval: { enabled: false, processing: false },
   };
@@ -48,6 +49,7 @@ function fixture({ repairs = true, locked = false, large = false } = {}) {
     brushFeedback: { drawing: false, end: () => {}, cancel: () => {}, sync: () => {} }, remapBrushStroke: () => {},
     liveDisplaySerial: 0,
     state, coreReprocessToken: 1, coreReprocessGeneration: 0, geometryToken: 0, loadGeneration: 1, cropDetection: null,
+    structuredClone,
     captureSnapshot: () => ({ settings: structuredClone({ filmType: 'color', positiveMode: 'correct', coreExposure: state.coreExposure }) }),
     filmInterpretationChanged, releaseOwnedPlanes,
     _coreReprocessFullInFlight: false, _coreReprocessPreviewInFlight: false,

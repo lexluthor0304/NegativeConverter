@@ -7683,7 +7683,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         const matching = Object.keys(before).every(key => settings[key] === before[key])
           && cropMeasurementInputsMatch(settings, historySettings);
         const recipe = measurement ? { ...measurement.settings, ...before, ...cropMeasurementInputs(historySettings) }
-          : whiteBalanceMeasurementSettings(historySettings);
+          : provisionalUnits() ? whiteBalanceMeasurementSettings(historySettings) : null;
         const measured = measurement?.geometry ? { ...measurement, settings: recipe } : provisionalWhiteBalanceMeasurement(historySettings, recipe);
         let historical;
         try {
