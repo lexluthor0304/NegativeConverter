@@ -84,6 +84,14 @@ export async function runInterpretationHistoryCropSmoke(ctx) {
     same('crop history original identity', await evaluate('window.__ncTwoStage.queuedRecipes().map(item => item.name)'), [filename]);
   };
   const cases = [
+    ['warm-middle-type-off', false, false, 'automatic', ['bw', 'correct'], ['positive', 'correct'], ['color', 'correct']],
+    ['full-middle-type-off', true, false, 'automatic', ['bw', 'correct'], ['positive', 'correct'], ['color', 'correct']],
+    ['warm-middle-mode-off', false, false, 'automatic', ['color', 'correct'], ['bw', 'edit'], ['color', 'edit']],
+    ['full-middle-mode-off', true, false, 'automatic', ['color', 'correct'], ['bw', 'edit'], ['color', 'edit']],
+    ['warm-middle-type-on', false, true, 'automatic', ['bw', 'correct'], ['positive', 'correct'], ['color', 'correct']],
+    ['full-middle-type-on', true, true, 'automatic', ['bw', 'correct'], ['positive', 'correct'], ['color', 'correct']],
+    ['warm-middle-mode-on', false, true, 'automatic', ['color', 'correct'], ['bw', 'edit'], ['color', 'edit']],
+    ['full-middle-mode-on', true, true, 'automatic', ['color', 'correct'], ['bw', 'edit'], ['color', 'edit']],
     ['warm-color-bw-off', false, false, 'automatic', ['color', 'correct'], ['bw', 'correct']],
     ['full-color-bw-off', true, false, 'automatic', ['color', 'correct'], ['bw', 'correct']],
     ['warm-color-mode-off', false, false, 'automatic', ['color', 'correct'], ['color', 'edit']],
@@ -97,7 +105,7 @@ export async function runInterpretationHistoryCropSmoke(ctx) {
     ['warm-color-bw-gray', false, false, 'gray', ['color', 'correct'], ['bw', 'correct']],
     ['full-color-bw-gray', true, true, 'gray', ['color', 'correct'], ['bw', 'correct']]
   ];
-  for (const [scene, staged, rescue, ownership, before, after] of cases) {
+  for (const [scene, staged, rescue, ownership, before, after, middle] of cases) {
     if (process.env.NC229_HISTORY_BROWSER_CASE && scene !== process.env.NC229_HISTORY_BROWSER_CASE) continue;
     console.log('interpretation crop history scene:', scene);
     const seed = { ...seedRecipe, filmType: before[0], positiveMode: before[1], filmTypeSource: 'manual',
@@ -138,11 +146,17 @@ export async function runInterpretationHistoryCropSmoke(ctx) {
       document.getElementById('applyCropBtn').click()`);
     await waitFor(scene + ' real detector held', `window.__interpretationCropHold.held.length === 1 && window.__ncAnalysis.pendingDetection()`, 60_000);
     if (!rescue) await waitFor(scene + ' provisional crop converted', `${ready} && !window.__ncAnalysis.converting()`, 120_000);
-    await evaluate(`(() => {
-      ${before[0] !== after[0] ? `document.querySelector('.film-type-btn[data-type="${after[0]}"]').click();` : ''}
-      ${before[1] !== after[1] ? `const mode = document.getElementById('positiveModeSelect'); mode.value = '${after[1]}'; mode.dispatchEvent(new Event('change', { bubbles: true }));` : ''}
+    const changeInterpretation = (from, to) => evaluate(`(() => {
+      ${from[0] !== to[0] ? `document.querySelector('.film-type-btn[data-type="${to[0]}"]').click();` : ''}
+      ${from[1] !== to[1] ? `const mode = document.getElementById('positiveModeSelect'); mode.value = '${to[1]}'; mode.dispatchEvent(new Event('change', { bubbles: true }));` : ''}
     })()`);
-    await setSlider('coreExposure', 15);
+    if (middle) {
+      await changeInterpretation(before, middle);
+      await waitFor(scene + ' intermediate interpretation', `${status}.settings.filmType === '${middle[0]}' && ${status}.settings.positiveMode === '${middle[1]}'`, 30_000);
+      if (!rescue) await waitFor(scene + ' intermediate conversion', `${ready} && !window.__ncAnalysis.converting()`, 120_000);
+    }
+    await changeInterpretation(middle || before, after);
+    if (!middle) await setSlider('coreExposure', 15);
     await evaluate('window.__interpretationCropHold.release(); window.__ncAnalysis.settle()');
     await waitFor(scene + ' crop hit', `${ready} && !window.__ncAnalysis.converting() && window.__ncAnalysis.diagnostics()?.method === 'manual-image-window'`, 150_000);
     if (staged) {
@@ -165,37 +179,51 @@ export async function runInterpretationHistoryCropSmoke(ctx) {
       if (ownership !== 'automatic') same(scene + ' explicit WB', [recipe.wbR, recipe.wbG, recipe.wbB], [initial.wbR, initial.wbG, initial.wbB]);
       results[phase] = { recipe, single, batch };
     };
-    await capture('live');
-    await evaluate(`document.getElementById('undoBtn').click(); window.__ncAnalysis.settle()`);
-    await capture('new-entry-undo');
-    await evaluate(`document.getElementById('undoBtn').click(); window.__ncAnalysis.settle()`);
-    await capture('old-entry-undo');
-    await evaluate(`document.getElementById('redoBtn').click(); window.__ncAnalysis.settle();`);
-    await capture('new-entry-redo');
-    same(scene + ' old-entry interpretation', [results['old-entry-undo'].recipe.filmType, results['old-entry-undo'].recipe.positiveMode], before);
-    if (rescue || before[0] !== 'color' || ownership !== 'automatic') same(scene + ' valid old WB retained',
-      [results['old-entry-undo'].recipe.wbR, results['old-entry-undo'].recipe.wbG, results['old-entry-undo'].recipe.wbB], [initial.wbR, initial.wbG, initial.wbB]);
-    for (const phase of ['live', 'new-entry-undo', 'new-entry-redo']) same(scene + ' new-entry interpretation',
-      [results[phase].recipe.filmType, results[phase].recipe.positiveMode], after);
+    if (middle) {
+      for (let round = 0; round < 2; round++) {
+        await evaluate(`document.getElementById('undoBtn').click(); window.__ncAnalysis.settle()`);
+        await capture('middle-undo-' + round);
+        await evaluate(`document.getElementById('redoBtn').click(); window.__ncAnalysis.settle()`);
+        await capture('final-redo-' + round);
+      }
+      for (const [phase, result] of Object.entries(results)) same(scene + ' ' + phase + ' interpretation',
+        [result.recipe.filmType, result.recipe.positiveMode], phase.startsWith('middle') ? middle : after);
+    } else {
+      await capture('live');
+      await evaluate(`document.getElementById('undoBtn').click(); window.__ncAnalysis.settle()`);
+      await capture('new-entry-undo');
+      await evaluate(`document.getElementById('undoBtn').click(); window.__ncAnalysis.settle()`);
+      await capture('old-entry-undo');
+      await evaluate(`document.getElementById('redoBtn').click(); window.__ncAnalysis.settle();`);
+      await capture('new-entry-redo');
+      same(scene + ' old-entry interpretation', [results['old-entry-undo'].recipe.filmType, results['old-entry-undo'].recipe.positiveMode], before);
+      if (rescue || before[0] !== 'color' || ownership !== 'automatic') same(scene + ' valid old WB retained',
+        [results['old-entry-undo'].recipe.wbR, results['old-entry-undo'].recipe.wbG, results['old-entry-undo'].recipe.wbB], [initial.wbR, initial.wbG, initial.wbB]);
+      for (const phase of ['live', 'new-entry-undo', 'new-entry-redo']) same(scene + ' new-entry interpretation',
+        [results[phase].recipe.filmType, results[phase].recipe.positiveMode], after);
+    }
+    same(scene + ' actual caller errors', await evaluate('window.__historyErrors'), []);
     for (const [phase, result] of Object.entries(results)) {
       console.log('interpretation crop history independent reference:', scene, phase);
       const eligible = ownership === 'automatic' && !rescue && result.recipe.filmType === 'color';
-      // The event converted at exposure 15. Import/Apply that immutable recipe
+      // Reproduce the event's dispatch exposure (0 for intermediate cases,
+      // 15 for the original exposure-edit cases). Import/Apply that recipe
       // with the real full loader, then replay the saved control at exposure 0.
-      const recipe = { ...result.recipe, coreExposure: eligible ? 15 : result.recipe.coreExposure,
+      const measurementExposure = middle ? 0 : 15;
+      const recipe = { ...result.recipe, coreExposure: eligible ? measurementExposure : result.recipe.coreExposure,
         ...(eligible ? { wbR: 1, wbG: 1, wbB: 1, wbAutoConfidence: null, wbSemanticApplied: false, semanticMap: null } : {}) };
       await open(one, recipe);
       if (eligible) {
         const wb = await evaluate('window.__ncAnalysis.whiteBalance()');
         if (Math.abs(wb.wbR - 1) + Math.abs(wb.wbB - 1) < .0001) fail(scene + ': actual independent color measurement must be nonunit');
-        if (result.recipe.coreExposure !== 15) { await setSlider('coreExposure', result.recipe.coreExposure); await evaluate('window.__ncAnalysis.settle()'); }
+        if (result.recipe.coreExposure !== measurementExposure) { await setSlider('coreExposure', result.recipe.coreExposure); await evaluate('window.__ncAnalysis.settle()'); }
       }
       const fresh = await exportFormats(scene + ' ' + phase + ' independent full interpretation', formats);
       console.log('interpretation crop history comparison:', JSON.stringify({ scene, phase, actual: result.single, fresh }));
       sameExports(scene + ' ' + phase + ' independent exact samples/files', result.single, fresh);
       result.fresh = fresh;
     }
-    console.log('interpretation crop history receipt:', JSON.stringify({ scene, staged, rescue, ownership, before, after, initial, results }));
+    console.log('interpretation crop history receipt:', JSON.stringify({ scene, staged, rescue, ownership, before, middle, after, initial, results }));
     console.log(`ok: ${scene}: held real detector, real type/mode/WB/gray callers, warm/full-swap Undo/Redo, PNG8/TIFF16 samples and bytes`);
   }
 }

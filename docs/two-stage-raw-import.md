@@ -219,7 +219,12 @@ instead (step 4 runs it on the full base). It then swaps in one task:
    A late crop hit converts the original historical interpretation when the
    dispatched positive belongs to another recipe. Completed events match
    type/mode, WB ownership, film base, semantic map and roll inputs; both old
-   and new entries keep their own measurements. Dispatch settings stay fixed
+   and new entries keep their own measurements. Intermediate Undo/Redo
+   entries sharing that detection token are measured too, even if neither
+   the starting nor final conversion used their WB and input recipe. Each
+   recipe is captured before its worker wait, without installing historical
+   pixels; temporary planes are released before the detection settles.
+   Dispatch settings stay fixed
    across the worker wait, and a crossing converts the current recipe before
    adopting it. Manual/gray WB locks still permit missing rescue analysis on
    cold replay.
