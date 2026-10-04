@@ -18864,6 +18864,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // History taken while this ran holds the miss outcome; it gets the hit
       // when it is restored (restoreSnapshot).
       detection.token.hit = { fields };
+      // The hit changes the measured region without changing crop dimensions.
+      // Its rescue must be measured anew, preserving user strength ownership.
+      if (state.expiredEnabled) {
+        state.expiredAnalysis = null;
+        expiredAnalysisKey = null;
+      }
       if (detection.whiteBalanceMeasurement?.pending && !detection.whiteBalanceMeasurement.measurement) {
         detection.whiteBalanceMeasurement.hit = { generation: detection.generation, geometry: detection.geometry };
       }
