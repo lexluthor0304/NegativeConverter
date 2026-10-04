@@ -437,6 +437,9 @@ if (selection === 'all' || selection === 'shared-hit-events') {
     const event = c.promoteWhiteBalanceMeasurement(pending, f.provisional, full, recipe);
     c.installFullDecode(f.record, f.provisional, full, recipe);
     await c.whenGeometrySettled(); state.provisional = null;
+    c.cancelCropDetection();
+    assert.equal(c.hasPendingCropDetection(), false, 'shared hit replay has no live detector');
+    assert.equal(c.frameWantsAutoWhiteBalance(event.before), true, 'pending event owns an automatic color measurement');
     state.conversionSourceImageData = c.workingPlanes();
     const hit = { generation: target.loadGeneration, geometry: c.liveGeometry() };
     if (mismatch === 'generation') hit.generation--;
@@ -452,6 +455,7 @@ if (selection === 'all' || selection === 'shared-hit-events') {
     if (mismatch === 'superseded') state.fullBaseFrameEdit = { whiteBalance: { ...event } };
     await c.maybeAutoWhiteBalance(processed, settings, () => true, { settings: recipe, live: c.liveGeometry() });
     if (mismatch === 'none') {
+      assert.ok(hit.whiteBalance, 'the actual shared hit object acquires WB');
       assert.deepEqual(canon(hit.whiteBalance.result), canon(expected), 'the actual hit object stores exact WB');
       assert.ok(event.measurement, 'the shared pending event settles its immutable recipe');
     } else {
