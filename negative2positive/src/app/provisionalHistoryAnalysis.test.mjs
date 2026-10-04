@@ -847,7 +847,9 @@ for (const replacement of ['confirm', 'confirm-history', 'reset']) {
   for (let i = 0; i < 64 && (!h.conversionReplies.length || !reference.conversionReplies.length); i++) await new Promise(setImmediate);
   assert.equal(h.conversionReplies.length, 1, 'actual full-settle dispatch held');
   assert.equal(reference.conversionReplies.length, 1, 'single-stage dispatch held');
-  target.holdConversion = ({ live }) => !live;
+  // Completion can measure additional compatible history recipes inside its
+  // live pass. Hold the subsequent off-state settlement replay specifically.
+  target.holdConversion = ({ live }) => !live && !target.processNegativeInFlight;
   for (const item of [h, reference]) {
     item.context.pushUndo('in-flight-exposure'); item.state.coreExposure = 0; item.target.conversionHold = false;
     item.conversionReplies.splice(0).forEach(resolve => resolve());
