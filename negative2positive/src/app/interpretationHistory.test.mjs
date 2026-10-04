@@ -431,6 +431,8 @@ async function exactBatch(f, expectedGains, label) {
 if (selection === 'all' || selection === 'shared-hit-events') {
   for (const mismatch of ['none', 'generation', 'rotation', 'mirror', 'crop', 'superseded']) {
     const f = await historyFixture(['color', 'correct']), { context: c, state, target } = f;
+    // Match the production ES module's strict assignment semantics.
+    vm.runInContext('"use strict";\n' + fn('maybeAutoWhiteBalance'), c);
     Object.assign(state, { expiredEnabled: false, semanticMap: null, rollFrame: null });
     const recipe = c.whiteBalanceMeasurementSettings(state);
     const pending = { pending: true, before: { ...recipe }, previous: c.provisionalWhiteBalanceMeasurement(state) };

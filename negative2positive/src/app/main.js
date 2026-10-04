@@ -7688,9 +7688,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const event = detection?.whiteBalanceMeasurement || (state.provisional?.swapped && state.provisional.fullBaseWhiteBalanceToken === geometryToken
         ? state.provisional.fullBaseWhiteBalance : state.fullBaseFrameEdit?.whiteBalance);
       const before = event?.pending && !event.measurement ? event.before : detection?.whiteBalance;
-      const hit = detection?.token.hit || (event?.hit && isCurrentLoad(event.hit.generation)
-        && effectiveGeometryAngle(state.rotationAngle) === effectiveGeometryAngle(event.hit.geometry.rotationAngle)
-        && Boolean(state.mirrored) === Boolean(event.hit.geometry.mirrored) && sameCropRect(state.cropRegion, event.hit.geometry.cropRegion));
+      const eventHit = event?.hit;
+      const hit = detection?.token.hit || (eventHit && isCurrentLoad(eventHit.generation)
+        && effectiveGeometryAngle(state.rotationAngle) === effectiveGeometryAngle(eventHit.geometry.rotationAngle)
+        && Boolean(state.mirrored) === Boolean(eventHit.geometry.mirrored) && sameCropRect(state.cropRegion, eventHit.geometry.cropRegion)
+        ? eventHit : null);
       const ownsHit = () => isCurrent() && (detection ? cropDetection === detection && detection.token.hit === hit
         : event === (state.provisional?.swapped && state.provisional.fullBaseWhiteBalanceToken === geometryToken
           ? state.provisional.fullBaseWhiteBalance : state.fullBaseFrameEdit?.whiteBalance));
