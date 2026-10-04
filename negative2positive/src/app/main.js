@@ -19935,6 +19935,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // its full decode is installed first (decoded again if it failed).
       try {
         if (!await ensureFullDecode({ reason: 'export' })) throw new Error('Photo changed while exporting. Please export again.');
+        await settlePendingCropDetection();
       } catch (error) {
         overlay.hide();
         throw error;
@@ -19964,6 +19965,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           overlay.updateProgress(40, lang.loadingEncoding);
           blob = renderLinearDngBlob(state.conversionSourceImageData || state.croppedImageData || state.originalImageData, state, Math.max(0, state.currentFileIndex));
         } else {
+          const onModelLoad = (percent) => overlay.updateProgress(state.currentStep >= 3 ? 5 : 50, percent !== null
+            ? `${getLocalizedText('exportAiModelLoading', 'Loading the AI repair model…')}${percent > 0 ? ` ${percent}%` : ''}`
+            : state.currentStep >= 3 ? lang.loadingAdjusting : lang.loadingEncoding);
+          // Full decoding and exact conversion can start another measurement.
+          // Persist the recipe only after those and its repairs have settled.
+          await prepareCurrentImageForExport({ onModelLoad });
           const full = state.currentStep >= 3 && state.processedImageData;
           if (full) persistCurrentFileSettings({ silent: true, force: true });
           else overlay.updateProgress(50, lang.loadingEncoding);
@@ -19982,9 +19989,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
             },
             onProgress: (pct) => overlay.updateProgress(start + pct * span, lang.loadingEncoding),
             // A repair model the export loads (#236 and #241 release it).
-            onModelLoad: (percent) => overlay.updateProgress(full ? 5 : 50, percent !== null
-              ? `${getLocalizedText('exportAiModelLoading', 'Loading the AI repair model…')}${percent > 0 ? ` ${percent}%` : ''}`
-              : full ? lang.loadingAdjusting : lang.loadingEncoding)
+            onModelLoad
           });
           try {
             blob = await render(true);

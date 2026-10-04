@@ -313,6 +313,39 @@ for (const mode of ['owned', 'superseded', 'disabled', 'new-load', 'new-interpre
   console.log('spatial settlement PASS ' + mode);
 }
 
+for (const format of ['png', 'tiff']) {
+  const run = spatialContext({ unevenFog: 100 });
+  const {context:c,state,target,held}=run;
+  state.currentStep=3;state.dustRemoval={ai:false,enabled:false,mask:null};state.repairStrokes=[];state.currentFileIndex=0;
+  const item={file:{name:'aged.png'},isDirty:true,settings:null};let promoted=false;let persisted=0;let encoded=0;
+  const overlay={show:async()=>{},hide:()=>{},updateProgress:()=>{},setCancelable:()=>{}};
+  Object.assign(target,{
+    processNegativeInFlight:null,fullResolutionRenderTimer:null,
+    getCurrentQueueItem:()=>item,getExportInfo:()=>({format,bitDepth:format==='tiff'?16:8,mimeType:'image/'+format}),
+    buildActiveExportFileName:()=> 'output.'+format,isTauriDesktop:()=>false,
+    manualEditRevision:0, i18n:{en:{}}, currentLang:'en',getLoadingOverlay:()=>overlay,
+    createExportWorkerBridge:()=>({dispose(){}}),createExportBands:()=>null,exportBands:null,
+    ensureFullDecode:async()=>{
+      if(!promoted){promoted=true;const full=agedPositive({width:320,height:220,seed:7});state.originalImageData=state.loadedBaseImageData=state.processedImageData=full;c.runExpiredAnalysis(full);}
+      return true;
+    },
+    colorAnalysisSampleMissing:()=>false,whenGeometrySettled:async()=>{},geometryOutOfStep:()=>false,
+    flushScheduledCoreReprocess:async()=>{},fullResolutionIsStale:()=>false,
+    extractCurrentSettings:()=>{persisted++;return structuredClone({filmType:state.filmType,positiveMode:state.positiveMode,expiredEnabled:state.expiredEnabled,expiredAnalysis:state.expiredAnalysis,expiredBrightness:state.expiredBrightness,expiredContrast:state.expiredContrast});},
+    renderAndEncodeCurrentImage:async()=>{await c.prepareCurrentImageForExport();encoded++;assert.deepEqual(item.settings.expiredAnalysis,state.expiredAnalysis,'real saved recipe and prepared image measurement must agree');return new Blob(['bounded']);},
+    saveBlob:async()=>({saved:false,path:null})
+  });
+  vm.runInContext(['exportSingle','persistCurrentFileSettings','prepareCurrentImageForExport','ensureFullResolutionReadyForExport','ensureRepairsReadyForExport'].map(functionSource).join('\n'),c);
+  c.runExpiredAnalysis(run.frame);await until(()=>held.length===1,'initial source worker');await release(held,0);assert.ok(state.expiredAnalysis.spatial);
+  let error;const exporting=c.exportSingle().catch(e=>{error=e;});
+  await until(()=>held.length===2||error,'full decode starts new actual spatial measurement');if(error)throw error;
+  const persistedBeforeFullMeasurement=persisted;
+  await release(held,1);await exporting;if(error)throw error;
+  assert.equal(persistedBeforeFullMeasurement,0,'post-decode recipe must wait for actual full-source measurement');
+  assert.equal(persisted,1);assert.equal(encoded,1);assert.ok(item.settings.expiredAnalysis.spatial);
+  console.log('postdecode saved recipe PASS '+format);
+}
+
 console.log('expiredMeasurement: a fog-surface request with other inputs measures again; the stored measurement is 1703835\'s (R1-074)');
 
 // ---------------------------------------------------------------------------
