@@ -673,7 +673,7 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
                     probe.historyRequests.push({ id: message.id, wbSample: !!message.wbSample,
                       exposure: message.settings?.coreExposure, preview: message.options?.preview,
                       pending: state.pending, provisional: state.provisional,
-                      converting: window.__ncAnalysis.converting() });
+                      converting: window.__ncAnalysis.converting(), stack: new Error().stack });
                     if (probe.historyRequests.length > 40) probe.historyRequests.shift();
                   }
                   if (geometry && probe.geometryOn && state.swapped) requests.set(message.id, 'geometry');
@@ -894,7 +894,8 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
                 void window.__ncAnalysis.settle().then(() => { window.__historyCropProbe.oldSettled = true; })`);
               await wait(50);
               const proof = await evaluate(`({ ...window.__historyCropProbe.dispatched, settled: window.__historyCropProbe.oldSettled,
-                converting: window.__ncAnalysis.converting(), replies: window.__historyCropProbe.conversionHeld.length })`);
+                converting: window.__ncAnalysis.converting(), replies: window.__historyCropProbe.conversionHeld.length,
+                requests: window.__historyCropProbe.historyRequests })`);
               if (proof.coldRestores <= before || proof.settled || proof.replies !== 1 || proof.geometryPending || proof.detecting
                 || proof.exposure !== 15 || proof.converting !== !wbReplayOnly
                 || (wbReplayOnly && !proof.preview)) fail(scene + ': held leaf/old ownership proof: ' + JSON.stringify(proof));
