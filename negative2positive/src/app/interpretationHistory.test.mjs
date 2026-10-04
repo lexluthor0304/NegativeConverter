@@ -454,13 +454,23 @@ if (selection === 'all' || selection === 'shared-hit-events') {
     const expected = c.automaticWhiteBalanceResult(processed, settings, {
       meta: settings.autoFrameMeta, base: state.loadedBaseImageData, wbSample: null });
     assert.ok(expected, 'real color kernel supplies a measurement');
-    if (mismatch === 'superseded') state.fullBaseFrameEdit = { whiteBalance: { ...event } };
+    let historicalRequests = 0;
+    if (mismatch === 'superseded') {
+      const convert = target.convertFromCurrentSource;
+      target.convertFromCurrentSource = async (...args) => {
+        const output = await convert(...args);
+        historicalRequests++;
+        state.fullBaseFrameEdit = { whiteBalance: { ...event } };
+        return output;
+      };
+    }
     await c.maybeAutoWhiteBalance(processed, settings, () => true, { settings: recipe, live: c.liveGeometry() });
     if (mismatch === 'none') {
       assert.ok(hit.whiteBalance, 'the actual shared hit object acquires WB');
       assert.deepEqual(canon(hit.whiteBalance.result), canon(expected), 'the actual hit object stores exact WB');
       assert.ok(event.measurement, 'the shared pending event settles its immutable recipe');
     } else {
+      if (mismatch === 'superseded') assert.equal(historicalRequests, 1, 'event replaced during real historical conversion');
       assert.equal(hit.whiteBalance, undefined, 'stale frame or superseded event cannot acquire WB');
       assert.equal(event.measurement, undefined, 'stale event stays unmeasured');
     }
