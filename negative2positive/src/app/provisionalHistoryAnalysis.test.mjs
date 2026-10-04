@@ -60,7 +60,7 @@ function fixture(staged, manualWb = false) {
         { analysisImageData: c.getColorAnalysisSample(settings === state ? { ...settings, autoFrameMeta: state.autoFrame.lastDiagnostics } : settings) });
       dispatched.push(recipe);
       if (target.holdConversion?.({ live: settings === state, recipe })
-        || target.conversionHold && (!target.measurementHold || settings !== state)) await new Promise(resolve => {
+        || target.conversionHold && (!target.measurementHold || recipe.coreExposure === 15)) await new Promise(resolve => {
         Object.assign(resolve, { live: settings === state, recipe });
         conversionReplies.push(resolve);
       });
@@ -398,6 +398,7 @@ for (const defect of ['conversion-in-flight', 'post-install-history', 'cold-undo
       const restoring = c[`perform${action}`]();
       for (let i = 0; i < 32 && !h.conversionReplies.length; i++) await new Promise(setImmediate);
       assert.equal(h.conversionReplies.length, 1, action + ': cold history conversion reply explicitly held');
+      if (target.measurementHold) assert.equal(h.conversionReplies[0].recipe.coreExposure, 15, 'only the immutable WB event measurement is held');
       assert.equal(state.provisional, null, 'promotion has finished before cold history rebuild');
       assert.ok(state.fullBaseHistoryPending, 'history barrier covers the held conversion');
       assert.equal(state.geometryPending, false, 'geometry finished before the new edit');
