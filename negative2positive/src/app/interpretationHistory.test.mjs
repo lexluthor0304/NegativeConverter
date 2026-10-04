@@ -428,6 +428,40 @@ async function exactBatch(f, expectedGains, label) {
   assert.deepEqual([state.wbR, state.wbG, state.wbB], expectedGains, `${label}: live WB ownership`);
 }
 
+if (selection === 'all' || selection === 'shared-hit-events') {
+  for (const mismatch of ['none', 'generation', 'rotation', 'mirror', 'crop', 'superseded']) {
+    const f = await historyFixture(['color', 'correct']), { context: c, state, target } = f;
+    Object.assign(state, { expiredEnabled: false, semanticMap: null, rollFrame: null });
+    const recipe = c.whiteBalanceMeasurementSettings(state);
+    const pending = { pending: true, before: { ...recipe }, previous: c.provisionalWhiteBalanceMeasurement(state) };
+    const event = c.promoteWhiteBalanceMeasurement(pending, f.provisional, full, recipe);
+    c.installFullDecode(f.record, f.provisional, full, recipe);
+    await c.whenGeometrySettled(); state.provisional = null;
+    state.conversionSourceImageData = c.workingPlanes();
+    const hit = { generation: target.loadGeneration, geometry: c.liveGeometry() };
+    if (mismatch === 'generation') hit.generation--;
+    if (mismatch === 'rotation') hit.geometry.rotationAngle += 90;
+    if (mismatch === 'mirror') hit.geometry.mirrored = !hit.geometry.mirrored;
+    if (mismatch === 'crop') hit.geometry.cropRegion = { left: 2, top: 2, width: 100, height: 70 };
+    event.hit = hit; state.fullBaseFrameEdit = { whiteBalance: event };
+    const settings = c.captureSnapshot('shared-hit').settings;
+    const processed = await target.convertFromCurrentSource(settings);
+    const expected = c.automaticWhiteBalanceResult(processed, settings, {
+      meta: settings.autoFrameMeta, base: state.loadedBaseImageData, wbSample: null });
+    assert.ok(expected, 'real color kernel supplies a measurement');
+    if (mismatch === 'superseded') state.fullBaseFrameEdit = { whiteBalance: { ...event } };
+    await c.maybeAutoWhiteBalance(processed, settings, () => true, { settings: recipe, live: c.liveGeometry() });
+    if (mismatch === 'none') {
+      assert.deepEqual(canon(hit.whiteBalance.result), canon(expected), 'the actual hit object stores exact WB');
+      assert.ok(event.measurement, 'the shared pending event settles its immutable recipe');
+    } else {
+      assert.equal(hit.whiteBalance, undefined, 'stale frame or superseded event cannot acquire WB');
+      assert.equal(event.measurement, undefined, 'stale event stays unmeasured');
+    }
+    f.pool.dispose(); cases++;
+  }
+}
+
 if (selection === 'all' || selection === 'promoted-inputs') {
   for (const input of ['filmBase', 'semanticMap', 'rollFrame']) {
     const f = await historyFixture(['color', 'correct']), { context: c, state, target } = f;
