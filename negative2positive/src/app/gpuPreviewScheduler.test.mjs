@@ -336,10 +336,12 @@ const discreteStubs = {
 };
 function discreteFixture(functions, extra = '') {
   const f = gpuSettleFixture();
+  f.state.expiredEnabled = false;
   Object.assign(f.context, discreteStubs, {
+    loadGeneration: 1, isCurrentLoad: () => true, processNegativeInFlight: null,
     applyFilmPresetSettingsToState: async (presetId) => { f.state.coreFilmPreset = presetId; },
   });
-  vm.runInContext(functions.map(mainFunction).join('\n') + '\n' + extra, f.context);
+  vm.runInContext([...functions, 'remeasureExpiredAfterRetype'].map(mainFunction).join('\n') + '\n' + extra, f.context);
   return f;
 }
 
