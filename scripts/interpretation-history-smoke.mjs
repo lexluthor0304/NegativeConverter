@@ -193,14 +193,32 @@ export async function runInterpretationHistoryCropSmoke(ctx) {
     })()`);
     const editInput = async last => {
       if (inputKind === 'filmBase') {
+        await waitFor(scene + ' sampling geometry', `!window.__ncGeometry.pending()`, 60_000);
         const point = await evaluate(`(() => {
           document.getElementById('studioTab-edit').click(); document.getElementById('step2ModeBorderBtn').click();
           document.getElementById('sampleBaseBtn').click();
           const gl = document.getElementById('glCanvas'), el = gl.style.display !== 'none' && gl.getBoundingClientRect().width > 0 ? gl : document.getElementById('canvas');
-          const r = el.getBoundingClientRect(); return { x: r.left + r.width * ${last ? .71 : .27}, y: r.top + r.height * ${last ? .63 : .31} };
+          const r = el.getBoundingClientRect(); return { id: el.id, x: r.left + r.width * ${last ? .71 : .27}, y: r.top + r.height * ${last ? .63 : .31} };
         })()`);
-        await send('Input.dispatchMouseEvent', { type: 'mousePressed', ...point, button: 'left', clickCount: 1 });
-        await send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...point, button: 'left', clickCount: 1 });
+        await waitFor(scene + ' sampler active', `document.getElementById('sampleBaseBtn').classList.contains('active')`, 60_000);
+        if (rescue) {
+          // Rescue awaits the held detector behind the loading overlay. Deliver
+          // only the input event directly; keep the real sampler, history,
+          // planes, conversion and overlay protection unchanged.
+          const delivery = await evaluate(`(() => {
+            const point = ${JSON.stringify(point)}, el = document.getElementById(point.id);
+            const hit = document.elementFromPoint(point.x, point.y);
+            const blocked = Boolean(hit?.closest('.loading-overlay.visible'));
+            if (!blocked || window.__ncGeometry.pending()) throw new Error('Expected held-rescue input barrier');
+            el.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: point.x, clientY: point.y }));
+            return { controlledPointerTransport: true, target: point.id, blockedBy: hit.className };
+          })()`);
+          console.log('interpretation history manual-base input:', JSON.stringify({ scene, last, ...delivery }));
+        } else {
+          const { x, y } = point;
+          await send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
+          await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
+        }
         await waitFor(scene + ' real manual base sample', `!document.getElementById('sampleBaseBtn').classList.contains('active')`, 60_000);
       } else {
         const value = inputKind === 'semanticMap' ? { width: 2, height: 1, labels: [0, 4], confidence: last ? .8 : .95 }
