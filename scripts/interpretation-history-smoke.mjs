@@ -272,6 +272,7 @@ export async function runInterpretationHistoryCropSmoke(ctx) {
       console.log('interpretation crop history capture:', scene, phase);
       await evaluate('window.__ncAnalysis.settle()');
       const recipe = await evaluate(`${status}.settings`);
+      if ((middle || hitDispatch) && rescue && !recipe.expiredAnalysis) fail(scene + ' ' + phase + ': settled rescued history has no measurement before export');
       const single = await exportFormats(scene + ' ' + phase, formats);
       const all = await exportAllFormats(1, scene + ' ' + phase + ' batch', formats);
       const batch = Object.fromEntries(Object.entries(all).map(([key, values]) => [key, Object.values(values)[0]]));
