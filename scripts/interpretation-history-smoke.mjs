@@ -44,6 +44,20 @@ export async function installFrozenHistoryControl({ send, onCdpEvent, root, fail
       const anchor = functions(text).get('processNegative');
       if (!anchor) throw new Error('History input probe scope missing');
       const hook = `window.__ncHistoryInputs = {
+        exportState: async () => {
+          const image = state.processedImageData;
+          const summary = { step: state.currentStep, pendingSpatial: Boolean(expiredSpatialRun),
+            spatialCurrent: Boolean(expiredSpatialRun && expiredSpatialRun.generation === loadGeneration && expiredSpatialRun.key === expiredSourceKey()),
+            analysis: structuredClone(state.expiredAnalysis),
+            coreExposure: state.coreExposure, filmType: state.filmType, wb: [state.wbR, state.wbG, state.wbB],
+            preview: Boolean(state.processedImageDataIsPreview), fullPending: Boolean(state.fullResolutionPending),
+            historyPending: Boolean(state.fullBaseHistoryPending), converting: Boolean(processNegativeInFlight) };
+          const hash = async data => data ? [...new Uint8Array(await crypto.subtle.digest('SHA-256',
+            new Uint8Array(data.buffer, data.byteOffset, data.byteLength).slice()))].map(v => v.toString(16).padStart(2, '0')).join('') : null;
+          summary.processed = image && { width: image.width, height: image.height,
+            rgba8: await hash(image.data), rgba16: await hash(image.__image16?.data) };
+          return summary;
+        },
         restoration: () => ({ step: state.currentStep, geometryPending: Boolean(state.geometryPending),
           historyPending: Boolean(state.fullBaseHistoryPending), converting: Boolean(processNegativeInFlight),
           reprocessPending: Boolean(coreReprocessTimer || _coreReprocessFullInFlight || _coreReprocessPreviewInFlight || _coreReprocessPending),
@@ -275,6 +289,16 @@ export async function runInterpretationHistoryCropSmoke(ctx) {
     }
     await waitFor(scene + ' exact source', `${ready} && ${exact} && !window.__ncAnalysis.converting()`, 150_000);
     const results = {};
+    const diagnosticExport = async (label, phase) => {
+      if (scene !== 'full-color-bw-gray') return exportFormats(label, formats);
+      const before = await evaluate('window.__ncHistoryInputs.exportState()');
+      const png = await exportFormats(label, [formats[0]]);
+      const afterPng = await evaluate('window.__ncHistoryInputs.exportState()');
+      const tiff = await exportFormats(label, [formats[1]]);
+      const afterTiff = await evaluate('window.__ncHistoryInputs.exportState()');
+      console.log('interpretation gray export state:', JSON.stringify({ scene, phase, before, afterPng, afterTiff }));
+      return { ...png, ...tiff };
+    };
     const capture = async phase => {
       console.log('interpretation crop history capture:', scene, phase);
       await evaluate('window.__ncAnalysis.settle()');
@@ -282,7 +306,7 @@ export async function runInterpretationHistoryCropSmoke(ctx) {
       if (hitDispatch) console.log('interpretation hit restoration:', JSON.stringify({ scene, phase,
         ...await evaluate('window.__ncHistoryInputs.restoration()') }));
       if ((middle || hitDispatch) && rescue && !recipe.expiredAnalysis) fail(scene + ' ' + phase + ': settled rescued history has no measurement before export');
-      const single = await exportFormats(scene + ' ' + phase, formats);
+      const single = await diagnosticExport(scene + ' ' + phase, phase);
       const all = await exportAllFormats(1, scene + ' ' + phase + ' batch', formats);
       const batch = Object.fromEntries(Object.entries(all).map(([key, values]) => [key, Object.values(values)[0]]));
       console.log('interpretation crop history live/batch check:', JSON.stringify({ scene, phase,
@@ -338,7 +362,7 @@ export async function runInterpretationHistoryCropSmoke(ctx) {
         if (Math.abs(wb.wbR - 1) + Math.abs(wb.wbB - 1) < .0001) fail(scene + ': actual independent color measurement must be nonunit');
         if (result.recipe.coreExposure !== measurementExposure) { await setSlider('coreExposure', result.recipe.coreExposure); await evaluate('window.__ncAnalysis.settle()'); }
       }
-      const fresh = await exportFormats(scene + ' ' + phase + ' independent full interpretation', formats);
+      const fresh = await diagnosticExport(scene + ' ' + phase + ' independent full interpretation', 'fresh-' + phase);
       console.log('interpretation crop history comparison:', JSON.stringify({ scene, phase, actual: result.single, fresh }));
       sameExports(scene + ' ' + phase + ' independent exact samples/files', result.single, fresh);
       result.fresh = fresh;
