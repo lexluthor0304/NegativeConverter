@@ -373,6 +373,16 @@ async function dumpDiagnostics(context) {
       loupeHidden: document.getElementById('loupeOverlay')?.hidden,
       loupePermissionProbe: window.__loupePermissionProbe,
       timeOrigin: performance.timeOrigin,
+      historyRestore: window.__historyCropProbe && {
+        requests: window.__historyCropProbe.historyRequests,
+        held: window.__historyCropProbe.conversionHeld.length,
+        replies: window.__historyCropProbe.conversionReplies,
+        dispatched: window.__historyCropProbe.dispatched,
+        converting: window.__ncAnalysis.converting(),
+        pendingGeometry: window.__ncGeometry.pending(),
+        pendingDetection: window.__ncAnalysis.pendingDetection(),
+        state: window.__ncTwoStage.status(),
+      },
       toast: [...document.querySelectorAll('.toast-message')].map((t) => t.textContent),
     }))()`);
     console.error(`diagnostics [${context}]: ${JSON.stringify(info)}`);

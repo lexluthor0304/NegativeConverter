@@ -642,7 +642,8 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
             const auto = document.getElementById('studioImportAutoCrop'); if (auto.checked) auto.click();
             const probe = window.__historyCropProbe = { hold: false, held: [], answers: 0, replacement: null,
               once: ${unansweredPreview}, geometryOn: false, historyOn: false,
-              geometryHeld: [], conversionOn: false, conversionHeld: [], conversionReplies: 0, wbReplayOnly: false };
+              geometryHeld: [], conversionOn: false, conversionHeld: [], conversionReplies: 0, wbReplayOnly: false,
+              historyRequests: [] };
             const post = Worker.prototype.postMessage;
             Worker.prototype.postMessage = function (message, ...args) {
               if (probe.hold && message?.type === 'detect-crop-area') {
@@ -668,6 +669,13 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
                 Object.defineProperty(this, 'onmessage', { configurable: true, get: () => handler, set: fn => { handler = fn; } });
                 this.postMessage = (message, ...args) => {
                   const state = window.__ncTwoStage.status();
+                  if (conversion && probe.historyOn) {
+                    probe.historyRequests.push({ id: message.id, wbSample: !!message.wbSample,
+                      exposure: message.settings?.coreExposure, preview: message.options?.preview,
+                      pending: state.pending, provisional: state.provisional,
+                      converting: window.__ncAnalysis.converting() });
+                    if (probe.historyRequests.length > 40) probe.historyRequests.shift();
+                  }
                   if (geometry && probe.geometryOn && state.swapped) requests.set(message.id, 'geometry');
                   if (conversion && probe.conversionOn && message.wbSample && message.settings?.coreExposure === 15
                     && (!probe.wbReplayOnly || message.options?.preview === true)
