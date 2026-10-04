@@ -9493,6 +9493,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // because startFullResolutionRender hands back the queued render whose
       // promise resolves before the new pixels exist.
       await flushScheduledCoreReprocess();
+      // A conversion can start the rescue's second, spatial measurement.
+      // Freeze its completed recipe before selecting either export plane.
+      await settlePendingCropDetection();
       // Besides the flags, a plane that is not the size of the conversion
       // source counts as stale: flagged full resolution by mistake, it would
       // be exported at display size.
@@ -9506,6 +9509,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         if (!pending) break;
         await pending;
         await flushScheduledCoreReprocess();
+        await settlePendingCropDetection();
         if (!fullResolutionIsStale(state)) return;
       }
       if (state.processedImageDataIsPreview) {
@@ -18772,10 +18776,19 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       return Boolean(cropDetection) && isCurrentCropDetection(cropDetection);
     }
 
-    // Resolves once no crop-area detection is pending, a hit's conversion
-    // included.
+    // Resolves once the current frame's detection, history restoration and
+    // spatial rescue measurement have settled. The rescue replaces its first
+    // global measurement asynchronously; an output recipe must include that
+    // replacement before its PNG8 and TIFF16 exports begin.
     async function settlePendingCropDetection() {
-      while (cropDetection || state.fullBaseHistoryPending) await (state.fullBaseHistoryPending || cropDetection.settled);
+      for (;;) {
+        while (cropDetection || state.fullBaseHistoryPending) await (state.fullBaseHistoryPending || cropDetection.settled);
+        const run = expiredSpatialRun;
+        if (!run || !state.expiredEnabled || !isCurrentLoad(run.generation) || run.key !== expiredSourceKey()) return;
+        await run.promise;
+        // A new measurement may supersede the one awaited, or its completion
+        // may expose another owned history/detection operation.
+      }
     }
 
     // Starts the detection for the frame Apply has just set up (state holds

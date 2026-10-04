@@ -303,6 +303,7 @@ export async function runInterpretationHistoryCropSmoke(ctx) {
       console.log('interpretation crop history capture:', scene, phase);
       await evaluate('window.__ncAnalysis.settle()');
       const recipe = await evaluate(`${status}.settings`);
+      if (scene === 'full-color-bw-gray' && (await evaluate('window.__ncHistoryInputs.exportState()')).spatialCurrent) fail(scene + ' ' + phase + ': exact settlement left its spatial analysis pending');
       if (hitDispatch) console.log('interpretation hit restoration:', JSON.stringify({ scene, phase,
         ...await evaluate('window.__ncHistoryInputs.restoration()') }));
       if ((middle || hitDispatch) && rescue && !recipe.expiredAnalysis) fail(scene + ' ' + phase + ': settled rescued history has no measurement before export');

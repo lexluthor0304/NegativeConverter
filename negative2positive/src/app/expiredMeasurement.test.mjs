@@ -90,7 +90,7 @@ function proxyContext(target) {
 const SPATIAL_FUNCTIONS = [
   'isCurrentLoad', 'expiredSourceKey', 'expiredInterpretation', 'baseSizeSource', 'sanitizeNumeric', 'clampBetween', 'expiredAnalysisSample',
   'measureExpiredAnalysisWithSpatial', 'expiredSpatialInputs', 'runExpiredSpatialAnalysis', 'measureExpiredSpatialAnalysis',
-  'applyExpiredAnalysisDefaults', 'resetExpiredStrengthsInState', 'runExpiredAnalysis'
+  'applyExpiredAnalysisDefaults', 'resetExpiredStrengthsInState', 'runExpiredAnalysis', 'settlePendingCropDetection'
 ];
 // 1703835's interactive measurement: OpenCV in the page, each request measured
 // in one go with the settings of its call once OpenCV was ready.
@@ -187,7 +187,7 @@ function spatialContext({ at1703835 = false, unevenFog = 0 } = {}) {
   };
   const held = [];
   const target = {
-    state, loadGeneration: 1, expiredAnalysisKey: null, expiredOpenCvState: 'idle', expiredSpatialRun: null,
+    state, cropDetection: null, loadGeneration: 1, expiredAnalysisKey: null, expiredOpenCvState: 'idle', expiredSpatialRun: null,
     yieldToPaint: tick, ensureOpenCvReady: async () => true,
     runOpenCvTask: async (type, { build, onMainThread }) => {
       assert.equal(type, 'expired-spatial-maps');
@@ -278,6 +278,41 @@ for (const order of [[0, 1], [1, 0]]) {
   assert.deepEqual(run.state.expiredAnalysis, landed, 'superseded runs never land');
   assert.ok(landed.spatial);
 }
+for (const mode of ['owned', 'superseded', 'disabled', 'new-load', 'new-interpretation']) {
+  const run = spatialContext({ unevenFog: 100 });
+  run.context.runExpiredAnalysis(run.frame);
+  await until(() => run.held.length === 1, mode + ': actual fog worker held');
+  let settled = false;
+  if (mode === 'disabled') run.state.expiredEnabled = false;
+  if (mode === 'new-load') run.target.loadGeneration++;
+  if (mode === 'new-interpretation') run.state.filmType = 'bw';
+  const barrier = run.context.settlePendingCropDetection().then(() => { settled = true; });
+  for (let i = 0; i < 10; i++) await tick();
+  if (['owned', 'superseded'].includes(mode)) {
+    assert.equal(settled, false, mode + ': exact recipe/export settlement must await its current spatial measurement');
+    assert.equal(Boolean(run.state.expiredAnalysis.spatial), false);
+    if (mode === 'superseded') {
+      run.state.coreBorderBuffer = 4;
+      run.context.runExpiredSpatialAnalysis();
+      await until(() => run.held.length === 2, 'replacement worker held');
+      await release(run.held, 0);
+      for (let i = 0; i < 10; i++) await tick();
+      assert.equal(settled, false, 'barrier follows the replacement owned measurement');
+      await release(run.held, 1);
+    } else await release(run.held, 0);
+    await barrier;
+    assert.ok(run.state.expiredAnalysis.spatial, 'exact recipe now includes actual OpenCV spatial result');
+    assert.equal(run.target.expiredSpatialRun, null);
+  } else {
+    await barrier;
+    assert.equal(settled, true, mode + ': an unowned measurement cannot block this recipe');
+    const analysis = structuredClone(run.state.expiredAnalysis);
+    await release(run.held, 0);
+    assert.deepEqual(run.state.expiredAnalysis, analysis, mode + ': stale reply cannot change current recipe');
+  }
+  console.log('spatial settlement PASS ' + mode);
+}
+
 console.log('expiredMeasurement: a fog-surface request with other inputs measures again; the stored measurement is 1703835\'s (R1-074)');
 
 // ---------------------------------------------------------------------------
