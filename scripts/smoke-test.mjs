@@ -117,8 +117,10 @@ process.on('exit', cleanup);
 // 'exit' does not fire on Ctrl-C or kill, which would orphan vite and Chrome.
 for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => process.exit(130));
 
+let viteDiagnostics = '';
 function fail(msg) {
   console.error(`FAIL: ${msg}`);
+  if (viteDiagnostics) console.error(`Vite diagnostics:\n${viteDiagnostics}`);
   process.exit(1);
 }
 
@@ -128,9 +130,12 @@ function fail(msg) {
 const viteBin = join(ROOT, 'node_modules', 'vite', 'bin', 'vite.js');
 const vite = spawn(process.execPath, [viteBin, '--config', 'negative2positive/vite.config.js', '--port', String(PORT), '--strictPort'], {
   cwd: ROOT,
-  stdio: 'ignore',
+  stdio: ['ignore', 'pipe', 'pipe'],
 });
 children.push(vite);
+for (const stream of [vite.stdout, vite.stderr]) stream.on('data', chunk => {
+  viteDiagnostics = (viteDiagnostics + chunk).slice(-8000);
+});
 
 let serverUp = false;
 for (let i = 0; i < 60; i++) {

@@ -256,6 +256,14 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
     if (!input.result?.nodeId) fail('#fileInput not found');
     await send('DOM.setFileInputFiles', { files: paths, nodeId: input.result.nodeId });
   };
+  let captureOrigin = null;
+  const navigations = [];
+  onCdpEvent(message => {
+    if (message.method === 'Page.frameNavigated' && !message.params?.frame?.parentId) {
+      navigations.push(message.params.frame.url);
+      if (navigations.length > 8) navigations.shift();
+    }
+  });
   const boot = async (query, { holdSemantic = false } = {}) => {
     const previous = await evaluate('performance.timeOrigin');
     await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en&debug=1${query}` });
@@ -263,9 +271,13 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
     await installDialogAutoAccept();
     await wait(800);
     await evaluate(CAPTURE);
+    captureOrigin = await evaluate('performance.timeOrigin');
     if (holdSemantic) await evaluate(SEMANTIC_HOLD);
   };
   const take = async label => {
+    const scope = await evaluate(`({ origin: performance.timeOrigin, href: location.href,
+      captured: Array.isArray(window.__twoStageDownloads) })`);
+    if (!scope.captured || scope.origin !== captureOrigin) fail(`${label}: download document changed: ${JSON.stringify({ captureOrigin, ...scope, navigations })}`);
     await waitFor(label, `window.__twoStageDownloads.length > 0`, 600_000);
     return evaluate(`window.__twoStageDownloads.shift()`);
   };

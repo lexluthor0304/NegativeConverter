@@ -315,7 +315,8 @@ export async function runInterpretationHistoryCropSmoke(ctx) {
       result.fresh = fresh;
     }
     console.log('interpretation crop history receipt:', JSON.stringify({ scene, staged, rescue, ownership, before, middle, after, inputKind,
-      inputLeaf: inputKind === 'semanticMap' || inputKind === 'rollFrame' ? 'controlled input; actual measured roll histogram' : 'real UI', initial, results }));
+      inputLeaf: inputKind === 'semanticMap' || inputKind === 'rollFrame' ? 'controlled input; actual measured roll histogram'
+        : inputKind === 'filmBase' && rescue ? 'controlled pointer transport; actual canvas sampler' : 'real UI', initial, results }));
     console.log(`ok: ${scene}: held real detector, actual callers, warm/full-swap Undo/Redo, PNG8/TIFF16 samples and bytes`);
   }
 }
