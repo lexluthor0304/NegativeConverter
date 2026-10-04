@@ -220,6 +220,37 @@ if (selection === 'all' || selection === 'input-ownership') {
   }
 }
 
+// A retype can finish its crop event before the next slider snapshot. The
+// new interpretation has no rescue yet, and no crop token to supply it.
+if (selection === 'all' || selection === 'unmeasured-hot') {
+  for (const after of interpretations) for (const ownership of ['automatic', 'manual', 'gray', 'semantic']) {
+    const before = [after[0] === 'bw' ? 'color' : 'bw', 'correct'];
+    const f = await measurementFixture(before, ownership, true), { context: c, state, target } = f;
+    await c.applyGeometryFromBase({ cropRegion: { left: 0, top: 0, width: 56, height: 40 } });
+    await c.processNegative();
+    f.listeners[after[0]]();
+    if (after[1] !== 'correct') f.listeners.mode({ target: { value: after[1] } });
+    const entry = c.pushUndo('coreExposure');
+    assert.equal(entry.settings.currentStep, 3, 'actual converted photo snapshot');
+    assert.equal(Boolean(entry.refs.cold), false, 'actual warm planes retained');
+    assert.equal(entry.settings.expiredAnalysis, null, 'actual retype cleared previous rescue');
+    assert.equal(entry.settings.cropDetectionToken, undefined, 'completed crop event owns no token');
+    const reference = await cropMeasurementReference(f, entry.settings);
+    state.coreExposure = 15;
+    await c.processNegative(); await f.drain();
+    for (let round = 0; round < 2; round++) {
+      await c.performUndo(); await f.drain();
+      assert.ok(state.expiredAnalysis, 'Undo settles missing rescue before any output consumer');
+      await strictMeasurementPixels(f, reference, `unmeasured hot ${after.join('/')} ${ownership} Undo ${round}`);
+      assert.deepEqual([state.expiredBrightness, state.expiredContrast], [17, 23], 'explicit rescue strengths preserved');
+      await c.performRedo(); await f.drain();
+      assert.ok(state.expiredAnalysis, 'Redo retains measured rescue');
+    }
+    assert.deepEqual(f.errors, [], 'actual unmeasured hot restoration has no caller errors');
+    f.pool.dispose(); cases++;
+  }
+}
+
 if (selection === 'all' || selection === 'held-measurements') {
   const crossings = [
     [['color', 'correct'], ['bw', 'correct']], [['color', 'correct'], ['positive', 'correct']],
