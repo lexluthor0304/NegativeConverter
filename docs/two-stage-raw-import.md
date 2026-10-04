@@ -478,3 +478,5 @@ previously configured photos, hits, misses and manual confirmations.
   `dcraw_process()` calls for DNG.
 - Zoom detail levels beyond the stand-in (#248). The concurrent start still
   follows `stageTwoStartMode`, not the memory budget (#258).
+
+The crop-interpretation history smoke includes 32 encoded scenarios: the twelve prior endpoint flows, eight intermediate type/mode flows and twelve warm/full-source manual-base, semantic-map and roll-input flows across rescue off/on. Manual bases use canvas clicks. Semantic/roll updates use bounded input leaves injected only into the test response; roll histogram/density measurements use real image data downsampled to at most 256 pixels per side. Production capture, measurement, Undo/Redo and PNG8/TIFF16 encoding remain intact. Each intermediate recipe is checked on two Undo/Redo rounds against actual batch and independent full-source exports, preserving its base, semantic anchors and roll inputs. These synthetic correctness checks do not establish historical noMask/positive baseline parity, Safari functionality or native/60MP performance targets.

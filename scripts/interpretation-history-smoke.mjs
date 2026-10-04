@@ -9,9 +9,8 @@ import { parseAst } from 'vite';
 // measurement, router, replay or worker is replaced by a test estimate.
 export async function installFrozenHistoryControl({ send, onCdpEvent, root, fail }) {
   const head = process.env.NC229_HISTORY_BEFORE_HEAD;
-  if (!head) return;
-  if (!/^[a-f0-9]{40}$/.test(head)) fail('Invalid immutable history control head');
-  const source = execFileSync('git', ['show', `${head}:negative2positive/src/app/main.js`], { cwd: root, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 });
+  if (head && !/^[a-f0-9]{40}$/.test(head)) fail('Invalid immutable history control head');
+  const source = head ? execFileSync('git', ['show', `${head}:negative2positive/src/app/main.js`], { cwd: root, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 }) : '';
   const names = ['maybeAutoWhiteBalance', 'provisionalWhiteBalanceMeasurement', 'processNegative',
     'startCropDetection', 'restoreSnapshot', 'rebaseProvisionalHistory'];
   const functions = text => {
@@ -33,12 +32,38 @@ export async function installFrozenHistoryControl({ send, onCdpEvent, root, fail
       const response = await send('Fetch.getResponseBody', { requestId: request.requestId });
       let text = response.result.base64Encoded ? Buffer.from(response.result.body, 'base64').toString() : response.result.body;
       const compiled = functions(text), replacements = [];
-      for (const name of names) {
+      for (const name of head ? names : []) {
         const current = compiled.get(name), old = original.get(name);
         if (!current || !old) throw new Error(`Frozen history function absent: ${name}; url=${request.request.url}; status=${request.responseStatusCode}; bytes=${text.length}; start=${text.slice(0, 120)}`);
         replacements.push({ start: current.start, end: current.end, body: source.slice(old.start, old.end) });
       }
       for (const replacement of replacements.sort((a, b) => b.start - a.start)) text = text.slice(0, replacement.start) + replacement.body + text.slice(replacement.end);
+      // Controlled input leaves for fields without a direct edit control.
+      // Production capture, processing, measurement, history and encoding stay
+      // intact. This hook exists only in the intercepted development response.
+      const anchor = functions(text).get('processNegative');
+      if (!anchor) throw new Error('History input probe scope missing');
+      const hook = `window.__ncHistoryInputs = {
+        edit: (key, value) => {
+          if (!['semanticMap', 'rollFrame'].includes(key) || !state.loadedBaseImageData) throw new Error('Invalid bounded history input');
+          const next = key === 'semanticMap' ? sanitizeSemanticMap(value) : sanitizeRollFrameForSettings(value);
+          if (!next) throw new Error('Invalid history input recipe');
+          pushUndo(key); state[key] = next; markCurrentFileDirty();
+          scheduleSilverSourceRefresh({ immediate: true });
+        },
+        seedRoll: async () => {
+          const sample = downsampleImageDataForMaxDim(state.loadedBaseImageData, 256);
+          const channelData = await analyzeSilverCoreFrame(sample, buildCoreConversionSettings(state), resolveConversionMode(state));
+          const darker = new ImageData(Uint8ClampedArray.from(sample.data, (v, i) => i % 4 === 3 ? v : Math.round(v * Math.pow(.5, 1 / 2.2))), sample.width, sample.height);
+          const roll = aggregateRollAnalysis([sample, darker, darker].map((image, id) => ({ id,
+            filmBase: state.filmBase, channelData, negativeMean: measureNegativeMean(image, 0) })));
+          state.rollFrame = sanitizeRollFrameForSettings({ rollId: 'history-measured-roll', channelData: roll.channelData,
+            ...roll.frames[0], locked: true, equalize: true });
+          markCurrentFileDirty(); await processNegative({ automatic: false });
+          return structuredClone(state.rollFrame);
+        }
+      };\n`;
+      text = text.slice(0, anchor.start) + hook + text.slice(anchor.start);
       await send('Fetch.fulfillRequest', { requestId: request.requestId, responseCode: 200,
         responseHeaders: request.responseHeaders.filter(header => !/^(content-length|etag)$/i.test(header.name)),
         body: Buffer.from(text).toString('base64') });
@@ -46,8 +71,9 @@ export async function installFrozenHistoryControl({ send, onCdpEvent, root, fail
   });
   await send('Network.setCacheDisabled', { cacheDisabled: true });
   await send('Fetch.enable', { patterns: [{ urlPattern: '*/src/app/main.js*', requestStage: 'Response' }] });
-  console.log('interpretation history frozen browser control:', JSON.stringify({ head, functions: names,
+  if (head) console.log('interpretation history frozen browser control:', JSON.stringify({ head, functions: names,
     original_main_sha256: createHash('sha256').update(source).digest('hex') }));
+  console.log('history input probe: controlled semantic/roll leaves; actual caller/history/PNG8/TIFF16; roll histogram sample <=256px');
 }
 
 export async function runInterpretationHistoryCropSmoke(ctx) {
@@ -105,8 +131,12 @@ export async function runInterpretationHistoryCropSmoke(ctx) {
     ['warm-color-bw-gray', false, false, 'gray', ['color', 'correct'], ['bw', 'correct']],
     ['full-color-bw-gray', true, true, 'gray', ['color', 'correct'], ['bw', 'correct']]
   ];
-  for (const [scene, staged, rescue, ownership, before, after, middle] of cases) {
-    if (process.env.NC229_HISTORY_BROWSER_CASE && scene !== process.env.NC229_HISTORY_BROWSER_CASE) continue;
+  for (const kind of ['filmBase', 'semanticMap', 'rollFrame']) for (const staged of [false, true]) for (const rescue of [false, true]) {
+    cases.push([`${staged ? 'full' : 'warm'}-middle-${kind}-${rescue ? 'on' : 'off'}`, staged, rescue,
+      'automatic', ['color', 'correct'], ['color', 'correct'], ['color', 'correct'], kind]);
+  }
+  for (const [scene, staged, rescue, ownership, before, after, middle, inputKind] of cases) {
+    if (process.env.NC229_HISTORY_BROWSER_CASE && !process.env.NC229_HISTORY_BROWSER_CASE.split(',').includes(scene)) continue;
     console.log('interpretation crop history scene:', scene);
     const seed = { ...seedRecipe, filmType: before[0], positiveMode: before[1], filmTypeSource: 'manual',
       coreFilmPreset: 'none', coreColorModel: 'standard', coreEnhancedProfile: 'none', coreBorderBuffer: 0,
@@ -115,6 +145,10 @@ export async function runInterpretationHistoryCropSmoke(ctx) {
       expiredBrightness: 17, expiredContrast: 23, expiredBrightnessUserOverride: true, expiredContrastUserOverride: true,
       wbR: 1.17, wbG: 1, wbB: .86, wbAutoConfidence: 'high', wbUserOverride: false, grayPointSampled: false, wbSemanticApplied: false };
     await open(staged && ownership !== 'gray' ? two : one, seed, staged && ownership !== 'gray');
+    if (inputKind === 'rollFrame') {
+      const roll = await evaluate('window.__ncHistoryInputs.seedRoll()');
+      if (!roll?.locked || !roll.channelData || !(roll.offsetStops > .5)) fail(scene + ': real measured roll histogram and density offset missing');
+    }
     if (ownership === 'manual') {
       await setSlider('wbR', 1.42); await setSlider('wbB', .77);
     } else if (ownership === 'gray') {
@@ -150,12 +184,37 @@ export async function runInterpretationHistoryCropSmoke(ctx) {
       ${from[0] !== to[0] ? `document.querySelector('.film-type-btn[data-type="${to[0]}"]').click();` : ''}
       ${from[1] !== to[1] ? `const mode = document.getElementById('positiveModeSelect'); mode.value = '${to[1]}'; mode.dispatchEvent(new Event('change', { bubbles: true }));` : ''}
     })()`);
+    const editInput = async last => {
+      if (inputKind === 'filmBase') {
+        const point = await evaluate(`(() => {
+          document.getElementById('studioTab-edit').click(); document.getElementById('step2ModeBorderBtn').click();
+          document.getElementById('sampleBaseBtn').click();
+          const gl = document.getElementById('glCanvas'), el = gl.style.display !== 'none' && gl.getBoundingClientRect().width > 0 ? gl : document.getElementById('canvas');
+          const r = el.getBoundingClientRect(); return { x: r.left + r.width * ${last ? .71 : .27}, y: r.top + r.height * ${last ? .63 : .31} };
+        })()`);
+        await send('Input.dispatchMouseEvent', { type: 'mousePressed', ...point, button: 'left', clickCount: 1 });
+        await send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...point, button: 'left', clickCount: 1 });
+        await waitFor(scene + ' real manual base sample', `!document.getElementById('sampleBaseBtn').classList.contains('active')`, 60_000);
+      } else {
+        const value = inputKind === 'semanticMap' ? { width: 2, height: 1, labels: [0, 4], confidence: last ? .8 : .95 }
+          : { ...initial.rollFrame, offsetStops: initial.rollFrame.offsetStops + (last ? .7 : .35) };
+        await evaluate(`window.__ncHistoryInputs.edit(${JSON.stringify(inputKind)}, ${JSON.stringify(value)})`);
+      }
+      if (!rescue) await waitFor(scene + ' input conversion', `${ready} && !window.__ncAnalysis.converting()`, 120_000);
+      return await evaluate(`${status}.settings`);
+    };
+    let middleInputs, finalInputs;
     if (middle) {
-      await changeInterpretation(before, middle);
+      if (inputKind) middleInputs = await editInput(false);
+      else await changeInterpretation(before, middle);
       await waitFor(scene + ' intermediate interpretation', `${status}.settings.filmType === '${middle[0]}' && ${status}.settings.positiveMode === '${middle[1]}'`, 30_000);
       if (!rescue) await waitFor(scene + ' intermediate conversion', `${ready} && !window.__ncAnalysis.converting()`, 120_000);
     }
-    await changeInterpretation(middle || before, after);
+    if (inputKind) {
+      finalInputs = await editInput(true);
+      if (JSON.stringify(middleInputs[inputKind]) === JSON.stringify(initial[inputKind])
+        || JSON.stringify(finalInputs[inputKind]) === JSON.stringify(middleInputs[inputKind])) fail(scene + ': all three input recipes must differ');
+    } else await changeInterpretation(middle || before, after);
     if (!middle) await setSlider('coreExposure', 15);
     await evaluate('window.__interpretationCropHold.release(); window.__ncAnalysis.settle()');
     await waitFor(scene + ' crop hit', `${ready} && !window.__ncAnalysis.converting() && window.__ncAnalysis.diagnostics()?.method === 'manual-image-window'`, 150_000);
@@ -174,7 +233,8 @@ export async function runInterpretationHistoryCropSmoke(ctx) {
       const batch = Object.fromEntries(Object.entries(all).map(([key, values]) => [key, Object.values(values)[0]]));
       sameExports(scene + ' ' + phase + ' actual single/batch', single, batch);
       if (single.png8.layout?.bits?.[0] !== 8 || single.tiff16.layout?.bits?.[0] !== 16 || !single.tiff16.lowBits) fail(scene + ': exact 8/true16 layout missing');
-      same(scene + ' manual base', recipe.filmBase, initial.filmBase);
+      const expectedInputs = inputKind ? (phase.startsWith('middle') ? middleInputs : finalInputs) : initial;
+      for (const key of ['filmBase', 'semanticMap', 'rollFrame']) same(scene + ' ' + phase + ' immutable ' + key, recipe[key], expectedInputs[key]);
       same(scene + ' explicit strengths', [recipe.expiredBrightness, recipe.expiredContrast], [17, 23]);
       if (ownership !== 'automatic') same(scene + ' explicit WB', [recipe.wbR, recipe.wbG, recipe.wbB], [initial.wbR, initial.wbG, initial.wbB]);
       results[phase] = { recipe, single, batch };
@@ -211,7 +271,7 @@ export async function runInterpretationHistoryCropSmoke(ctx) {
       // with the real full loader, then replay the saved control at exposure 0.
       const measurementExposure = middle ? 0 : 15;
       const recipe = { ...result.recipe, coreExposure: eligible ? measurementExposure : result.recipe.coreExposure,
-        ...(eligible ? { wbR: 1, wbG: 1, wbB: 1, wbAutoConfidence: null, wbSemanticApplied: false, semanticMap: null } : {}) };
+        ...(eligible ? { wbR: 1, wbG: 1, wbB: 1, wbAutoConfidence: null, wbSemanticApplied: false } : {}) };
       await open(one, recipe);
       if (eligible) {
         const wb = await evaluate('window.__ncAnalysis.whiteBalance()');
@@ -223,7 +283,8 @@ export async function runInterpretationHistoryCropSmoke(ctx) {
       sameExports(scene + ' ' + phase + ' independent exact samples/files', result.single, fresh);
       result.fresh = fresh;
     }
-    console.log('interpretation crop history receipt:', JSON.stringify({ scene, staged, rescue, ownership, before, middle, after, initial, results }));
-    console.log(`ok: ${scene}: held real detector, real type/mode/WB/gray callers, warm/full-swap Undo/Redo, PNG8/TIFF16 samples and bytes`);
+    console.log('interpretation crop history receipt:', JSON.stringify({ scene, staged, rescue, ownership, before, middle, after, inputKind,
+      inputLeaf: inputKind === 'semanticMap' || inputKind === 'rollFrame' ? 'controlled input; actual measured roll histogram' : 'real UI', initial, results }));
+    console.log(`ok: ${scene}: held real detector, actual callers, warm/full-swap Undo/Redo, PNG8/TIFF16 samples and bytes`);
   }
 }
