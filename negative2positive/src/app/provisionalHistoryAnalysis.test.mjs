@@ -53,15 +53,19 @@ function fixture(staged, manualWb = false) {
     estimateAutoWhiteBalance, deepCopySanitizedSettings, stripLegacyToneSettingsForSilverCore, filmInterpretationChanged, cropHitHold: false,
     usesSilverCoreConversion: () => true,
     // Use real geometry pixels and WB sampling; no display-sized stand-in.
-    convertFromCurrentSource: async (settings = state) => {
+    convertFromCurrentSource: async (settings = state, { preview = false, wbSample = false } = {}) => {
+      // This tiny fixture's live frames are full-size. Historical WB requests
+      // explicitly ask for a preview sample; both now carry immutable recipes.
+      const live = !preview;
+      if (!live) assert.equal(wbSample, true, 'off-state transport is an actual WB sample request');
       const recipe = canon(settings === state ? target.extractCurrentSettings() : settings);
       const processed = convertColorWithSilverCore(state.conversionSourceImageData,
         { filmBase: settings.filmBase, colorModel: 'standard', filmPreset: 'none', borderBuffer: 0, exposure: settings.coreExposure },
         { analysisImageData: c.getColorAnalysisSample(settings === state ? { ...settings, autoFrameMeta: state.autoFrame.lastDiagnostics } : settings) });
       dispatched.push(recipe);
-      if (target.holdConversion?.({ live: settings === state, recipe })
+      if (target.holdConversion?.({ live, recipe })
         || target.conversionHold && (!target.measurementHold || recipe.coreExposure === 15)) await new Promise(resolve => {
-        Object.assign(resolve, { live: settings === state, recipe });
+        Object.assign(resolve, { live, recipe });
         conversionReplies.push(resolve);
       });
       return processed;
