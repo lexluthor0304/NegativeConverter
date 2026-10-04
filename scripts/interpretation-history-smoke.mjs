@@ -54,9 +54,11 @@ export async function installFrozenHistoryControl({ send, onCdpEvent, root, fail
         seedRoll: async () => {
           const sample = downsampleImageDataForMaxDim(state.loadedBaseImageData, 256);
           const channelData = await analyzeSilverCoreFrame(sample, buildCoreConversionSettings(state), resolveConversionMode(state));
-          const darker = new ImageData(Uint8ClampedArray.from(sample.data, (v, i) => i % 4 === 3 ? v : Math.round(v * Math.pow(.5, 1 / 2.2))), sample.width, sample.height);
+          const darker = new ImageData(Uint8ClampedArray.from(sample.data, (v, i) => i % 4 === 3 ? v
+            : Math.round(v * Math.pow([.55, .75, .45][i % 4], 1 / 2.2))), sample.width, sample.height);
+          const otherChannels = await analyzeSilverCoreFrame(darker, buildCoreConversionSettings(state), resolveConversionMode(state));
           const roll = aggregateRollAnalysis([sample, darker, darker].map((image, id) => ({ id,
-            filmBase: state.filmBase, channelData, negativeMean: measureNegativeMean(image, 0) })));
+            filmBase: state.filmBase, channelData: id ? otherChannels : channelData, negativeMean: measureNegativeMean(image, 0) })));
           state.rollFrame = sanitizeRollFrameForSettings({ rollId: 'history-measured-roll', channelData: roll.channelData,
             ...roll.frames[0], locked: true, equalize: true });
           markCurrentFileDirty(); await processNegative({ automatic: false });
@@ -275,6 +277,7 @@ export async function runInterpretationHistoryCropSmoke(ctx) {
       await open(one, recipe);
       if (eligible) {
         const wb = await evaluate('window.__ncAnalysis.whiteBalance()');
+        console.log('interpretation crop history reference WB:', JSON.stringify({ scene, phase, wb, rollOffset: recipe.rollFrame?.offsetStops }));
         if (Math.abs(wb.wbR - 1) + Math.abs(wb.wbB - 1) < .0001) fail(scene + ': actual independent color measurement must be nonunit');
         if (result.recipe.coreExposure !== measurementExposure) { await setSlider('coreExposure', result.recipe.coreExposure); await evaluate('window.__ncAnalysis.settle()'); }
       }
