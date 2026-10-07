@@ -17,6 +17,8 @@ export async function runCameraSmoke({ send, evaluate, waitFor, wait, fail, inst
   // Exercise the actual browser module's HEIF fallback. Only the native
   // unsupported-format boundaries and worker are faked; cancellation must
   // cross loadStandardImage -> decodeHeifInWorker and dispose the worker.
+  // Like the served worker, the fake announces its module before the loader
+  // transfers the file.
   const heifCancel = await evaluate(`(async () => {
     const { loadStandardImage } = await import('/src/app/imageFileLoaders.js');
     const original = { bitmap: window.createImageBitmap, Image: window.Image, Worker: window.Worker };
@@ -33,6 +35,7 @@ export async function runCameraSmoke({ send, evaluate, waitFor, wait, fail, inst
           postMessage() { posted++; lateReply = this.onmessage; queueMicrotask(() => controller.abort()); },
           terminate() { terminated++; }
         };
+        queueMicrotask(() => worker.onmessage?.({ data: { ready: true } }));
         return worker;
       };
       const bytes = new Uint8Array(16);
