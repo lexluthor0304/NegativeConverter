@@ -16343,6 +16343,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           base: Boolean(state.loadedBaseImageData), baseDescriptor: Boolean(state.baseDescriptor),
           source: Boolean(state.conversionSourceImageData), sourcePending: Boolean(state.sourcePending),
           proxyMatches: displayProxyMatches(), preparing: Boolean(document.body.dataset.studioPreparing),
+          // Whether a slider tick is drawn by the GPU (else the worker converts it).
+          gpuDraws: gpuApplyUsable(),
           target: state.conversionPreviewImageData
             ? { width: state.conversionPreviewImageData.width, height: state.conversionPreviewImageData.height,
               onLevel: state.conversionPreviewImageData.__displayOf === state.displayLevelImageData }

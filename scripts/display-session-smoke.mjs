@@ -404,6 +404,9 @@ export async function runDisplaySessionSmoke({ send, evaluate, waitFor, fail, in
       })()`);
       await idle();
       expect(!(await evaluate(`document.getElementById('undoBtn').disabled`)), 'the committed drag made no undo step');
+      // Without a usable GPU preview (auto mode on a software rasteriser, as
+      // on CI) the GPU path's ticks are converted by the worker as well.
+      const gpuDrawn = path === 'gpu' && (await live()).gpuDraws;
       const unsettled = (await diagnostics()).unsettled;
       const nudged = await evaluate(`(() => {
         const input = document.getElementById('coreExposure');
@@ -417,8 +420,8 @@ export async function runDisplaySessionSmoke({ send, evaluate, waitFor, fail, in
       await until(`photo ${Y} open after the nudge`, `${ready} && document.getElementById('studioFilename').textContent === ${JSON.stringify(Y)}`, 120000);
       await idle();
       expect(await evaluate(`window.__ncDisplaySessions.tier(0)`) === tier, `the nudged frame was not kept as Tier ${tier} (${path} path): ` + JSON.stringify(await evaluate(`window.__ncDisplaySessions.tier(0)`)));
-      if (path === 'worker') {
-        expect((await diagnostics()).unsettled === unsettled + 1, `the nudged Tier ${tier} frame was not left before it settled (worker path): ` + JSON.stringify(await diagnostics()));
+      if (!gpuDrawn) {
+        expect((await diagnostics()).unsettled === unsettled + 1, `the nudged Tier ${tier} frame was not left before it settled (${path} path, ticks on the worker): ` + JSON.stringify(await diagnostics()));
       } else {
         expect((await diagnostics()).unsettled === unsettled, `the nudged Tier ${tier} frame was left unsettled although the switch settles a GPU-drawn tick first (R1-048): ` + JSON.stringify(await diagnostics()));
       }
@@ -440,7 +443,7 @@ export async function runDisplaySessionSmoke({ send, evaluate, waitFor, fail, in
       const diff = differences(coldNudged.settings, back.settings);
       expect(!diff.length, `the nudged Tier ${tier} return (${path} path) saved other settings than a cold open:\n${diff.join('\n')}`);
     }
-    console.log('ok: a frame left right after a nudge comes back (Tier A, Tier B; left unsettled on the worker path, settled first on the GPU path) without a read or decode, with the nudge and its history, showing what a cold open of the nudged recipe shows');
+    console.log('ok: a frame left right after a nudge comes back (Tier A, Tier B; left unsettled when the worker converts its ticks, settled first when the GPU draws them) without a read or decode, with the nudge and its history, showing what a cold open of the nudged recipe shows');
     await evaluate(`window.__ncDisplaySessions.force(null)`);
   } catch (error) {
     failure = error;
