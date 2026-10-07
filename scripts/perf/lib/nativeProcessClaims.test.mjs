@@ -44,6 +44,12 @@ assert not answer(request([other, root]))['signalled'], 'a separate owned instan
 assert len(signals) == 1
 print('native process claims: current version, unique identity, ancestry, kernel token and unrelated/shared exclusions passed (pure OS data)')
 `;
+// process-metadata.py reads macOS process records (libSystem): nothing to run
+// on Linux CI runners.
+if (process.platform !== 'darwin') {
+  console.log('native process claims: skipped, macOS only');
+  process.exit(0);
+}
 const result = spawnSync('python3', ['-c', script, fileURLToPath(new URL('../native/process-metadata.py', import.meta.url))],
   { encoding: 'utf8', timeout: 5000, input: '' });
 assert.equal(result.status, 0, result.stderr || result.error?.message);

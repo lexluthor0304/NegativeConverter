@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WebKitOwnership, sameProcess } from './webkit-ownership.mjs';
 import { webkitMemory, tauriScenario } from './webkit.mjs';
@@ -168,7 +169,7 @@ for (const guard of ['swap', 'disk']) {
 // The actual Tauri launcher/caller writes the grant only after a valid sample.
 // A tiny fake child supplies bootstrap, a completed partial report and exit.
 for (const outcome of ['success', 'initial-timeout', 'midrun-loss', 'launcher-error', 'scenario-timeout', 'grant-io-error']) {
-  const out = mkdtempSync(process.env.NC_PERF_TEST_TMP_PREFIX || '/private/tmp/nc229-codex-handoff/native-identity-guard-unit-');
+  const out = mkdtempSync(process.env.NC_PERF_TEST_TMP_PREFIX || join(tmpdir(), 'nc-native-identity-guard-unit-'));
   const resultsDir = join(out, 'results'); mkdirSync(resultsDir);
   const { state, memory } = await world({ automatic: true, pending: true });
   let files, admitted = false, runner, interval, metrics = {};
@@ -211,6 +212,6 @@ for (const outcome of ['success', 'initial-timeout', 'midrun-loss', 'launcher-er
       assert.equal(memory.verdict?.reason, 'error', 'this is an automatic sampler abort, not the final result assertion');
       assert.equal(state.aborts.length, 1);
     }
-  } finally { clearInterval(interval); memory.stop(); }
+  } finally { clearInterval(interval); memory.stop(); rmSync(out, { recursive: true, force: true }); }
   console.log(`native identity guard: actual Tauri caller ${outcome} passed (fake child, no native workload)`);
 }

@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import fs from 'node:fs';
+import { tmpdir } from 'node:os';
 import { syncBuiltinESMExports } from 'node:module';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -178,7 +179,7 @@ for (const acquired of [false, true]) {
 // Observe every real production grant write, including loss after the awaited
 // readiness result but before the caller's synchronous admission continuation.
 for (const acquired of [false, true]) for (const boundary of ['swap', 'after-wait']) for (const loss of [...losses, 'valid']) {
-  const out = mkdtempSync('/private/tmp/nc229-codex-handoff/native-admission-finish-unit-');
+  const out = mkdtempSync(join(tmpdir(), 'nc-native-admission-finish-unit-'));
   const resultsDir = join(out, 'results'); mkdirSync(resultsDir);
   const { state, memory } = await world();
   let interval;
@@ -234,6 +235,6 @@ for (const acquired of [false, true]) for (const boundary of ['swap', 'after-wai
       checkDenied(state, memory, loss);
       assert.ok(memory.summary()?.rendererPeakMB > 0, 'genuine measured bytes remain readable after denial');
     }
-  } finally { fs.writeFileSync = originalWrite; syncBuiltinESMExports(); clearInterval(interval); memory.stop(); }
+  } finally { fs.writeFileSync = originalWrite; syncBuiltinESMExports(); clearInterval(interval); memory.stop(); rmSync(out, { recursive: true, force: true }); }
 }
 console.log('WebKit admission finish: pending-await losses, fresh request samples, 4 valid grants, 20 caller denials and retained partial metrics passed (tiny fake OS data, real production callers/validator).');

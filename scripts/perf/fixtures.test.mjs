@@ -118,7 +118,10 @@ try {
   assert.equal(second['synthetic-roll-02.dng'].sha256, first['synthetic-roll-02.dng'].sha256);
   assert.notEqual(first['synthetic-roll-01.dng'].sha256, first['synthetic-roll-02.dng'].sha256, 'roll frames differ by seed');
   assert.equal(first['synthetic-60mp-cfa.dng'].previews.length, 3);
-  await assert.rejects(ensureFixtures({ dir: join(dir, 'huge'), specs: [{ ...small[0], width: 60000, height: 60000 }], checkDisk: true }), /free disk/);
+  // The refusal must not depend on the machine's free disk: with a large one
+  // (CI runners) the check passed and the 60000 x 60000 DNG was generated.
+  await assert.rejects(ensureFixtures({ dir: join(dir, 'huge'), specs: [{ ...small[0], width: 60000, height: 60000 }], checkDisk: true,
+    readDisk: () => 21 * 1024 ** 3 }), /free disk/);
 
   // Bounded memory: a 6 MP DNG in a fresh process peaks well under 300 MB RSS
   // (rows are generated in bands, so the peak does not grow with size).
