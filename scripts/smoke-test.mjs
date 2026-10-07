@@ -292,10 +292,14 @@ receiveCdp = (msg) => {
     });
   }
 };
+// One CDP command's limit. The GPU-preview step forces WebGL2 onto CI's
+// software rasteriser, where a single evaluate (the 62-case self-test, a
+// bordered drag) takes several times as long as on a Mac and crossed 180 s.
+const COMMAND_TIMEOUT_MS = process.env.CI ? 600_000 : 180_000;
 const send = (method, params = {}) => new Promise((resolve) => {
   const id = ++msgId;
   lastCommand = method;
-  const timeout = setTimeout(() => fail(`Chrome command timed out: ${method}`), 180_000);
+  const timeout = setTimeout(() => fail(`Chrome command timed out: ${method}`), COMMAND_TIMEOUT_MS);
   pending.set(id, (m) => { clearTimeout(timeout); resolve(m); });
   writeCdp({ id, method, params, sessionId: pageSessionId });
 });
