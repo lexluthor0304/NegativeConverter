@@ -63,14 +63,17 @@ for (const abort of [false, true]) {
     Uint8Array, Uint8ClampedArray, URL, importScripts() {},
     self: { location: { href: 'http://localhost/codecs/heif-worker.js' }, addEventListener() {},
       postMessage(data) { if (!stopped) worker.onmessage?.({ data }); } },
-    libheif: async () => {
-      await ready.promise;
-      return { heif_image_handle_is_primary_image: () => true,
+    // libheif-js returns its module (the options object, extended), not a
+    // promise; its runtime starts later, here when `ready` resolves.
+    libheif: options => {
+      const module = Object.assign(options, { heif_image_handle_is_primary_image: () => true,
         HeifDecoder: class { decode(bytes) {
           assert.equal(budget.foregroundOutstanding, 0, 'actual worker decode starts after foreground release');
           assert.equal(budget.reserved, 192, 'actual worker decode owns its counted claim');
           assert.equal(bytes.length, 32); starts++; return [primary];
-        } } };
+        } } });
+      ready.promise.then(() => { module.calledRun = true; module.onRuntimeInitialized?.(); });
+      return module;
     }
   });
   const pending = decodeHeifInWorker({ arrayBuffer: async () => { reading.resolve(); await read.promise; return new ArrayBuffer(32); } }, {
