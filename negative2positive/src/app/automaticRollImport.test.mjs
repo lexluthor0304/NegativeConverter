@@ -8,7 +8,7 @@ import { createJobMarker, readJobMarker, JOB_MARKER_KEYS } from './jobMarker.js'
 import { aggregateRollAnalysis, groupAutomaticRollFrames, sanitizeRollFrameForSettings } from './rollAnalysis.js';
 import { decideRollFilmType, mergeRollDecision, ownFilmTypeVerdict, rollDecisionFrame, rollFilmTypeTarget, ROLL_MONOCHROME } from './rollFilmType.js';
 import { applyAutomaticFilmType, applyFilmTypeOverride, sanitizeFilmTypeOverride } from './filmTypeOverride.js';
-import { applyLearnedDefaults, learnedDefaultsKey, withoutLearnedDefaults, LEARNED_NUMERIC_KEYS, LEARNED_CATEGORY_KEYS } from './learnedDefaults.js';
+import { applyLearnedDefaults, learnedDefaultsKey, withoutLearnedDefaults, snapLearnedDefaults, LEARNED_NUMERIC_KEYS, LEARNED_CATEGORY_KEYS } from './learnedDefaults.js';
 import { importConversionKey } from './importDetection.js';
 import { canPublishThumbnail } from './thumbnailRank.js';
 import { createSharedDecodes } from './sharedDecodes.js';
@@ -59,7 +59,7 @@ const channels = [0, 1, 2].map(() => ({ whitePointOrigin: 50000, blackPointOrigi
 // importUserEdited is the userEdited a fresh recipe decides with (#255).
 const FILM_TYPE_FUNCTIONS = ['importUserEdited', 'importFilmTypeRoll', 'importFilmTypeActive', 'createImportFilmTypeRoll', 'liveImportSettings',
   'importFilmTypeLocked', 'refreshImportFilmTypeDecision', 'importFilmTypeTarget', 'settleImportFilmType',
-  'scheduleImportFilmTypeUpdate', 'relearnImportSettings', 'retypeImportItem', 'applyImportFilmTypeDecision',
+  'scheduleImportFilmTypeUpdate', 'snapLearned', 'relearnImportSettings', 'retypeImportItem', 'applyImportFilmTypeDecision',
   'flipImportPhoto', 'finalizeImportFilmType', 'deferImportFilmTypeToast', 'showImportFilmTypeToast', 'applyImportPositives'];
 const VERDICTS = {
   mono: { filmType: 'bw', filmTypeConfidence: 'low', filmTypeReason: 'monochrome' },
@@ -221,6 +221,8 @@ function fixture({ count = 4, prepared = false, realRoll = false, verdicts = nul
     importFilmTypeRolls: new Map(), learnedRecords: new Map(), i18n: { en: { filmTypeMonochrome: 'Monochrome' } }, currentLang: 'en',
     decideRollFilmType, mergeRollDecision, ownFilmTypeVerdict, rollDecisionFrame, rollFilmTypeTarget, ROLL_MONOCHROME,
     applyAutomaticFilmType, applyFilmTypeOverride, sanitizeFilmTypeOverride, applyLearnedDefaults, learnedDefaultsKey, withoutLearnedDefaults,
+    // No slider here: learned values stay as applied.
+    snapLearnedDefaults, sliderBindingMap: new Map(),
     scheduleSilverSourceRefresh: noop, schedulePreviewUpdate: noop,
     // Per-frame analysis tiles: a deferred worker conversion per frame.
     canPublishThumbnail, frameThumbnailWorkers: null, frameThumbnailJobs: new Set(),

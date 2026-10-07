@@ -6,7 +6,7 @@ import { routeCoreConversion, keepsFullPlaneOnDowngrade, fullResolutionIsStale }
 import { DISABLED_GPU_PREVIEW_SCHEDULER } from './gpuPreviewScheduler.js';
 import { hasWindowEdits, geometryEdits, overlayWindowEdits, createExactGeometry, analysisAreaEdited, confirmedImageArea } from './provisionalPhoto.js';
 import { displaySessionStubs, DISPLAY_SESSION_HELPERS } from './displaySessionHarness.mjs';
-import { applyLearnedDefaults, learnedDefaultsKey } from './learnedDefaults.js';
+import { applyLearnedDefaults, learnedDefaultsKey, snapLearnedDefaults } from './learnedDefaults.js';
 import { decideRollFilmType, mergeRollDecision, ownFilmTypeVerdict, rollDecisionFrame, rollFilmTypeTarget, ROLL_MONOCHROME } from './rollFilmType.js';
 import { applyAutomaticFilmType, filmInterpretationChanged, sanitizeFilmTypeOverride } from './filmTypeOverride.js';
 import { releaseOwnedPlanes } from './planeRelease.js';
@@ -921,10 +921,11 @@ for (const timing of ['during', 'after']) {
       restoreSettings: (settings, options) => { restore(settings, options); for (const key of FILM_KEYS) f.state[key] = settings[key]; },
       learnedReady: Promise.resolve(), learnedRecords: new Map([[LEARNED_KEY, { version: 1, key: LEARNED_KEY, rolls: [{ id: 'r1', frames: { f1: { coreTemperature: 20 } } }] }]]),
       applyLearnedDefaults, learnedDefaultsKey, importFilmTypeRolls: new Map(), automaticRollRevision: 0,
+      snapLearnedDefaults, sliderBindingMap: new Map(),
       decideRollFilmType, mergeRollDecision, ownFilmTypeVerdict, rollDecisionFrame, rollFilmTypeTarget, ROLL_MONOCHROME,
       applyAutomaticFilmType, sanitizeFilmTypeOverride, scheduleImportFilmTypeUpdate: () => {}
     });
-    vm.runInContext(['learnsImportDefaults', 'learnedImportSettings', 'provisionalLearnedSettings',
+    vm.runInContext(['learnsImportDefaults', 'snapLearned', 'learnedImportSettings', 'provisionalLearnedSettings',
       'importFilmTypeRoll', 'importFilmTypeActive', 'createImportFilmTypeRoll', 'liveImportSettings', 'importFilmTypeLocked',
       'refreshImportFilmTypeDecision', 'settleImportFilmType'].map(functionSource).join('\n'), f.context);
     f.context.createImportFilmTypeRoll(f.state.fileQueue);

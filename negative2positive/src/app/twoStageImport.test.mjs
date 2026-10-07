@@ -58,7 +58,7 @@ import { createMemoryBudget } from './memoryBudget.js';
 import { backingBuffers } from './photoSessionCache.js';
 import { aggregateRollAnalysis, groupAutomaticRollFrames, sanitizeRollFrameForSettings } from './rollAnalysis.js';
 import { applyAutomaticFilmType, applyFilmTypeOverride, sanitizeFilmTypeOverride } from './filmTypeOverride.js';
-import { applyLearnedDefaults, learnedDefaultsKey } from './learnedDefaults.js';
+import { applyLearnedDefaults, learnedDefaultsKey, snapLearnedDefaults } from './learnedDefaults.js';
 import { decideRollFilmType, mergeRollDecision, ownFilmTypeVerdict, rollDecisionFrame, rollFilmTypeTarget, ROLL_MONOCHROME } from './rollFilmType.js';
 import { createSemanticAnalyzer } from './semanticModel.js';
 import { sanitizeSemanticMap } from './semanticAnchors.js';
@@ -588,7 +588,7 @@ const SAVED = { left: 400, top: 300, width: 8700, height: 5800 };
 // one earlier roll whose user raised the contrast by 20 adds +5.
 const LEARNED_KEY = learnedDefaultsKey({ filmType: 'color' });
 const learnedRecord = key => ({ version: 1, key, rolls: [{ id: 'roll-1', frames: { f1: { coreContrast: 20 } } }] });
-const RECIPE_FUNCTIONS = ['importUserEdited', 'learnsImportDefaults', 'learnedImportSettings', 'provisionalLearnedSettings'];
+const RECIPE_FUNCTIONS = ['importUserEdited', 'learnsImportDefaults', 'snapLearned', 'learnedImportSettings', 'provisionalLearnedSettings'];
 function flowFixture({ twoStage, learnedKeys = [LEARNED_KEY] }) {
   const f = fixture({ search: twoStage ? '?twoStageMinMp=40&twoStageMode=sequential' : '' });
   const { target, state } = f;
@@ -605,7 +605,7 @@ function flowFixture({ twoStage, learnedKeys = [LEARNED_KEY] }) {
   Object.assign(target, {
     manualEditRevision: 0, automaticRollRevision: 0,
     learnedReady: Promise.resolve(), learnedRecords: new Map(learnedKeys.map(key => [key, learnedRecord(key)])),
-    applyLearnedDefaults, learnedDefaultsKey
+    applyLearnedDefaults, learnedDefaultsKey, snapLearnedDefaults, sliderBindingMap: new Map()
   });
   vm.runInContext(RECIPE_FUNCTIONS.map(functionSource).join('\n'), f.context);
   return f;
@@ -795,7 +795,7 @@ assert.equal(JSON.parse(reference).coreExposure, 18);
     const context = vm.createContext({
       state, structuredClone, Map, Set, Promise, automaticRollRevision: 0, importFilmTypeRolls: new Map(),
       learnedReady: Promise.resolve(), learnedRecords: new Map(['color', 'bw', 'positive'].map(type => learnedDefaultsKey({ filmType: type }))
-        .map(key => [key, learnedRecord(key)])), applyLearnedDefaults, learnedDefaultsKey,
+        .map(key => [key, learnedRecord(key)])), applyLearnedDefaults, learnedDefaultsKey, snapLearnedDefaults, sliderBindingMap: new Map(),
       decideRollFilmType, mergeRollDecision, ownFilmTypeVerdict, rollDecisionFrame, rollFilmTypeTarget, ROLL_MONOCHROME,
       applyAutomaticFilmType, sanitizeFilmTypeOverride, scheduleImportFilmTypeUpdate: () => {}, getCurrentQueueItem: () => null
     });
@@ -816,7 +816,7 @@ assert.equal(JSON.parse(reference).coreExposure, 18);
     const record = context.importFilmTypeRoll(items[0]);
     return JSON.stringify({ recipes, typed: [...record.typed].map(([item, target]) => [item.id, target]) });
   };
-  const NEW = ['importUserEdited', 'learnsImportDefaults', 'learnedImportSettings', 'refreshImportFilmTypeDecision', 'settleImportFilmType']
+  const NEW = ['importUserEdited', 'learnsImportDefaults', 'snapLearned', 'learnedImportSettings', 'refreshImportFilmTypeDecision', 'settleImportFilmType']
     .map(functionSource).join('\n');
   let cases = 0;
   for (const pattern of PATTERNS) for (const lock of LOCKS) for (let lockAt = 0; lockAt < pattern.length; lockAt++) {

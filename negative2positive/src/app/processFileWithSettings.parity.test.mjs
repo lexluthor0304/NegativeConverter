@@ -324,7 +324,7 @@ console.log(`processFileWithSettings batch options: ${batchCases} cases match HE
 // learned contrast).
 {
   const { hasWindowEdits, overlayWindowEdits, geometryEdits } = await import('./provisionalPhoto.js');
-  const { applyLearnedDefaults, learnedDefaultsKey } = await import('./learnedDefaults.js');
+  const { applyLearnedDefaults, learnedDefaultsKey, snapLearnedDefaults } = await import('./learnedDefaults.js');
   const { decideRollFilmType, mergeRollDecision, ownFilmTypeVerdict, rollDecisionFrame, rollFilmTypeTarget, ROLL_MONOCHROME } = await import('./rollFilmType.js');
   const { applyAutomaticFilmType, sanitizeFilmTypeOverride } = await import('./filmTypeOverride.js');
   const learnedKey = learnedDefaultsKey({ filmType: 'bw' });
@@ -344,10 +344,11 @@ console.log(`processFileWithSettings batch options: ${batchCases} cases match HE
       structuredClone, hasWindowEdits, overlayWindowEdits, geometryEdits, getCurrentQueueItem: () => null,
       learnedReady: Promise.resolve(), learnedRecords: new Map([[learnedKey, { version: 1, key: learnedKey, rolls: [{ id: 'r1', frames: { f1: { contrast: 20 } } }] }]]),
       applyLearnedDefaults, learnedDefaultsKey, importFilmTypeRolls: new Map(), automaticRollRevision: 0,
+      snapLearnedDefaults, sliderBindingMap: new Map(),
       decideRollFilmType, mergeRollDecision, ownFilmTypeVerdict, rollDecisionFrame, rollFilmTypeTarget, ROLL_MONOCHROME,
       applyAutomaticFilmType, sanitizeFilmTypeOverride, scheduleImportFilmTypeUpdate: () => {}
     });
-    vm.runInContext(['withPendingEdits', 'pendingGeometryEdits', 'importUserEdited', 'learnsImportDefaults', 'learnedImportSettings',
+    vm.runInContext(['withPendingEdits', 'pendingGeometryEdits', 'importUserEdited', 'learnsImportDefaults', 'snapLearned', 'learnedImportSettings',
       'importFilmTypeRoll', 'importFilmTypeActive', 'createImportFilmTypeRoll', 'liveImportSettings', 'importFilmTypeLocked',
       'refreshImportFilmTypeDecision', 'settleImportFilmType'].map(functionSource).join('\n'), context);
     context.createImportFilmTypeRoll(context.state.fileQueue);
