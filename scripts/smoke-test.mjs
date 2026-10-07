@@ -154,6 +154,11 @@ const chrome = spawn(chromeBin, [
   '--remote-debugging-pipe',
   `--user-data-dir=${chromeProfileDir}`,
   '--no-first-run', '--hide-scrollbars', '--window-size=1440,900',
+  // Every step navigates to a fresh page and none restores one from the
+  // back-forward cache. Kept there, each left page held its photos: the
+  // browser grew past 5 GB in ten minutes, and a CI runner's renderer
+  // crashed a quarter of an hour in (about 1 GB without it).
+  '--disable-features=BackForwardCache',
   // A fake camera, granted without a prompt, for the live loupe scenario.
   '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream',
   'about:blank',
