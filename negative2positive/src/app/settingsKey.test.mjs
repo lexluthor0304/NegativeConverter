@@ -153,7 +153,11 @@ const report = [];
 for (const [label, colors, bound] of [['slider colours', sliders, 1.5], ['colours with curves', pickStudioColors, 3]]) {
   const roll = rollSettings.map(settings => ({ settings, studioColors: colors(settings), filmTypeOverride: null }));
   const oldRuns = time(roll, oldKey), newRuns = time(roll, app.photoSettingsKey);
-  assert.ok(newRuns[0] <= bound, `${label}: 232 keys took ${newRuns[0].toFixed(2)} ms`);
+  // Shared CI runners are several times slower than a desktop, so the bound is
+  // relative: twice as fast as the old JSON key of the same roll in the same
+  // process (about 11x on a desktop), and within a few desktop bounds.
+  assert.ok(newRuns[0] * 2 <= oldRuns[0] && newRuns[0] <= bound * 4,
+    `${label}: 232 keys took ${newRuns[0].toFixed(2)} ms (old JSON ${oldRuns[0].toFixed(2)} ms, desktop bound ${bound} ms)`);
   report.push(`${label} (${(oldKey(roll[0]).length / 1024).toFixed(1)} KB -> ${(app.photoSettingsKey(roll[0]).length / 1024).toFixed(1)} KB) `
     + `best ${newRuns[0].toFixed(2)} / median ${newRuns[7].toFixed(2)} ms, old JSON median ${oldRuns[7].toFixed(2)} ms`);
 }
