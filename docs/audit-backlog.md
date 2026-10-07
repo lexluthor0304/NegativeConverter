@@ -570,6 +570,16 @@ proof does not establish the unmeasured performance targets.
 
 ## Other
 
+- **low/bug** — The native RAW plane worker gets its error handler only after the decode, so a worker that fails to load stalls every native decode until the transfer timeout  
+  `negative2positive/src/app/nativeRawTransfer.js readInWorker`  
+  The plane worker is created when the native decode starts (`createWorker()`), but `onerror` and `onmessage` are attached in readInWorker, after `native_raw_process` returns. If the worker script fails to load in between, its `error` event has no listener and the read is posted to a dead worker: the decode waits for the transfer timeout (2–20 s) before the WASM fallback, and again on the next decode, because a timeout never sets `workerReachesScheme`. Desktop only; present since d9981bcb (#264), before 9a89764. Found by the #229 decoder-protocol audit, static analysis.  
+  _Suggested fix:_ Attach `onerror` (and keep the failure) when the worker is created, and have readInWorker reject at once with that failure; treat a load failure like `workerReachesScheme === false` for later decodes.
+
+- **low/ux** — A HEIC whose page-side read fails before the worker transfer shows the generic error instead of "Could not decode this HEIC/HEIF photo"  
+  `negative2positive/src/app/heifLoader.js decodeHeifInWorker`  
+  Since the decode admission (b8846691/53d196b2) the page reads the file and posts the buffer after the worker's `ready`; errors there (`file.arrayBuffer()` NotReadableError, a DataCloneError from `postMessage`) go through `finish(error)` without `HEIC_DECODE_FAILED`, which 4e9ee959's loader added to every non-abort error (the read then happened in the worker). Abort and admission rejection must stay uncoded. Found by the #229 decoder-protocol audit.  
+  _Suggested fix:_ Route non-abort, non-admission errors of the read/transfer step through `failed()`, with a unit case for a rejected `arrayBuffer()`.
+
 - **low/export** — A Chrome JPEG export carries two ICC profiles
   `negative2positive/src/app/exportMetadata.js:attachMetadataToBlob`
   Chrome's canvas JPEG encoder (main-thread canvas and `OffscreenCanvas` in the export worker alike) already writes an sRGB `ICC_PROFILE` APP2 segment. `attachMetadataToBlob` inserts its own after APP0 and keeps the encoder's, so the file has two ICC_PROFILE sequences, each numbered 1 of 1 (found by the #250 export-ownership smoke; baseline behaviour, both paths identical). The PNG path already replaces the encoder's colour chunks with its `iCCP`.
