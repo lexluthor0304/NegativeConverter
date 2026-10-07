@@ -370,16 +370,29 @@ export async function runDisplaySessionSmoke({ send, evaluate, waitFor, fail, in
     }
     console.log('ok: a Tier A Undo across Confirm image area keeps its colour-analysis sample; its PNG16 and TIFF16 exports equal a cold reopen\'s');
 
-    // ---- Left before it settled (R2-002): a slider nudge, and another photo
-    // in the same task (inside the reprocess debounce). The session without
-    // its base is kept in its display form; the way back reads and decodes
-    // nothing, shows the nudge, and shows what a cold open of the nudged
-    // recipe shows ----
-    for (const tier of ['A', 'B']) {
+    // ---- Left right after a nudge: a slider nudge, and another photo in the
+    // same task. On the worker path (SilverCore on the GPU off) the nudge is
+    // still inside the reprocess debounce, so the session without its base is
+    // left before it settles and kept in its display form (R2-002). On the
+    // GPU path the switch first sends the GPU-drawn tick's exact frame and
+    // remembers the photo once it has landed (R1-048), so it is stored
+    // settled. Either way the way back reads and decodes nothing, shows the
+    // nudge and its history, and shows what a cold open of the nudged recipe
+    // shows ----
+    for (const tier of ['A', 'B']) for (const path of ['worker', 'gpu']) {
       await evaluate(`window.__ncDisplaySessions.force(${JSON.stringify(tier)})`);
       await open(1, Y);
       await open(0, X);
-      expect(!(await live()).base, `the colour frame did not come back as Tier ${tier} before the nudge`);
+      expect(!(await live()).base, `the colour frame did not come back as Tier ${tier} before the nudge (${path} path)`);
+      // coreUseWebGL is a recipe setting: switch it for this photo, then let
+      // that change settle before the history step below.
+      const gpuOn = await evaluate(`(() => {
+        const input = document.getElementById('coreUseWebGL');
+        if (input.checked !== ${path === 'gpu'}) input.click();
+        return input.checked;
+      })()`);
+      expect(gpuOn === (path === 'gpu'), `SilverCore on the GPU was not ${path === 'gpu' ? 'on' : 'off'} for the ${path} path`);
+      await idle();
       // A step of history first (a committed drag), then a nudge that is
       // left inside its debounce: an input event, and the click in its task.
       await evaluate(`(() => {
@@ -403,27 +416,31 @@ export async function runDisplaySessionSmoke({ send, evaluate, waitFor, fail, in
       })()`);
       await until(`photo ${Y} open after the nudge`, `${ready} && document.getElementById('studioFilename').textContent === ${JSON.stringify(Y)}`, 120000);
       await idle();
-      expect(await evaluate(`window.__ncDisplaySessions.tier(0)`) === tier, `the nudged frame was not kept as Tier ${tier}: ` + JSON.stringify(await evaluate(`window.__ncDisplaySessions.tier(0)`)));
-      expect((await diagnostics()).unsettled === unsettled + 1, `the nudged Tier ${tier} frame was not left before it settled: ` + JSON.stringify(await diagnostics()));
+      expect(await evaluate(`window.__ncDisplaySessions.tier(0)`) === tier, `the nudged frame was not kept as Tier ${tier} (${path} path): ` + JSON.stringify(await evaluate(`window.__ncDisplaySessions.tier(0)`)));
+      if (path === 'worker') {
+        expect((await diagnostics()).unsettled === unsettled + 1, `the nudged Tier ${tier} frame was not left before it settled (worker path): ` + JSON.stringify(await diagnostics()));
+      } else {
+        expect((await diagnostics()).unsettled === unsettled, `the nudged Tier ${tier} frame was left unsettled although the switch settles a GPU-drawn tick first (R1-048): ` + JSON.stringify(await diagnostics()));
+      }
       const before = await counts(X);
       await open(0, X);
       const after = await counts(X);
-      expect(after.reads === before.reads && after.decodes === before.decodes, `the return of the nudged Tier ${tier} frame read or decoded: ` + JSON.stringify({ before, after }));
+      expect(after.reads === before.reads && after.decodes === before.decodes, `the return of the nudged Tier ${tier} frame (${path} path) read or decoded: ` + JSON.stringify({ before, after }));
       const back = await view();
-      expect(back.settings.coreExposure === nudged, `the return lost the nudge: ${back.settings.coreExposure} vs ${nudged}`);
-      expect(!(await evaluate(`document.getElementById('undoBtn').disabled`)), 'the return lost the undo history');
+      expect(back.settings.coreExposure === nudged, `the return lost the nudge (${path} path): ${back.settings.coreExposure} vs ${nudged}`);
+      expect(!(await evaluate(`document.getElementById('undoBtn').disabled`)), `the return lost the undo history (${path} path)`);
       // The reference: the nudged recipe opened cold.
       await evaluate(`window.__ncDisplaySessions.force(null)`);
       await open(1, Y);
       await open(0, X, { before: 'await window.__ncDisplaySessions.drop(0)' });
       expect((await live()).base, 'the nudged reference was not opened cold');
       const coldNudged = await view();
-      expect(back.gpu === coldNudged.gpu, `the nudged Tier ${tier} return shows other pixels than a cold open of its recipe (${back.gpu} vs ${coldNudged.gpu})`);
-      expect(JSON.stringify(back.wb) === JSON.stringify(coldNudged.wb), `the nudged Tier ${tier} return has another white balance than a cold open: ` + JSON.stringify({ back: back.wb, cold: coldNudged.wb }));
+      expect(back.gpu && back.gpu === coldNudged.gpu, `the nudged Tier ${tier} return (${path} path) shows other pixels than a cold open of its recipe (${back.gpu} vs ${coldNudged.gpu})`);
+      expect(JSON.stringify(back.wb) === JSON.stringify(coldNudged.wb), `the nudged Tier ${tier} return (${path} path) has another white balance than a cold open: ` + JSON.stringify({ back: back.wb, cold: coldNudged.wb }));
       const diff = differences(coldNudged.settings, back.settings);
-      expect(!diff.length, `the nudged Tier ${tier} return saved other settings than a cold open:\n${diff.join('\n')}`);
+      expect(!diff.length, `the nudged Tier ${tier} return (${path} path) saved other settings than a cold open:\n${diff.join('\n')}`);
     }
-    console.log('ok: a frame left inside the reprocess debounce comes back (Tier A, Tier B) without a read or decode, with the nudge and its history, showing what a cold open of the nudged recipe shows');
+    console.log('ok: a frame left right after a nudge comes back (Tier A, Tier B; left unsettled on the worker path, settled first on the GPU path) without a read or decode, with the nudge and its history, showing what a cold open of the nudged recipe shows');
     await evaluate(`window.__ncDisplaySessions.force(null)`);
   } catch (error) {
     failure = error;
