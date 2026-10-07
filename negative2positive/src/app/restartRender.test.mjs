@@ -442,6 +442,46 @@ for (const [label, options] of [['stroke', { strokes: 1 }], ['dust', { dust: tru
 }
 
 {
+  // Reset All while a geometry build is pending (#229 review R1-040, conflict
+  // 31): Reset rebuilds the geometry and converts after it, and the idle
+  // exact render of the old settings (exposure 20) in flight is abandoned at
+  // once, as on the path without a geometry build: it is aborted, the
+  // scheduled exact render is cancelled, and its reply never becomes the
+  // current plane.
+  const f = largeFixture({ strokes: 1 });
+  const { context, state } = f;
+  state.coreExposure = 20;
+  state.fullResolutionPending = true;
+  state.currentStep = 3;
+  const geometryCalls = [];
+  let settleGeometry;
+  const ready = new Promise(resolve => { settleGeometry = resolve; });
+  Object.assign(context, {
+    applyGeometryFromBase: () => { geometryCalls.push('apply'); return ready; },
+    afterGeometry: (promise, convert) => { geometryCalls.push('after'); return promise.then(() => convert(() => true)); },
+    convertAfterGeometryEdit: async () => { geometryCalls.push('convert'); },
+  });
+  const idle = context.startFullResolutionRender('repair-idle');
+  await drain();
+  assert.deepEqual(f.conversions.map(entry => [entry.exact, entry.exposure]), [[true, 20]], 'geometry: the idle pass converts exposure 20');
+  const token = context.coreReprocessToken;
+  state.geometryPending = true;
+  context.resetAllAdjustments();
+  assert.equal(state.coreExposure, 0);
+  assert.deepEqual(geometryCalls, ['apply', 'after'], 'geometry: Reset rebuilds the geometry and converts after it');
+  assert.ok(context.coreReprocessToken > token, 'geometry: Reset abandons the old settings\' renders (token)');
+  assert.equal(f.conversions[0].signal.aborted, true, 'geometry: the superseded exact request is aborted at once');
+  assert.equal(f.timers.size, 0, 'geometry: no exact render of the old settings stays scheduled');
+  f.conversions[0].resolve();
+  await idle;
+  await drain();
+  assert.notEqual(state.processedImageData.renderedExposure, 20, 'geometry: the old settings\' reply is not installed');
+  settleGeometry();
+  await drain();
+  assert.deepEqual(geometryCalls, ['apply', 'after', 'convert'], 'geometry: the reset settings convert once the geometry is ready');
+}
+
+{
   // The AI-brush barrier converts exposure 20 for a display-preview frame
   // when Reset All sets 0: its loop renders the reset settings instead of
   // returning on the abandoned plane.

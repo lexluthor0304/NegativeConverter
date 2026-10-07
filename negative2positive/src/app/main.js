@@ -19129,14 +19129,16 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       initCurves(true);
       renderCurve();
       markCurrentFileDirty();
-      if (ready && state.currentStep >= 3) {
-        void afterGeometry(ready, isCurrent => convertAfterGeometryEdit(isCurrent, { automatic: false }));
-      } else if (usesSilverCoreConversion(state) && state.conversionSourceImageData) {
+      const convertAfterGeometryBuild = ready && state.currentStep >= 3;
+      const convertNow = !convertAfterGeometryBuild && usesSilverCoreConversion(state) && state.conversionSourceImageData;
+      if (convertAfterGeometryBuild || convertNow) {
         // New conversion settings, as a slider's (scheduleCoreReprocess). An
         // exact render of the old ones in flight (the idle repair pass, the
-        // dust-detection or AI-brush barrier) is abandoned: above 16 MP this
-        // request converts the display preview and does not queue behind it
-        // (#237), so with the old token it would land as the current plane.
+        // dust-detection or AI-brush barrier) is abandoned: above 16 MP the
+        // reset's request converts the display preview and does not queue
+        // behind it (#237), so with the old token it would land as the current
+        // plane. The same holds while a geometry build is pending: its
+        // conversion only starts once the build is ready (#229 review R1-040).
         coreReprocessToken += 1;
         abortSupersededFullResolutionConversion();
         cancelScheduledFullResolutionRender();
@@ -19144,6 +19146,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           clearTimeout(dustDetectionTimer);
           dustDetectionTimer = null;
         }
+      }
+      if (convertAfterGeometryBuild) {
+        void afterGeometry(ready, isCurrent => convertAfterGeometryEdit(isCurrent, { automatic: false }));
+      } else if (convertNow) {
         if (hasSeparateConversionPreview()) state.fullResolutionPending = true;
         void rerenderWithCoreControls({ full: true }).catch((err) => {
           console.error('Core rerender failed:', err);
