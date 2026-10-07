@@ -201,9 +201,15 @@ export async function runRepairReleaseSmoke({ send, evaluate, waitFor, wait, fai
     surface.dispatchEvent(new PointerEvent('pointermove', at(12)));
     surface.dispatchEvent(new PointerEvent('pointerup', { ...at(12), buttons: 0 }));
   })()`);
-  await waitFor('the first stroke after a release is repaired', `${ready} && (() => { const s = window.__ncAiRepair.state();
-    return s.strokes === 1 && s.status === 'ready' && s.revision === ${JSON.stringify((await state()).revision)}; })()
-    && /last run [1-9][0-9]* tile/.test(document.getElementById('dustAiStatus').textContent)`, 180_000);
+  // The released model loads again on its provider and keeps its revision.
+  const strokeRevision = (await state()).revision;
+  const strokeRepaired = await waitFor('the first stroke after a release is repaired', `${ready} && (() => { const s = window.__ncAiRepair.state();
+    return s.strokes === 1 && s.status === 'ready' && s.revision === ${JSON.stringify(strokeRevision)}; })()
+    && /last run [1-9][0-9]* tile/.test(document.getElementById('dustAiStatus').textContent)`, 180_000, { soft: true });
+  if (!strokeRepaired) {
+    fail('the first stroke after a release was not repaired: ' + JSON.stringify({ expectedRevision: strokeRevision, state: await state(),
+      aiStatus: await evaluate(`document.getElementById('dustAiStatus').textContent`), toasts: await evaluate('window.__brushToasts') }));
+  }
   const toasts = await evaluate(`window.__brushToasts`);
   if (toasts.some(text => /still loading/.test(text))) fail('the first AI-brush stroke after a release was refused: ' + JSON.stringify(toasts));
   console.log('ok: an armed AI brush after a release shows a crosshair, takes its first stroke and repairs it with the model it loads again');
