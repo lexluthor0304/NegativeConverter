@@ -67,7 +67,8 @@ export class ChromeSession {
     const { chromeBin, cdpPort, headful, log = () => {} } = this.options;
     this.chrome = await (this.deps.launchChrome || launchChrome)({ bin: chromeBin, port: cdpPort, headful, log, fakeCamera: this.options.fakeCamera });
     this.connection = await (this.deps.connect || (url => CdpConnection.connect(url)))(this.chrome.version.webSocketDebuggerUrl);
-    this.connection.onClose(() => { if (this.status === 'ok') this.#abort('crashed', 'CDP connection closed'); });
+    // The harness's own close() ends the connection too: that is no crash.
+    this.connection.onClose(() => { if (this.status === 'ok' && !this.closing) this.#abort('crashed', 'CDP connection closed'); });
     const { targetInfos } = await this.connection.send('Target.getTargets');
     const target = targetInfos.find(info => info.type === 'page') || { targetId: (await this.connection.send('Target.createTarget', { url: 'about:blank' })).targetId };
     this.targetId = target.targetId;
@@ -458,6 +459,7 @@ export class ChromeSession {
   }
 
   async close() {
+    this.closing = true;
     this.watchdog?.stop();
     this.sampler?.stop();
     this.reader?.stop();
