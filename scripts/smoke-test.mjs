@@ -1290,7 +1290,10 @@ if (!process.argv.some(arg => arg.endsWith('-only'))) {
   await runPreviewTierSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
   await runStudioSyncSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
   await runPreviewPathSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
-  await runGpuPreviewSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
+  // CI runs this step in a browser of its own (desktop-ci.yml): late in the
+  // complete run, its offscreen sweep on the runner's software rasteriser
+  // crashed the renderer that had served every earlier step.
+  if (!process.env.SMOKE_GPU_PREVIEW_SEPARATE) await runGpuPreviewSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
   await runDisplayModesSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
   await runZoomDetailSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
 }
