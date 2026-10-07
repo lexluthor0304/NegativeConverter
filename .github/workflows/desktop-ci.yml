@@ -77,14 +77,6 @@ jobs:
       # scripts/smoke-test.mjs probes for.
       - name: End-to-end smoke test
         run: npm run test:smoke
-        env:
-          SMOKE_GPU_PREVIEW_SEPARATE: '1'
-
-      # The GPU-preview step forces WebGL2 onto the runner's software
-      # rasteriser; in its own browser it does not inherit the renderer the
-      # complete run has used for every earlier step.
-      - name: GPU preview smoke (own browser)
-        run: node scripts/smoke-test.mjs --gpu-preview-only
 
   build:
     name: Build (${{ matrix.os }})
