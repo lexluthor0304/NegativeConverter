@@ -384,7 +384,7 @@ function largeFixture({ strokes = 0, dust = false, aiBrush = false } = {}) {
     updateCanvasVisibility: noop, syncDustWorkerPin: noop,
     convertFromCurrentSource: (settings, options) => new Promise((resolve, reject) => {
       const exact = !options.interactive;
-      const entry = { exact, exposure: state.coreExposure, signal: options.signal || null };
+      const entry = { exact, exposure: state.coreExposure, source: state.conversionSourceImageData, signal: options.signal || null };
       entry.resolve = () => resolve({ ...(exact ? { width: 2, height: 2 } : { width: 1, height: 1 }), renderedExposure: entry.exposure });
       options.signal?.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { code: 'WORKER_ABORTED' })));
       conversions.push(entry);
@@ -456,10 +456,21 @@ for (const [label, options] of [['stroke', { strokes: 1 }], ['dust', { dust: tru
   const geometryCalls = [];
   let settleGeometry;
   const ready = new Promise(resolve => { settleGeometry = resolve; });
+  const rebuilt = { source: { width: 2, height: 2, name: 'rebuilt source' }, preview: { width: 1, height: 1, name: 'rebuilt preview' } };
   Object.assign(context, {
     applyGeometryFromBase: () => { geometryCalls.push('apply'); return ready; },
-    afterGeometry: (promise, convert) => { geometryCalls.push('after'); return promise.then(() => convert(() => true)); },
-    convertAfterGeometryEdit: async () => { geometryCalls.push('convert'); },
+    afterGeometry: (promise, convert) => {
+      geometryCalls.push('after');
+      return promise.then(() => { state.geometryPending = false; return convert(() => true); });
+    },
+    // processNegative's tail for a frame with a display preview: the rebuilt
+    // source is installed and its exact render is armed.
+    convertAfterGeometryEdit: async () => {
+      geometryCalls.push('convert');
+      Object.assign(state, { conversionSourceImageData: rebuilt.source, conversionPreviewImageData: rebuilt.preview,
+        processedImageData: { width: 1, height: 1, renderedExposure: state.coreExposure }, processedImageDataIsPreview: true });
+      context.scheduleFullResolutionRender('initial-preview');
+    },
   });
   const idle = context.startFullResolutionRender('repair-idle');
   await drain();
@@ -476,9 +487,20 @@ for (const [label, options] of [['stroke', { strokes: 1 }], ['dust', { dust: tru
   await idle;
   await drain();
   assert.notEqual(state.processedImageData.renderedExposure, 20, 'geometry: the old settings\' reply is not installed');
+  // A stale retry of the old geometry's source would be the in-flight render
+  // the rebuilt frame's request is handed, and that render is discarded.
+  assert.equal(f.timers.size, 0, 'geometry: nothing is armed for the old geometry\'s source while the build runs');
   settleGeometry();
   await drain();
   assert.deepEqual(geometryCalls, ['apply', 'after', 'convert'], 'geometry: the reset settings convert once the geometry is ready');
+  assert.equal(f.timers.size, 1, 'geometry: the rebuilt frame arms its own exact render');
+  await f.runTimers();
+  const settled = f.exact().at(-1);
+  assert.deepEqual([settled.source, settled.exposure], [rebuilt.source, 0], 'geometry: the exact render converts the rebuilt source with the reset settings');
+  settled.resolve();
+  await drain();
+  assert.equal(state.processedImageData.renderedExposure, 0);
+  assert.equal(state.processedImageDataIsPreview, false, 'geometry: the rebuilt frame settles exact');
 }
 
 {

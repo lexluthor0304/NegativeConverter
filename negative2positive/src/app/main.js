@@ -9410,8 +9410,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           // was discarded. Schedule another pass so the display converges on
           // the latest settings instead of staying at preview quality. A pass
           // the newer input already armed (repairs wait for idle) stands.
+          // While a geometry build runs, the source is about to be replaced
+          // and the conversion after the build arms the exact render of the
+          // new one: a retry here would convert the old geometry and be the
+          // in-flight render that request is handed instead (Reset All
+          // during a build, R1-040).
           if (token !== coreReprocessToken && state.conversionSourceImageData === sourceRef
-            && !fullResolutionRenderTimer) {
+            && !fullResolutionRenderTimer && !state.geometryPending) {
             scheduleFullResolutionRender('stale-retry', FULL_RESOLUTION_INTERACTIVE_DELAY_MS);
           }
         });
