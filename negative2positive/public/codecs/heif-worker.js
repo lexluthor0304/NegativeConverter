@@ -8,11 +8,29 @@ self.addEventListener('message', event => {
     sharedArrayBuffer: typeof SharedArrayBuffer === 'function', secureContext: self.isSecureContext === true });
 });
 importScripts('./libheif.js');
+// libheif-js returns its module, not a promise; in a worker it compiles the
+// WASM synchronously. The runtime's start is the ready signal: the page
+// transfers the file only after it.
 let initializedHeif = null;
-libheif({ locateFile: name => new URL(name, self.location.href).href }).then(heif => {
+let startFailed = false;
+const announce = heif => {
+  if (initializedHeif || startFailed) return;
   initializedHeif = heif;
   self.postMessage({ ready: true });
-}, error => self.postMessage({ error: error.message }));
+};
+const failStart = reason => {
+  if (initializedHeif || startFailed) return;
+  startFailed = true;
+  self.postMessage({ error: reason?.message || String(reason || 'HEIF decoder could not start') });
+};
+try {
+  const heif = libheif({
+    locateFile: name => new URL(name, self.location.href).href,
+    onRuntimeInitialized() { announce(this); },
+    onAbort: failStart
+  });
+  if (heif?.calledRun) announce(heif);
+} catch (error) { failStart(error); }
 self.onmessage = async ({ data: { buffer } }) => {
   try {
     const heif = initializedHeif;
