@@ -1,0 +1,3 @@
+# Bundled into every desktop package as licenses/raw-decoder-notices.txt: keep
+# it byte-identical on Windows checkouts, where Git would otherwise write CRLF.
+negative2positive/public/licenses/*.txt text eol=lf
