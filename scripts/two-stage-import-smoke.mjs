@@ -602,8 +602,23 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
         const afterExport = await evaluate('window.__ncTwoStage.queuedRecipes()');
         return { all, beforeExport, afterExport, geometry: { cropRegion: geometry.cropRegion, rotationAngle: geometry.rotationAngle, mirrored: geometry.mirrored }, recipe: { confirm, crop } };
       };
+      // Learned defaults (#229 review): their offsets are fractions, which an
+      // opened photo's sliders snap; the photo left inside the window must
+      // get the same snapped values. Seed one learned edit for this scene's
+      // stock key ('none' preset, colour) and put the device's records back.
+      const learnedKeys = ['NONE', 'GENERIC'].map(stock => JSON.stringify([stock, '', 'color']));
+      const deviceLearned = await evaluate(`import('/src/app/learnedDefaultsStore.js').then(async m => {
+        const records = await m.readLearnedDefaults();
+        for (const key of ${JSON.stringify(learnedKeys)}) await m.writeLearnedDefaults({ version: 1, key, rolls: [{ id: 'smoke', frames: { f: { coreTemperature: 6, coreContrast: -6 } } }] });
+        return records;
+      })`);
       const staged = await flow(true);
       const single = await flow(false, staged.recipe);
+      await evaluate(`import('/src/app/learnedDefaultsStore.js').then(async m => {
+        await m.resetLearnedDefaults();
+        for (const record of ${JSON.stringify(deviceLearned)}) await m.writeLearnedDefaults(record);
+        return true;
+      })`);
       same(label + ': crop geometry before leaving', staged.geometry, single.geometry);
       const byFile = entries => entries.find(item => item.name === basename(cropFile));
       if (!byFile(staged.beforeExport)?.pendingFrameEdit?.intent.detect) fail(label + ': Export All did not receive the pending crop-detection intent');
@@ -611,9 +626,12 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
       if (resolved.pendingFrameEdit || resolved.pendingEdits || resolved.automatic) fail(label + ': the viewed full recipe did not settle: ' + JSON.stringify(resolved));
       same(label + ': full-base cropped analysis area', resolved.settings.autoFrameMeta.imageArea, reference.settings.autoFrameMeta.imageArea);
       const wb = settings => Object.fromEntries(['wbR', 'wbG', 'wbB', 'wbAutoConfidence', 'wbUserOverride'].map(key => [key, settings[key]]));
+      if (!resolved.settings.learnedDefaults || !reference.settings.learnedDefaults) fail(label + ': the seeded learned defaults did not apply: ' + JSON.stringify([resolved.settings.learnedDefaults, reference.settings.learnedDefaults]));
+      const learnedValues = settings => ({ coreTemperature: settings.coreTemperature, coreContrast: settings.coreContrast });
+      same(label + ': learned values as the sliders show them', learnedValues(resolved.settings), learnedValues(reference.settings));
       same(label + ': settled crop white balance', wb(resolved.settings), wb(reference.settings));
       for (const format of Object.keys(single.all)) sameExports(`${label}: crop then leave Export All ${format}`, staged.all[format], single.all[format]);
-      console.log(`ok: ${label}: crop-hit then leave before stage 2 exports one stage's decoded samples in every format`);
+      console.log(`ok: ${label}: crop-hit then leave before stage 2 exports one stage's decoded samples in every format, with learned defaults`);
     }
 
     // R2-052 supplemental: real Apply/slider/Undo/Redo callers through the

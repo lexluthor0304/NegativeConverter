@@ -11,7 +11,7 @@ import { analyzeSemanticPreview } from './semanticModel.js';
 import { isLargeImage } from './imageMemoryBudget.js';
 import { defaultInferencePreference } from './inferenceBackend.js';
 import { readDesktopImportFile } from './desktopImportReader.js';
-import { learnedDefaultsKey, learnedDelta, recordLearnedObservation, applyLearnedDefaults, withoutLearnedDefaults, LEARNED_NUMERIC_KEYS, LEARNED_CATEGORY_KEYS } from './learnedDefaults.js';
+import { learnedDefaultsKey, learnedDelta, recordLearnedObservation, applyLearnedDefaults, withoutLearnedDefaults, snapLearnedDefaults, LEARNED_NUMERIC_KEYS, LEARNED_CATEGORY_KEYS } from './learnedDefaults.js';
 import { readLearnedDefaults, writeLearnedDefaults, resetLearnedDefaults } from './learnedDefaultsStore.js';
 import { exportNameStem } from './exportFileName.js';
 import { frameNeedsReview } from './reviewQueue.js';
@@ -29797,19 +29797,28 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     function learnsImportDefaults(item, userEdited = importUserEdited(item)) {
       return Boolean(item && !item.savedSettings && !state.rollReference.applyLock && !userEdited);
     }
+    // Learned values snapped as the photo's sliders snap them when it is
+    // opened (syncSliderFromState): a photo exported without being opened, or
+    // left inside a two-stage window (#255), gets the recipe it shows.
+    function snapLearned(settings) {
+      return snapLearnedDefaults(settings, (key, value) => {
+        for (const binding of sliderBindingMap.values()) if (binding.stateKey === key) return binding.normalize(value);
+        return value;
+      });
+    }
     async function learnedImportSettings(settings, item, { userEdited = importUserEdited(item) } = {}) {
       if (!learnsImportDefaults(item, userEdited)) return settings;
       await learnedReady;
       item.automaticDefaults ||= structuredClone(settings);
       const key = learnedDefaultsKey(settings, state.rollMetadata);
-      return applyLearnedDefaults(settings, learnedRecords.get(key));
+      return snapLearned(applyLearnedDefaults(settings, learnedRecords.get(key)));
     }
     // The same learned values for a provisional render, without recording
     // `automaticDefaults`: only the final (post-detection) settings may.
     async function provisionalLearnedSettings(settings, item) {
       if (!learnsImportDefaults(item)) return settings;
       await learnedReady;
-      return applyLearnedDefaults(settings, learnedRecords.get(learnedDefaultsKey(settings, state.rollMetadata)));
+      return snapLearned(applyLearnedDefaults(settings, learnedRecords.get(learnedDefaultsKey(settings, state.rollMetadata))));
     }
     let learningWrites = Promise.resolve();
     function learnFromExport(item) {
@@ -30005,7 +30014,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
     function relearnImportSettings(settings, item) {
       if (!item.automaticDefaults || item.savedSettings || item.userEdited || state.rollReference.applyLock) return settings;
-      return applyLearnedDefaults(settings, learnedRecords.get(learnedDefaultsKey(settings, state.rollMetadata)));
+      return snapLearned(applyLearnedDefaults(settings, learnedRecords.get(learnedDefaultsKey(settings, state.rollMetadata))));
     }
     // Applied the way a film-type change is: automatic WB and analysis of the
     // old type are reset, and learned defaults follow the new type's key.
