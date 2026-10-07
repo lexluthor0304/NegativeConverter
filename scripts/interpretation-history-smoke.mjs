@@ -25,8 +25,11 @@ export async function installFrozenHistoryControl({ send, onCdpEvent, root, fail
     return found;
   };
   const original = functions(source);
-  onCdpEvent(message => {
+  const unsubscribe = onCdpEvent(message => {
     if (message.method !== 'Fetch.requestPaused' || message.sessionId) return;
+    // Another step's interception (the isolation smoke's document rewrite)
+    // pauses requests through the same event; only main.js is this one's.
+    if (!/\/src\/app\/main\.js(?:[?#]|$)/.test(message.params?.request?.url || '')) return;
     void (async () => {
       const request = message.params;
       const response = await send('Fetch.getResponseBody', { requestId: request.requestId });
@@ -102,6 +105,13 @@ export async function installFrozenHistoryControl({ send, onCdpEvent, root, fail
   if (head) console.log('interpretation history frozen browser control:', JSON.stringify({ head, functions: names,
     original_main_sha256: createHash('sha256').update(source).digest('hex') }));
   console.log('history input probe: controlled semantic/roll leaves; actual caller/history/PNG8/TIFF16; roll histogram sample <=256px');
+  // The complete smoke run goes on to other steps: the interception, its
+  // listener and the disabled cache end with the step that installed them.
+  return async () => {
+    unsubscribe();
+    await send('Fetch.disable');
+    await send('Network.setCacheDisabled', { cacheDisabled: false });
+  };
 }
 
 export async function runInterpretationHistoryCropSmoke(ctx) {

@@ -249,7 +249,7 @@ const comparable = settings => {
 export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, onCdpEvent, port, root,
   parityFiles = (process.env.TWO_STAGE_PARITY_FILES || '').split(':').filter(Boolean) }) {
   const dir = mkdtempSync(join(tmpdir(), 'nc-two-stage-'));
-  await installFrozenHistoryControl({ send, onCdpEvent, root, fail });
+  const endHistoryControl = await installFrozenHistoryControl({ send, onCdpEvent, root, fail });
   const importFiles = async paths => {
     const doc = await send('DOM.getDocument');
     const input = await send('DOM.querySelector', { nodeId: doc.result.root.nodeId, selector: '#fileInput' });
@@ -258,7 +258,7 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
   };
   let captureOrigin = null;
   const navigations = [];
-  onCdpEvent(message => {
+  const endNavigationLog = onCdpEvent(message => {
     if (message.method === 'Page.frameNavigated' && !message.params?.frame?.parentId) {
       navigations.push(message.params.frame.url);
       if (navigations.length > 8) navigations.shift();
@@ -1254,5 +1254,7 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
     }
   } finally {
     rmSync(dir, { recursive: true, force: true });
+    endNavigationLog();
+    await endHistoryControl();
   }
 }
