@@ -138,7 +138,11 @@ storage never clones a full plane in one request. After the settled photo's
 archive commits, the dust worker, tint, repair-preview aliases, display border
 and cached conversion-preview source, analysis and private worker planes are
 released too. Work that starts while storage is pending prevents parking;
-its live planes and workers remain owned. Promoted undo/redo also waits for
+its live planes and workers remain owned. An export holding the export lock
+(a single export, or a desktop Export All) prevents parking as well, both
+before the archive write and after it, since a single export may be waiting
+for the repair model with the window hidden; a park refused this way is not
+retried when the export ends. Promoted undo/redo also waits for
 its full-base history measurements after geometry settles; parking cannot
 supersede that restoration or persist its previous recipe. Showing the window reads that exact
 repair instead of detecting dust again. A failed write keeps the live photo
