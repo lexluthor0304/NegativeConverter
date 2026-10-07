@@ -67,6 +67,8 @@ function fixture({ enabled = true, hidden = true, brush = true, geometry = null 
   const c = vm.createContext({
     state, undoStack, redoStack, SNAPSHOT_REF_KEYS: vm.runInNewContext(refKeys),
     document: { visibilityState: hidden ? 'hidden' : 'visible', body: { dataset: {} } },
+    // No export runs in these scenes (hiddenParkExportLock.test covers the locks).
+    singleExportActive: false, isDesktopBatchExportLocked: () => false,
     parkedPhoto: null, parkingPhoto: false, manualEditRevision: 0, dustHistoryArchive: archive,
     memoryBudget: createMemoryBudget({ budgetBytes: 10000 }), loadGeneration: 4, processNegativeInFlight: null, coreReprocessTimer: null,
     dustDetectionTimer: null, pendingBrushRepairs: 0, dustDrawing: false,

@@ -11619,6 +11619,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
     async function parkOpenPhotoForHiddenJob() {
       if (parkedPhoto || parkingPhoto || !hiddenParkEnabled() || document.visibilityState !== 'hidden') return false;
+      // An export owns the open photo's planes until it ends: a single export
+      // can be waiting for the repair model while the window is hidden, and
+      // parking would drop the very planes it is about to encode.
+      if (singleExportActive || isDesktopBatchExportLocked()) return false;
       const item = getCurrentQueueItem();
       if (!item || item.file !== state.loadedFile || !state.loadedBaseImageData || state.rawDecodePending || state.provisional
         || state.currentStep < 3 || state.cropping || document.body.dataset.studioBusy || document.body.dataset.photoSwitching
@@ -11645,6 +11649,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           // history. Nothing can be dropped until the complete record commits
           // and this is still the same settled, hidden photo.
           if (document.visibilityState !== 'hidden' || loadGeneration !== generation || manualEditRevision !== editRevision
+            || singleExportActive || isDesktopBatchExportLocked()
             || state.fullBaseHistoryPending || processNegativeInFlight || coreReprocessBusy() || coreReprocessTimer || state.dustRemoval.processing
             || dustDetectionTimer || pendingBrushRepairs || dustDrawing || state.cropping
             || document.body.dataset.studioBusy || document.body.dataset.photoSwitching
