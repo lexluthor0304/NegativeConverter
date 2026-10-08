@@ -5,7 +5,18 @@
 // display-size element over the image. The three comparison assertions of
 // the earlier version stay: exit restores fresh pixels, edits made during a
 // comparison apply, and a closed session releases the canvases.
+// #279 follow-up: the comparison keeps #canvas's box (with the border a
+// transform lays it over the photo) and draws a patch's sides within 1 CSS px
+// of where #canvas under it draws them, and #canvas within 1 CSS px of where
+// its box puts them (it fills the box), at 100 % and about 400 % zoom, with
+// and without the border (DPR 2).
+import { createScreenEdges } from './screen-edges.mjs';
+
 const PREVIEW_CAP = 4_000_000;
+// A uniform patch of the first fixture (3600 x 2400), clear of the pattern's
+// wrap, in view at about 400 %: its sides are the edges the alignment check
+// measures.
+const PATCH = { left: 1560, top: 1080, right: 1680, bottom: 1160 };
 const ready = `document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy`;
 
 // Timing budgets hold on a real Mac; shared CI runners (software GL, noisy
@@ -72,10 +83,74 @@ export async function runComparePreviewSmoke({ send, evaluate, waitFor, wait, fa
   const frame = () => evaluate(`window.__ncDisplay.frame()`);
   const counters = () => evaluate(`window.__ncDisplay.counters()`);
   const withinCap = size => Boolean(size) && size[0] * size[1] <= PREVIEW_CAP;
+  // #279 follow-up: the patch's left side (along a row) and top side (along a
+  // column), drawn by the comparison and, with it hidden, by #canvas under it,
+  // at 100 % and about 400 % zoom.
+  const edges = createScreenEdges({ send, evaluate });
+  const zoomOf = () => evaluate(`Number(/matrix\\(([\\d.]+)/.exec(document.getElementById('canvasTransformWrapper').style.transform)?.[1] || 1)`);
+  const settleFrames = () => evaluate('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(resolve, 150))))');
+  const comparisonAlignment = async (label) => {
+    const results = [];
+    for (const level of [1, 4]) {
+      await evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key: '0', bubbles: true }))`);
+      for (let i = 0; i < 12 && level > 1 && await zoomOf() < level * 0.95; i++) {
+        await evaluate(`document.getElementById('zoomInBtn').click()`);
+        await wait(80);
+      }
+      await waitFor(`${label} zoom ${level} idle`, ready, 60000);
+      await settleFrames();
+      const shown = await frame();
+      const geometry = await evaluate(`(() => { const r = window.__ncBrush.state().photoRect, c = document.getElementById('canvasContainer').getBoundingClientRect();
+        return { photo: r, view: { left: c.left, top: c.top, right: c.right, bottom: c.bottom } }; })()`);
+      const W = shown.width, H = shown.height;
+      const toClient = (x, y) => ({ x: geometry.photo.left + x / W * geometry.photo.width, y: geometry.photo.top + y / H * geometry.photo.height });
+      const texel = geometry.photo.width / shown.display[0];
+      const reach = Math.max(10, 6 * texel);
+      const sides = [
+        { axis: 'x', point: toClient(PATCH.left, (PATCH.top + PATCH.bottom) / 2), band: Math.min(60, 0.5 * (PATCH.bottom - PATCH.top) / H * geometry.photo.height) },
+        { axis: 'y', point: toClient((PATCH.left + PATCH.right) / 2, PATCH.top), band: Math.min(60, 0.5 * (PATCH.right - PATCH.left) / W * geometry.photo.width) },
+      ];
+      for (const side of sides) {
+        if (!(side.point.x - reach > geometry.view.left && side.point.x + reach < geometry.view.right
+          && side.point.y - reach > geometry.view.top && side.point.y + reach < geometry.view.bottom)) {
+          fail(`${label} zoom ${level}: the patch side is out of view: ` + JSON.stringify({ side, geometry }));
+        }
+      }
+      await evaluate(`document.getElementById('beforeAfterBtn').click()`);
+      await waitFor(`${label} zoom ${level} comparison shown`, `window.__ncDisplay.frame().comparison.shown`, 30000);
+      await settleFrames();
+      const measured = [];
+      for (const side of sides) {
+        measured.push(await edges.layerEdges('beforeAfterCanvas', { axis: side.axis, reach, band: side.band,
+          at: side.axis === 'x' ? side.point.x : side.point.y, across: side.axis === 'x' ? side.point.y : side.point.x }));
+      }
+      await evaluate(`document.getElementById('beforeAfterBtn').click()`);
+      await waitFor(`${label} zoom ${level} comparison closed`, `!window.__ncDisplay.frame().comparison.shown`, 30000);
+      const [x, y] = measured;
+      if (![x.shown, x.under, y.shown, y.under].every(edge => !edge.error && edge.contrast >= 8)) {
+        fail(`${label} zoom ${level}: the patch side was not found on screen: ` + JSON.stringify(measured));
+      }
+      // #canvas fills its box (object-fit): it draws the sides where the box
+      // puts them, as the comparison laid on the box does.
+      const cx = x.under.position - sides[0].point.x, cy = y.under.position - sides[1].point.y;
+      if (!(Math.abs(cx) <= 1 && Math.abs(cy) <= 1)) {
+        fail(`${label} zoom ${level}: #canvas draws the photo more than 1 CSS px off its box: ` + JSON.stringify({ cx, cy, measured, sides }));
+      }
+      const dx = x.shown.position - x.under.position, dy = y.shown.position - y.under.position;
+      if (!(Math.abs(dx) <= 1 && Math.abs(dy) <= 1)) {
+        fail(`${label} zoom ${level}: the comparison draws the patch more than 1 CSS px off #canvas: ` + JSON.stringify({ dx, dy, measured, sides, shown }));
+      }
+      const round = value => Math.round(value * 100) / 100;
+      results.push({ level, zoom: round(await zoomOf()), dx: round(dx), dy: round(dy), canvas: [round(cx), round(cy)] });
+    }
+    await evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key: '0', bubbles: true }))`);
+    await waitFor(`${label} back at fit`, ready, 60000);
+    return results;
+  };
   try {
     // Two synthetic 35 mm frames: 3600x2400 (8.6 MP, above the cap) and 3000x2000.
     await evaluate(`(async () => {
-      const make = async (width, height, name, phase) => {
+      const make = async (width, height, name, phase, patch = null) => {
         const canvas = document.createElement('canvas'); canvas.width = width; canvas.height = height;
         const ctx = canvas.getContext('2d'), image = ctx.createImageData(width, height);
         for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
@@ -83,11 +158,12 @@ export async function runComparePreviewSmoke({ send, evaluate, waitFor, wait, fa
           image.data[i] = 100 + t; image.data[i + 1] = 45 + t * .6; image.data[i + 2] = 20 + t * .3; image.data[i + 3] = 255;
         }
         ctx.putImageData(image, 0, 0);
+        if (patch) { ctx.fillStyle = 'rgb(60,35,20)'; ctx.fillRect(patch.left, patch.top, patch.right - patch.left, patch.bottom - patch.top); }
         const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', .95));
         canvas.width = canvas.height = 1;
         return new File([blob], name, { type: 'image/jpeg' });
       };
-      window.__comparePreviewFiles = [await make(3600, 2400, 'compare-preview-a.jpg', 0), await make(3000, 2000, 'compare-preview-b.jpg', 40)];
+      window.__comparePreviewFiles = [await make(3600, 2400, 'compare-preview-a.jpg', 0, ${JSON.stringify(PATCH)}), await make(3000, 2000, 'compare-preview-b.jpg', 40)];
       const probe = window.__comparePreviewProbe;
       probe.writes.length = 0; probe.largeMainWrites.length = 0;
       window.__ncDisplay.resetCounters();
@@ -183,11 +259,18 @@ export async function runComparePreviewSmoke({ send, evaluate, waitFor, wait, fa
     if (result.secondPress.writes.length) fail('a later comparison press on the same photo wrote pixels: ' + JSON.stringify(result.secondPress));
     const comparison = result.comparisonFrame;
     if (!comparison.comparison.shown || !withinCap(comparison.canvases.comparison) || comparison.canvases.comparison[0] >= 3600) fail('the comparison element is not a display-size canvas: ' + JSON.stringify(comparison));
-    // With the border, over the photo rectangle, not stretched over the border.
-    const [left, top, width, height] = comparison.comparison.box.map(value => parseFloat(value));
-    if (!(left > 0 && top > 0 && width < 100 && height < 100 && Math.abs(left * 2 + width - 100) < 0.5 && Math.abs(top * 2 + height - 100) < 0.5)) {
-      fail('the comparison is not placed over the photo inside the border: ' + JSON.stringify(comparison.comparison));
+    // With the border, over the photo rectangle, not stretched over the
+    // border: #canvas's box, carried onto the photo by a transform (#279
+    // follow-up: a box of its own was rounded off the photo's grid).
+    const placed = comparison.comparison;
+    const scale = /scale\(([\d.e-]+), ([\d.e-]+)\)/.exec(placed.transform || '');
+    if (placed.box.some(value => value !== '') || !placed.photo || !scale
+      || Math.abs(Number(scale[1]) - placed.photo.width / placed.photo.frameWidth) > 1e-9 || Math.abs(Number(scale[2]) - placed.photo.height / placed.photo.frameHeight) > 1e-9
+      || !(placed.photo.x > 0 && placed.photo.y > 0)) {
+      fail('the comparison is not placed over the photo inside the border: ' + JSON.stringify(placed));
     }
+    const bordered = await comparisonAlignment('CPU border');
+    console.log('ok: with the border, the comparison draws the image within 1 CSS px of #canvas under it ' + JSON.stringify(bordered));
     for (const exit of [result.firstExit, result.secondExit]) {
       if (exit.writes.some(w => w.pixels > PREVIEW_CAP)) fail('compare exit wrote a full-resolution frame: ' + JSON.stringify(exit));
     }
@@ -200,7 +283,11 @@ export async function runComparePreviewSmoke({ send, evaluate, waitFor, wait, fa
       compare.click(); const frame = window.__ncDisplay.frame(); compare.click();
       return frame;
     })()`);
-    if (plain.comparison.box.some(value => value !== '')) fail('without the border the comparison must cover the image box: ' + JSON.stringify(plain.comparison));
+    if (plain.comparison.box.some(value => value !== '') || plain.comparison.transform !== '' || plain.comparison.photo) {
+      fail('without the border the comparison must cover the image box: ' + JSON.stringify(plain.comparison));
+    }
+    const unbordered = await comparisonAlignment('CPU no border');
+    console.log('ok: without the border, the comparison draws the image within 1 CSS px of #canvas under it ' + JSON.stringify(unbordered));
 
     // ---- GPU mode: the hidden #canvas holds no frame; the comparison lies over the GL canvas ----
     await evaluate(`(async () => {

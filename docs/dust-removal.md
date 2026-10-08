@@ -235,7 +235,17 @@ and every count equals a full recount.
   pointer events (touch and pen paint too, `touch-action: none` on the view
   while a brush is active), coalesced samples at least a device pixel apart,
   one draw per animation frame of the new segments only, round-capped lines of
-  the brush's width. `#canvas` is not written while a stroke is painted.
+  the brush's width. `#canvas` is not written while a stroke is painted. The
+  brush stores the pointer rounded to a pixel, and `DustBrush` stamps each disc
+  around that pixel, centred on its centre; the live stroke is drawn through
+  those centres (`dustDiscCentre`), so the dab lies where the disc is committed
+  (#279 follow-up). It used to be drawn at the pixel's corner, half a pixel up
+  and to the left of the disc: in the display-modes smoke (1500 px fixture, DPR
+  1) 0.76 to 0.84 CSS px off the committed disc at 381 % with the border and
+  1.14 to 1.17 px without it; now within 0.1 px at 100 % and 381 %. The smoke
+  reads the disc back from the mask (`__ncBrush.maskWindow`) and measures the
+  dab and the tint against it. The stored points, the mask and exports are
+  unchanged.
 - **AI repair on, or repair strokes present.** The TELEA patch also overwrote
   MI-GAN pixels inside R. After a 200 ms debounce only the tiles over queued
   rects are inferred again, on a window of the repaired image, and only the

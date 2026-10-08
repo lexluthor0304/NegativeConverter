@@ -100,7 +100,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       displayLevelFactor, displayLevelGeometry, buildDisplayLevelInBands, resampleDisplayLevel, displayTargetFor, isDisplayTarget,
       displaySizeServes, displayFilterOf, adoptDisplayLevel
     } from './displayPreview.js';
-    import { settledDisplayRoute, step3FrameReference, upscaleReference, photoRectPercent } from './displayCanvas.js';
+    import { settledDisplayRoute, step3FrameReference, upscaleReference, frameRectTransform } from './displayCanvas.js';
     import { createCoreReprocessGates, previewDispatchAction, CORE_FULL_REPROCESS_DELAY_MS } from './coreReprocessDispatcher.js';
     import { createPreviewTierController, previewTierMaxPixels, capBackingSize, parsePreviewTierOverride } from './previewTier.js';
     import { describeWebglRenderer, startsReducedReason, formatRenderEnvironmentLine, formatPreviewSessionLine } from './renderEnvironment.js';
@@ -3734,6 +3734,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // on the same photo only show it again.
     const beforeAfterCanvas = document.getElementById('beforeAfterCanvas');
     let beforeAfterCanvasSource = null;
+    // The transform that lays it over the photo inside the film border ('' for
+    // the whole box), as placeBeforeAfterCanvas last set it.
+    let beforeAfterCanvasPlaced = '';
     // The display negative made for a display target (#248), with the preview
     // or source it stands for: { key, image }.
     let beforeAfterBuiltReference = null;
@@ -4102,17 +4105,27 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       return hasBeforeAfterReference();
     }
 
-    // Over the photo, not the film border drawn around it.
+    // The photo's rectangle in the frame the photo canvas shows: inside the
+    // film border, or null without it (the whole frame).
+    function comparisonPhotoLayout() {
+      if (!state.sprocketPreviewEnabled) return null;
+      return canvas.style.display !== 'none' ? mainCanvasPhoto
+        : glCanvas.style.display === 'block' ? glBorder.photo : null;
+    }
+
+    // Over the photo, not the film border drawn around it. The comparison
+    // keeps the photo canvas's box (the stylesheet's); with the border a
+    // transform lays it over the photo's rectangle. A box of its own there
+    // was fractional, which left its place on screen to how the compositor
+    // rounds a canvas's box before the zoom scales it (#279; the detail
+    // layer's box of its own was 2.4 screen px off at 381 %). The transform
+    // puts it where the photo canvas's box puts the photo.
     function placeBeforeAfterCanvas() {
-      const style = beforeAfterCanvas.style;
-      const photo = !state.sprocketPreviewEnabled ? null
-        : canvas.style.display !== 'none' ? mainCanvasPhoto
-          : glCanvas.style.display === 'block' ? glBorder.photo : null;
-      const box = photo ? photoRectPercent(photo) : { left: '', top: '', width: '', height: '' };
-      style.left = box.left;
-      style.top = box.top;
-      style.width = box.width;
-      style.height = box.height;
+      const photo = comparisonPhotoLayout();
+      const transform = photo ? frameRectTransform(photo, photo.frameWidth, photo.frameHeight) : '';
+      if (beforeAfterCanvasPlaced === transform) return;
+      beforeAfterCanvas.style.transform = transform;
+      beforeAfterCanvasPlaced = transform;
     }
 
     // One put per reference; the same photo's next press is a style flip.
@@ -4392,6 +4405,30 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (canvas.width !== nextWidth) canvas.width = nextWidth;
       if (canvas.height !== nextHeight) canvas.height = nextHeight;
       setMainCanvasBox(nextWidth, nextHeight, reference);
+      fitPhotoCanvasContent(canvas);
+    }
+
+    // The photo fills its canvas's box (#279 follow-up). The backing and the
+    // whole-pixel box come from separate roundings (the display size is
+    // floored at fit x DPR, the box rounded from the full frame; a reduced
+    // tier caps the backing), so they can differ by a pixel, and the
+    // stylesheet's `object-fit: contain` letterboxed the photo inside its own
+    // box, which Chrome then snapped a whole CSS pixel off one side: a 901 px
+    // backing in a 902 px box was drawn from x = 1, 1.7 to 2.2 screen px at
+    // 381 % from where the box, and every layer laid on it (the overlay, the
+    // comparison, the detail layer, the brush mapping), put it. `fill`
+    // stretches that pixel away. A backing of another shape, as when the box
+    // already fits new planes whose frame is not drawn yet, keeps `contain`:
+    // the old frame is shown letterboxed rather than stretched. The shapes
+    // agree when letterboxing would leave at most 2 CSS px.
+    function fitPhotoCanvasContent(surface) {
+      const boxWidth = parseFloat(surface.style.width), boxHeight = parseFloat(surface.style.height);
+      let fit = 'contain';
+      if (boxWidth > 0 && boxHeight > 0 && surface.width > 0 && surface.height > 0) {
+        const scale = Math.min(boxWidth / surface.width, boxHeight / surface.height);
+        if (boxWidth - surface.width * scale <= 2 && boxHeight - surface.height * scale <= 2) fit = 'fill';
+      }
+      if (surface.style.objectFit !== fit) surface.style.objectFit = fit;
     }
 
     function refitMainCanvasBox() {
@@ -6236,6 +6273,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (previewTier === 'reduced') ({ width, height } = capBackingSize(width, height, previewTierMaxPixels('reduced')));
       if (glCanvas.width !== width) glCanvas.width = width;
       if (glCanvas.height !== height) glCanvas.height = height;
+      fitPhotoCanvasContent(glCanvas);
     }
 
     function getWebglSourceImageData() {
@@ -6722,9 +6760,20 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         baseWidth: webglState.sourceSize.w || state.webglSourceImageData?.width || 0,
         fit: canvasDisplayFit.scale, zoom: state.zoomLevel, dpr: window.devicePixelRatio || 1,
         panX: state.panX, panY: state.panY, baseX: geometry.baseX, baseY: geometry.baseY,
+        // The base's box (whole CSS px, #279), where the region is laid.
+        boxWidth: geometry.wrapperW, boxHeight: geometry.wrapperH,
         containerWidth: container.width, containerHeight: container.height,
         levelFactor: displayLevelGeometry(state.displayLevelImageData).k
       };
+    }
+
+    // CSS pixels per source pixel of the base's box at zoom 1: where the
+    // region's rectangle lies in the wrapper (positionDetailCanvas). Within
+    // half a CSS pixel across the frame of the exact fit scale, which plans
+    // the region's density.
+    function detailBoxScale(view) {
+      return { x: view.boxWidth > 0 ? view.boxWidth / view.sourceWidth : view.fit,
+        y: view.boxHeight > 0 ? view.boxHeight / view.sourceHeight : view.fit };
     }
 
     // A full-resolution frame current for the settings, to crop from: it
@@ -6774,21 +6823,24 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       hideDetailLayer();
     }
 
-    // The canvas at the region's pre-transform CSS rect in the wrapper. Pans
-    // and base redraws call this often; the rect only changes with the region
-    // or the fit.
+    // The canvas over the region's rectangle of the base: it keeps the photo
+    // canvas's box (the stylesheet's) and a transform lays it over the
+    // region, in percentages of that box, so a new fit moves it with the base.
+    // A box of its own at the region's rect (fractional CSS pixels at the fit
+    // scale) was rounded to whole pixels by the compositor before the zoom
+    // scaled it, at the exact fit rather than the base's whole-pixel box: 2.4
+    // screen px from where the base's box puts the region at 381 % in the
+    // zoom-detail smoke (#279 follow-up). Pans and base redraws call this
+    // often; the transform changes only with the region.
     function positionDetailCanvas() {
       const shown = detailLayer.shown;
-      const fit = canvasDisplayFit.scale;
-      if (!shown || !(fit > 0)) return;
+      const source = conversionSourceSize();
+      if (!shown || !source) return;
       const { plan } = shown;
-      const key = `${plan.x}|${plan.y}|${plan.width}|${plan.height}|${fit}`;
+      const key = `${plan.x}|${plan.y}|${plan.width}|${plan.height}|${source.width}|${source.height}`;
       if (detailLayer.placed === key) return;
       detailLayer.placed = key;
-      glDetailCanvas.style.left = `${plan.x * fit}px`;
-      glDetailCanvas.style.top = `${plan.y * fit}px`;
-      glDetailCanvas.style.width = `${plan.width * fit}px`;
-      glDetailCanvas.style.height = `${plan.height * fit}px`;
+      glDetailCanvas.style.transform = frameRectTransform(plan, source.width, source.height);
     }
 
     // Draws the region with the Step-3 uniforms and curves the base just used,
@@ -6973,9 +7025,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // return) plans the same region and keeps its pan.
       if (state.zoomLevel > 1) {
         let { panX, panY } = state;
+        const scale = detailBoxScale(view);
         for (let pass = 0; pass < 4; pass++) {
-          const snapX = snapPanToDevicePixels(panX, view.baseX, state.zoomLevel, plan.x * view.fit, view.dpr);
-          const snapY = snapPanToDevicePixels(panY, view.baseY, state.zoomLevel, plan.y * view.fit, view.dpr);
+          const snapX = snapPanToDevicePixels(panX, view.baseX, state.zoomLevel, plan.x * scale.x, view.dpr);
+          const snapY = snapPanToDevicePixels(panY, view.baseY, state.zoomLevel, plan.y * scale.y, view.dpr);
           if (snapX === panX && snapY === panY) break;
           panX = snapX;
           panY = snapY;
@@ -7235,15 +7288,22 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         const shown = detailLayer.shown;
         const fit = canvasDisplayFit.scale;
         const dpr = window.devicePixelRatio || 1;
+        const source = conversionSourceSize();
+        // CSS px per source px of the base's (whole-pixel) box, which the
+        // region is laid on (#279 follow-up).
+        const boxScale = source && glCanvas.style.width ? parseFloat(glCanvas.style.width) / source.width : fit;
         return {
           enabled: DETAIL_LAYER_ENABLED, visible: detailLayer.visible, allowed: detailLayerAllowed(),
           pending: Boolean(detailLayer.request || detailLayer.timer), counters: { ...detailLayer.counters },
           region: shown ? { ...shown.plan, visible: undefined } : null,
+          // Where the region lies on the base: its transform and the frame
+          // its rectangle is a part of.
+          placement: shown ? { transform: glDetailCanvas.style.transform, frame: source ? [source.width, source.height] : null } : null,
           // Source pixels per device pixel on screen: the layer's own density
           // while it covers the view, the base's otherwise.
           sourcePxPerDevicePx: detailLayer.visible && shown
-            ? shown.width / (shown.plan.width * fit * state.zoomLevel * dpr)
-            : (webglState.sourceSize.w || 0) / Math.max(1e-9, (state.conversionSourceImageData?.width || 1) * fit * state.zoomLevel * dpr),
+            ? shown.width / (shown.plan.width * boxScale * state.zoomLevel * dpr)
+            : (webglState.sourceSize.w || 0) / Math.max(1e-9, (state.conversionSourceImageData?.width || 1) * boxScale * state.zoomLevel * dpr),
           current: shown ? detailTagCurrent(shown.tag) : false, exact: Boolean(shown?.tag.full),
           roiToken: shown ? shown.tag.token : null, baseToken: displayedFrameToken,
           // Workers of a region (#270): the bands of the one on screen.
@@ -7526,7 +7586,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           ready: Boolean(beforeAfterBuiltReference?.image && beforeAfterBuiltReference.key === (state.conversionPreviewImageData || state.conversionSourceImageData)),
           shown: Boolean(beforeAfterCanvas && beforeAfterCanvas.style.display === 'block'),
           cached: Boolean(beforeAfterCanvasSource),
-          box: beforeAfterCanvas ? ['left', 'top', 'width', 'height'].map(key => beforeAfterCanvas.style[key]) : null
+          // Its inline box (none: the photo canvas's, the stylesheet's) and,
+          // with the border, the transform over the photo's rectangle and
+          // that rectangle in the shown frame (#279 follow-up).
+          box: beforeAfterCanvas ? ['left', 'top', 'width', 'height'].map(key => beforeAfterCanvas.style[key]) : null,
+          transform: beforeAfterCanvasPlaced,
+          photo: comparisonPhotoLayout() ? { ...comparisonPhotoLayout() } : null
         }
       };
     }
@@ -11073,7 +11138,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
     // Records the samples at least a device pixel apart; the overlay draws
     // them at the next frame. The committed stroke is discs of the brush along
-    // them, which the round-capped line of width 2r shows.
+    // them, which the round-capped line of width 2r shows. A recorded point is
+    // a pixel (the pointer rounded, as the brush has always stored it), and
+    // DustBrush stamps each disc around that pixel: its centre is the pixel's
+    // centre, half a pixel right of and below the point taken as a position.
+    // The overlay draws the dab there, where the disc is committed (#279
+    // follow-up); the stored points are unchanged.
     function addDustBrushSamples(samples) {
       const dpr = window.devicePixelRatio || 1;
       const added = [];
@@ -11083,9 +11153,15 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         if (!point) continue;
         dustBrushLastSample = { clientX: sample.clientX, clientY: sample.clientY };
         dustBrushPoints.push(point);
-        added.push(point);
+        added.push(dustDiscCentre(point));
       }
       if (added.length) brushFeedback.add(added);
+    }
+
+    // Where the disc DustBrush stamps around a recorded pixel is centred, in
+    // working-frame pixels: the pixel's centre.
+    function dustDiscCentre(point) {
+      return { x: point.x + 0.5, y: point.y + 0.5 };
     }
 
     function onDustBrushMove(e) {
@@ -11426,6 +11502,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       canvas.style.height = cssH;
       glCanvas.style.width = cssW;
       glCanvas.style.height = cssH;
+      fitPhotoCanvasContent(canvas);
+      fitPhotoCanvasContent(glCanvas);
       cropCanvas.style.width = cssW;
       cropCanvas.style.height = cssH;
       canvasTransformWrapper.style.width = cssW;
@@ -26744,6 +26822,19 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         canvasWrites: { ...mainCanvasWrites },
         photoRect: (() => { const rect = brushSurfaceRect(); return { left: rect.left, top: rect.top, width: rect.width, height: rect.height }; })()
       }),
+      // The dust mask's bytes in a rectangle of the working frame (clipped to
+      // it), as committed: where a stroke's disc landed (#279 follow-up).
+      maskWindow: (x, y, width, height) => {
+        const mask = state.dustRemoval.mask;
+        const frame = state.processedImageData;
+        if (!mask || !frame) return null;
+        const x0 = Math.max(0, Math.floor(x)), y0 = Math.max(0, Math.floor(y));
+        const x1 = Math.min(frame.width, Math.ceil(x + width)), y1 = Math.min(frame.height, Math.ceil(y + height));
+        if (!(x1 > x0 && y1 > y0)) return null;
+        const data = [];
+        for (let row = y0; row < y1; row++) for (let column = x0; column < x1; column++) data.push(mask[row * frame.width + column] ? 1 : 0);
+        return { x: x0, y: y0, width: x1 - x0, height: y1 - y0, frame: [frame.width, frame.height], data };
+      },
       resetCounters: () => {
         mainCanvasWrites.put = 0; mainCanvasWrites.draw = 0; mainCanvasWrites.maxPutPixels = 0;
         for (const key of Object.keys(liveDodgeCounters)) liveDodgeCounters[key] = key === 'lastRect' || key === 'box' ? null : 0;

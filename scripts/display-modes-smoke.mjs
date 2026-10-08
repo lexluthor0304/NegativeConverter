@@ -19,14 +19,21 @@
 //    same pixels as a backing of the photo's size). A dodge stroke lands on the
 //    same image point whether GL or #canvas shows the photo; the overlay draws
 //    it within 0.5 backing pixels of that point and on screen within 1 CSS px,
-//    on both canvases. A direct dust stroke: #brushFeedback draws its live dab
-//    within 1 CSS px of the recorded point, and the tint of the committed disc
-//    lies around it in the backing and on screen within 1 CSS px of where the
-//    backing puts it. All at 100 % and about 400 % zoom, with and without the
-//    border.
+//    on both canvases. A direct dust stroke, against one reference: the disc it
+//    commits, read back from the dust mask (#279 follow-up). It is centred on
+//    the stored pixel's centre; #brushFeedback draws the live dab within 1 CSS
+//    px of that centroid, the tint holds the disc's cells (pooled) and is drawn
+//    within 1 CSS px of where the backing puts them. All at 100 % and about
+//    400 % zoom, with and without the border.
+// 5. The before/after comparison (#279 follow-up) keeps the photo canvas's box
+//    (a transform lays it over the photo inside the border) and draws a
+//    patch's sides within 1 CSS px of where the photo under it draws them, and
+//    the photo within 1 CSS px of where its box puts them (it fills the box),
+//    at 100 % and about 400 % zoom, with and without the border.
 // The rescue in the app (fog from OpenCV, local contrast, drags, hold-to-compare)
 // is checked by expired-film-smoke.mjs on its aged positive.
 import { createRequire } from 'node:module';
+import { createScreenEdges } from './screen-edges.mjs';
 
 const UPNG = createRequire(import.meta.url)('upng-js');
 const ready = `document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy`;
@@ -509,14 +516,37 @@ export async function runDisplayModesSmoke({ send, evaluate, waitFor, fail, inst
     surface.dispatchEvent(new PointerEvent(${JSON.stringify(type)}, { bubbles: true, cancelable: true, pointerId: 31, pointerType: 'mouse',
       isPrimary: true, button: 0, buttons: ${type === 'pointerup' ? 0 : 1}, clientX: ${x}, clientY: ${y}, altKey: true }));
   })()`);
-  // The dust tint and the live brush (#279): a direct dust stroke (Alt) at a
-  // known image point, at 100 % and about 400 % zoom. While the pointer is
-  // down #brushFeedback draws the dab at the point the brush records (the
-  // pointer, rounded to an image pixel); within 1 CSS px of it on screen. The
-  // committed disc is stamped around that pixel (its centre is the pixel's
-  // centre) and max-pooled into the tint: its cells lie around that point in
-  // the overlay's backing (within a cell), and on screen within 1 CSS px of
-  // where the backing puts them.
+  // The dust tint and the live brush (#279 and its follow-up): a direct dust
+  // stroke (Alt) at a known image point, at 100 % and about 400 % zoom, both
+  // measured against one reference: the disc the stroke commits, read back
+  // from the dust mask. The brush records the pointer rounded to a pixel and
+  // DustBrush stamps the disc around that pixel, so its centroid is the
+  // pixel's centre. While the pointer is down #brushFeedback draws the live
+  // dab there: on screen within 1 CSS px of that centroid. The disc is
+  // max-pooled into the tint: the tint's cells are those of the disc, and on
+  // screen within 1 CSS px of where the backing puts them.
+  const committedDisc = async (point, brush) => {
+    const reach = brush + 2;
+    const bytes = await evaluate(`window.__ncBrush.maskWindow(${point.x - reach}, ${point.y - reach}, ${2 * reach + 1}, ${2 * reach + 1})`);
+    if (!bytes) return null;
+    const pixels = [];
+    for (let row = 0; row < bytes.height; row++) for (let column = 0; column < bytes.width; column++) {
+      if (bytes.data[row * bytes.width + column]) pixels.push({ x: bytes.x + column, y: bytes.y + row });
+    }
+    if (!pixels.length) return null;
+    // Pixel (x, y) covers [x, x + 1) x [y, y + 1) of the working frame.
+    const centroid = { x: pixels.reduce((sum, p) => sum + p.x + 0.5, 0) / pixels.length, y: pixels.reduce((sum, p) => sum + p.y + 0.5, 0) / pixels.length };
+    return { pixels, centroid, frame: bytes.frame };
+  };
+  // The tint cells of a set of mask pixels (dustTint.js: cell floor(i x cells
+  // / size)), as the overlay's backing holds them: their centroid there.
+  const pooledCentroid = (state, pixels) => {
+    const [W, H] = [state.working.width, state.working.height];
+    const cells = new Set(pixels.map(p => `${Math.floor(p.x * state.overlayPhoto.width / W)},${Math.floor(p.y * state.overlayPhoto.height / H)}`));
+    let sx = 0, sy = 0;
+    for (const cell of cells) { const [cx, cy] = cell.split(',').map(Number); sx += cx + 0.5; sy += cy + 0.5; }
+    return { x: state.overlayPhoto.x + sx / cells.size, y: state.overlayPhoto.y + sy / cells.size, cells: cells.size };
+  };
   const dustAlignment = async (label, points) => {
     const results = [];
     for (const [level, fx, fy] of points) {
@@ -528,37 +558,112 @@ export async function runDisplayModesSmoke({ send, evaluate, waitFor, fail, inst
       const point = { x: Math.round((x - state.photo.left) * W / state.photo.width), y: Math.round((y - state.photo.top) * H / state.photo.height) };
       const cellsPerPixel = state.overlayPhoto.width / W;
       const span = (brush + 6) * Math.max(1, cellsPerPixel);
-      const wantTint = imageToBacking(state, { x: point.x + 0.5, y: point.y + 0.5 });
-      expect(!(await backingCentroid(wantTint, span)), `${label} zoom ${level}: the tint is set at the test point before the stroke`);
+      const roughTint = imageToBacking(state, { x: point.x + 0.5, y: point.y + 0.5 });
+      expect(!(await backingCentroid(roughTint, span)), `${label} zoom ${level}: the tint is set at the test point before the stroke`);
+      expect(!(await committedDisc(point, brush)), `${label} zoom ${level}: the mask is set at the test point before the stroke`);
       await dustPointer('pointerdown', x, y);
       await until(`${label} zoom ${level} live dab`, `window.__ncBrush.state().feedback.drawing && window.__ncBrush.state().feedback.drawn > 0`, 10_000);
       await nextFrames();
-      const wantDab = { x: state.photo.left + point.x * state.photo.width / W, y: state.photo.top + point.y * state.photo.height / H };
+      const toClient = (p) => ({ x: state.photo.left + p.x * state.photo.width / W, y: state.photo.top + p.y * state.photo.height / H });
       const screenSpan = (brush + 6) * state.photo.width / W;
-      const dab = await layerCentroid(around(wantDab, screenSpan), 'brushFeedback');
+      const dab = await layerCentroid(around(toClient({ x: point.x + 0.5, y: point.y + 0.5 }), screenSpan), 'brushFeedback');
       await dustPointer('pointerup', x, y);
-      expect(dab && offBy(dab, wantDab) <= 1,
-        `${label} zoom ${level}: #brushFeedback draws the dab more than 1 CSS px off its image point: ` + JSON.stringify({ dab, wantDab, state }));
       await until(`${label} zoom ${level} tint of the stroke`, `(() => {
-        const c = document.getElementById('displayOverlay'), x = ${Math.round(wantTint.x)}, y = ${Math.round(wantTint.y)};
+        const c = document.getElementById('displayOverlay'), x = ${Math.round(roughTint.x)}, y = ${Math.round(roughTint.y)};
         return c.width > x && c.height > y && c.getContext('2d').getImageData(x - 1, y - 1, 3, 3).data.some((v, i) => i % 4 === 3 && v > 0);
       })()`, 60_000);
       await settle(`${label} zoom ${level} dust stroke`, 1000);
+      // The reference: the committed disc, centred on the stored pixel's centre.
+      const disc = await committedDisc(point, brush);
+      expect(disc && Math.abs(disc.centroid.x - (point.x + 0.5)) < 1e-9 && Math.abs(disc.centroid.y - (point.y + 0.5)) < 1e-9,
+        `${label} zoom ${level}: the committed disc is not centred on the stored pixel: ` + JSON.stringify({ point, centroid: disc?.centroid }));
+      const wantDab = toClient(disc.centroid);
+      expect(dab && offBy(dab, wantDab) <= 1,
+        `${label} zoom ${level}: #brushFeedback draws the dab more than 1 CSS px off the committed disc: ` + JSON.stringify({ dab, wantDab, point, state }));
       const after = await probe();
       await expectSharedBox(`${label} dust zoom ${level}`, after);
+      const wantTint = pooledCentroid(after, disc.pixels);
       const tint = await backingCentroid(wantTint, span);
-      expect(tint && offBy(tint, wantTint) <= 1,
-        `${label} zoom ${level}: the tint of the stroke is off its image point in the overlay's backing: ` + JSON.stringify({ tint, wantTint }));
-      const want = backingToClient(after, tint);
+      expect(tint && offBy(tint, wantTint) <= 1e-6,
+        `${label} zoom ${level}: the tint of the stroke is not the committed disc pooled: ` + JSON.stringify({ tint, wantTint }));
+      const want = backingToClient(after, wantTint);
       const drawn = await layerCentroid(around(want, screenSpan), 'displayOverlay');
       expect(drawn && offBy(drawn, want) <= 1,
-        `${label} zoom ${level}: the tint is drawn more than 1 CSS px off its place: ` + JSON.stringify({ drawn, want, tint, after }));
+        `${label} zoom ${level}: the tint is drawn more than 1 CSS px off the committed disc: ` + JSON.stringify({ drawn, want, tint, after }));
       results.push({ level, zoom: round(await zoomOf()), dab: [round(dab.x - wantDab.x), round(dab.y - wantDab.y)],
-        tint: [round(drawn.x - want.x), round(drawn.y - want.y)], tintBacking: [round(tint.x - wantTint.x), round(tint.y - wantTint.y)] });
+        tint: [round(drawn.x - want.x), round(drawn.y - want.y)], disc: disc.pixels.length, cells: wantTint.cells });
     }
     await zoomTo(1);
     return results;
   };
+
+  // The before/after comparison (#279 follow-up): it keeps the photo canvas's
+  // box, never one of its own; with the border a transform lays it over the
+  // photo's rectangle. A side of the first colour patch (an image edge the
+  // negative and the positive both show) is drawn by the comparison within
+  // 1 CSS px of where the photo under it draws that side, at 100 % and about
+  // 400 % zoom, with and without the border.
+  const edges = createScreenEdges({ send, evaluate });
+  const comparisonAlignment = async (label) => {
+    const results = [];
+    for (const level of [1, 4]) {
+      await zoomTo(level);
+      const state = await probe();
+      const shown = await frame();
+      const zoom = await zoomOf();
+      const W = state.working.width, H = state.working.height;
+      // Patch 0 of importNegative: from 0.55 of the width for 0.1, from 0.55 of the height for 0.12.
+      const patch = { left: Math.round(0.55 * W), top: Math.round(0.55 * H), right: Math.round(0.65 * W), bottom: Math.round(0.67 * H) };
+      const toClient = (x, y) => ({ x: state.photo.left + x / W * state.photo.width, y: state.photo.top + y / H * state.photo.height });
+      // A display pixel on screen; the edge's blur is a few of them.
+      const texel = state.photo.width / shown.display[0];
+      const reach = Math.max(10, 6 * texel);
+      const sides = [
+        { axis: 'x', point: toClient(patch.left, (patch.top + patch.bottom) / 2), band: Math.min(60, 0.5 * (patch.bottom - patch.top) / H * state.photo.height) },
+        { axis: 'y', point: toClient((patch.left + patch.right) / 2, patch.top), band: Math.min(60, 0.5 * (patch.right - patch.left) / W * state.photo.width) },
+      ];
+      const view = await evaluate(`(() => { const r = document.getElementById('canvasContainer').getBoundingClientRect(); return { left: r.left, top: r.top, right: r.right, bottom: r.bottom }; })()`);
+      for (const side of sides) {
+        expect(side.point.x - reach > view.left && side.point.x + reach < view.right && side.point.y - reach > view.top && side.point.y + reach < view.bottom,
+          `${label} zoom ${level}: the patch side is out of view: ` + JSON.stringify({ side, view }));
+      }
+      await evaluate(`document.getElementById('beforeAfterBtn').click()`);
+      await until(`${label} zoom ${level} comparison shown`, `window.__ncDisplay.frame().comparison.shown`, 30_000);
+      await nextFrames();
+      const placed = (await frame()).comparison;
+      const measured = [];
+      for (const side of sides) {
+        measured.push(await edges.layerEdges('beforeAfterCanvas', { axis: side.axis, reach, band: side.band,
+          at: side.axis === 'x' ? side.point.x : side.point.y, across: side.axis === 'x' ? side.point.y : side.point.x }));
+      }
+      await evaluate(`document.getElementById('beforeAfterBtn').click()`);
+      await until(`${label} zoom ${level} comparison closed`, `!window.__ncDisplay.frame().comparison.shown`, 30_000);
+      const layout = shown.glPhoto;
+      expect(placed.box.every(value => value === '') && (layout
+        ? placed.photo && placed.photo.x === layout.x && placed.photo.frameWidth === layout.frameWidth && /^translate\(/.test(placed.transform)
+        : !placed.photo && placed.transform === ''),
+      `${label} zoom ${level}: the comparison is not in the photo canvas's box, laid over the photo: ` + JSON.stringify({ placed, layout }));
+      const [x, y] = measured;
+      expect([x.shown, x.under, y.shown, y.under].every(edge => !edge.error && edge.contrast >= 8),
+        `${label} zoom ${level}: the patch side was not found on screen: ` + JSON.stringify(measured));
+      // The photo fills its box (object-fit, #279 follow-up): it draws the sides
+      // where the box puts them, as every layer over it does.
+      const px = x.under.position - sides[0].point.x, py = y.under.position - sides[1].point.y;
+      expect(Math.abs(px) <= 1 && Math.abs(py) <= 1,
+        `${label} zoom ${level}: the photo is drawn more than 1 CSS px off its box: ` + JSON.stringify({ px, py, measured, sides }));
+      const dx = x.shown.position - x.under.position, dy = y.shown.position - y.under.position;
+      expect(Math.abs(dx) <= 1 && Math.abs(dy) <= 1,
+        `${label} zoom ${level}: the comparison draws the patch more than 1 CSS px off the photo: ` + JSON.stringify({ dx, dy, measured, sides, placed }));
+      results.push({ level, zoom: round(zoom), dx: round(dx), dy: round(dy),
+        // Where the photo itself draws the sides, from where its box puts them.
+        photo: [round(px), round(py)] });
+    }
+    await zoomTo(1);
+    return results;
+  };
+
+  const borderedComparison = await comparisonAlignment('border');
+  console.log('ok: with the border, the comparison draws the image within 1 CSS px of the photo under it ' + JSON.stringify(borderedComparison));
 
   await setDodge(true);
   await settle('dodge tool on', 1000);
@@ -589,6 +694,8 @@ export async function runDisplayModesSmoke({ send, evaluate, waitFor, fail, inst
   await settle('dodge tool off', 1000);
   console.log('ok: without the border, dodge strokes land on the same image points on GL and #canvas and the overlay draws them within 1 CSS px '
     + JSON.stringify({ plainAlignment, plainMapping }));
+  const plainComparison = await comparisonAlignment('no border');
+  console.log('ok: without the border, the comparison draws the image within 1 CSS px of the photo under it ' + JSON.stringify(plainComparison));
 
   // ---- 3b. Portrait border ----
   await open('', [['display-modes-portrait.png', 1000, 1500]]);

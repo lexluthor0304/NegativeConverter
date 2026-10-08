@@ -264,13 +264,59 @@ surface at 2.2–4 MP, in Node). They now stay on the GPU.
   CSS pixels, the size the compositor showed anyway: a box 746.5 px wide was shown
   747 px wide, which put a point 60 % across the photo 1.1 screen px from its
   client rect at 381 %. With a whole-pixel box the client rect is where the photo
-  is drawn, up to the wrapper's own sub-pixel position (at most 0.5 CSS px at any
-  zoom), so the brush mappings and `#brushFeedback`, which work from that rect,
-  stay on the photo. The fit scale behind "100 %", the zoom and the detail layer
-  stays the exact one. In the display-modes smoke at 381 % (DPR 1), measured with
+  is drawn (once the photo fills it, see the follow-up below), up to the wrapper's
+  own sub-pixel position (at most 0.5 CSS px at any zoom), so the brush mappings
+  and `#brushFeedback`, which work from that rect, stay on the photo. The fit scale
+  behind "100 %" and the zoom stays the exact one (the detail layer plans its
+  density from it). In the display-modes smoke at 381 % (DPR 1), measured with
   whole-pixel clips, a saved stroke on `#glCanvas` was 1.28 px off its point with
   the border and 0.70 px without it before; on either canvas it is now within
   0.2 px, and the tint and the live dab within 0.1 px.
+- **The comparison, the detail layer and the photo itself (#279 follow-up).** The
+  before/after comparison and the detail layer (#248) were the last layers in the
+  wrapper with boxes of their own: the comparison over the photo's rectangle inside
+  the border (percentages of the wrapper), the detail layer at its region's
+  rectangle in CSS pixels at the exact fit scale, while the photo is drawn at its
+  whole-pixel box's scale (up to half a CSS pixel apart across the frame, which the
+  zoom magnifies too). Both now keep the photo canvas's box, the stylesheet's, and a
+  CSS transform lays them over their rectangle (`frameRectTransform` in
+  `displayCanvas.js`): a translation in percentages of that box and a scale. The
+  compositor applies a transform as it is, so they land where the box puts their
+  rectangle, and the percentages follow a new fit without placing them again. Their
+  pixels are those they had: the comparison is still its reference put at its own
+  size, the detail layer its region, planned at the same density; only the placement
+  changed. The pan that puts a region's corner on a whole device pixel uses the
+  box's scale, where the corner now is. A standalone Chrome measurement (DPR 1 and
+  2, zoom 1 to 7.45, 2D and WebGL canvases) put the detail layer within 0.1 px of
+  the base at 381 % and 0.035 px at 745 %, where its own box was 2.3 px and 4.5 px
+  off, and the comparison within 0.002 px of the photo (0.08 px for a reference of
+  another size).
+  Measuring the layers against the photo under them (not against its client rect)
+  showed the photo itself off its box: `#glCanvas` and `#canvas` had
+  `object-fit: contain`, and their backing and box come from separate roundings
+  (the display size is floored at fit x DPR, the box rounded from the full frame;
+  a reduced tier caps the backing). A 901 x 601 backing in a 902 x 601 box was
+  letterboxed and snapped to start 1 CSS px in, so without the border the photo was
+  drawn 1.7 to 2.2 screen px right of where its box, and every layer laid on the
+  box (the overlay of #279 too), put it at 333 % to 381 %. `fitPhotoCanvasContent`
+  sets `object-fit: fill` while the backing has the box's shape up to rounding (at
+  most 2 CSS px of letterbox), so the photo fills its box like every layer over it;
+  a backing of another shape (the box already fits new planes whose frame is not
+  drawn yet) keeps `contain`, letterboxed as before rather than stretched. In the
+  app, measured on screen with the sides of a patch that the layer and the photo
+  under it both show (`scripts/screen-edges.mjs`), DPR 1 unless noted:
+  - the detail layer (zoom-detail smoke) was 2.16 screen px off the base at true
+    100 % (333 %) and 4.35 px at 381 %, of which the base's letterbox was 1.67 and
+    1.91 px; now 0.04 and 0.07 px, and the base within 0.15 px of its box;
+  - the comparison over `#glCanvas` (display-modes smoke) without the border was
+    0.59 px (100 %) and 1.88 px (381 %) off the photo, all of it the photo's
+    letterbox (0.58 and 2.18 px off its box); now 0.08 and 0.20 px, the photo
+    within 0.53 px of its box. With the border its own box measured within 0.14 px
+    before and after;
+  - over `#canvas` at DPR 2 (compare-preview smoke) the comparison was within
+    0.17 px before and is within 0.11 px now, with and without the border: there
+    the photo's backing filled its box and the box rounded benignly. The transform
+    keeps the comparison there however Chrome would round a box of its own.
 - **Histogram.** Unchanged: the GL path's sample (≤ 24,576 px) goes through the same
   look, rescue and hold-to-compare rules, every 260 ms and at each settle, including
   above 16 MP where `updateFull` does not run.
@@ -319,6 +365,23 @@ fallback keeps one worker; #256 splits export conversions).
   checks the plan, the offsets of the tint, its patches and the strokes, and that
   the overlay sets no box of its own; `zoomActualPixels.test.mjs` the whole-pixel
   box.
+- #279 follow-up: `--display-modes-only` shows the comparison over `#glCanvas` and
+  checks that it keeps the photo canvas's box (a transform over the photo with the
+  border) and draws a colour patch's left and top sides within 1 CSS px of where
+  the photo under it draws them, and the photo within 1 CSS px of where its box
+  puts them, at 100 % and about 400 % zoom, with and without the border; its dust
+  check now measures the live dab and the tint against one reference, the disc
+  the stroke commits, read back from the dust mask (`__ncBrush.maskWindow`).
+  `--compare-preview-only` does the same for the comparison over `#canvas` (DPR 2,
+  with and without the border) and `--zoom-detail-only` for the detail layer over
+  the base at true 100 % and about 400 %. The edges are found on screen to a
+  fraction of a pixel where each layer's profile across a patch side crosses
+  halfway between its two sides (`scripts/screen-edges.mjs`).
+  `displayCanvas.test.mjs` checks `frameRectTransform`, `displayPath.test.mjs` the
+  comparison's placement, `detailLayerWiring.test.mjs` the detail layer's and the
+  snapped pan, `zoomActualPixels.test.mjs` and `previewTierWiring.test.mjs` the
+  photo's `object-fit` (a reduced buffer included), `brushWiring.test.mjs` the dab
+  at the committed disc's centre.
 - Frame rates, latency, heap growth and WebKit behaviour need the #230 harness.
 
 ## Native detail at zoom (#248 review)
@@ -337,6 +400,10 @@ cannot cover the entire view, and superseded requests abort and drop queued row
 buffers. When native rows would exceed 16 MP, the retained level covers the full
 view at its available density. This is a display approximation below native zoom;
 100% and export-triggered exact frames use exact frame crops.
+
+The region's canvas keeps the base's box, and a transform lays it over the
+region (#279 follow-up, see Display modes): it is drawn on the base's pixel
+grid at any zoom, where a box of its own was rounded off it.
 
 An export's exact frame uses its own pixels and box-filter grid, even when the
 source plan says `fromLevel`. Above the 16 MP native-copy limit it builds that

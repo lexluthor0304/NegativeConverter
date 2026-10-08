@@ -471,3 +471,48 @@ for (const border of [false, true]) {
   assert.deepEqual(released, [11]);
   assert.equal(context.liveDodge, next);
 }
+
+// #279 follow-up: the dust brush stores the pixel under the pointer (rounded,
+// as it always has), and DustBrush stamps the committed disc around that
+// pixel, centred on its centre. The live dab on #brushFeedback is drawn at
+// that centre, not at the pixel's corner half a pixel up and left; the stored
+// points are unchanged.
+{
+  const { rasterizeBrushStroke } = await import('../silvercore/engine/DustBrush.js');
+  const W = 1500, H = 1000;
+  const rect = { left: 210.25, top: 96.5, width: 871, height: 580.6666 };
+  const feedback = { begun: null, points: [] };
+  const state = { processedImageData: { width: W, height: H },
+    dustRemoval: { enabled: true, showMask: true, mask: new Uint8Array(1), brushSize: 8, processing: false },
+    processedImageDataIsPreview: false, fullResolutionPending: false, samplingMode: null, cropping: false };
+  const surface = { setPointerCapture() {} };
+  const context = vm.createContext({ state, Math, window: { devicePixelRatio: 1 }, dustDrawing: false, dustBrushPoints: [], dustBrushSource: null,
+    dustBrushToken: null, dustBrushPointerId: null, dustBrushSurface: null, dustBrushRect: null, dustBrushLastSample: null, dustBrushMode: null,
+    coreReprocessToken: 4, canPaintAiBrush: () => false, canPaintDodgeBurn: () => false, currentPhotoExact: () => true, getDustSource: () => ({}),
+    captureBrushPointer() {}, brushSurfaceRect: () => rect, BRUSH_FEEDBACK_STYLES, movedEnough, pointerSamples,
+    brushFeedback: { begin: (options) => { feedback.begun = options; }, add: (points) => feedback.points.push(...points) } });
+  vm.runInContext(['clientToImageCoords', 'dustDiscCentre', 'onDustBrushStart', 'addDustBrushSamples', 'onDustBrushMove'].map(functionSource).join('\n'), context);
+  const event = (clientX, clientY, extra = {}) => ({ clientX, clientY, pointerId: 3, pointerType: 'mouse', button: 0, altKey: true, currentTarget: surface,
+    preventDefault() {}, stopImmediatePropagation() {}, ...extra });
+  context.onDustBrushStart(event(600.3, 402.9));
+  for (const [x, y] of [[604.1, 405.2], [611.8, 409.7]]) context.onDustBrushMove(event(x, y));
+  const stored = Array.from(context.dustBrushPoints, point => ({ ...point }));
+  assert.equal(context.dustBrushMode, 'direct');
+  assert.deepEqual(stored, [[600.3, 402.9], [604.1, 405.2], [611.8, 409.7]].map(([x, y]) => ({
+    x: Math.round((x - rect.left) * W / rect.width), y: Math.round((y - rect.top) * H / rect.height) })), 'the stored points: rounded pixels, as before');
+  assert.deepEqual(Array.from(feedback.points, point => ({ ...point })), stored.map(point => ({ x: point.x + 0.5, y: point.y + 0.5 })),
+    'the live dab at each pixel\'s centre');
+  assert.equal(feedback.begun.radius, 8);
+  // The committed disc of a point is centred exactly there.
+  for (const [index, point] of stored.entries()) {
+    const raster = rasterizeBrushStroke([point], 8, W, H);
+    let sx = 0, sy = 0, n = 0;
+    for (let y = 0; y < raster.rect.height; y++) for (let x = 0; x < raster.rect.width; x++) {
+      if (!raster.brush[y * raster.rect.width + x]) continue;
+      sx += raster.rect.x + x + 0.5; sy += raster.rect.y + y + 0.5; n++;
+    }
+    assert.deepEqual({ x: sx / n, y: sy / n }, { ...feedback.points[index] }, `disc ${index}: centred on the live dab`);
+  }
+}
+
+console.log('brushWiring: the live dust dab is drawn at the centre of the disc DustBrush commits for the stored pixel');

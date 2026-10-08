@@ -9,6 +9,7 @@ import { displayTargetFor, displayLevelGeometry } from './displayPreview.js';
 import { computeZoomGeometry } from './zoomGeometry.js';
 import { displaySessionStubs, DISPLAY_SESSION_HELPERS } from './displaySessionHarness.mjs';
 import { regionFrame } from '../render/previewTables.js';
+import { frameRectTransform } from './displayCanvas.js';
 
 // #248 part 5 in main.js (extracted with vm): when the detail layer asks for a
 // region, from what, how it is placed, and that a stale region is never drawn.
@@ -82,6 +83,8 @@ function fixture({ dpr = 2, container = { width: 600, height: 420 }, size = { wi
     modesStatus: () => renderer.modes || 'linked'
   };
   const fit = Math.min((container.width - 20) / W, (container.height - 20) / H);
+  // The base's box, whole CSS pixels (#279), as adjustCanvasDisplay sets it.
+  const box = { width: Math.round(W * fit), height: Math.round(H * fit) };
   const context = vm.createContext({
     // #249: no photo here takes a display form.
     ...displaySessionStubs(),
@@ -109,7 +112,8 @@ function fixture({ dpr = 2, container = { width: 600, height: 420 }, size = { wi
     isWebGLActive: () => true, canPaintAiBrush: () => false, usesSilverCoreConversion: () => true,
     hasSeparateConversionPreview: () => true, hasFrameRepairs: () => state.dustRemoval.enabled,
     getCanvasContainerSize: () => container,
-    getZoomGeometry: () => computeZoomGeometry({ wrapperW: W * fit, wrapperH: H * fit, containerW: container.width, containerH: container.height, zoom: state.zoomLevel }),
+    getZoomGeometry: () => computeZoomGeometry({ wrapperW: box.width, wrapperH: box.height, containerW: container.width, containerH: container.height, zoom: state.zoomLevel }),
+    frameRectTransform, conversionSourceSize: () => state.conversionSourceImageData || state.sourcePending || null,
     interimGeometryCss: () => '', webglStep3Values: () => ({ wb: [1, 1, 1], vib: 0, cmy: [0, 0, 0], stages: state.stages || null }),
     regionFrame, requestAnimationFrame: () => 1,
     gpuPreview: { lastDraw: 'step3' }, gpuPreviewScheduler: { isAhead: () => false },
@@ -130,7 +134,7 @@ function fixture({ dpr = 2, container = { width: 600, height: 420 }, size = { wi
   });
   vm.runInContext([
     ...DISPLAY_SESSION_HELPERS,
-    'detailLayerAllowed', 'detailView', 'detailFullFrame', 'detailTag', 'detailTagCurrent', 'hideDetailLayer', 'dropDetailLayer',
+    'detailLayerAllowed', 'detailView', 'detailBoxScale', 'detailFullFrame', 'detailTag', 'detailTagCurrent', 'hideDetailLayer', 'dropDetailLayer',
     'positionDetailCanvas', 'drawDetailLayer', 'detailModesReady', 'syncDetailLayer', 'noteDetailViewChanged', 'scheduleDetailRequest',
     'scheduleDetailWarmUp', 'detailConversionBusy', 'wakeDetailAfterConversion', 'noteCoreReprocessSettled', 'requestDetailRegion', 'detailFromFrame', 'detailFromSource', 'showDetailRegion',
     'detailBandCount', 'detailClients', 'retireDetailWorkers', 'detailBandsFor', 'detailRowsPlane', 'detailInBands',
@@ -152,7 +156,7 @@ function fixture({ dpr = 2, container = { width: 600, height: 420 }, size = { wi
     state.panX = cx - next.baseX - contentX * zoom;
     state.panY = cy - next.baseY - contentY * zoom;
   };
-  return { context, state, roiCalls, resamples, draws, uploads, glDetailCanvas, wrapper, timers, runTimers, zoomTo, fit, conversionSource, base, container,
+  return { context, state, roiCalls, resamples, draws, uploads, glDetailCanvas, wrapper, timers, runTimers, zoomTo, fit, box, conversionSource, base, container,
     analyses, heldLevel, bandCalls, disposed, level };
 }
 
@@ -183,17 +187,23 @@ function fixture({ dpr = 2, container = { width: 600, height: 420 }, size = { wi
   assert.equal(request.base.levelWidth, W);
   assert.equal(request.base.display.target.width, f.base.width, 'with the base display target, whose analysis it shares');
   assert.ok(request.region.slotWidth >= request.region.outWidth && request.region.slotWidth % 256 === 0);
-  // Snapped: the region's corner on a whole device pixel.
+  // Snapped: the region's corner on a whole device pixel, where the base's
+  // whole-pixel box puts it (#279 follow-up).
   const geometry = f.context.getZoomGeometry();
-  const device = (geometry.baseX + f.state.panX + zoom100 * request.region.x * f.fit) * 2;
+  const device = (geometry.baseX + f.state.panX + zoom100 * request.region.x * f.box.width / W) * 2;
   assert.ok(Math.abs(device - Math.round(device)) < 1e-6, 'the pan is snapped to device pixels');
   assert.ok(plan);
   f.roiCalls[0].resolve(new ImageData(request.region.outWidth, request.region.outHeight));
   await settle();
   assert.equal(f.context.detailLayer.visible, true);
   assert.equal(f.glDetailCanvas.width, request.region.outWidth);
-  assert.equal(f.glDetailCanvas.style.left, `${request.region.x * f.fit}px`);
-  assert.equal(f.glDetailCanvas.style.width, `${request.region.width * f.fit}px`);
+  // Laid over the region by a transform of the base's box, never a box of
+  // its own: the compositor rounded that box off the base's pixel grid.
+  assert.deepEqual([f.glDetailCanvas.style.left, f.glDetailCanvas.style.top, f.glDetailCanvas.style.width, f.glDetailCanvas.style.height],
+    [undefined, undefined, undefined, undefined]);
+  assert.equal(f.glDetailCanvas.style.transform, frameRectTransform(request.region, W, H));
+  assert.equal(f.glDetailCanvas.style.transform, `translate(${request.region.x / W * 100}%, ${request.region.y / H * 100}%) `
+    + `scale(${request.region.width / W}, ${request.region.height / H})`);
   assert.equal(f.draws.length, 1);
 
   // A small pan inside the margin keeps it; a base redraw (a Step-3 edit)
@@ -270,13 +280,14 @@ function fixture({ dpr = 2, container = { width: 600, height: 420 }, size = { wi
   f.state.fullResolutionPending = false;
   f.zoomTo(1.953125 / (f.fit * 1.76));
   const start = { panX: f.state.panX, panY: f.state.panY };
-  // A pan whose snap for its own region plans another one.
+  // A pan whose snap for its own region plans another one. The step is not
+  // near a third of a source row, so the search meets every phase of the rows.
   let crossing = null;
   for (let step = 0; step < 400 && !crossing; step++) {
-    const panY = start.panY - step * 0.37;
+    const panY = start.panY - step * 0.113;
     const view = { ...f.context.detailView(), panY };
     const plan = planDetailRegion(view);
-    const snapped = snapPanToDevicePixels(panY, view.baseY, f.state.zoomLevel, plan.y * view.fit, 1);
+    const snapped = snapPanToDevicePixels(panY, view.baseY, f.state.zoomLevel, plan.y * view.boxHeight / view.sourceHeight, 1);
     if (planDetailRegion({ ...view, panY: snapped }).y !== plan.y) crossing = panY;
   }
   assert.ok(crossing !== null, 'a pan whose snap crosses a source row');

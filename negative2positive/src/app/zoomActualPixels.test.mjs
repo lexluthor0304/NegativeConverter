@@ -63,7 +63,7 @@ function fixture({ source: size = { width: 9536, height: 6336 }, container = { w
     constSource('ZOOM_MIN'), constSource('ZOOM_MAX_FIT'), constSource('ZOOM_DOUBLE_CLICK_FACTOR'),
     'const canvasDisplayFit = { w: 0, h: 0, containerW: 0, containerH: 0, zoom: 0, dpr: 0, scale: 0 };',
     'let displayPreviewResizeTimer = null;',
-    ...['getFullResDisplayReference', 'displayFrameReference', 'conversionSourceSize', 'adjustCanvasDisplay', 'actualPixelsZoom', 'zoomMax', 'zoomIndicatorText',
+    ...['getFullResDisplayReference', 'displayFrameReference', 'conversionSourceSize', 'adjustCanvasDisplay', 'fitPhotoCanvasContent', 'actualPixelsZoom', 'zoomMax', 'zoomIndicatorText',
       'applyZoomPanTransform', 'getZoomGeometry', 'clampPan', 'resetZoomPan', 'resetUserZoom',
       'toggleActualPixels', 'zoomAtPoint', 'scheduleDisplayPreviewResize'].map(functionSource)
   ].join('\n'), context);
@@ -85,6 +85,17 @@ for (const container of [{ width: 1110 - 300, height: 700 - 100 }, { width: 1440
     assert.deepEqual([f.wrapper.style.width, f.wrapper.style.height], [`${Math.round(9536 * fit)}px`, `${Math.round(6336 * fit)}px`]);
     assert.deepEqual([f.context.glCanvas.style.width, f.context.glCanvas.style.height], [f.wrapper.style.width, f.wrapper.style.height]);
     assert.ok(Number.isInteger(cssWidth(f)) && Math.abs(cssWidth(f) - 9536 * fit) <= 0.5);
+    // #279 follow-up: the photo fills that box. A backing of the box's shape
+    // up to rounding (the display size is floored, the box rounded) is
+    // stretched over it, never letterboxed a pixel off; one of another shape
+    // (the box already fits new planes) is letterboxed, as before.
+    const gl = f.context.glCanvas;
+    for (const [width, height, want] of [[Math.floor(9536 * fit * dpr), Math.floor(6336 * fit * dpr), 'fill'],
+      [Math.round(9536 * fit * dpr) - 1, Math.round(6336 * fit * dpr), 'fill'], [1202, 1809, 'contain'], [0, 0, 'contain']]) {
+      Object.assign(gl, { width, height });
+      f.context.fitPhotoCanvasContent(gl);
+      assert.equal(gl.style.objectFit, want, `${width} x ${height} in ${gl.style.width} x ${gl.style.height}`);
+    }
     const zoom100 = Math.max(1, 1 / (fit * dpr));
     assert.ok(Math.abs(f.context.actualPixelsZoom() - zoom100) < 1e-9, 'zoom100 = max(1, 1 / (fit x DPR))');
     // 200 % of native is reachable.
