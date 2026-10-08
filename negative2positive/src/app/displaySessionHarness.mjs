@@ -3,10 +3,15 @@
 // functions they test, and stubs for what a fixture that does not exercise
 // the tiers needs defined. Never imported by the app.
 
-// Helpers every reader of the base, the source or the working planes calls.
+import { displayFilterOf, displayResampleMode } from './displayPreview.js';
+
+// Helpers every reader of the base, the source or the working planes calls,
+// and those every frame that lands goes through (the live dodge composite and
+// the exact displays of #254's follow-up).
 export const DISPLAY_SESSION_HELPERS = [
   'baseSizeSource', 'conversionSourceSize', 'releasedPlane', 'isReleasedPlane', 'workingPlanes', 'sessionGeometryKey',
-  'reviveFrameDescriptor', 'autoWbSampleKey', 'pendingConversionTarget', 'displayFrameReference'
+  'reviveFrameDescriptor', 'autoWbSampleKey', 'pendingConversionTarget', 'displayFrameReference',
+  'applyPreviewFrame', 'liveCompositeOf', 'noteExactFrame', 'noteExactDisplay', 'exactDisplayFilterK'
 ];
 
 export function displaySessionDiagnosticsStub() {
@@ -57,6 +62,9 @@ export function displaySessionStubs(overrides = {}) {
     // Part 3: no persistent store.
     displayProxyStore: null, persistDisplayProxy: async () => false, readStoredDisplaySession: async () => null,
     persistPresentationPreview: async () => false, presentStoredPreview: async () => {},
+    // No stroke is painted: the registries of exact displays and composites.
+    exactFrames: new WeakMap(), exactDisplays: new WeakMap(), liveComposites: new WeakMap(), convertedPixelsRevision: 0,
+    displayFilterOf, displayResampleMode,
     ...overrides
   };
 }

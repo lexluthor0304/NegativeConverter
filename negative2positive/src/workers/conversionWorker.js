@@ -16,10 +16,13 @@ import { convertAdjustedFrame } from '../pipeline/adjustedFrame.js';
 import { createAdjustmentLutScratch } from '../app/adjustmentPipeline.js';
 import { fromImageData8 } from '../silvercore/util/image16.js';
 import { downsampleImageDataForMaxPixels } from '../app/imageDataOps.js';
-import { resampleDisplayLevel, filterDisplayImage, buildDisplayLevel, displayLevelFactor, displayLevelRows, resampleDisplayLevelRows } from '../app/displayPreview.js';
+import { resampleDisplayLevel, filterDisplayImage, buildDisplayLevel, displayLevelFactor, displayLevelRows, resampleDisplayLevelRows,
+  displayFootprint, filterDisplayRegion } from '../app/displayPreview.js';
 import { assertDetailAllocation, assertDetailRoiAllocation, assertDetailGeometry, DETAIL_MAX_OUTPUT_PIXELS, DETAIL_MAX_DIMENSION } from '../app/detailLayer.js';
 
 let cachedSource = null;
+// The client's number for the cached source (#254 follow-up: exposureExact).
+let cachedSourceSeq = 0;
 let cachedAnalysis = null;
 // The 16-bit plane of the last interactive frame that main asked to retain
 // (#233). During a slider drag main draws the 8-bit plane only, so this one
@@ -43,6 +46,10 @@ const WB_SAMPLE_LONG_SIDE = 1024;
 // and the committed strokes main last sent with a live request.
 let liveStroke = null;
 let liveCommitted = null;
+// The stroke being painted over the display of a full-resolution frame
+// (#254 follow-up): { strokeId, stroke, points, store, settings, analysis,
+// frame, display }.
+let exactStroke = null;
 
 function planeOf(image) {
   if (image.data instanceof Uint16Array) return image;
@@ -113,6 +120,7 @@ function resolveRequest(msg, settings = msg.settings) {
   if (msg.cacheInput) {
     // Resampled negatives of another level are dropped with it.
     if (cachedSource !== imageData) displayNegatives = displayNegatives.filter(entry => entry.level === imageData);
+    if (!msg.reuseSource) cachedSourceSeq = msg.sourceSeq || 0;
     cachedSource = imageData;
     if (!msg.reuseAnalysis) cachedAnalysis = options.analysisImageData || null;
     conversionOptions.analysisImageData = cachedAnalysis;
@@ -211,6 +219,8 @@ async function convert(msg) {
     };
     // An interactive frame a live dodge-and-burn stroke can be painted over (#254).
     if (Number.isInteger(result.__liveFrame)) payload.liveFrame = { seq: result.__liveFrame, slot: slotNameFor(options) };
+    // The analysis a full-resolution frame was converted with (#254 follow-up).
+    if (result.__analysis) payload.analysis = result.__analysis;
     const transfers = [result.data.buffer];
     if (result.__analysisPreview) {
       const sample = result.__analysisPreview;
@@ -538,7 +548,7 @@ function exposureLive(msg) {
   const { id, slot, frameSeq } = msg;
   try {
     if (msg.probe) {
-      self.postMessage({ type: 'exposureLive', id, hasLive: Boolean(liveStroke), hasCommitted: Boolean(liveCommitted) });
+      self.postMessage({ type: 'exposureLive', id, hasLive: Boolean(liveStroke), hasCommitted: Boolean(liveCommitted), hasExact: Boolean(exactStroke) });
       return;
     }
     if (msg.end) {
@@ -547,6 +557,7 @@ function exposureLive(msg) {
         liveStroke = null;
         liveCommitted = null;
       }
+      if (!exactStroke || msg.strokeId == null || exactStroke.strokeId === msg.strokeId) exactStroke = null;
       self.postMessage({ type: 'exposureLive', id, ended: true });
       return;
     }
@@ -584,6 +595,78 @@ function exposureLive(msg) {
   }
 }
 
+// One step of a live stroke over the display preview of a full-resolution
+// frame (#254 follow-up), whose pixels are not the preview slot's. The new
+// segments are rasterised at full resolution; the display pixels whose filter
+// footprint they reach are converted from the cached source as that frame was
+// converted (a region of it with the frame's analysis, every stroke placed by
+// `region`, so the same values as the whole frame) and filtered as its display
+// preview was. Replies { rect, rgba, image16 } in display pixels: exactly the
+// display preview the frame with the stroke so far gets. { stale } when the
+// cached source is not that frame's source, { needsReset } when the stroke has
+// to be sent again from its first point. `exact` comes with `reset`: the
+// router settings (with the committed strokes), the frame's `analysis`, its
+// `frame` size, the `display` { width, height, k } and the stroke `geometry`.
+async function exposureExact(msg) {
+  const { id } = msg;
+  try {
+    if (msg.reset) {
+      const { settings, analysis, frame, display, geometry } = msg.exact || {};
+      if (!settings || !analysis || !frame || !display || !geometry) throw new Error('An exact live stroke needs its frame');
+      exactStroke = { strokeId: msg.strokeId, stroke: msg.stroke, points: [], settings, analysis, frame, display,
+        store: createLiveStrokeCoverage(msg.stroke, geometry) };
+    }
+    const session = exactStroke;
+    if (!session || session.strokeId !== msg.strokeId) {
+      self.postMessage({ type: 'exposureLive', id, needsReset: true });
+      return;
+    }
+    // The cached source is the frame's source (a level of k = 1), the one the
+    // client names when it numbers its sources.
+    const level = cachedSource;
+    if (!level || level.width !== session.frame.width || level.height !== session.frame.height
+      || (msg.sourceSeq && msg.sourceSeq !== cachedSourceSeq)) {
+      exactStroke = null;
+      self.postMessage({ type: 'exposureLive', id, stale: true });
+      return;
+    }
+    const points = msg.points || [];
+    for (const point of points) session.points.push(point);
+    let rect = addLiveStrokePoints(session.store, points);
+    if (msg.fullStroke) rect = unionRect(rect, session.store.bounds);
+    const footprint = rect ? displayFootprint(session.frame, session.display, session.display.k, rect) : null;
+    if (!footprint) {
+      self.postMessage({ type: 'exposureLive', id, rect: null });
+      return;
+    }
+    const { display, source } = footprint;
+    // The stroke as the pen-up stores it, after the committed ones.
+    const committed = session.settings.localExposure?.strokes || [];
+    const settings = { ...session.settings, localExposure: { strokes: [...committed, { ...session.stroke, points: session.points.slice() }] } };
+    let result;
+    try {
+      result = await convertFrameWithRouter({
+        imageData: cropPlane(planeOf(level), source),
+        settings,
+        options: {
+          region: { originX: source.x, originY: source.y, frameWidth: session.frame.width, frameHeight: session.frame.height },
+          forceFullProcess: true, ownedSource: true, includeAnalysisPreview: false, sharedAnalysis: session.analysis
+        }
+      });
+    } finally {
+      releaseSlotBuffers('roi');
+    }
+    const plane = result.__image16 && result.__image16.data instanceof Uint16Array ? result.__image16.data : null;
+    if (!plane) throw new Error('The region conversion returned no 16-bit plane');
+    const out = filterDisplayRegion({ width: source.width, height: source.height, data: plane }, source, session.frame,
+      session.display, session.display.k, display);
+    self.postMessage({ type: 'exposureLive', id, rect: display, rgba: out.data.buffer, image16: out.image16.buffer },
+      [out.data.buffer, out.image16.buffer]);
+  } catch (err) {
+    self.postMessage({ type: 'error', id, message: err?.message || String(err) });
+  }
+}
+
 // Hands the retained plane of request `resultId` to main, or null when a
 // newer request has taken it over (main then converts that frame again).
 function commit(msg) {
@@ -610,6 +693,7 @@ async function handleMessage(msg) {
   if (msg.type === 'resample') return resample(msg);
   if (msg.type === 'roi') return roi(msg);
   if (msg.type === 'exposureLive') return exposureLive(msg);
+  if (msg.type === 'exposureExact') return exposureExact(msg);
   self.postMessage({ type: 'error', id: msg.id, message: `Unknown message type: ${msg.type}` });
 }
 

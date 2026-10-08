@@ -404,3 +404,63 @@ function noiseImage(width, height, wide) {
   assert.equal(bands.at(-1)[1], 10);
   console.log('displayPreview: level box, area/bilinear resample, checkerboard and grain, region updates');
 }
+
+// #254 follow-up: the display pixels a change of a frame's rect reaches, made
+// from the frame's pixels of the footprint's source region alone, equal the
+// whole-frame filter there (both planes); nothing outside that display rect
+// moves; and with k = 1 a bilinear-mode filter is resizeDisplayPreview's frame.
+{
+  const { displayFootprint, filterDisplayRegion } = await import('./displayPreview.js');
+  const crop = (image, rect) => {
+    const data = new Uint16Array(rect.width * rect.height * 4);
+    for (let y = 0; y < rect.height; y++) {
+      const from = ((rect.y + y) * image.width + rect.x) * 4;
+      data.set(image.__image16.data.subarray(from, from + rect.width * 4), y * rect.width * 4);
+    }
+    return { width: rect.width, height: rect.height, data };
+  };
+  let checked = 0;
+  for (const [w, h, k, tw, th] of [[97, 61, 1, 70, 44], [97, 61, 1, 30, 19], [300, 200, 3, 80, 53], [300, 200, 2, 140, 93], [211, 143, 2, 101, 68], [64, 48, 1, 64, 47]]) {
+    const image = noiseImage(w, h, true);
+    const target = { width: tw, height: th };
+    for (let n = 0; n < 12; n++) {
+      const rect = { x: Math.floor(random() * w), y: Math.floor(random() * h), width: 1 + Math.floor(random() * 30), height: 1 + Math.floor(random() * 30) };
+      rect.width = Math.min(rect.width, w - rect.x); rect.height = Math.min(rect.height, h - rect.y);
+      const footprint = displayFootprint(image, target, k, rect);
+      if (!footprint) continue;
+      const { display, source } = footprint;
+      assert.ok(source.x % k === 0 && source.y % k === 0 && source.width % k === 0 && source.height % k === 0, 'whole level boxes');
+      assert.ok(source.x >= 0 && source.y >= 0 && source.x + source.width <= w && source.y + source.height <= h, 'inside the frame');
+      const before = filterDisplayImage(image, target, { k });
+      // Change the rect: only `display` may move.
+      for (let y = rect.y; y < rect.y + rect.height; y++) for (let x = rect.x; x < rect.x + rect.width; x++) {
+        const i = (y * w + x) * 4;
+        for (let c = 0; c < 3; c++) image.__image16.data[i + c] = Math.floor(random() * 65536);
+      }
+      const after = filterDisplayImage(image, target, { k });
+      for (let y = 0; y < th; y++) for (let x = 0; x < tw; x++) {
+        if (x >= display.x && x < display.x + display.width && y >= display.y && y < display.y + display.height) continue;
+        const i = (y * tw + x) * 4;
+        for (let c = 0; c < 4; c++) assert.equal(after.__image16.data[i + c], before.__image16.data[i + c], `nothing moves outside the footprint ${w}x${h} k${k}`);
+      }
+      const region = filterDisplayRegion(crop(image, source), source, image, target, k, display);
+      for (let y = 0; y < display.height; y++) {
+        const from = ((display.y + y) * tw + display.x) * 4;
+        assert.deepEqual(region.image16.subarray(y * display.width * 4, (y + 1) * display.width * 4),
+          after.__image16.data.subarray(from, from + display.width * 4), `16-bit rows of the region filter ${w}x${h} k${k} ${tw}x${th}`);
+        assert.deepEqual(region.data.subarray(y * display.width * 4, (y + 1) * display.width * 4),
+          after.data.subarray(from, from + display.width * 4), `8-bit rows of the region filter ${w}x${h} k${k} ${tw}x${th}`);
+      }
+      checked++;
+    }
+    if (k === 1 && displayResampleMode({ sourceWidth: w, sourceHeight: h, k: 1 }, target) === 'bilinear') {
+      const filtered = filterDisplayImage(image, target, { k: 1 });
+      const resized = resizeDisplayPreview(image, target);
+      assert.deepEqual(filtered.__image16.data, resized.__image16.data, 'k 1 bilinear filter = resizeDisplayPreview (16-bit)');
+      assert.deepEqual(filtered.data, resized.data, 'k 1 bilinear filter = resizeDisplayPreview (8-bit)');
+    }
+  }
+  assert.ok(checked > 40, `${checked} footprints checked`);
+  assert.throws(() => filterDisplayRegion({ width: 2, height: 2, data: new Uint8ClampedArray(16) }, { x: 0, y: 0, width: 2, height: 2 }, { width: 9, height: 9 }, { width: 3, height: 3 }, 1, { x: 0, y: 0, width: 1, height: 1 }), TypeError);
+  console.log(`displayPreview: ${checked} display footprints of frame rects filtered from their source regions alone, equal to the whole-frame filter`);
+}

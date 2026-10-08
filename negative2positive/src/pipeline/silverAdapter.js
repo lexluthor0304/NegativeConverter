@@ -1028,6 +1028,15 @@ async function runSilverCore(imageData, settings, mode, options) {
     geometry: { ...settings.localExposureGeometry, width: input16.width, height: input16.height },
   } : null;
   if (slot.live) result.__liveFrame = slot.live.seq;
+  // The analysis the frame was converted with, when the caller asks (#254
+  // follow-up): a region of the frame converted with it as `sharedAnalysis`
+  // (and the frame's strokes placed by `region`) has exactly the frame's pixels.
+  if (options?.returnAnalysis && engine.channelData) {
+    result.__analysis = {
+      channelData: engine.channelData.map((channel) => ({ ...channel })),
+      positiveAnalysis: engine.positiveAnalysis ? { gain: engine.positiveAnalysis.gain, wb: [...engine.positiveAnalysis.wb] } : null,
+    };
+  }
 
   if (needsFullProcess) slot.analysis = analysisState;
   if (analysisPreview) result.__analysisPreview = analysisPreview;

@@ -98,7 +98,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     import {
       displayPreviewSize, resizeDisplayPreview, resizeDisplayPreviewInBands, updateDisplayPreviewRect, noteDisplayFilter,
       displayLevelFactor, displayLevelGeometry, buildDisplayLevelInBands, resampleDisplayLevel, displayTargetFor, isDisplayTarget,
-      displaySizeServes, displayFilterOf, adoptDisplayLevel
+      displaySizeServes, displayFilterOf, adoptDisplayLevel, displayResampleMode
     } from './displayPreview.js';
     import { settledDisplayRoute, step3FrameReference, upscaleReference, frameRectTransform } from './displayCanvas.js';
     import { createCoreReprocessGates, previewDispatchAction, CORE_FULL_REPROCESS_DELAY_MS } from './coreReprocessDispatcher.js';
@@ -3886,6 +3886,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     const dustTint = { mask: null, tag: null, width: 0, height: 0, image: null, building: null };
     // Live dodge and burn (see its section).
     const LIVE_DODGE_ENABLED = new URLSearchParams(window.location.search).get('liveDodge') !== '0';
+    // Exact rectangles over a full-resolution display (#254 follow-up);
+    // ?liveDodgeExact=0, or the smoke's __ncBrush.setExactDisplays(false),
+    // paints those strokes by delta instead.
+    let liveDodgeExactDisplays = new URLSearchParams(window.location.search).get('liveDodgeExact') !== '0';
     // The preview worker's newest interactive frame: { frame: { seq, slot },
     // token, generation, width, height }.
     let lastLiveFrame = null;
@@ -3898,8 +3902,19 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // present, an exact-texture upload), which drops live rectangles.
     let liveDisplaySerial = 0;
     // `box`: the union of the rectangles drawn since the counters were reset.
-    const liveDodgeCounters = { strokes: 0, requests: 0, rects: 0, deltaRects: 0, stale: 0, warmups: 0,
-      uploads: 0, puts: 0, maxRectPixels: 0, restored: 0, lastRect: null, box: null };
+    const liveDodgeCounters = { strokes: 0, requests: 0, rects: 0, deltaRects: 0, exactRects: 0, stale: 0, warmups: 0,
+      uploads: 0, puts: 0, maxRectPixels: 0, restored: 0, adopted: 0, kept: 0, lastRect: null, box: null };
+    // Full-resolution frames of a known conversion (#254 follow-up): processed
+    // -> { token, generation, analysis }. The display previews that are exactly
+    // the display filter of one, or what a stroke painted exactly over one left
+    // on screen: preview -> { token, generation, analysis, k, revision }. A
+    // stroke over such a display gets exact rectangles (exposureExact).
+    const exactFrames = new WeakMap();
+    const exactDisplays = new WeakMap();
+    // Display previews that are what a stroke's live rectangles left on screen,
+    // installed as the display at its pen-up: preview -> { token (the
+    // pen-up's), adjusted (a CPU display's adjusted frame, or null) }.
+    const liveComposites = new WeakMap();
     const brushFeedback = createBrushFeedback({
       canvas: brushFeedbackCanvas,
       measure: () => {
@@ -5317,6 +5332,34 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       state.histogramSourceImageData = histogram || histogramSourceFor(processed);
       state.webglSourceImageData = preview;
       if (webglState.gl) webglState.sourceDirty = true;
+      noteExactDisplay(processed, preview);
+    }
+
+    // A full-resolution frame of `token`'s settings that came with the
+    // analysis it was converted with (#254 follow-up): its display previews
+    // show those settings exactly (noteExactDisplay).
+    function noteExactFrame(processed, token, generation) {
+      if (processed?.__analysis) exactFrames.set(processed, { token, generation, analysis: processed.__analysis });
+    }
+
+    // A display preview made of a full-resolution frame whose conversion main
+    // knows, by a filter filterDisplayRegion reproduces (#254 follow-up): a
+    // dodge stroke over it is painted with that frame's exact pixels.
+    function noteExactDisplay(processed, preview) {
+      const frame = exactFrames.get(processed);
+      if (!frame || !preview || preview === processed) return;
+      const k = exactDisplayFilterK(preview, processed);
+      if (k !== null) exactDisplays.set(preview, { ...frame, k, revision: convertedPixelsRevision });
+    }
+
+    // The box size of the filter that made `preview` of `frame`: the area
+    // filter's, or 1 for the main thread's bilinear resize where it is the
+    // area filter's bilinear resample at k = 1. Null for anything else.
+    function exactDisplayFilterK(preview, frame) {
+      const filter = displayFilterOf(preview);
+      if (filter.kind === 'area') return Number.isInteger(filter.k) && filter.k >= 1 ? filter.k : null;
+      if (filter.kind !== 'bilinear') return null;
+      return displayResampleMode({ sourceWidth: frame.width, sourceHeight: frame.height, k: 1 }, preview) === 'bilinear' ? 1 : null;
     }
 
     // A display preview being rebuilt off the input path (#248 part 4): the
@@ -8333,7 +8376,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           // A full-resolution render brings its display preview (#248 part 4),
           // made for the normal tier's display size at request time.
           ...(fullRender && state.conversionSourceImageData ? {
-            displayTarget: getDisplayPreviewSize(fullSource, undefined, 'normal'), histogramSamples: HISTOGRAM_MAX_SAMPLES
+            displayTarget: getDisplayPreviewSize(fullSource, undefined, 'normal'), histogramSamples: HISTOGRAM_MAX_SAMPLES,
+            // The analysis the frame is converted with: a live dodge stroke
+            // over its display converts regions of it exactly (#254 follow-up).
+            returnAnalysis: true
           } : {})
         }
       };
@@ -8928,6 +8974,20 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       fitStep3CanvasBox();
     }
 
+    // A display-size frame of `token`'s settings (null: superseded ones): its
+    // planes are applied, but the pen-up frame of a stroke painted over
+    // another frame than this worker's leaves what the stroke's rectangles
+    // left on screen (#254 follow-up), which stands for these settings until
+    // their exact frame lands. True when it kept that composite.
+    function applyPreviewFrame(processed, { previewOnly = false, token = null } = {}) {
+      const composite = token === null ? null : liveCompositeOf(token);
+      const sourceDirty = webglState.sourceDirty;
+      if (previewOnly) applyProcessedImageToState(processed, { previewOnly: true });
+      else applyPreviewProcessedImageToState(processed);
+      if (composite) keepLiveComposite(composite, sourceDirty);
+      return Boolean(composite);
+    }
+
     let _coreReprocessFullInFlight = false;
     // The running preview flight's own token object, or false. A follow-up
     // posted early (postPendingPreviewEarly) takes the lane over while its
@@ -9375,6 +9435,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           if (sourceRef && state.conversionSourceImageData !== sourceRef) return false;
           gpuPreviewScheduler.exactApplied(token);
           displayedFrameToken = token;
+          // Its display preview shows these settings exactly (#254 follow-up).
+          noteExactFrame(processed, token, generation);
           if (repairedPreviewShown && repairedPreviewShown === state.previewSourceImageData
             && repairedPreviewMatches(repairedPreviewMasks)) {
             // The repaired preview stays on screen until detection repairs
@@ -9460,16 +9522,16 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
             // Preview source is smaller — update preview display path only.
             // A downgraded request (>16 MP) drops a full-resolution plane it
             // would leave stale, unless a brush paints on that plane.
-            if (downgraded && !keepsFullPlaneOnDowngrade({ repairs, aiBrush: isAiBrushEnabled() })) {
-              applyProcessedImageToState(previewProcessed, { previewOnly: true });
-            } else {
-              applyPreviewProcessedImageToState(previewProcessed);
-            }
+            const kept = applyPreviewFrame(previewProcessed, {
+              previewOnly: downgraded && !keepsFullPlaneOnDowngrade({ repairs, aiBrush: isAiBrushEnabled() }),
+              token: superseded ? null : token
+            });
             carryStudioThumbnailSource(replacedSource);
             // Export owes this frame an exact render.
             if (downgraded) state.fullResolutionPending = true;
             repairedPreviewShown = repairedSource ? state.previewSourceImageData : null;
-            updatePreview();
+            // A CPU display shows the composite's adjusted frame already.
+            if (!kept || isWebGLActive()) updatePreview();
             if (repairs) {
               // The exact conversion, detection and inpainting run once, after
               // input has been idle; every tick cancels the timer again.
@@ -9642,7 +9704,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
             processed.__image16 = { width: processed.width, height: processed.height, data: plane };
             delete processed.__retained16;
             // A display preview resampled from this frame was built from 8 bits.
-            if (retained.derived !== processed && state.previewSourceImageData === retained.derived) {
+            // A live composite on screen (#254 follow-up) is not made of it.
+            if (retained.derived !== processed && state.previewSourceImageData === retained.derived
+              && !liveComposites.has(retained.derived)) {
               state.previewSourceImageData = buildPreviewSourceImageData(processed);
               state.histogramSourceImageData = histogramSourceFor(processed);
               state.webglSourceImageData = state.previewSourceImageData;
@@ -26706,9 +26770,17 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       markCurrentFileDirty();
       updateDodgeBurnUI();
       // The live rectangles stay on screen until this frame replaces them; the
-      // stored stroke joins the display overlay.
+      // stored stroke joins the display overlay. Over another frame than the
+      // worker's, what they left on screen stands for the pen-up's settings
+      // until their exact frame lands (adoptLiveComposite, #254 follow-up).
       endLiveDodge(true);
       scheduleCoreReprocess({ full: false });
+      const session = liveDodge;
+      if (session && session.ended === 'commit') {
+        session.commitToken = coreReprocessToken;
+        session.storedPoints = state.localExposure?.strokes?.at(-1)?.points?.length || 0;
+        adoptLiveComposite(session);
+      }
       syncDisplayOverlay();
     }
 
@@ -26788,12 +26860,22 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       return { shown, gl: false, serial: liveDisplaySerial };
     }
 
-    // The worker frame a stroke paints over: the frame on screen when it is
-    // the worker's live frame of the current settings ('exact'), else the
-    // worker's newest frame of the current settings and the same size
-    // ('delta'). Null while a newer frame is on its way.
-    function liveDodgeTarget(display) {
+    // What a stroke paints over (null while a newer frame is on its way):
+    // - 'exact': the frame on screen is the worker's live frame of the current
+    //   settings; its rectangles go in as they are.
+    // - 'display': the frame on screen is the display preview of a
+    //   full-resolution frame of the current settings (exactDisplays), whose
+    //   source the worker holds as its level. The worker converts the stroke's
+    //   region of that source as the frame was converted and filters it as the
+    //   display was (exposureExact): the rectangles are that display's own
+    //   pixels with the stroke (#254 follow-up).
+    // - 'delta': another frame (a repaired one, say): the worker's newest frame
+    //   of the current settings and the same size, shown as displayed + (live -
+    //   committed), an approximation.
+    function liveDodgeTarget(display, session = null) {
       if (!LIVE_DODGE_ENABLED || !display || !usesSilverCoreConversion(state)) return null;
+      const full = session?.noExactDisplay ? null : exactDisplayTarget(display);
+      if (full) return full;
       if (coreReprocessScheduled || _coreReprocessPending || _coreReprocessPreviewInFlight || gpuPreviewScheduler.isAhead()) return null;
       const own = convertPreviewFrameInWorker.liveFrameOf?.(display.shown);
       if (own && !staleLiveFrames.has(own.seq) && displayedFrameToken === coreReprocessToken) return { frame: own, mode: 'exact' };
@@ -26803,13 +26885,43 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       return null;
     }
 
+    // The 'display' target over the frame on screen, or null. The display must
+    // be the filter of a full-resolution frame as its conversion made it: a
+    // repaired frame is another object, and an in-place patch moves
+    // convertedPixelsRevision, so the worker's region (which carries no dust
+    // or AI repair) is never painted over repaired pixels.
+    function exactDisplayTarget(display) {
+      if (!liveDodgeExactDisplays) return null;
+      const entry = exactDisplays.get(display.shown);
+      const source = state.conversionSourceImageData;
+      if (!entry || entry.token !== coreReprocessToken || entry.generation !== coreReprocessGeneration
+        || entry.revision !== convertedPixelsRevision) return null;
+      // The worker converts regions of its cached level: the source itself.
+      if (!source || state.displayLevelImageData !== source
+        || !convertPreviewFrameInWorker.holds?.(source, getColorAnalysisSample(state))) return null;
+      const geometry = localExposureGeometryFor(state);
+      if (!geometry) return null;
+      return { mode: 'display', frame: null, entry, source, exact: {
+        settings: buildRouterSettings(state), analysis: entry.analysis,
+        frame: { width: source.width, height: source.height },
+        display: { width: display.shown.width, height: display.shown.height, k: entry.k },
+        geometry: { ...geometry, width: source.width, height: source.height }
+      } };
+    }
+
     function beginLiveDodge(parameters, geometry, firstPoint) {
       if (!LIVE_DODGE_ENABLED) return;
       const display = liveDodgeDisplay();
-      const session = { id: liveDodgeCounters.strokes + 1, parameters, geometry, display, target: liveDodgeTarget(display),
+      const session = { id: liveDodgeCounters.strokes + 1, parameters, geometry, display, target: null,
         // The stored strokes this one is painted over; the pen-up adds it to them.
         committed: state.localExposure || null,
-        base: [], sent: 0, inFlight: false, reset: true, fullStroke: false, ended: null, touched: false, warming: false };
+        // `sent` points were posted, the rectangles of `applied` are on screen,
+        // `inFlight` requests run (two at most, at the pen-up).
+        base: [], sent: 0, applied: 0, inFlight: 0, reset: true, fullStroke: false, ended: null, touched: false, warming: false,
+        // What the rectangles left on screen over a frame that is not the
+        // worker's own (noteLiveComposite), and the pen-up's token.
+        composite: null, adjusted: null, noExactDisplay: false, commitToken: null, storedPoints: 0, adopted: false };
+      session.target = liveDodgeTarget(display, session);
       liveDodge = session;
       liveDodgeCounters.strokes++;
       addLiveDodgePoints([firstPoint]);
@@ -26840,40 +26952,57 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     function retargetLiveDodge(session) {
-      session.display = liveDodgeDisplay();
-      session.target = liveDodgeTarget(session.display);
+      const display = liveDodgeDisplay();
+      // Rectangles over another frame are no part of the new frame's composite.
+      if (!display || !session.display || display.shown !== session.display.shown || display.gl !== session.display.gl) {
+        session.composite = null;
+        session.adjusted = null;
+        session.applied = 0;
+      }
+      session.display = display;
+      session.target = liveDodgeTarget(display, session);
       session.reset = true;
       if (!session.target && session.display && !session.ended) warmLiveDodge(session);
     }
 
     function flushLiveDodge(session) {
       if (session.released) return;
-      if (liveDodge !== session) { releaseLiveDodge(session); return; }
-      if (session.inFlight || session.ended === 'cancel') return;
+      if (liveDodge !== session) { finishLiveDodge(session); return; }
+      if (session.ended === 'cancel') return;
+      // One request at a time while painting: points gather meanwhile. The
+      // pen-up sends the rest at once, so the worker paints it before it
+      // converts the pen-up frame (#254 follow-up).
+      if (session.inFlight && session.ended !== 'commit') return;
       if (!liveDodgeStillShown(session)) {
-        if (session.ended) { releaseLiveDodge(session); return; }
+        if (session.ended) { finishLiveDodge(session); return; }
         retargetLiveDodge(session);
       }
-      if (!session.target) { if (session.ended) releaseLiveDodge(session); return; }
+      if (!session.target) { if (session.ended && !session.inFlight) finishLiveDodge(session); return; }
       const points = session.reset ? session.base.slice() : session.base.slice(session.sent);
-      if (!points.length && !session.reset && !session.fullStroke) { if (session.ended) releaseLiveDodge(session); return; }
+      if (!points.length && !session.reset && !session.fullStroke) { if (session.ended && !session.inFlight) finishLiveDodge(session); return; }
+      const upTo = session.base.length;
+      const { mode } = session.target;
       const request = { frame: session.target.frame, strokeId: session.id, stroke: session.parameters, points, committed: session.committed,
-        reset: session.reset, fullStroke: session.fullStroke, withCommitted: session.target.mode === 'delta' };
-      session.sent = session.base.length;
+        reset: session.reset, fullStroke: session.fullStroke, withCommitted: mode === 'delta', exact: session.target.exact || null,
+        source: session.target.source || null };
+      session.sent = upTo;
       session.reset = false;
       session.fullStroke = false;
-      session.inFlight = true;
+      session.inFlight++;
       liveDodgeCounters.requests++;
-      convertPreviewFrameInWorker.exposureLive(request)
-        .then((reply) => applyLiveDodgeReply(session, reply, request.frame), (error) => {
+      const pending = mode === 'display' ? convertPreviewFrameInWorker.exposureExact(request) : convertPreviewFrameInWorker.exposureLive(request);
+      pending
+        .then((reply) => applyLiveDodgeReply(session, reply, request, upTo), (error) => {
           console.warn('Live dodge and burn failed:', error?.message || error);
+          if (mode === 'display') session.noExactDisplay = true;
           session.target = null;
         })
         .finally(() => {
-          session.inFlight = false;
+          session.inFlight--;
+          if (session.inFlight) return;
           // Points that arrived meanwhile, or the rest of an ended stroke.
           if (session.base.length > session.sent || session.reset || session.fullStroke) flushLiveDodge(session);
-          else if (session.ended) releaseLiveDodge(session);
+          else if (session.ended) finishLiveDodge(session);
         });
     }
 
@@ -26892,14 +27021,18 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       return out;
     }
 
-    // `frame`: the live frame the request painted over.
-    function applyLiveDodgeReply(session, reply, frame) {
+    // `request`: what was asked (its live frame, `exact` for a display
+    // target); `upTo`: the points it covered.
+    function applyLiveDodgeReply(session, reply, request, upTo) {
+      const { frame } = request;
       if (reply.stale) {
         liveDodgeCounters.stale++;
         // Retargeting must never pick that frame again (a request loop): the
         // next target is a newer or a warmed frame.
         if (frame) staleLiveFrames.add(frame.seq);
         if (staleLiveFrames.size > 32) staleLiveFrames.delete(staleLiveFrames.values().next().value);
+        // A display whose source the worker no longer holds is painted by delta.
+        if (request.exact) session.noExactDisplay = true;
       }
       if (session.ended === 'cancel') return;
       if (reply.stale || reply.needsReset) {
@@ -26908,12 +27041,18 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         else retargetLiveDodge(session);
         return;
       }
-      if (!reply.rect || !liveDodgeStillShown(session)) return;
+      if (!liveDodgeStillShown(session)) return;
+      if (!reply.rect) {
+        session.applied = Math.max(session.applied, upTo);
+        return;
+      }
       const { rect } = reply;
       const shown = session.display.shown;
-      const rows = session.target?.mode === 'delta' && reply.committedRgba
+      const mode = session.target?.mode;
+      const rows = mode === 'delta' && reply.committedRgba
         ? liveDeltaRows(shown, rect, reply.rgba, reply.committedRgba) : reply.rgba;
-      if (session.target?.mode === 'delta') liveDodgeCounters.deltaRects++;
+      if (mode === 'delta') liveDodgeCounters.deltaRects++;
+      if (mode === 'display') liveDodgeCounters.exactRects++;
       liveDodgeCounters.rects++;
       liveDodgeCounters.maxRectPixels = Math.max(liveDodgeCounters.maxRectPixels, rect.width * rect.height);
       liveDodgeCounters.lastRect = { ...rect };
@@ -26923,12 +27062,15 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         width: Math.max(box.x + box.width, rect.x + rect.width) - Math.min(box.x, rect.x),
         height: Math.max(box.y + box.height, rect.y + rect.height) - Math.min(box.y, rect.y)
       };
+      const rows16 = mode === 'display' ? reply.image16 : null;
       if (session.display.gl) {
         if (!webglUploadRectRows(rect, rows, shown.width, shown.height)) {
           session.target = null;
           return;
         }
+        noteLiveComposite(session, rect, rows, rows16, null);
         session.touched = true;
+        session.applied = Math.max(session.applied, upTo);
         liveDodgeCounters.uploads++;
         renderWebGL();
         return;
@@ -26942,8 +27084,97 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       });
       const photo = state.sprocketPreviewEnabled ? mainCanvasPhoto : null;
       ctx.putImageData(adjusted, (photo ? photo.x : 0) + rect.x, (photo ? photo.y : 0) + rect.y);
+      noteLiveComposite(session, rect, rows, rows16, adjusted);
       session.touched = true;
+      session.applied = Math.max(session.applied, upTo);
       liveDodgeCounters.puts++;
+    }
+
+    function writeRectRows(plane, width, rect, rows) {
+      const span = rect.width * 4;
+      for (let y = 0; y < rect.height; y++) plane.set(rows.subarray(y * span, (y + 1) * span), ((rect.y + y) * width + rect.x) * 4);
+    }
+
+    // What the rectangles of a stroke leave on screen over a frame that is
+    // not the worker's own (#254 follow-up): the display preview with their
+    // rows in it (the 16-bit plane too while they are exact), and on a CPU
+    // display the adjusted frame with their adjusted rows. Its pen-up installs
+    // it as the display (adoptLiveComposite). Over the worker's own frame the
+    // pen-up frame is the live frame itself, so nothing is kept.
+    function noteLiveComposite(session, rect, rows, rows16, adjusted) {
+      if (session.target?.mode === 'exact') return;
+      const shown = session.display.shown;
+      if (!session.composite) {
+        const composite = new ImageData(new Uint8ClampedArray(shown.data), shown.width, shown.height);
+        if (rows16 && shown.__image16?.data instanceof Uint16Array) {
+          composite.__image16 = { width: shown.width, height: shown.height, data: new Uint16Array(shown.__image16.data) };
+        }
+        session.composite = composite;
+        const frame = state.displayImageData;
+        session.adjusted = !session.display.gl && frame && frame.width === shown.width && frame.height === shown.height
+          ? new ImageData(new Uint8ClampedArray(frame.data), frame.width, frame.height) : null;
+      }
+      const { composite } = session;
+      writeRectRows(composite.data, composite.width, rect, rows);
+      if (composite.__image16) {
+        if (rows16) writeRectRows(composite.__image16.data, composite.width, rect, rows16);
+        else delete composite.__image16;
+      }
+      if (session.adjusted && adjusted) writeRectRows(session.adjusted.data, shown.width, rect, adjusted.data);
+    }
+
+    // Once a committed stroke's rectangles are all on screen, and its pen-up
+    // frame has not landed, what they left there becomes the display preview
+    // without a redraw (#254 follow-up). The pen-up frame then leaves it
+    // (keepLiveComposite), and the exact frame of the stroke replaces it:
+    // outside the stroke's rectangles that frame is the one on screen before
+    // it. A composite of exact rectangles is the exact display of the pen-up
+    // settings, so a next stroke paints exactly over it too.
+    function adoptLiveComposite(session) {
+      const composite = session.composite;
+      if (!composite || session.adopted || session.ended !== 'commit' || session.commitToken === null) return;
+      if (session.inFlight || session.applied < session.base.length) return;
+      if (session.commitToken !== coreReprocessToken || displayedFrameToken === session.commitToken) return;
+      const display = liveDodgeDisplay();
+      if (!display || !session.display || display.shown !== session.display.shown || display.gl !== session.display.gl
+        || display.serial !== session.display.serial) return;
+      session.adopted = true;
+      state.previewSourceImageData = composite;
+      state.webglSourceImageData = composite;
+      state.histogramSourceImageData = buildHistogramSourceImageData(composite);
+      if (session.adjusted) state.displayImageData = session.adjusted;
+      liveComposites.set(composite, { token: session.commitToken, adjusted: session.adjusted });
+      if (session.target?.mode === 'display' && session.storedPoints === session.base.length && composite.__image16) {
+        exactDisplays.set(composite, { ...session.target.entry, token: session.commitToken, revision: convertedPixelsRevision });
+      }
+      session.display = { ...session.display, shown: composite };
+      liveDodgeCounters.adopted++;
+    }
+
+    // The live composite on screen that stands for `token`'s settings, or null.
+    function liveCompositeOf(token) {
+      const shown = state.previewSourceImageData;
+      const entry = shown ? liveComposites.get(shown) : null;
+      return entry && entry.token === token ? { image: shown, adjusted: entry.adjusted } : null;
+    }
+
+    // Puts the live composite back after its pen-up frame was applied: the
+    // display fields name it again, the texture (which holds it) is not
+    // uploaded again, and a CPU display keeps its adjusted frame.
+    function keepLiveComposite(composite, sourceDirty) {
+      state.previewSourceImageData = composite.image;
+      state.webglSourceImageData = composite.image;
+      state.histogramSourceImageData = buildHistogramSourceImageData(composite.image);
+      if (composite.adjusted) state.displayImageData = composite.adjusted;
+      webglState.sourceDirty = sourceDirty;
+      liveDodgeCounters.kept++;
+    }
+
+    // The stroke's last request has run: a committed stroke's composite
+    // becomes the display, and the worker lets the stroke go.
+    function finishLiveDodge(session) {
+      adoptLiveComposite(session);
+      releaseLiveDodge(session);
     }
 
     // Pen-up keeps the rectangles (and sends the last points) until the new
@@ -27007,7 +27238,15 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         tint: dustTint.image ? { width: dustTint.width, height: dustTint.height, current: Boolean(dustTint.mask === state.dustRemoval.mask && dustTint.tag === state.dustRemoval.maskTag) } : null,
         live: { ...liveDodgeCounters, enabled: LIVE_DODGE_ENABLED,
           session: liveDodge ? { mode: liveDodge.target?.mode || null, ended: liveDodge.ended, points: liveDodge.base.length, touched: liveDodge.touched,
-            sent: liveDodge.sent, inFlight: liveDodge.inFlight } : null },
+            sent: liveDodge.sent, applied: liveDodge.applied, inFlight: liveDodge.inFlight, adopted: liveDodge.adopted } : null,
+          // The display preview on screen (#254 follow-up): what a stroke's
+          // rectangles left there, and whether it is a full-resolution frame's
+          // exact display of the current settings.
+          display: (() => {
+            const shown = displaySourceImageData();
+            const exact = shown ? exactDisplays.get(shown) : null;
+            return { composite: Boolean(shown && liveComposites.has(shown)), exact: Boolean(exact && exact.token === coreReprocessToken) };
+          })() },
         // Points of each stored dodge-and-burn stroke (#280).
         strokePoints: (state.localExposure?.strokes || []).map((stroke) => stroke.points.length),
         canvasWrites: { ...mainCanvasWrites },
@@ -27026,6 +27265,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         for (let row = y0; row < y1; row++) for (let column = x0; column < x1; column++) data.push(mask[row * frame.width + column] ? 1 : 0);
         return { x: x0, y: y0, width: x1 - x0, height: y1 - y0, frame: [frame.width, frame.height], data };
       },
+      // The delta path on frames that would get exact rectangles (#254 follow-up).
+      setExactDisplays: (on) => { liveDodgeExactDisplays = Boolean(on); },
       resetCounters: () => {
         mainCanvasWrites.put = 0; mainCanvasWrites.draw = 0; mainCanvasWrites.maxPutPixels = 0;
         for (const key of Object.keys(liveDodgeCounters)) liveDodgeCounters[key] = key === 'lastRect' || key === 'box' ? null : 0;

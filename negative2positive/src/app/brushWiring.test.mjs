@@ -208,8 +208,10 @@ function liveFixture({ delta = false, cpu = false, border = false } = {}) {
     applyPreparedAdjustmentsToBuffer, buildDisplayAdjustmentSettings: () => adjustment, adjustmentLutScratch: createAdjustmentLutScratch(),
     ctx: { putImageData: (image, x, y) => texture.puts.push({ image, x, y }) },
     convertPreviewFrameInWorker: client, LIVE_DODGE_ENABLED: true, lastLiveFrame: null, liveDodge: null, liveDisplaySerial: 0,
-    staleLiveFrames: new Set(),
-    liveDodgeCounters: { strokes: 0, requests: 0, rects: 0, deltaRects: 0, stale: 0, warmups: 0, uploads: 0, puts: 0, maxRectPixels: 0, restored: 0, lastRect: null },
+    staleLiveFrames: new Set(), exactDisplays: new WeakMap(), liveComposites: new WeakMap(), convertedPixelsRevision: 0, liveDodgeExactDisplays: true, localExposureGeometryFor: () => geometry, buildRouterSettings: () => structuredClone(settingsFor(state.localExposure)),
+    getColorAnalysisSample: () => null, buildHistogramSourceImageData: (image) => ({ histogramOf: image }),
+    liveDodgeCounters: { strokes: 0, requests: 0, rects: 0, deltaRects: 0, exactRects: 0, stale: 0, warmups: 0, uploads: 0, puts: 0, maxRectPixels: 0,
+      restored: 0, adopted: 0, kept: 0, lastRect: null },
     isWebGLActive: () => !cpu, usesSilverCoreConversion: () => true,
     displaySourceImageData: () => state.previewSourceImageData || state.processedImageData,
     coreReprocessScheduled: null, _coreReprocessPending: null, _coreReprocessPreviewInFlight: false,
@@ -223,8 +225,9 @@ function liveFixture({ delta = false, cpu = false, border = false } = {}) {
     renderWebGL: () => true, updatePreview: () => { texture.restored = true; },
     warmLiveDodge: () => assert.fail('the frame on screen is live'),
   });
-  vm.runInContext(['noteLiveFrame', 'liveDodgeDisplay', 'liveDodgeTarget', 'beginLiveDodge', 'addLiveDodgePoints', 'liveDodgeStillShown',
-    'retargetLiveDodge', 'flushLiveDodge', 'liveDeltaRows', 'applyLiveDodgeReply', 'releaseLiveDodge', 'endLiveDodge'].map(functionSource).join('\n'), context);
+  vm.runInContext(['noteLiveFrame', 'liveDodgeDisplay', 'liveDodgeTarget', 'exactDisplayTarget', 'beginLiveDodge', 'addLiveDodgePoints',
+    'liveDodgeStillShown', 'retargetLiveDodge', 'flushLiveDodge', 'liveDeltaRows', 'applyLiveDodgeReply', 'writeRectRows', 'noteLiveComposite',
+    'adoptLiveComposite', 'liveCompositeOf', 'keepLiveComposite', 'finishLiveDodge', 'releaseLiveDodge', 'endLiveDodge'].map(functionSource).join('\n'), context);
   return { context, state, texture, worker, webglState, delta, adjustment, photo, TestImageData };
 }
 
@@ -463,7 +466,7 @@ for (const border of [false, true]) {
   let requests = 0;
   const context = vm.createContext({ liveDodge: next, console,
     convertPreviewFrameInWorker: { exposureLiveEnd: async id => released.push(id), exposureLive: () => { requests++; } } });
-  vm.runInContext(['releaseLiveDodge', 'flushLiveDodge'].map(functionSource).join('\n'), context);
+  vm.runInContext(['releaseLiveDodge', 'adoptLiveComposite', 'finishLiveDodge', 'flushLiveDodge'].map(functionSource).join('\n'), context);
   context.flushLiveDodge(old);
   context.flushLiveDodge(old);
   await settle();
@@ -516,3 +519,217 @@ for (const border of [false, true]) {
 }
 
 console.log('brushWiring: the live dust dab is drawn at the centre of the disc DustBrush commits for the stored pixel');
+
+// #254 follow-up, the cause: a stroke painted over another frame than the
+// preview worker's ('delta') ended with its pen-up frame, the worker's frame
+// of the stored stroke, put on screen in place of the frame there, which
+// changed every pixel where the two frames differ, inside the stroke or not.
+// Now what the rectangles left on screen becomes the display at the pen-up
+// (adoptLiveComposite) and the pen-up frame leaves it (applyPreviewFrame): no
+// pixel outside the rectangles changes, and the texture is not uploaded again.
+for (const cpu of [false, true]) {
+  const { displayFilterOf, displayResampleMode } = await import('./displayPreview.js');
+  adapter.invalidateSilverCoreCache();
+  const f = liveFixture({ cpu });
+  const landing = { applyProcessed: 0 };
+  Object.assign(f.context, {
+    releaseCorePreviewRetained() {}, cancelDisplayPreviewRebuild() {}, buildPreviewSourceImageData: (image) => image,
+    initWebGLRenderer: () => true, fitStep3CanvasBox() {}, histogramSourceFor: () => 'histogram', exactFrames: new WeakMap(),
+    displayFilterOf, displayResampleMode, applyProcessedImageToState: () => { landing.applyProcessed++; },
+  });
+  vm.runInContext(['applyPreviewFrame', 'applyPreviewProcessedImageToState', 'installDisplayPreview', 'noteExactDisplay', 'exactDisplayFilterK']
+    .map(functionSource).join('\n'), f.context);
+  const frame = await adapter.convertColorWithSilverCore(negative(), structuredClone(settingsFor(committed)), { preview: true, includeAnalysisPreview: false });
+  frame.__liveSeq = frame.__liveFrame;
+  // On screen: another frame of the same size and settings (as a full
+  // render's display is), the worker's frame noted as the newest.
+  const shown = { width: W, height: H, data: frame.data.map((v, i) => (i % 4 === 3 ? v : Math.min(255, v + 7))) };
+  f.context.noteLiveFrame(frame, 1, 1);
+  Object.assign(f.state, { previewSourceImageData: shown, webglSourceImageData: shown, processedImageData: { width: W * 2, height: H * 2 },
+    processedImageDataIsPreview: false });
+  f.texture.data = new Uint8ClampedArray(shown.data);
+  // A CPU display: the adjusted frame on screen, which the live rows are put over.
+  const adjustedBefore = new f.TestImageData(W, H);
+  applyPreparedAdjustmentsToBuffer(shown, f.adjustment, adjustedBefore, { quality: 'full' });
+  if (cpu) f.state.displayImageData = adjustedBefore;
+  const working = { ...geometry, width: W, height: H };
+  const parameters = sanitizeLocalExposureStrokes({ strokes: [{ stops: 1.5, size: 0.2, feather: 0.3, points: [{ x: 0.5, y: 0.5 }] }] }).strokes[0];
+  const points = Array.from({ length: 24 }, (_, k) => ({ x: 10 + k * 3, y: 40 - k * 1.2, p: 1 }));
+  f.context.beginLiveDodge({ stops: parameters.stops, size: parameters.size, feather: parameters.feather }, working, points[0]);
+  assert.equal(f.context.liveDodge.target.mode, 'delta');
+  for (let k = 1; k < points.length; k += 5) { f.context.addLiveDodgePoints(points.slice(k, k + 5)); await settle(); }
+  await drain();
+  // The pen-up as onDodgeBurnPointerUp ends it: the last points, then its token.
+  f.context.endLiveDodge(true);
+  f.context.coreReprocessToken = 2;
+  const session = f.context.liveDodge;
+  Object.assign(session, { commitToken: 2, storedPoints: points.length });
+  f.context.adoptLiveComposite(session);
+  await drain();
+  const composite = f.state.previewSourceImageData;
+  assert.notEqual(composite, shown, 'the composite is the display from the pen-up on');
+  // What the screen shows: the texture, or the adjusted frame with the rows put over it.
+  const canvas = new Uint8ClampedArray(adjustedBefore.data);
+  for (const put of f.texture.puts) {
+    for (let y = 0; y < put.image.height; y++) canvas.set(put.image.data.subarray(y * put.image.width * 4, (y + 1) * put.image.width * 4), ((put.y + y) * W + put.x) * 4);
+  }
+  if (!cpu) assert.deepEqual(composite.data, f.texture.data, 'it is what the texture shows');
+  else {
+    assert.ok(f.texture.puts.length > 0);
+    assert.deepEqual(f.state.displayImageData.data, canvas, 'the CPU display keeps the adjusted frame it shows');
+  }
+  assert.equal(f.webglState.sourceDirty, false, 'the texture is not uploaded again');
+  assert.equal(f.context.liveComposites.get(composite).token, 2);
+  assert.equal(f.context.exactDisplays.has(composite), false, 'delta rectangles are no exact display');
+  // The pen-up frame lands: the worker's frame of the stored stroke.
+  const stored = { ...parameters, points: points.map(p => ({ ...workingPointToBase(p, working), p: p.p })) };
+  const penUp = await adapter.convertColorWithSilverCore(negative(), structuredClone(settingsFor(sanitizeLocalExposureForSettings({ strokes: [...committed.strokes, stored] }))),
+    { preview: true, includeAnalysisPreview: false });
+  assert.equal(f.context.applyPreviewFrame(penUp, { token: 2 }), true);
+  assert.equal(f.state.previewSourceImageData, composite, 'the pen-up frame leaves the composite on screen');
+  assert.equal(f.state.webglSourceImageData, composite);
+  assert.equal(f.webglState.sourceDirty, false);
+  if (cpu) assert.deepEqual(f.state.displayImageData.data, canvas, 'and the adjusted frame on the CPU display');
+  assert.equal(f.state.fullResolutionPending, true, 'the exact frame is still owed');
+  const box = f.context.liveDodgeCounters.box;
+  let outside = 0, changedByWorkerFrame = 0, changedNow = 0;
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    if (x >= box.x && x < box.x + box.width && y >= box.y && y < box.y + box.height) continue;
+    const i = (y * W + x) * 4;
+    outside++;
+    if ([0, 1, 2].some(c => penUp.data[i + c] !== shown.data[i + c])) changedByWorkerFrame++;
+    if ([0, 1, 2].some(c => composite.data[i + c] !== shown.data[i + c])) changedNow++;
+  }
+  assert.ok(outside > 0 && changedByWorkerFrame > outside * 0.9, `the worker's frame would change ${changedByWorkerFrame} of ${outside} pixels outside the stroke`);
+  assert.equal(changedNow, 0, 'nothing outside the stroke changes at its pen-up');
+  // A frame of other settings (superseded token) is put on screen as before.
+  assert.equal(f.context.applyPreviewFrame(frame, { token: null }), false);
+  assert.equal(f.state.previewSourceImageData, frame);
+  assert.equal(f.webglState.sourceDirty, true);
+  assert.equal(landing.applyProcessed, 0);
+  console.log(`brushWiring (${cpu ? 'CPU' : 'GPU'} display): a delta stroke's pen-up keeps what its rectangles left on screen (the worker's frame would have changed ${changedByWorkerFrame} of ${outside} pixels outside the stroke; now 0), no texture upload`);
+}
+
+// #254 follow-up, exact rectangles: over the display preview of a
+// full-resolution frame, a stroke is painted with that display's own pixels
+// (exposureExact in the real worker handler, in this process), and its pen-up
+// leaves a composite that is the exact display of the stored stroke in both
+// planes, registered as such for the next stroke.
+{
+  globalThis.ImageData = class {
+    constructor(a, b, c) {
+      if (typeof a === 'number') Object.assign(this, { width: a, height: b, data: new Uint8ClampedArray(a * b * 4) });
+      else Object.assign(this, { data: a, width: b, height: c });
+    }
+  };
+  const replies = new Map();
+  globalThis.self = { postMessage: (payload, transfers = []) => { replies.set(payload.id, structuredClone(payload, { transfer: transfers })); } };
+  await import('../workers/conversionWorker.js');
+  let nextId = 0;
+  const send = async (message) => {
+    const id = ++nextId;
+    await self.onmessage({ data: structuredClone({ ...message, id }) });
+    const reply = replies.get(id);
+    replies.delete(id);
+    if (reply.type === 'error') throw new Error(reply.message);
+    return reply;
+  };
+  const FW = 150, FH = 100, target = { width: 97, height: 64 };
+  const source = new Uint16Array(FW * FH * 4);
+  for (let y = 0; y < FH; y++) for (let x = 0; x < FW; x++) {
+    const i = (y * FW + x) * 4, t = (x + y * 0.7) / (FW + FH), edge = x % 31 < 2 ? 0.4 : 1;
+    source.set([Math.round((52000 - 30000 * t) * edge + (x * 131 % 900)), Math.round((36000 - 22000 * t) * edge + (y * 97 % 700)), Math.round((24000 - 15000 * t) * edge), 65535], i);
+  }
+  const full = { baseWidth: FW, baseHeight: FH, rotatedWidth: FW, rotatedHeight: FH, rotationAngle: 0, mirrored: false, cropRegion: null };
+  const fullSettings = (localExposure) => ({ colorModel: 'standard', filmBase: { r: 210, g: 140, b: 90 }, localExposure, localExposureGeometry: full });
+  const render = async (localExposure) => {
+    const reply = await send({ type: 'convert', width: FW, height: FH, image16: source.slice().buffer, settings: fullSettings(localExposure),
+      options: { forceFullProcess: true, includeAnalysisPreview: false, returnAnalysis: true, displayTarget: target } });
+    const display = new ImageData(new Uint8ClampedArray(reply.displayPreview.rgba), target.width, target.height);
+    display.__image16 = { width: target.width, height: target.height, data: new Uint16Array(reply.displayPreview.image16) };
+    return { display, analysis: reply.analysis };
+  };
+  const before = await render(committed);
+  // The preview worker caches the source as its level (k = 1).
+  await send({ type: 'convert', cacheInput: true, reuseSource: false, reuseAnalysis: false, width: FW, height: FH, image16: source.slice().buffer,
+    display: { target, geometry: { sourceWidth: FW, sourceHeight: FH, k: 1 } }, settings: fullSettings(committed), options: { preview: true, includeAnalysisPreview: false } });
+  const sourceImage = { width: FW, height: FH };
+  const texture = { data: new Uint8ClampedArray(before.display.data), uploads: 0 };
+  const state = { currentStep: 3, cropping: false, beforeAfterActive: false, localExposure: committed, sprocketPreviewEnabled: false,
+    previewSourceImageData: before.display, webglSourceImageData: before.display, processedImageData: { width: FW, height: FH },
+    displayImageData: null, conversionSourceImageData: sourceImage, displayLevelImageData: sourceImage };
+  const webglState = { sourceDirty: false, sourceSize: { w: target.width, h: target.height } };
+  const exactDisplays = new WeakMap();
+  exactDisplays.set(before.display, { token: 1, generation: 1, analysis: before.analysis, k: 1, revision: 0 });
+  const requests = [];
+  const client = {
+    holds: (image) => image === sourceImage,
+    liveFrameOf: () => null,
+    exposureLive: async () => assert.fail('no delta requests over an exact display'),
+    exposureLiveEnd: async (strokeId) => send({ type: 'exposureLive', end: true, strokeId }),
+    exposureExact: async (request) => {
+      requests.push(request);
+      const reply = await send({ type: 'exposureExact', strokeId: request.strokeId, stroke: request.stroke, points: request.points,
+        reset: request.reset, fullStroke: request.fullStroke, ...(request.reset ? { exact: request.exact } : {}) });
+      if (!reply.rect) return { rect: null, stale: Boolean(reply.stale), needsReset: Boolean(reply.needsReset) };
+      return { rect: reply.rect, rgba: new Uint8ClampedArray(reply.rgba), image16: new Uint16Array(reply.image16) };
+    }
+  };
+  const context = vm.createContext({
+    state, webglState, glCanvas: { style: { display: 'block' } }, console, Math, Uint8ClampedArray, Uint16Array, ImageData: globalThis.ImageData,
+    convertPreviewFrameInWorker: client, LIVE_DODGE_ENABLED: true, lastLiveFrame: null, liveDodge: null, liveDisplaySerial: 0,
+    staleLiveFrames: new Set(), exactDisplays, liveComposites: new WeakMap(), convertedPixelsRevision: 0, liveDodgeExactDisplays: true,
+    localExposureGeometryFor: () => full, buildRouterSettings: () => structuredClone(fullSettings(state.localExposure)),
+    getColorAnalysisSample: () => null, buildHistogramSourceImageData: (image) => ({ histogramOf: image }),
+    liveDodgeCounters: { strokes: 0, requests: 0, rects: 0, deltaRects: 0, exactRects: 0, stale: 0, warmups: 0, uploads: 0, puts: 0, maxRectPixels: 0,
+      restored: 0, adopted: 0, kept: 0, lastRect: null, box: null },
+    isWebGLActive: () => true, usesSilverCoreConversion: () => true, displaySourceImageData: () => state.previewSourceImageData || state.processedImageData,
+    coreReprocessScheduled: null, _coreReprocessPending: null, _coreReprocessPreviewInFlight: {}, gpuPreviewScheduler: { isAhead: () => false },
+    displayedFrameToken: 1, coreReprocessToken: 1, coreReprocessGeneration: 1, sanitizeStrokePoint, workingPointToBase,
+    webglUploadRectRows: (rect, rows) => {
+      texture.uploads++;
+      for (let y = 0; y < rect.height; y++) texture.data.set(rows.subarray(y * rect.width * 4, (y + 1) * rect.width * 4), ((rect.y + y) * target.width + rect.x) * 4);
+      return true;
+    },
+    renderWebGL: () => true, updatePreview: () => assert.fail('nothing is redrawn'), warmLiveDodge: () => assert.fail('an exact display needs no warm frame'),
+  });
+  vm.runInContext(['noteLiveFrame', 'liveDodgeDisplay', 'liveDodgeTarget', 'exactDisplayTarget', 'beginLiveDodge', 'addLiveDodgePoints',
+    'liveDodgeStillShown', 'retargetLiveDodge', 'flushLiveDodge', 'liveDeltaRows', 'applyLiveDodgeReply', 'writeRectRows', 'noteLiveComposite',
+    'adoptLiveComposite', 'liveCompositeOf', 'keepLiveComposite', 'finishLiveDodge', 'releaseLiveDodge', 'endLiveDodge'].map(functionSource).join('\n'), context);
+  const working = { ...full, width: FW, height: FH };
+  const parameters = { stops: 1.2, size: 0.25, feather: 0.5 };
+  const points = Array.from({ length: 30 }, (_, k) => ({ x: 20 + k * 3.6, y: 70 - k * 1.5, p: 0.4 + (k % 6) * 0.1 }));
+  // A conversion still in flight does not hold an exact stroke back.
+  context.beginLiveDodge(parameters, working, points[0]);
+  assert.equal(context.liveDodge.target.mode, 'display');
+  assert.deepEqual({ ...context.liveDodge.target.exact.display }, { width: target.width, height: target.height, k: 1 });
+  for (let k = 1; k < points.length; k += 4) { context.addLiveDodgePoints(points.slice(k, k + 4)); await settle(); }
+  // The pen-up sends the rest at once, behind any request in flight.
+  context.addLiveDodgePoints(points.slice(-1));
+  context.endLiveDodge(true);
+  const stored = sanitizeLocalExposureForSettings({ strokes: [...committed.strokes, { ...parameters, points: points.concat(points.slice(-1))
+    .map(p => ({ ...workingPointToBase(p, working), p: p.p })) }] });
+  state.localExposure = stored;
+  context.coreReprocessToken = 2;
+  const session = context.liveDodge;
+  Object.assign(session, { commitToken: 2, storedPoints: stored.strokes.at(-1).points.length });
+  context.adoptLiveComposite(session);
+  for (let i = 0; i < 40 && !session.released; i++) await settle();
+  assert.ok(session.released, 'the stroke is released once its last rectangle is on screen');
+  assert.ok(requests.length >= 2 && requests[0].reset && !requests.slice(1).some(r => r.reset));
+  const after = await render(stored);
+  assert.deepEqual(texture.data, after.display.data, 'the painted texture is the exact display of the stored stroke');
+  const composite = state.previewSourceImageData;
+  assert.notEqual(composite, before.display);
+  assert.deepEqual(composite.data, after.display.data, 'the composite is that display (8-bit)');
+  assert.deepEqual(composite.__image16.data, after.display.__image16.data, '... and its 16-bit plane');
+  assert.equal(context.exactDisplays.get(composite)?.token, 2, 'registered as the exact display of the pen-up settings');
+  assert.equal(webglState.sourceDirty, false);
+  assert.ok(context.liveDodgeCounters.exactRects > 0 && context.liveDodgeCounters.deltaRects === 0);
+  // The next stroke paints exactly over it, with the stored strokes.
+  context.beginLiveDodge(parameters, working, { x: 60, y: 30, p: 1 });
+  assert.equal(context.liveDodge.target.mode, 'display');
+  assert.equal(context.liveDodge.target.exact.settings.localExposure.strokes.length, 2);
+  context.endLiveDodge(false);
+  console.log('brushWiring: over a full-resolution display, exact rectangles from the real worker handler paint the exact display of the stored stroke (both planes); its pen-up composite is registered for the next stroke');
+}

@@ -275,87 +275,137 @@ export async function runDarkroomSmoke({ send, evaluate, waitFor, wait, fail, in
   const cleared = await canvasLuminance(region);
   if (Math.abs(cleared - untouched) > 1.5) fail(`removing the stroke did not restore the region: ${untouched} -> ${cleared}`);
 
-  // #280: a long pen stroke of 522 samples, all but the last 1.2 px apart,
-  // with pen pressure that changes fast. Its first 400 samples are kept as
-  // recorded, then one per eighth of the brush radius, and the live effect
-  // paints exactly the points stored: more than 400 (resampled to 400, as
-  // before #280, its feather edge jumped at pen-up). The last sample lies a
-  // jump away, so the recorder keeps it while painting and the frame read
-  // before pen-up is the last live frame. Over the worker's own frame
-  // ('exact') the pen-up frame must equal it within the acceptance bound
-  // (2/255 in 99.9 % of the stroke's pixels; silverAdapter.live.test.mjs
-  // checks it bitwise). Over another frame ('delta', the usual case here) the
-  // pen-up frame replaces the frame on screen as a whole: the pixels outside
-  // the stroke's box change by as much as those inside it, so the comparison
-  // is only logged, with both sides.
-  {
-    const pen = (type, x, y, force) => send('Input.dispatchMouseEvent', { type, x, y, button: 'left', pointerType: 'pen', force,
-      clickCount: type === 'mousePressed' ? 1 : 0, buttons: type === 'mouseReleased' ? 0 : 1 });
-    const cx = rect.x + rect.width * 0.5, cy = rect.y + rect.height * 0.5;
-    const radius = Math.min(rect.width, rect.height) * 0.25;
-    const at = (i) => [cx + radius * Math.cos(i * 1.2 / radius), cy + radius * Math.sin(i * 1.2 / radius)];
-    await evaluate(`(() => { window.__darkroomPen = { pre: window.__ncDisplay.shownFrame() }; })()`);
-    await evaluate('window.__ncBrush.resetCounters()');
-    await pen('mousePressed', ...at(0), 0.5);
-    for (let i = 1; i <= 520; i++) await pen('mouseMoved', ...at(i), 0.3 + 0.7 * Math.abs(Math.sin(i / 20)));
-    // Outwards by a fifth of the photo's short side, far more than an eighth of the brush radius.
-    const [lx, ly] = at(520);
-    const end = [cx + (lx - cx) * 1.8, cy + (ly - cy) * 1.8];
-    await pen('mouseMoved', ...end, 0.6);
-    await waitFor('long pen stroke painted live', `(() => { const s = window.__ncBrush.state().live.session;
-      return Boolean(s && s.touched && !s.inFlight && s.sent === s.points); })()`, 30_000);
-    await wait(300);
-    const painting = await evaluate(`window.__ncBrush.state().live`);
-    await evaluate(`(() => { window.__darkroomPen.live = window.__ncDisplay.shownFrame(); })()`);
-    await pen('mouseReleased', ...end, 0);
-    await waitFor('long pen stroke recorded', `/1 stroke/.test(document.getElementById('dodgeBurnStatus').textContent)`, 10_000);
-    const penUpToken = await evaluate('window.__ncDisplay.state().token');
-    await waitFor('pen-up frame on screen', `window.__ncDisplay.state().displayed >= ${penUpToken}`, 30_000);
-    const penStroke = await evaluate(`(() => {
-      const { pre, live } = window.__darkroomPen, settled = window.__ncDisplay.shownFrame();
-      delete window.__darkroomPen;
-      const box = ${JSON.stringify(painting.box)};
-      if (!pre || !live || !settled || !box || pre.width !== settled.width || live.width !== settled.width
-        || pre.height !== settled.height || live.height !== settled.height) return { error: 'frames', box, sizes: [pre?.width, live?.width, settled?.width] };
-      // Inside the stroke's box: the pixels the live or the settled frame
-      // changed. Outside it: every pixel the pen-up frame changed.
-      const inside = { area: 0, within2: 0, max: 0 }, outside = { changed: 0, max: 0 };
-      for (let y = 0; y < settled.height; y++) for (let x = 0; x < settled.width; x++) {
-        const i = (y * settled.width + x) * 4;
+  // #254 follow-up: what is on screen once a stroke's pen-up frame has landed,
+  // and once its exact frame (the full-resolution render's display) has,
+  // against its last live frame. Inside the box of the rectangles drawn live:
+  // the pixels the stroke changed (the live or the compared frame differs from
+  // the frame before the stroke), within 2/255 in 99.9 % (#254's acceptance).
+  // Outside it: every pixel, none more than 2/255 off. Frames stay in the
+  // page; only the numbers come back.
+  await evaluate(`(() => {
+    window.__darkroomCompare = (pre, live, other, box) => {
+      if (!pre || !live || !other || !box || pre.width !== other.width || live.width !== other.width
+        || pre.height !== other.height || live.height !== other.height) return { error: 'frames', box, sizes: [pre?.width, live?.width, other?.width] };
+      const inside = { area: 0, within2: 0, max: 0 }, outside = { pixels: 0, changed: 0, over2: 0, max: 0 };
+      for (let y = 0; y < other.height; y++) for (let x = 0; x < other.width; x++) {
+        const i = (y * other.width + x) * 4;
         let changed = false, d = 0;
         for (let c = 0; c < 3; c++) {
-          if (pre.data[i + c] !== live.data[i + c] || pre.data[i + c] !== settled.data[i + c]) changed = true;
-          d = Math.max(d, Math.abs(live.data[i + c] - settled.data[i + c]));
+          if (pre.data[i + c] !== live.data[i + c] || pre.data[i + c] !== other.data[i + c]) changed = true;
+          d = Math.max(d, Math.abs(live.data[i + c] - other.data[i + c]));
         }
         if (x >= box.x && x < box.x + box.width && y >= box.y && y < box.y + box.height) {
           if (!changed) continue;
           inside.area++;
           if (d <= 2) inside.within2++;
           inside.max = Math.max(inside.max, d);
-        } else if (d) {
-          outside.changed++;
+        } else {
+          outside.pixels++;
+          if (d) outside.changed++;
+          if (d > 2) outside.over2++;
           outside.max = Math.max(outside.max, d);
         }
       }
       inside.within2 = inside.area ? +(100 * inside.within2 / inside.area).toFixed(3) : 0;
-      return { surface: settled.surface, inside, outside, strokePoints: window.__ncBrush.state().strokePoints };
-    })()`);
-    penStroke.live = { mode: painting.session?.mode ?? null, points: painting.session?.points, rects: painting.rects };
-    console.log('darkroom long pen stroke:', JSON.stringify(penStroke));
-    if (penStroke.error || !(penStroke.inside.area > 2000)) fail('the long pen stroke did not paint: ' + JSON.stringify(penStroke));
-    if (!(penStroke.strokePoints?.length === 1 && penStroke.strokePoints[0] > 400 && penStroke.strokePoints[0] === penStroke.live.points)) {
-      fail('the long pen stroke was not stored as painted (the points painted live, more than 400): ' + JSON.stringify(penStroke));
-    }
-    if (penStroke.live.mode === 'exact' && !(penStroke.inside.within2 >= 99.9)) fail('the long pen stroke jumped at pen-up: ' + JSON.stringify(penStroke));
+      return { inside, outside };
+    };
+  })()`);
+  // Paints a stroke (`paint`, then `release`), then compares its last live
+  // frame with the frame on screen after its pen-up frame (`penUp`) and after
+  // its exact frame (`exact`; `settle` waits for anything that comes before it).
+  const strokeAtPenUp = async (label, { paint, release, settle = null }) => {
+    await evaluate(`(() => { window.__darkroomFrames = { pre: window.__ncDisplay.shownFrame() }; })()`);
+    await evaluate('window.__ncBrush.resetCounters()');
+    await paint();
+    await waitFor(`${label} painted live`, `(() => { const s = window.__ncBrush.state().live.session;
+      return Boolean(s && s.touched && !s.inFlight && s.sent === s.points && s.applied === s.points); })()`, 30_000);
+    await wait(300);
+    const painting = await evaluate(`window.__ncBrush.state().live`);
+    await evaluate(`(() => { window.__darkroomFrames.live = window.__ncDisplay.shownFrame(); })()`);
+    await release();
+    await waitFor(`${label} recorded`, `/1 stroke/.test(document.getElementById('dodgeBurnStatus').textContent)`, 10_000);
+    const token = await evaluate('window.__ncDisplay.state().token');
+    await waitFor(`${label} pen-up frame landed`, `window.__ncDisplay.state().displayed >= ${token}`, 30_000);
+    const box = JSON.stringify(painting.box);
+    const penUp = await evaluate(`(() => { const f = window.__darkroomFrames; f.penUp = window.__ncDisplay.shownFrame();
+      return { ...window.__darkroomCompare(f.pre, f.live, f.penUp, ${box}), display: window.__ncBrush.state().live.display }; })()`);
+    await waitFor(`${label} exact frame on screen`, `(() => { const d = window.__ncBrush.state().live.display; return !d.composite && d.exact; })()`, 30_000);
+    if (settle) await settle();
+    await wait(300);
+    const exact = await evaluate(`(() => { const f = window.__darkroomFrames; delete window.__darkroomFrames;
+      return window.__darkroomCompare(f.pre, f.live, window.__ncDisplay.shownFrame(), ${box}); })()`);
+    const live = painting.session || {};
+    const result = { label, mode: live.mode ?? null, points: live.points, rects: painting.rects, exactRects: painting.exactRects,
+      deltaRects: painting.deltaRects, adopted: (await evaluate('window.__ncBrush.state().live')).adopted, box: painting.box, penUp, exact,
+      strokePoints: await evaluate('window.__ncBrush.state().strokePoints') };
+    console.log(`darkroom pen-up (${label}):`, JSON.stringify(result));
+    if (penUp.error || exact.error || !(penUp.inside.area > 1000)) fail(`${label}: the stroke did not paint: ` + JSON.stringify(result));
+    // At pen-up nothing on screen moves: what the rectangles left there stays.
+    if (penUp.outside.over2 || penUp.outside.max > 2) fail(`${label}: pixels outside the stroke changed at pen-up: ` + JSON.stringify(result));
+    if (!(penUp.inside.within2 >= 99.9)) fail(`${label}: the stroke jumped at pen-up: ` + JSON.stringify(result));
+    // Outside the stroke the exact frame is the frame on screen before it.
+    if (exact.outside.over2 || exact.outside.max > 2) fail(`${label}: pixels outside the stroke changed when its exact frame landed: ` + JSON.stringify(result));
+    return result;
+  };
+  const removeStroke = async (label) => {
     await evaluate(`document.getElementById('dodgeBurnUndoStrokeBtn').click()`);
-    await waitFor('long pen stroke removed', `/No strokes/.test(document.getElementById('dodgeBurnStatus').textContent)`, 10_000);
-    await wait(2500);
+    await waitFor(`${label} removed`, `/No strokes/.test(document.getElementById('dodgeBurnStatus').textContent)`, 10_000);
+    // The full-resolution display of the photo without it, as before the stroke.
+    await waitFor(`${label}: exact frame without it`, `(() => { const d = window.__ncBrush.state().live.display; return !d.composite && d.exact; })()`,
+      30_000, { soft: true });
+    await wait(1000);
+  };
+
+  // #280: a long pen stroke of 522 samples, all but the last 1.2 px apart,
+  // with pen pressure that changes fast. Its first 400 samples are kept as
+  // recorded, then one per eighth of the brush radius, and the live effect
+  // paints exactly the points stored: more than 400 (resampled to 400, as
+  // before #280, its feather edge jumped at pen-up). The last sample lies a
+  // jump away, so the recorder keeps it while painting and the frame read
+  // before pen-up is the last live frame. The frame on screen is the
+  // full-resolution render's display (the photo is idle): the stroke gets that
+  // display's own pixels (exact rectangles, #254 follow-up), so its pen-up and
+  // its exact frame both meet the acceptance bound inside and outside its box.
+  // Then the same stroke by delta (the path of repaired frames): nothing moves
+  // at its pen-up or outside its box, and the exact frame refines the inside.
+  const pen = (type, x, y, force) => send('Input.dispatchMouseEvent', { type, x, y, button: 'left', pointerType: 'pen', force,
+    clickCount: type === 'mousePressed' ? 1 : 0, buttons: type === 'mouseReleased' ? 0 : 1 });
+  const cx = rect.x + rect.width * 0.5, cy = rect.y + rect.height * 0.5;
+  const radius = Math.min(rect.width, rect.height) * 0.25;
+  const at = (i) => [cx + radius * Math.cos(i * 1.2 / radius), cy + radius * Math.sin(i * 1.2 / radius)];
+  const [lx, ly] = at(520);
+  // Outwards by a fifth of the photo's short side, far more than an eighth of the brush radius.
+  const end = [cx + (lx - cx) * 1.8, cy + (ly - cy) * 1.8];
+  const longPenStroke = {
+    paint: async () => {
+      await pen('mousePressed', ...at(0), 0.5);
+      for (let i = 1; i <= 520; i++) await pen('mouseMoved', ...at(i), 0.3 + 0.7 * Math.abs(Math.sin(i / 20)));
+      await pen('mouseMoved', ...end, 0.6);
+    },
+    release: () => pen('mouseReleased', ...end, 0)
+  };
+  const exactStroke = await strokeAtPenUp('long pen stroke', longPenStroke);
+  if (!(exactStroke.strokePoints?.length === 1 && exactStroke.strokePoints[0] > 400 && exactStroke.strokePoints[0] === exactStroke.points)) {
+    fail('the long pen stroke was not stored as painted (the points painted live, more than 400): ' + JSON.stringify(exactStroke));
   }
+  if (exactStroke.mode !== 'display' || !exactStroke.exactRects || exactStroke.deltaRects) {
+    fail('the long pen stroke over the full-resolution display was not painted with exact rectangles: ' + JSON.stringify(exactStroke));
+  }
+  if (!(exactStroke.exact.inside.within2 >= 99.9)) fail('the long pen stroke jumped when its exact frame landed: ' + JSON.stringify(exactStroke));
+  await removeStroke('long pen stroke');
+  await evaluate('window.__ncBrush.setExactDisplays(false)');
+  const deltaStroke = await strokeAtPenUp('long pen stroke by delta', longPenStroke);
+  await evaluate('window.__ncBrush.setExactDisplays(true)');
+  if (deltaStroke.mode !== 'delta' || !deltaStroke.deltaRects || !deltaStroke.adopted) fail('the delta pass did not paint by delta: ' + JSON.stringify(deltaStroke));
+  await removeStroke('long pen stroke by delta');
 
   // #254's third brush session: dodge with dust removal on. The frame on
-  // screen is the repaired full-resolution frame's display preview, so the
-  // effect shows as displayed + (live - committed) of the preview worker's
-  // frame (#237 keeps its slot warm); the GPU display takes no #canvas writes.
+  // screen is the repaired full-resolution frame's display. This fixture has
+  // no dust, so nothing was repaired and its display is the exact one: the
+  // stroke gets exact rectangles, the dust pass after it finds nothing, and
+  // the frame stays put inside and outside the stroke. (Where dust is found,
+  // the pass after the stroke may change repairs outside it: its threshold is a
+  // quantile of the whole frame; docs/darkroom.md, Limits.)
   await evaluate(`(() => {
     window.__darkroomDustUpdates = 0;
     window.__darkroomDustObserver = new MutationObserver(() => window.__darkroomDustUpdates++);
@@ -370,20 +420,32 @@ export async function runDarkroomSmoke({ send, evaluate, waitFor, wait, fail, in
     const r = surface.getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height };
   })()`);
   const ry = repairedRect.y + repairedRect.height * 0.5;
-  await evaluate('window.__ncBrush.resetCounters()');
-  await mouse('mousePressed', repairedRect.x + repairedRect.width * 0.35, ry);
-  for (let i = 1; i <= 8; i++) { await mouse('mouseMoved', repairedRect.x + repairedRect.width * (0.35 + 0.3 * i / 8), ry); await wait(30); }
-  await waitFor('live dodge rectangles over the repaired frame', `window.__ncBrush.state().live.rects > 0 && window.__ncBrush.state().live.session?.touched`, 30_000);
-  const repairedLive = await evaluate(`window.__ncBrush.state()`);
-  console.log('darkroom repaired live burn:', JSON.stringify({ surface: repairedLive.surface, live: repairedLive.live, writes: repairedLive.canvasWrites }));
+  const dustBefore = await evaluate(`document.getElementById('dustStatus').textContent`);
+  let repairedLive = null;
+  const repaired = await strokeAtPenUp('repaired-frame stroke', {
+    paint: async () => {
+      await mouse('mousePressed', repairedRect.x + repairedRect.width * 0.35, ry);
+      for (let i = 1; i <= 8; i++) { await mouse('mouseMoved', repairedRect.x + repairedRect.width * (0.35 + 0.3 * i / 8), ry); await wait(30); }
+      await waitFor('live dodge rectangles over the repaired frame', `window.__ncBrush.state().live.rects > 0 && window.__ncBrush.state().live.session?.touched`, 30_000);
+      repairedLive = await evaluate(`window.__ncBrush.state()`);
+    },
+    release: () => mouse('mouseReleased', repairedRect.x + repairedRect.width * 0.65, ry),
+    // The repair pass after the stroke's exact frame: detection on it.
+    settle: async () => {
+      const updates = await evaluate('window.__darkroomDustUpdates');
+      await waitFor('dust pass after the stroke', `window.__darkroomDustUpdates > ${updates}
+        && /^(Detected [0-9]+ dust particles|No dust detected)/.test(document.getElementById('dustStatus').textContent)`, 30_000, { soft: true });
+    }
+  });
+  const dustAfter = await evaluate(`document.getElementById('dustStatus').textContent`);
+  console.log('darkroom repaired live burn:', JSON.stringify({ surface: repairedLive.surface, live: repairedLive.live, writes: repairedLive.canvasWrites, dustBefore, dustAfter }));
   if (repairedLive.surface === 'gl' && (repairedLive.canvasWrites.put || repairedLive.canvasWrites.draw)) {
     fail('#canvas was written during a repaired-frame stroke on the GPU display: ' + JSON.stringify(repairedLive.canvasWrites));
   }
-  await mouse('mouseReleased', repairedRect.x + repairedRect.width * 0.65, ry);
-  await waitFor('repaired-frame stroke recorded', `/1 stroke/.test(document.getElementById('dodgeBurnStatus').textContent)`, 10_000);
-  await wait(3000);
-  await evaluate(`document.getElementById('dodgeBurnUndoStrokeBtn').click()`);
-  await waitFor('repaired-frame stroke removed', `/No strokes/.test(document.getElementById('dodgeBurnStatus').textContent)`, 10_000);
+  if (/^No dust detected/.test(dustBefore) && /^No dust detected/.test(dustAfter) && !(repaired.exact.inside.within2 >= 99.9)) {
+    fail('the repaired-frame stroke jumped when its exact frame landed, with nothing repaired: ' + JSON.stringify(repaired));
+  }
+  await removeStroke('repaired-frame stroke');
   await evaluate(`window.__darkroomDustObserver.disconnect(); document.getElementById('dustRemovalEnabled').click()`);
   await wait(3000);
 

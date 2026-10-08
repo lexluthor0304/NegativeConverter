@@ -14,6 +14,7 @@ if (!globalThis.ImageData) {
 }
 const geometry = await import('./imageGeometry.js');
 const imageDataOps = await import('./imageDataOps.js');
+const displayPreviewModule = await import('./displayPreview.js');
 const { createGeometryPool, yieldToEventLoop } = await import('./geometryPool.js');
 const { backingBuffers, createPhotoSessionCache } = await import('./photoSessionCache.js');
 const { planGeometryBandsInFlight } = await import('./batchExportScheduler.js');
@@ -276,6 +277,9 @@ export function createHarness(base, { historyBudget = 768 * 1024 * 1024, session
     },
     applyLensCorrectionWithSettings: async source => source,
     sampleAnalysisArea: analysisRegion.sampleAnalysisArea,
+    // #254 follow-up: exact displays and live dodge composites (no stroke here).
+    exactFrames: new WeakMap(), exactDisplays: new WeakMap(), liveComposites: new WeakMap(), convertedPixelsRevision: 0,
+    displayFilterOf: displayPreviewModule.displayFilterOf, displayResampleMode: displayPreviewModule.displayResampleMode,
   };
   const context = vm.createContext(new Proxy(target, {
     has: () => true,

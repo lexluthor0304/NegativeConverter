@@ -120,10 +120,8 @@ formula, keeping its end; its settled frame stays within 1/255 of the live
 one. Resampling a pen stroke cannot do that: a merged segment paints with the
 larger of its two pressures, which moves the feather edge where the pressure
 changes, and no choice of 400 of a fast-pressure stroke's 600 points stays
-within the acceptance bound (see Limits). When
-the frame on screen is not that conversion (a repaired full-resolution frame,
-say), the worker also returns the rectangle without the stroke and the screen
-shows displayed + (live - committed) until pen-up. A stroke stored before its
+within the acceptance bound (see Limits). Over another frame than the worker's
+the stroke is painted otherwise (next paragraph). A stroke stored before its
 pen-up frame ran is added to the worker's map first, so a quick second stroke
 never hides the first. `?liveDodge=0` turns the live effect off. The stored
 strokes (orange = burn, blue = dodge) are drawn on `#displayOverlay` in the
@@ -135,6 +133,52 @@ grid: within 1 CSS px of their image points at 100 % and about 400 % zoom, as
 is the stroke being painted. The tool keeps the GPU display; the detail layer (#248) stays off
 while it is active, since the live rectangles go into the base frame's
 texture. Escape cancels the stroke being painted.
+
+Over another frame than the worker's (#254 follow-up). Once a photo of at most
+16 MP is idle, the frame on screen is the full-resolution render's display
+preview (#248 part 4), not the preview worker's frame: the display converts,
+then filters, while the worker filters the negative, then converts. Through the
+conversion's curves the two differ at edges and on grain: by up to 67/255 at the
+darkroom fixture's strip edges, and at the 772 px display of `_DSC3111.NEF` by
+more than 2/255 in 70 % of the pixels (up to 31/255). Such a stroke used to be
+painted as displayed + (live - committed) of the worker's frames, and its
+pen-up frame, the worker's frame of the stored stroke, replaced the whole frame
+on screen: every pixel where the two renderings differ moved, inside the
+stroke's box or not (the darkroom smoke's long pen stroke: 348,157 pixels
+outside its box, up to 67/255), and moved back about a second later when the
+exact frame landed.
+
+- Exact rectangles. A full-resolution render returns the analysis it converted
+  with (`returnAnalysis`), and main records its display previews as exact
+  displays of its settings (`exactDisplays`). A repaired frame is another
+  object and an in-place repair moves `convertedPixelsRevision`, so a display
+  with repaired pixels never counts. A stroke over an exact display ('display'
+  mode) goes to the worker as `exposureExact`: the new segments are rasterised
+  at full resolution; the display pixels whose filter footprint they reach
+  (`displayFootprint`) are converted from the region of the source the worker
+  holds as its level (k = 1: every display of a frame of at most 16 MP) with
+  the render's analysis and every stroke placed by `region`, as the detail
+  layer converts regions, and filtered as the display was
+  (`filterDisplayRegion`, both planes). The rectangles are that display's own
+  pixels with the stroke: `conversionWorker.exact.test.mjs` compares them bit
+  for bit with the full render of the stored stroke (colour with and without a
+  flat field, B&W and positive; plain and mirrored-crop geometry; bilinear and
+  area displays; with and without an analysis sample). A request converts the region its new points
+  reach (Node: 4 ms for the fixture's 237 x 237 brush region, 32 ms for the
+  782 x 782 region of a 30 % brush on a 10 MP frame).
+- Delta. Any other frame (dust or AI repairs that changed pixels, a worker
+  that no longer holds the source, `?liveDodgeExact=0`) is painted as
+  displayed + (live - committed), as before.
+- Pen-up. Over either, the last points go to the worker at once, ahead of the
+  pen-up conversion. Once their rectangles are on screen, what the stroke left
+  there becomes the display preview without a redraw (`adoptLiveComposite`; a
+  CPU display keeps its adjusted frame too), and the pen-up frame leaves it
+  there (`applyPreviewFrame`) until the exact frame of the stroke replaces it.
+  Outside the stroke's rectangles the exact frames before and after a stroke
+  are bit-identical, so nothing there moves at pen-up or later. Inside, an
+  exact composite is that frame, and it is recorded as the exact display of
+  the pen-up's settings, so a next stroke paints exactly over it; a delta one
+  is refined when the exact frame lands (Limits).
 
 Layout and DPR changes refit the canvases before remapping active dodge, dust
 and AI strokes, including at fit zoom. The DPR watcher uses both the standard
@@ -167,6 +211,10 @@ colorimetric match.
   `localExposure.test.mjs` (geometry round trips through rotation, mirror and
   crop; rasteriser falloff, accumulation and crop following; linear-light
   application), plus the existing adapter and curve engine tests.
+  `conversionWorker.exact.test.mjs` checks exact rectangles against the full
+  render of the stored stroke bit for bit, `brushWiring.test.mjs` the pen-up
+  composite and the 'display' wiring, `displayPreview.test.mjs` the display
+  footprints and region filters (#254 follow-up).
 - `scripts/darkroom-smoke.mjs` (`npm run test:smoke`, or
   `node scripts/smoke-test.mjs --darkroom-only`): renders a brightness test
   strip (patch means 21 → 134), applies a patch (+20) with toast and undo,
@@ -177,7 +225,18 @@ colorimetric match.
   (restored within 1); paints a 1.5-stop burn stroke (region 138 → 86) and
   removes it (restored); paints a 522-sample pen stroke with fast-changing
   pressure and checks that it stores the points the live effect painted, more
-  than 400 (#280).
+  than 400 (#280). Over the full-resolution display that stroke gets exact
+  rectangles, and once its pen-up frame and once its exact frame have landed
+  the frame on screen must be within 2/255 of its last live frame in 99.9 % of
+  the stroke's pixels, with no pixel outside its box more than 2/255 off
+  (#254 follow-up). Measured: bit-identical both times (104,182 stroke pixels,
+  348,552 outside), where the pen-up frame used to move 348,157 pixels outside
+  the box by up to 67/255. The same stroke painted by delta
+  (`__ncBrush.setExactDisplays(false)`) meets the bound at pen-up
+  (bit-identical) and leaves the outside of its box untouched when its exact
+  frame lands, which refines the inside (logged: 97.7 % within 2/255, up to
+  104/255). The stroke over the repaired frame (dust removal on; the fixture
+  has no dust) is exact as well.
 
 ```sh
 npm test
@@ -199,12 +258,29 @@ NC_DARKROOM_CPU=1 node scripts/smoke-test.mjs --darkroom-only
   acceptance bound (2/255 in 99.9 % of the stroke's pixels) for mouse, slow
   and fast pen pressure. Before #280 the fast-pressure stroke had 93 % of its
   pixels within 2/255 (up to 19/255).
-- The pen-up bound holds against the preview worker's own frame. When the
-  frame on screen is another one (the live effect then shows displayed +
-  (live - committed)), the pen-up frame replaces it as a whole: in the darkroom
-  smoke's long pen stroke the pixels outside the stroke's box change by up to
-  67/255, as much as inside it. The smoke checks that the stroke stores the
-  points it painted live and logs that comparison.
+- Over a frame with repaired pixels (dust or AI repairs) the live effect is
+  still displayed + (live - committed). Nothing moves at pen-up or outside the
+  stroke's rectangles, but the exact frame refines the inside when it lands:
+  the darkroom smoke's long pen stroke painted by delta has 97.7 % of its
+  pixels within 2/255 of it (up to 104/255 at the strip's edges); at the
+  772 px display of `_DSC3111.NEF` a Node probe of the composite against the
+  exact frame finds 47.8 % (up to 46/255). Exact rectangles there would need
+  the region's repair as well.
+- The dust pass after a stroke detects on the new frame, and its thresholds
+  are quantiles of the whole frame (`hatThreshold`), so a burn can change which
+  specks are repaired outside the stroke. Probe: a 1.5-stop burn on a 900 x 600
+  negative with 220 graded specks, at the default strength 3: the white
+  top-hat threshold moves 132 -> 129 and 5 specks outside the stroke become
+  repaired, while the conversion outside the stroke's box is bit-identical. The
+  exact frame and the export show that repair set; the live effect cannot. The
+  change that would stop it (detect before local exposure, or keep the
+  thresholds of the frame without strokes) changes exports, so it is queued in
+  `docs/audit-backlog.md` (Dust removal) for the owner.
+- Exact rectangles need the preview worker to hold the frame's source as its
+  level (the client numbers the sources it posts, and the worker refuses a
+  request for another) and the full render's analysis. Otherwise (a restarted
+  worker, a display the main thread resized in area mode) the stroke is
+  painted by delta.
 - A long pen stroke stores up to 1000 points instead of 400, so its share of
   the settings, the undo snapshots and the export raster grows with it. A
   2,400-sample pen stroke rasterised for a 24 MP export (Node): 0.70 → 0.97 s

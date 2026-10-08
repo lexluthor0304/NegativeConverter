@@ -604,22 +604,81 @@ function sliceTaps(taps, first, last) {
   return { mode: 'area', n: last - first, start, index: taps.index.subarray(base, taps.start[last]), weight: taps.weight.subarray(base, taps.start[last]) };
 }
 
-function updateFilteredRect(image, preview, rect, k) {
-  const levelWidth = Math.floor(image.width / k);
-  const levelHeight = Math.floor(image.height / k);
-  const geometry = { sourceWidth: image.width, sourceHeight: image.height, k };
-  const mode = displayResampleMode(geometry, preview);
-  const allCols = axisTaps(mode, preview.width, image.width, k, levelWidth, 0, preview.width);
-  const allRows = axisTaps(mode, preview.height, image.height, k, levelHeight, 0, preview.height);
+// The display pixels of filterDisplayImage(frame, target, { k }) whose
+// footprint meets source rect `rect`: their taps, their target spans and the
+// level block [minX, maxX) x [minY, maxY) the taps read. Null when none.
+function filterFootprint(frame, target, k, rect) {
+  const levelWidth = Math.floor(frame.width / k);
+  const levelHeight = Math.floor(frame.height / k);
+  const geometry = { sourceWidth: frame.width, sourceHeight: frame.height, k };
+  const mode = displayResampleMode(geometry, target);
+  const allCols = axisTaps(mode, target.width, frame.width, k, levelWidth, 0, target.width);
+  const allRows = axisTaps(mode, target.height, frame.height, k, levelHeight, 0, target.height);
   const columns = footprintSpan(allCols, rect.x, rect.x + rect.width, k, levelWidth);
   const rows = footprintSpan(allRows, rect.y, rect.y + rect.height, k, levelHeight);
   if (!columns || !rows) return null;
-  const cols = sliceTaps(allCols, columns[0], columns[1]);
-  const rowTaps = sliceTaps(allRows, rows[0], rows[1]);
   // The level block those taps read (taps are monotonic, but take the extremes anyway).
   let minX = Infinity, maxX = 0, minY = Infinity, maxY = 0;
   for (let j = columns[0]; j < columns[1]; j++) { const [a, b] = tapRange(allCols, j); minX = Math.min(minX, a); maxX = Math.max(maxX, b); }
   for (let j = rows[0]; j < rows[1]; j++) { const [a, b] = tapRange(allRows, j); minY = Math.min(minY, a); maxY = Math.max(maxY, b); }
+  return {
+    cols: sliceTaps(allCols, columns[0], columns[1]), rowTaps: sliceTaps(allRows, rows[0], rows[1]),
+    columns, rows, minX, maxX, minY, maxY,
+  };
+}
+
+/**
+ * Where a change of a frame inside source rect `rect` shows in its display
+ * image filterDisplayImage(frame, target, { k }) (#254 follow-up): `display`,
+ * the display pixels whose footprint meets the rect, and `source`, the frame
+ * pixels those display pixels read (whole level boxes, inside the frame).
+ * Null when the rect reaches no display pixel. filterDisplayRegion makes the
+ * pixels of `display` from the frame's pixels inside `source` alone.
+ */
+export function displayFootprint(frame, target, k, rect) {
+  const footprint = filterFootprint(frame, target, k, rect);
+  if (!footprint) return null;
+  const { columns, rows, minX, maxX, minY, maxY } = footprint;
+  return {
+    display: { x: columns[0], y: rows[0], width: columns[1] - columns[0], height: rows[1] - rows[0] },
+    source: { x: minX * k, y: minY * k, width: (maxX - minX) * k, height: (maxY - minY) * k },
+  };
+}
+
+/**
+ * The pixels filterDisplayImage(frame, target, { k }) gives over `display` (a
+ * displayFootprint result's), made from `plane`: the frame's 16-bit RGBA
+ * pixels inside `source` ({ width, height, data } of the source rect's size).
+ * Returns { width, height, data, image16 }: the 8-bit and 16-bit values the
+ * whole-frame filter gives there.
+ */
+export function filterDisplayRegion(plane, source, frame, target, k, display) {
+  if (!(plane?.data instanceof Uint16Array) || plane.width !== source.width || plane.height !== source.height) {
+    throw new TypeError('A 16-bit plane of the source region is needed');
+  }
+  if (source.x % k || source.y % k || source.width % k || source.height % k) throw new RangeError('The source region must hold whole level boxes');
+  const levelWidth = Math.floor(frame.width / k);
+  const levelHeight = Math.floor(frame.height / k);
+  const mode = displayResampleMode({ sourceWidth: frame.width, sourceHeight: frame.height, k }, target);
+  const cols = axisTaps(mode, target.width, frame.width, k, levelWidth, display.x, display.x + display.width);
+  const rows = axisTaps(mode, target.height, frame.height, k, levelHeight, display.y, display.y + display.height);
+  let block = plane.data;
+  let blockWidth = source.width;
+  if (k > 1) {
+    blockWidth = source.width / k;
+    block = new Uint16Array(blockWidth * (source.height / k) * 4);
+    boxLevelRows(plane, k, 0, blockWidth, 0, source.height / k, block, blockWidth);
+  }
+  const image16 = new Uint16Array(display.width * display.height * 4);
+  const data = new Uint8ClampedArray(image16.length);
+  resampleTaps(block, blockWidth, source.x / k, source.y / k, cols, rows, 0, 0, image16, data, display.width);
+  return { width: display.width, height: display.height, data, image16 };
+}
+
+function updateFilteredRect(image, preview, rect, k) {
+  const footprint = filterFootprint(image, preview, k, rect);
+  if (!footprint) return null;
+  const { cols, rowTaps, columns, rows, minX, maxX, minY, maxY } = footprint;
   let block;
   let blockWidth;
   let offX = minX;
