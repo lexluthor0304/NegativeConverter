@@ -264,6 +264,23 @@ Metric keys are `s<N>.<subject>.<metric>`; summaries are keyed
   otherwise the latest upload or uniform change behind it. The input time is
   the trusted mouse move that produced the value (platform timestamp). On-glass
   presentation adds about one vsync.
+- **Input phase** (#272, not a recorded metric). Chrome dispatches mouse moves
+  aligned to animation frames: a move later than a frame's time waits for the
+  next frame's BeginMainFrame, about 1 ms after that frame's time. A move's wait
+  is therefore up to one frame, set by where in the frame it arrives. `drag()`
+  starts the 60 Hz schedule right after the awaited `mousePressed`, which, after
+  the frame-aligned hover move, completes 1.5–5.5 ms after a frame start when
+  the main thread is idle; all 180 moves keep that phase and wait 13–16 ms each
+  (Chrome 155, measured from the probe's `t`/`h` and the rAF frame times). A
+  drag whose press meets a busy main thread starts later in the frame and reads
+  up to about 10 ms less, with the same app work. Input→draw of a SilverCore or
+  Step-3 drag is therefore about 17.8 ms minus the phase plus the app's tick,
+  and repetitions of the same code can land on either side of the 16 ms budget.
+  Pairing by platform timestamp also lets a slider that changes value on every
+  move (coreExposure) pair a picture with a move that arrived before the
+  picture's upload but was not dispatched yet: at a 2 ms phase such a drag reads
+  about 1 ms where the move→draw time is about 17 ms. Both are queued in
+  audit-backlog.md (Test coverage).
 - **Frames covered** is the share of value-changing 60 Hz frames whose newest
   input is reflected by a picture (pictures up to 250 ms after release count).
 - **Updates/s** counts pictures during the drag; **value changes/s** counts

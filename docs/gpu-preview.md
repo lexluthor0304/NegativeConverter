@@ -125,6 +125,39 @@ that still fails (a stage that reads neighbours, for one) settles with the exact
 The paper LUT build caches its strength-independent part per paper and toning
 (exact), so a toning-strength drag rebuilds it in about 1 ms instead of 5–6 ms.
 
+### A tick's cost and input→draw (#272)
+
+From the input's dispatch to `drawArrays`, a SilverCore tick took 1.6–1.9 ms (p50)
+on the main thread for contrast and temperature and 2.2–2.5 ms for exposure, which
+ticks on every frame (Chrome 155, DPR 2, S2 with the probe); a Step-3 cyan tick
+takes 0.2–0.3 ms. In a profiled contrast drag about 1.0 ms of it was the three
+65,536-entry tone-curve interpolations (`CurveEngine.interpolateToLUT`) and 0.17 ms
+the table-texture pack. The interpolation now walks the knots segment by segment
+with the same float64 expression per entry, and the pack writes 32-bit words: the
+tables are identical (`CurveEngine.interpolate.test.mjs` keeps the old
+implementation and a digest of `generateCurves`), and the tick is 1.0 ms (p50) and
+1.2 ms (p95) for contrast and temperature on a small fixture. On the synthetic 60 MP
+DNG at a load of 8–57 (three interleaved single-repetition S2 runs per side) it went
+from 1.6–2.8 to 0.9–1.5 ms (p50) and from 4.0–4.8 to 2.3–3.4 ms (p95; load stretches
+the tail), and input→draw from 15.7 / 18.4 to 14.7 / 17.2 ms (contrast, p50 / p95,
+medians) and from 16.2 / 19.0 to 15.5 / 17.4 ms (temperature).
+
+Most of S2's input→draw is not the tick. Chrome dispatches mouse moves aligned to
+animation frames: a move whose timestamp is later than a frame's time waits for the
+next frame's BeginMainFrame, which dispatches it about 1 ms after that frame's time,
+and the GPU tick draws in that same frame. A move therefore waits up to one frame,
+depending on where in the frame it arrives (its phase). S2 starts each drag's 60 Hz
+schedule right after the awaited press, which completes 1.5–5.5 ms after a frame
+start when the main thread is idle, and every move of the drag keeps that phase:
+each waits 13–16 ms (p50) before any app code runs. At a phase of φ ms the move→draw
+time is about 17.8 − φ ms plus the tick. Contrast and temperature read 16–18 ms
+before #272 because their drags kept that early phase; exposure's ticks cost as much
+or more, but its press often met a busy main thread (a later phase), and a slider
+that changes value on every move is paired with a move that arrived before the
+upload but was not dispatched yet, which reads about 1 ms at an early phase
+(performance-benchmark.md, "Input phase"). With the 1.2 ms tick, p95 ≤ 16 ms needs φ
+≳ 3 ms; below that the remainder is Chrome's frame-aligned input, outside the app.
+
 ## Settle, state and histogram
 
 - The exact frame of the newest settings leaves on commit, 150 ms after the last
