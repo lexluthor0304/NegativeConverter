@@ -20,6 +20,12 @@ export const CPU_CANVAS = 'canvas';
 // Crop mode draws on a 2D canvas of its own (#245).
 export const CROP_CANVAS = 'cropCanvas';
 export const COVERAGE_GRACE_MS = 250;
+// The photo-switch veil (#235) covers the viewer while a photo opens. Its
+// presentation surfaces show the target's own provisional pixels: the
+// probe names its canvases `${VEIL_ID}:${data-surface}`.
+export const VEIL_ID = 'studioPhotoSwitchFeedback';
+export const VEIL_BITMAP = `${VEIL_ID}:bitmap`;
+export const VEIL_IMAGE = `${VEIL_ID}:image`;
 
 export function byKind(events, kind) {
   return (events || []).filter(event => event.k === kind);
@@ -329,6 +335,78 @@ export function nextOverlayHidden(events, from) {
   return null;
 }
 
+/** Whether the photo-switch veil covers the viewer at `time` ('veil' events; none recorded: no). */
+export function veilShownAt(events, time) {
+  let state = null;
+  for (const event of byKind(events, 'veil')) {
+    if (event.t > time) break;
+    state = event;
+  }
+  return Boolean(state?.shown);
+}
+
+/**
+ * First time >= `from` at which the viewer is uncovered: the loading overlay
+ * hidden and the photo-switch veil gone. Exact pixels drawn under either are
+ * not visible yet. Recordings without 'veil' events reduce to
+ * nextOverlayHidden.
+ */
+export function nextViewerVisible(events, from) {
+  let overlayHidden = overlayHiddenAt(events, from);
+  let veilHidden = !veilShownAt(events, from);
+  if (overlayHidden && veilHidden) return from;
+  for (const event of events) {
+    if (event.t < from || (event.k !== 'vis' && event.k !== 'veil')) continue;
+    if (event.k === 'vis') overlayHidden = Number.isFinite(event.op) ? event.op <= 0.5 : !event.ov;
+    else veilHidden = !event.shown;
+    if (overlayHidden && veilHidden) return event.t;
+  }
+  return null;
+}
+
+/**
+ * Provisional pictures (#235): the target's own pixels on the veil's
+ * surfaces, never on the display canvases.
+ * - `embedded`: the camera's embedded preview, transferred to the bitmap
+ *   surface (`bmp` events);
+ * - `cached`: the retained converted 1200 px copy, put on the image surface;
+ * - the thumbnail <img> surface (`veil.load`): the tile's thumbnail or a
+ *   stored converted preview, as the veil's kind says, once loaded while
+ *   the veil shows it.
+ */
+export function provisionalPictures(events) {
+  const out = [];
+  for (const event of events || []) {
+    if (event.k === 'bmp' && event.c === VEIL_BITMAP && event.fn !== 'release') {
+      out.push({ t: event.t, kind: 'embedded', surface: 'bitmap', w: event.w, h: event.h });
+    } else if (event.k === 'c2d' && event.c === VEIL_IMAGE && event.fn === 'putImageData') {
+      out.push({ t: event.t, kind: 'cached', surface: 'image', w: event.w, h: event.h });
+    } else if (event.k === 'veil.load' && event.shown !== false) {
+      out.push({ t: event.t, kind: event.kind || 'thumbnail', surface: event.surface || 'thumbnail', w: event.w, h: event.h });
+    }
+  }
+  return out.sort((a, b) => a.t - b.t);
+}
+
+/**
+ * The first provisional picture in [from, until] that is visible (the
+ * loading overlay hidden; the veil itself carries it), and the first
+ * embedded-preview frame. Times are page times.
+ */
+export function firstProvisional(events, { from, until = Infinity }) {
+  let first = null;
+  let embedded = null;
+  for (const pic of provisionalPictures(events)) {
+    if (pic.t < from || pic.t > until) continue;
+    const visibleAt = nextOverlayHidden(events, pic.t);
+    if (visibleAt === null || visibleAt > until) continue;
+    if (!first) first = { ...pic, visibleAt };
+    if (!embedded && pic.kind === 'embedded') embedded = { ...pic, visibleAt };
+    if (first && embedded) break;
+  }
+  return { first, embedded };
+}
+
 export function firstReady(events, from) {
   let sawBusy = false;
   for (const event of byKind(events, 'vis')) {
@@ -365,7 +443,12 @@ export function settledAt(events, from, { quietMs = 2500, until = Infinity } = {
   return until - end >= quietMs ? end : null;
 }
 
-/** S1 import timeline, all values relative to the file input `change`. */
+/**
+ * S1 import timeline, all values relative to the file input `change`.
+ * Exact pixels are the display canvases' pictures; they are visible once
+ * neither the loading overlay nor the photo-switch veil covers them. The
+ * provisional pixels (#235) are the target's own pixels on the veil itself.
+ */
 export function importMetrics(events, { changeT, canvasIds = [GL_CANVAS, CPU_CANVAS], until = Infinity }) {
   const after = events.filter(event => event.t >= changeT);
   // New content only: a GL draw of a freshly uploaded source texture, or a 2D put/draw.
@@ -375,25 +458,33 @@ export function importMetrics(events, { changeT, canvasIds = [GL_CANVAS, CPU_CAN
   const first = pics[0] || null;
   let firstVisible = null;
   for (const pic of pics) {
-    const visibleAt = nextOverlayHidden(events, pic.t);
+    const visibleAt = nextViewerVisible(events, pic.t);
     if (visibleAt !== null) { firstVisible = visibleAt; break; }
   }
   let firstPositive = null;
   for (const pic of pics.filter(p => p.positive)) {
-    const visibleAt = nextOverlayHidden(events, pic.t);
+    const visibleAt = nextViewerVisible(events, pic.t);
     if (visibleAt !== null) { firstPositive = visibleAt; break; }
   }
+  const provisional = firstProvisional(events, { from: changeT, until });
   const ready = first ? firstReady(events, changeT) : null;
   const settled = settledAt(events, changeT, { until });
   const rel = t => (t === null || t === undefined ? null : round(t - changeT));
   const requests = byKind(after, 'req');
   const results = byKind(after, 'res');
+  // An 'analyze-import' reply carries the worker's own time for each part
+  // (#273): frame detection and the film-edge read.
   const stages = results.filter(res => Number.isFinite(res.rt)).map(res => ({
-    cls: res.cls, fn: res.fn || null, startMs: rel(res.rt), endMs: rel(res.t), ms: round(res.t - res.rt)
+    cls: res.cls, fn: res.fn || null, startMs: rel(res.rt), endMs: rel(res.t), ms: round(res.t - res.rt),
+    ...(Number.isFinite(res.frameMs) ? { frameMs: round(res.frameMs) } : {}),
+    ...(Number.isFinite(res.filmEdgeMs) ? { filmEdgeMs: round(res.filmEdgeMs) } : {})
   })).sort((a, b) => a.startMs - b.startMs);
   const librawOpens = requests.filter(req => req.cls === 'libraw' && req.fn === 'open');
   const measures = byKind(after, 'um').map(entry => ({ name: entry.n, startMs: rel(entry.s), ms: round(entry.d), detail: entry.detail || null }));
   return {
+    firstProvisionalPixelsMs: rel(provisional.first?.visibleAt ?? null),
+    provisionalKind: provisional.first?.kind ?? null,
+    firstEmbeddedPreviewMs: rel(provisional.embedded?.visibleAt ?? null),
     firstPixelsDrawnMs: rel(first?.t ?? null),
     firstPhotoVisibleMs: rel(firstVisible),
     firstPositiveVisibleMs: rel(firstPositive),
@@ -410,6 +501,12 @@ export function importMetrics(events, { changeT, canvasIds = [GL_CANVAS, CPU_CAN
 /**
  * One photo switch (S7): times from the Enter keydown.
  * `target` is the file name the switch should end on.
+ * - firstProvisionalPixelsMs (#235): the target's own pixels on the veil
+ *   (its thumbnail, retained copy or embedded preview), from the keypress.
+ *   The app binds the veil's presentation to the switch target and drops it
+ *   when the target changes.
+ * - firstPixelsMs / firstDisplayPositiveMs: exact pixels on the display
+ *   canvases once the target is named (drawn, possibly under the veil).
  */
 export function switchMetrics(events, { keyT, target, displaySize = null, until = Infinity, previousKeyTimes = [] }) {
   const after = events.filter(event => event.t >= keyT && event.t <= until);
@@ -434,7 +531,11 @@ export function switchMetrics(events, { keyT, target, displaySize = null, until 
   const lastKeyT = Math.max(keyT, ...previousKeyTimes);
   const stale = byKind(events, 'res').filter(res => Number.isFinite(res.rt) && res.rt < lastKeyT && res.t > (firstPositive?.t ?? readyOrUntil));
   const rel = t => (t === null || t === undefined ? null : round(t - keyT));
+  const provisional = firstProvisional(events, { from: keyT, until });
   return {
+    firstProvisionalPixelsMs: rel(provisional.first?.visibleAt ?? null),
+    provisionalKind: provisional.first?.kind ?? null,
+    firstEmbeddedPreviewMs: rel(provisional.embedded?.visibleAt ?? null),
     firstPixelsMs: rel(firstPixels?.t ?? null),
     firstPixelsSize: firstPixels?.w ? `${firstPixels.w}×${firstPixels.h}` : null,
     firstDisplayPositiveMs: rel(firstPositive?.t ?? null),

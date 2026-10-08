@@ -1,13 +1,30 @@
 // S7 navigation: Arrow + Enter on the film strip. Classes: cold unanalysed
 // (during the roll analysis), warm 1-back, cold analysed, 2-back and five
-// presses within 0.8 s. Times are from the Enter keydown: first pixels of
-// the target, first display-resolution positive, ready; LibRaw decodes
-// started, stale results after the target is shown, long tasks (keypress
-// until ready) and main busy %.
+// presses within 0.8 s. Times are from the Enter keydown: the target's
+// provisional pixels on the photo-switch veil (#235), its first exact pixels
+// and display-resolution positive, ready; LibRaw decodes started, stale
+// results after the target is shown, long tasks (keypress until ready) and
+// main busy %. Every cold switch also adds a sample to
+// s7.cold.firstProvisionalPixelsP95Ms, a p95 over all repetitions (#235
+// budgets the cold switch at p95).
 import { byKind, switchMetrics } from '../lib/metrics.mjs';
 import { median } from '../lib/stats.mjs';
 import { bootApp, recordRollRoutes, recordMemory, recordRoute, sleep, pageNow, round } from './common.mjs';
 import { importRoll, waitForRollBackground } from './s6-roll.mjs';
+
+// The classes #235's cold-switch budget (target pixels ≤ 200 ms p95) covers.
+export const COLD_CLASSES = new Set(['coldUnanalysed', 'coldAnalysed']);
+export const S7_CLASS_KEYS = ['firstProvisionalPixelsMs', 'firstEmbeddedPreviewMs', 'firstPixelsMs', 'firstDisplayPositiveMs', 'readyMs',
+  'librawDecodes', 'staleResultsAfterShown', 'mainBusyPct', 'fromFirstPressMs'];
+
+/**
+ * The cold-switch sample of the pooled p95: the provisional pixels, or,
+ * when the veil showed none, the time the exact frame was uncovered (ready),
+ * so a missing provisional frame cannot improve the p95.
+ */
+export function coldSwitchSample(metrics) {
+  return Number.isFinite(metrics.firstProvisionalPixelsMs) ? metrics.firstProvisionalPixelsMs : metrics.readyMs;
+}
 
 const QUICK_PLAN = [
   { to: 1, cls: 'coldUnanalysed' },
@@ -113,12 +130,15 @@ export default {
       const metrics = await measureSwitch(ctx, keyTimes, target, displaySize);
       (samples[step.cls] ||= []).push(metrics);
       ctx.raw[`s7.${step.cls}.${(samples[step.cls].length)}`] = metrics;
+      if (COLD_CLASSES.has(step.cls)) ctx.sample('s7.cold.firstProvisionalPixelsP95Ms', coldSwitchSample(metrics));
       // Update after each completed step: a later abort preserves earlier classes.
       for (const [cls, list] of Object.entries(samples)) {
-        for (const key of ['firstPixelsMs', 'firstDisplayPositiveMs', 'readyMs', 'librawDecodes', 'staleResultsAfterShown', 'mainBusyPct', 'fromFirstPressMs']) {
+        for (const key of S7_CLASS_KEYS) {
           const values = list.map(entry => entry[key]).filter(Number.isFinite);
           if (values.length) ctx.record(`s7.${cls}.${key}`, round(median(values)));
         }
+        const kinds = [...new Set(list.map(entry => entry.provisionalKind).filter(Boolean))];
+        if (kinds.length) ctx.record(`s7.${cls}.provisionalKind`, kinds.join('+'));
         ctx.record(`s7.${cls}.longTaskCount`, round(median(list.map(entry => entry.longTasks.n))));
         ctx.record(`s7.${cls}.maxLongTaskMs`, round(median(list.map(entry => entry.longTasks.maxMs))));
         ctx.record(`s7.${cls}.samples`, list.length);

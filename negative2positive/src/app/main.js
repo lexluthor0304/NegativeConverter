@@ -25275,9 +25275,14 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
             allowCrop, silent: true, autoFrame, filmType: snapshot.filmType, signal, detection
           }).then(settings => { trace.mark('autoFrame', { applied: settings.autoFrameMeta?.appliedMode || 'none' }); return settings; })
           : Promise.resolve(snapshot);
+        // `readMs`: the read's own time; it shares one worker reply with the
+        // frame detection, so the stage's mark alone cannot time it (#273).
         const edge = readEdge
           ? analysed.then(outcome => outcome.read)
-            .then(read => { trace.mark('filmEdge', { found: Boolean(read?.result?.found || read?.result?.text) }); return read; })
+            .then(read => {
+              trace.mark('filmEdge', { found: Boolean(read?.result?.found || read?.result?.text), ...(Number.isFinite(read?.ms) ? { readMs: read.ms } : {}) });
+              return read;
+            })
           : Promise.resolve(null);
         frame.catch(() => {});
         edge.catch(() => {});

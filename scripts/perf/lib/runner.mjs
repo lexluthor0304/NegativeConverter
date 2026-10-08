@@ -20,7 +20,7 @@ import { findChrome, isSoftwareGl } from './chrome.mjs';
 import { ChromeSession, ScenarioAbort } from './session.mjs';
 import { createSourceMapper } from './sourcemap.mjs';
 import { createTraceAnalyzer, createTraceFileWriter, recordTrace } from './trace.mjs';
-import { summarizeRepetitions } from './stats.mjs';
+import { summarizeRepetitions, p95, round } from './stats.mjs';
 import { loafAttribution, workerTimingSummary } from './metrics.mjs';
 import { compareRuns, collectRunSummaries, renderCompareMarkdown, findMetricDef, comparisonSelection, probeControlSummaries } from './compare.mjs';
 import { renderReport } from './report.mjs';
@@ -54,7 +54,7 @@ async function runRepetition({ scenario, fixture, group, ref, rep, args, profile
     fakeCamera: Boolean(scenario.fakeCamera),
     keepExportChunks: Boolean(extra?.keepExportChunks), watchdogWithoutProbe: true
   });
-  const result = { label, ref: ref.label, rep, profiled, extra: extra?.label || null, status: 'ok', metrics: {}, hashes: {}, routes: [], notes: [], raw: {}, hangs: [] };
+  const result = { label, ref: ref.label, rep, profiled, extra: extra?.label || null, status: 'ok', metrics: {}, samples: {}, hashes: {}, routes: [], notes: [], raw: {}, hangs: [] };
   let session;
   try {
     session = await openSession();
@@ -82,6 +82,9 @@ async function runRepetition({ scenario, fixture, group, ref, rep, args, profile
     raw: result.raw,
     hangs: result.hangs,
     record(key, value) { if (value !== null && value !== undefined && !(typeof value === 'number' && !Number.isFinite(value))) result.metrics[key] = value; },
+    // One sample of a pooled metric: summarized over every timing
+    // repetition's samples at once (a p95 across runs, see summarizeGroup).
+    sample(key, value) { if (typeof value === 'number' && Number.isFinite(value)) (result.samples[key] ||= []).push(value); },
     hash(key, value) { if (value) result.hashes[key] = value; },
     bump(key) { result.metrics[key] = (result.metrics[key] || 0) + 1; },
     note(text) { result.notes.push(text); log(`${label}: ${text}`); },
@@ -198,6 +201,15 @@ function summarizeGroup(reps) {
   }
   const selfPct = timing.flatMap(rep => Object.entries(rep.metrics).filter(([key]) => key.endsWith('.probeSelfPct')).map(([, value]) => value));
   if (selfPct.length) summary['probe.selfPctMax'] = { median: Math.max(...selfPct), min: Math.min(...selfPct), max: Math.max(...selfPct), n: selfPct.length, values: selfPct };
+  // Pooled samples (ctx.sample, keys ending in P95Ms): the p95 of every
+  // timing repetition's samples together, in the field budgets compare, with
+  // the samples' (min–max) and count. A per-repetition median cannot stand
+  // for a p95 budget such as #235's cold switch.
+  const pooled = {};
+  for (const rep of timing) for (const [key, values] of Object.entries(rep.samples || {})) (pooled[key] ||= []).push(...values);
+  for (const [key, values] of Object.entries(pooled)) {
+    if (values.length) summary[key] = { median: round(p95(values)), min: Math.min(...values), max: Math.max(...values), n: values.length, values, pooled: 'p95' };
+  }
   return summary;
 }
 

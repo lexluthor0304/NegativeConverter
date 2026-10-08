@@ -81,6 +81,19 @@ assert.equal(summary['s9.single.png8.imported.pixelsSha256'].value, 'aa');
 assert.equal(summary['s9.single.tiff16.imported.bitDepth'].median, 16);
 assert.equal(summary['s9.perfFlagParity'].value, 'identical');
 assert.equal(summary['probe.selfPctMax'].median, 0.6);
+// Pooled samples (ctx.sample): one p95 over every timing repetition's
+// samples, never a median of per-repetition values (#235's cold switch).
+{
+  const pooled = summarizeGroup([
+    { status: 'ok', metrics: {}, samples: { 's7.cold.firstProvisionalPixelsP95Ms': [40, 52] }, hashes: {} },
+    { status: 'ok', metrics: {}, samples: { 's7.cold.firstProvisionalPixelsP95Ms': [45, 300] }, hashes: {} },
+    { status: 'hang', metrics: {}, samples: { 's7.cold.firstProvisionalPixelsP95Ms': [47] }, hashes: {} },
+    { status: 'ok', profiled: true, metrics: {}, samples: { 's7.cold.firstProvisionalPixelsP95Ms': [9000] }, hashes: {} },
+    { status: 'ok', metrics: {}, hashes: {} }
+  ])['s7.cold.firstProvisionalPixelsP95Ms'];
+  assert.deepEqual([pooled.median, pooled.min, pooled.max, pooled.n, pooled.pooled], [250.4, 40, 300, 5, 'p95'],
+    'p95 of 40, 45, 47, 52, 300 (profiled samples excluded, completed samples of an aborted rep kept)');
+}
 reps[5].hashes['s9.single.png8.imported.pixelsSha256'] = 'bb';
 assert.match(summarizeGroup(reps)['s9.perfFlagParity'].value, /^differs/);
 assert.equal(pickSavedRun({ runs: [{ label: 'base' }, { label: 'head' }] }).label, 'head');

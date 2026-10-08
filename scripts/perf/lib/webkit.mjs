@@ -46,7 +46,15 @@ const REVEAL = `
   const pane = element.closest('.studio-pane');
   if (pane && pane.hidden) document.getElementById('studioTab-' + pane.id.replace('studioPane-', ''))?.click();
   for (let d = element.closest('details'); d; d = d.parentElement && d.parentElement.closest('details')) d.open = true;
+  const collapsed = element.closest('.section-content.collapsed');
+  if (collapsed) (collapsed.parentElement.querySelector('.section-header, .section-title') || {}).click?.();
   element.scrollIntoView({ block: 'center' });
+  const r = element.getBoundingClientRect();
+  return { x: r.x, y: r.y, width: r.width, height: r.height, value: element.value, min: Number(element.min || 0), max: Number(element.max || 100) };`;
+// The rect again once a reveal's layout has settled (see safariDrag).
+const MEASURE = `
+  const element = document.getElementById(arguments[0]);
+  if (!element) return null;
   const r = element.getBoundingClientRect();
   return { x: r.x, y: r.y, width: r.width, height: r.height, value: element.value, min: Number(element.min || 0), max: Number(element.max || 100) };`;
 const READY_EXPR = `(document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy && !document.querySelector('.loading-overlay.visible'))`;
@@ -94,7 +102,7 @@ export function metricsFromSelfDriven(report, { record } = {}) {
       if (!events.length && !window) continue;
       const changeT = byKind(events, 'input').find(event => event.type === 'change' && event.id === 'fileInput')?.t ?? part.before;
       const m = importMetrics(events, { changeT });
-      for (const key of ['firstPixelsDrawnMs', 'firstPhotoVisibleMs', 'firstPositiveVisibleMs', 'readyMs', 'librawDecodes']) {
+      for (const key of ['firstProvisionalPixelsMs', 'provisionalKind', 'firstEmbeddedPreviewMs', 'firstPixelsDrawnMs', 'firstPhotoVisibleMs', 'firstPositiveVisibleMs', 'readyMs', 'librawDecodes']) {
         if (key !== 'librawDecodes' || (Array.isArray(part.events) && (observedWindow || m[key] > 0))) put(`${scenario}.${key}`, m[key]);
       }
       for (const [key, value] of Object.entries(webkitWindowMetrics(window))) put(`${scenario}.${key}`, value);
@@ -106,7 +114,7 @@ export function metricsFromSelfDriven(report, { record } = {}) {
     } else if (part.name.startsWith('switch:')) {
       if (!events.length && !window) continue;
       const m = switchMetrics(events, { keyT: part.keyT, target: part.target, until: window?.end ?? Infinity });
-      for (const key of ['firstPixelsMs', 'firstDisplayPositiveMs', 'readyMs', 'librawDecodes']) {
+      for (const key of ['firstProvisionalPixelsMs', 'firstEmbeddedPreviewMs', 'firstPixelsMs', 'firstDisplayPositiveMs', 'readyMs', 'librawDecodes']) {
         if (key !== 'librawDecodes' || (Array.isArray(part.events) && (observedWindow || m[key] > 0))) put(`s7.${part.cls}.${key}#${sampleIndex}`, m[key]);
       }
     } else if (part.name.startsWith('export:')) {
@@ -378,9 +386,12 @@ async function safariRemainingRoutes(wd, events, roll, seen, record) {
 }
 
 async function safariDrag(wd, events, id, prefix, record) {
-  const info = await wd.execute(REVEAL, [id]);
-  if (!info) { record(`${prefix}.missing`, 1); return; }
+  if (!await wd.execute(REVEAL, [id])) { record(`${prefix}.missing`, 1); return; }
   await sleep(500);
+  // Measured after the wait: a drawer the reveal opened slides its body in
+  // (160 ms), and a rect read during that missed S2's 3 px wbR track (#273).
+  const info = await wd.execute(MEASURE, [id]);
+  if (!info) { record(`${prefix}.missing`, 1); return; }
   const span = info.width - 16;
   const fraction = (Number(info.value) - info.min) / Math.max(1e-9, info.max - info.min);
   const x0 = info.x + 8 + fraction * span, y = info.y + info.height / 2;
@@ -410,7 +421,7 @@ export async function safariScenario(id, { wd, origin, fixture, roll, record, no
   const dpr = Math.round(await wd.execute('return devicePixelRatio'));
   if (id === 's1') {
     const { metrics, window, changeT } = await safariImport(wd, [fixture.name], events);
-    for (const key of ['firstPixelsDrawnMs', 'firstPhotoVisibleMs', 'firstPositiveVisibleMs', 'readyMs', 'settledMs', 'librawDecodes', 'changeToLibrawOpenMs']) record(`s1.${key}`, metrics[key]);
+    for (const key of ['firstProvisionalPixelsMs', 'provisionalKind', 'firstEmbeddedPreviewMs', 'firstPixelsDrawnMs', 'firstPhotoVisibleMs', 'firstPositiveVisibleMs', 'readyMs', 'settledMs', 'librawDecodes', 'changeToLibrawOpenMs']) record(`s1.${key}`, metrics[key]);
     for (const [key, value] of Object.entries(webkitWindowMetrics(window))) record(`s1.${key}`, value);
     await safariRoute(wd, events, 's1.photo0', record, changeT);
     return;
@@ -491,7 +502,7 @@ export async function safariScenario(id, { wd, origin, fixture, roll, record, no
       (samples[step.cls] ||= []).push(m);
       // Publish before any later browser call can fail, including metadata.
       for (const [cls, list] of Object.entries(samples)) {
-        for (const key of ['firstPixelsMs', 'firstDisplayPositiveMs', 'readyMs', 'librawDecodes', 'timerGapCount', 'maxTimerGapMs', 'mainBusyPct']) {
+        for (const key of ['firstProvisionalPixelsMs', 'firstEmbeddedPreviewMs', 'firstPixelsMs', 'firstDisplayPositiveMs', 'readyMs', 'librawDecodes', 'timerGapCount', 'maxTimerGapMs', 'mainBusyPct']) {
           const values = list.map(entry => entry[key]).filter(Number.isFinite);
           if (values.length) record(`s7.${cls}.${key}`, round(median(values)));
         }

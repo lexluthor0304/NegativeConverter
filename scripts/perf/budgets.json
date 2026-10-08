@@ -1940,6 +1940,37 @@
         }
       ]
     },
+    "s1.firstProvisionalPixelsMs": {
+      "unit": "ms",
+      "better": "lower",
+      "target": 300,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 50
+      },
+      "budget": "Import: the target's provisional pixels on the photo-switch veil, visible after the file input change (#235: ≤ 300 ms, median of 5; #229 import budget). Exact pixels: firstPixelsDrawnMs, firstPhotoVisibleMs",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": null,
+          "range": null,
+          "source": "2026-09-23 interactive S1",
+          "note": "no provisional image at 1703835: the first visible pixels were the exact negative at 12349 ms"
+        }
+      ]
+    },
+    "s1.firstEmbeddedPreviewMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 50
+      },
+      "budget": "tracked: the embedded preview on the veil's bitmap surface after the file input change (#235)",
+      "baselines": []
+    },
     "s1.firstPixelsDrawnMs": {
       "unit": "ms",
       "better": "lower",
@@ -2143,6 +2174,54 @@
           "source": "2026-09-23 interactive S1"
         }
       ]
+    },
+    "s1.stage.filmEdgeMs": {
+      "unit": "ms",
+      "better": "lower",
+      "target": 180,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 10
+      },
+      "budget": "Film-edge stage of an import: the read's own time in the auto-frame worker's analyze-import request (#236: ≤ 180 ms on 60 MP M11 DNGs; #273). Refs before #251: the read-film-edge round trip",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 272,
+          "range": null,
+          "source": "2026-09-23 interactive S1"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 305,
+          "range": null,
+          "source": "2026-09-23 interactive S1"
+        }
+      ]
+    },
+    "s1.stage.frameDetectMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 20
+      },
+      "budget": "tracked: frame detection's own time in the analyze-import request (#273); the whole request is stage.autoFrameMs",
+      "baselines": []
+    },
+    "s1.control.stage.filmEdgeMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 10
+      },
+      "budget": "tracked: the worker-reported film-edge read, in probe and --no-probe runs alike (#273)",
+      "baselines": []
     },
     "*.memory.rendererPeakMB": {
       "unit": "MB",
@@ -2582,12 +2661,11 @@
     "s7.coldAnalysed.firstPixelsMs": {
       "unit": "ms",
       "better": "lower",
-      "target": 300,
       "tolerance": {
         "rel": 0.1,
         "abs": 50
       },
-      "budget": "Cold switch, provisional pixels",
+      "budget": "tracked: exact pixels after a cold switch (drawn, under the veil until it hides); the provisional budget (#235: ≤ 200 ms p95) is firstProvisionalPixelsMs (#273)",
       "baselines": [
         {
           "ref": "1703835",
@@ -2605,12 +2683,11 @@
     "s7.coldUnanalysed.firstPixelsMs": {
       "unit": "ms",
       "better": "lower",
-      "target": 300,
       "tolerance": {
         "rel": 0.1,
         "abs": 50
       },
-      "budget": "Cold switch, provisional pixels",
+      "budget": "tracked: exact pixels after a cold switch during the roll analysis (drawn, under the veil until it hides); the provisional budget (#235: ≤ 200 ms p95) is firstProvisionalPixelsMs (#273)",
       "baselines": [
         {
           "ref": "1703835",
@@ -2625,6 +2702,92 @@
           "note": "cold switch during analysis"
         }
       ]
+    },
+    "s7.coldAnalysed.firstProvisionalPixelsMs": {
+      "unit": "ms",
+      "better": "lower",
+      "target": 200,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 50
+      },
+      "budget": "Cold switch (coldAnalysed), the target's own pixels on the photo-switch veil after Enter (#235: ≤ 200 ms p95; median of the class here, the p95 is s7.cold.firstProvisionalPixelsP95Ms)",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617–628.DNG (12 files)",
+          "route": "positive",
+          "value": null,
+          "range": null,
+          "source": "2026-09-23 roll S7",
+          "note": "no provisional image at 1703835: only the veil until the exact image (see firstPixelsMs)"
+        }
+      ]
+    },
+    "s7.coldUnanalysed.firstProvisionalPixelsMs": {
+      "unit": "ms",
+      "better": "lower",
+      "target": 200,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 50
+      },
+      "budget": "Cold switch (coldUnanalysed), the target's own pixels on the photo-switch veil after Enter (#235: ≤ 200 ms p95; median of the class here, the p95 is s7.cold.firstProvisionalPixelsP95Ms)",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617–624.DNG (8 files)",
+          "route": "positive",
+          "value": null,
+          "range": null,
+          "source": "2026-09-23 interactive S6 session",
+          "note": "no provisional image at 1703835: only the veil until the exact image (see firstPixelsMs)"
+        }
+      ]
+    },
+    "s7.cold.firstProvisionalPixelsP95Ms": {
+      "unit": "ms",
+      "better": "lower",
+      "target": 200,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 50
+      },
+      "budget": "Cold switch, the target's own pixels after Enter, p95 over every cold switch of the timing repetitions (#235: ≤ 200 ms p95, n ≥ 20 in its acceptance run); a switch without provisional pixels counts its ready time",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617–628.DNG (12 files)",
+          "route": "positive",
+          "value": null,
+          "range": [
+            9472,
+            10445
+          ],
+          "source": "2026-09-23 roll S7",
+          "note": "n = 20 cold switches, median 9672 ms, nothing before the exact image"
+        }
+      ]
+    },
+    "s7.*.firstEmbeddedPreviewMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 50
+      },
+      "budget": "tracked: the embedded preview on the veil's bitmap surface after Enter (#235)",
+      "baselines": []
+    },
+    "s7.*.firstProvisionalPixelsMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 50
+      },
+      "budget": "tracked: provisional pixels on the photo-switch veil after Enter (#235); the cold classes and rapid5 have budgets",
+      "baselines": []
     },
     "s7.coldAnalysed.longTaskCount": {
       "unit": "n",
@@ -2650,12 +2813,11 @@
     "s7.rapid5.firstPixelsMs": {
       "unit": "ms",
       "better": "lower",
-      "target": 300,
       "tolerance": {
         "rel": 0.1,
         "abs": 50
       },
-      "budget": "5 presses in 0.8 s, target provisional pixels",
+      "budget": "tracked: exact pixels of the final target after 5 presses in 0.8 s; the ≤ 300 ms provisional budget is firstProvisionalPixelsMs (#273)",
       "baselines": [
         {
           "ref": "1703835",
@@ -2669,6 +2831,17 @@
           "source": "2026-09-23 roll S7"
         }
       ]
+    },
+    "s7.rapid5.firstProvisionalPixelsMs": {
+      "unit": "ms",
+      "better": "lower",
+      "target": 300,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 50
+      },
+      "budget": "5 presses in 0.8 s, the final target's provisional pixels on the veil (#230: ≤ 300 ms provisional)",
+      "baselines": []
     },
     "s7.rapid5.firstDisplayPositiveMs": {
       "unit": "ms",

@@ -5,12 +5,27 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { dragMetrics, pictures } from './lib/metrics.mjs';
+import { dragMetrics, pictures, provisionalPictures } from './lib/metrics.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const source = readFileSync(join(here, 'probe.js'), 'utf8');
 
-function createEnvironment({ invoke } = {}) {
+// `dom`: a stand-in photo-switch veil (#235) with its three surfaces, a
+// MutationObserver the test triggers, and document listeners.
+function createVeil() {
+  const surfaces = ['image', 'thumbnail', 'bitmap'].map(surface => ({
+    tagName: surface === 'thumbnail' ? 'IMG' : 'CANVAS', id: '', hidden: true, attrs: { 'data-surface': surface }, naturalWidth: 320, naturalHeight: 213
+  }));
+  const veil = { id: 'studioPhotoSwitchFeedback', hidden: true, attrs: {}, getAttribute(name) { return this.attrs[name] ?? null; }, querySelectorAll: () => surfaces };
+  for (const node of surfaces) {
+    node.getAttribute = name => node.attrs[name] ?? null;
+    node.hasAttribute = name => name in node.attrs;
+    node.closest = selector => (selector === '#studioPhotoSwitchFeedback' ? veil : null);
+  }
+  return { veil, image: surfaces[0], thumbnail: surfaces[1], bitmap: surfaces[2] };
+}
+
+function createEnvironment({ invoke, dom = null } = {}) {
   const calls = { readPixels: 0, getError: 0, getImageData: 0, texImage2D: 0, drawArrays: 0 };
   // As in browsers, WebGL2RenderingContext does not inherit from WebGLRenderingContext.
   const makeGl = () => class {
@@ -38,6 +53,21 @@ function createEnvironment({ invoke } = {}) {
     drawImage() { return 'drew'; }
     getImageData() { calls.getImageData++; return null; }
   }
+  class FakeBitmapRenderer {
+    constructor(canvas) { this.canvas = canvas; }
+    transferFromImageBitmap(bitmap) {
+      this.received = bitmap;
+      // As in browsers, the transfer detaches the bitmap.
+      if (bitmap) { bitmap.width = 0; bitmap.height = 0; }
+      return 'transferred';
+    }
+  }
+  const mutationObservers = [];
+  class FakeMutationObserver {
+    constructor(callback) { this.callback = callback; mutationObservers.push(this); }
+    observe(element, options) { this.element = element; this.options = options; }
+  }
+  const documentListeners = {};
   const listeners = {};
   class FakeWorker {
     constructor(url, options) { this.url = url; this.options = options; this.listeners = []; this.posted = []; }
@@ -59,15 +89,15 @@ function createEnvironment({ invoke } = {}) {
   const body = { classList: { contains: () => false }, dataset: {} };
   const document = {
     readyState: 'complete', body,
-    getElementById: () => null, querySelector: () => null, querySelectorAll: () => [],
-    addEventListener() {}, createElement: () => ({})
+    getElementById: id => (dom && id === dom.veil.id ? dom.veil : null), querySelector: () => null, querySelectorAll: () => [],
+    addEventListener: (type, listener, options) => { (documentListeners[type] ||= []).push({ listener, options }); }, createElement: () => ({})
   };
   const blobUrls = new Map();
   const URLStub = { createObjectURL: blob => { const url = `blob:test/${blobUrls.size}`; blobUrls.set(url, blob); return url; }, revokeObjectURL: () => {} };
   class Anchor { click() { this.clicked = true; } }
   const global = {
     performance, WebGLRenderingContext: FakeGl, WebGL2RenderingContext: FakeGl2,
-    CanvasRenderingContext2D: Fake2d, Worker: FakeWorker, Blob: FakeBlob, File: FakeFile,
+    CanvasRenderingContext2D: Fake2d, ImageBitmapRenderingContext: FakeBitmapRenderer, Worker: FakeWorker, Blob: FakeBlob, File: FakeFile,
     PerformanceObserver: FakePerformanceObserver, devicePixelRatio: 2,
     addEventListener: (type, listener, options) => { (listeners[type] ||= []).push({ listener, options }); }
   };
@@ -77,7 +107,7 @@ function createEnvironment({ invoke } = {}) {
     setInterval: (fn, ms) => { intervals.push({ fn, ms }); return intervals.length; },
     clearInterval: id => { if (intervals[id - 1]) intervals[id - 1].cleared = true; },
     setTimeout: () => 0, getComputedStyle: () => ({ opacity: '1', display: 'block' }),
-    MutationObserver: undefined, PerformanceObserver: FakePerformanceObserver, OffscreenCanvas: undefined,
+    MutationObserver: dom ? FakeMutationObserver : undefined, PerformanceObserver: FakePerformanceObserver, OffscreenCanvas: undefined,
     URL: URLStub, HTMLAnchorElement: Anchor, location: { origin: 'http://127.0.0.1:1' }, fetch: () => Promise.reject(new Error('offline')),
     Worker: FakeWorker, Blob: FakeBlob, File: FakeFile, crypto: undefined, createImageBitmap: undefined, DataTransfer: undefined, Event: class {}
   };
@@ -89,7 +119,7 @@ function createEnvironment({ invoke } = {}) {
   return {
     global, calls, listeners, observers, FakeWorker, Fake2d, Anchor, URLStub, blobUrls,
     flushFrames(times) { for (const time of times) { const queue = rafQueue; rafQueue = []; queue.forEach(cb => cb(time)); } },
-    intervals, FakeFile
+    intervals, FakeFile, mutationObservers, documentListeners
   };
 }
 
@@ -248,14 +278,23 @@ assert.deepEqual(drained.events.filter(event => event.k === 'read').map(event =>
 // ---- input capture ----
 const fire = (type, event) => env.listeners[type].forEach(({ listener }) => listener({ type, isTrusted: true, timeStamp: 100, ...event }));
 assert.ok(env.listeners.mousemove[0].options.capture, 'input listeners run in the capture phase');
-fire('mousemove', { target: { nodeType: 1, id: 'coreExposure' }, clientX: 10.4, clientY: 20, buttons: 1 });
+fire('mousemove', { target: { nodeType: 1, id: 'coreExposure' }, clientX: 10.4, clientY: 20, buttons: 1, metaKey: true });
 fire('input', { target: { nodeType: 1, id: 'coreExposure', value: '12', type: 'range' } });
-fire('pointermove', { pointerType: 'mouse', target: { nodeType: 1, id: 'x' } });
+fire('mousedown', { target: { nodeType: 1, id: 'cropOverlay' }, clientX: 1, clientY: 2, buttons: 1, metaKey: true });
+fire('wheel', { target: { nodeType: 1, id: 'canvasContainer' }, clientX: 5, clientY: 6, buttons: 0, deltaY: -60 });
+fire('keydown', { target: { nodeType: 1, id: '' }, key: 'Enter', shiftKey: true });
+assert.equal(['pointermove', 'pointerdown', 'pointerup'].some(type => env.listeners[type]), false,
+  'no pointer listeners: mouse pointer events are recorded once, as mouse events (#273)');
 drained = probe.drain();
 const inputs = drained.events.filter(event => event.k === 'input');
-assert.deepEqual(inputs.map(event => event.type), ['mousemove', 'input'], 'mouse pointer events are recorded once, as mouse events');
+assert.deepEqual(inputs.map(event => event.type), ['mousemove', 'input', 'mousedown', 'wheel', 'keydown']);
 assert.equal(inputs[0].x, 10);
+assert.equal(inputs[0].b, 1);
+assert.equal('mod' in inputs[0], false, 'moves carry no modifiers');
 assert.equal(inputs[1].v, '12');
+assert.equal(inputs[2].mod, 'M');
+assert.equal(inputs[3].dy, -60);
+assert.deepEqual([inputs[4].key, inputs[4].mod], ['Enter', 'S']);
 
 // ---- performance observers ----
 const longtaskObserver = env.observers.find(observer => observer.options?.type === 'longtask');
@@ -298,6 +337,168 @@ assert.deepEqual(probe.exports.list().map(entry => [entry.name, entry.size, entr
 const dump = probe.dump();
 assert.ok(dump.ring.length > 0, 'the ring buffer keeps recent events for hang dumps');
 assert.ok(probe.selfMs() >= 0);
+
+// ---- uniforms: the signature follows every value without walking them (#273) ----
+{
+  const run = createEnvironment();
+  const ctx = new run.global.WebGL2RenderingContext('glCanvas');
+  const p = run.global.__ncPerf;
+  const exposure = { loc: 'exposure' }, look = { loc: 'look' };
+  ctx.useProgram({ program: 1 });
+  ctx.uniform1f(exposure, 0.5);
+  ctx.uniformMatrix4fv(look, false, new Float32Array([1, 0, 0, 1]));
+  ctx.drawArrays(5, 0, 4);
+  ctx.uniform1f(exposure, 0.7);
+  ctx.drawArrays(5, 0, 4);
+  ctx.uniform1f(exposure, 0.5);
+  ctx.drawArrays(5, 0, 4);
+  ctx.uniform1f(exposure, 0.5);
+  ctx.uniform1f(null, 9);
+  ctx.drawArrays(5, 0, 4);
+  ctx.uniformMatrix4fv(look, false, new Float32Array([1, 0, 0, 1]));
+  ctx.drawArrays(5, 0, 4);
+  ctx.uniformMatrix4fv(look, false, new Float32Array([1, 0, 0, 2]));
+  ctx.drawArrays(5, 0, 4);
+  ctx.uniform1f(exposure, NaN);
+  ctx.drawArrays(5, 0, 4);
+  ctx.uniform1f(exposure, NaN);
+  ctx.drawArrays(5, 0, 4);
+  const draws = p.drain().events.filter(event => event.k === 'gl.draw');
+  assert.notEqual(draws[0].sig, draws[1].sig, 'a changed value is a new state');
+  assert.equal(draws[2].sig, draws[0].sig, 'the same values again are the same state');
+  assert.equal(draws[3].sig, draws[2].sig, 'an unchanged value and a null location change nothing');
+  assert.equal(draws[3].ut, draws[2].ut, 'nor the uniform change time');
+  assert.equal(draws[4].sig, draws[3].sig, 'an equal array is no change');
+  assert.notEqual(draws[5].sig, draws[4].sig, 'one array element is a change');
+  assert.notEqual(draws[6].sig, draws[5].sig);
+  assert.equal(draws[7].sig, draws[6].sig, 'NaN equals NaN here, as the old text comparison had it');
+  assert.ok(draws.every(draw => /^[0-9a-f]+$/.test(draw.sig)));
+}
+
+// ---- textures: the cached binding text follows binds and uploads (#273) ----
+{
+  const run = createEnvironment();
+  const ctx = new run.global.WebGL2RenderingContext('glCanvas');
+  const p = run.global.__ncPerf;
+  const a = { texture: 'a' }, b = { texture: 'b' };
+  ctx.activeTexture(0x84C0);
+  ctx.bindTexture(0x0DE1, a);
+  ctx.texImage2D(0x0DE1, 0, 0x1908, 4, 4, 0, 0x1908, 0x1401, new Uint8Array(64).fill(1));
+  ctx.drawArrays(5, 0, 4);
+  ctx.bindTexture(0x0DE1, a);
+  ctx.drawArrays(5, 0, 4);
+  ctx.bindTexture(0x0DE1, b);
+  ctx.drawArrays(5, 0, 4);
+  ctx.bindTexture(0x0DE1, a);
+  ctx.drawArrays(5, 0, 4);
+  ctx.texSubImage2D(0x0DE1, 0, 0, 0, 4, 4, 0x1908, 0x1401, new Uint8Array(64).fill(2));
+  ctx.drawArrays(5, 0, 4);
+  ctx.activeTexture(0x84C1);
+  ctx.bindTexture(0x0DE1, b);
+  ctx.drawArrays(5, 0, 4);
+  const sigs = p.drain().events.filter(event => event.k === 'gl.draw').map(event => event.sig);
+  assert.equal(sigs[1], sigs[0], 'binding the same texture again changes nothing');
+  assert.notEqual(sigs[2], sigs[1], 'another texture is another state');
+  assert.equal(sigs[3], sigs[0], 'and binding the first again restores it');
+  assert.notEqual(sigs[4], sigs[3], 'new content in a bound texture is a new state');
+  assert.notEqual(sigs[5], sigs[4], 'a texture on another unit too');
+}
+
+// ---- the photo-switch veil (#235): surfaces, bitmap renderer, visibility ----
+{
+  const dom = createVeil();
+  const run = createEnvironment({ dom });
+  const p = run.global.__ncPerf;
+  const veilObserver = run.mutationObservers.find(observer => observer.element === dom.veil);
+  assert.ok(veilObserver, 'the veil is observed');
+  assert.deepEqual(veilObserver.options.attributeFilter, ['hidden', 'data-provisional', 'src']);
+  // The embedded preview: a bitmap transfer on the bitmap surface, then the
+  // app reveals that surface and marks the veil.
+  const renderer = new run.global.ImageBitmapRenderingContext(dom.bitmap);
+  const bitmap = { width: 2112, height: 1408 };
+  assert.equal(renderer.transferFromImageBitmap(bitmap), 'transferred', 'the transfer passes through');
+  assert.equal(renderer.received, bitmap, 'the app\'s bitmap is the one transferred');
+  dom.veil.hidden = false;
+  dom.veil.attrs['data-provisional'] = 'embedded';
+  dom.bitmap.hidden = false;
+  veilObserver.callback([]);
+  veilObserver.callback([]);
+  // The retained copy on the 2D image surface; another anonymous canvas.
+  new run.global.CanvasRenderingContext2D(dom.image).putImageData({ width: 1200, height: 800, data: new Uint8ClampedArray(16) }, 0, 0);
+  new run.global.ImageBitmapRenderingContext({ id: '' }).transferFromImageBitmap({ width: 8, height: 8 });
+  // A thumbnail <img> on the veil loads; an image elsewhere does not count.
+  const load = target => run.documentListeners.load.forEach(({ listener }) => listener({ type: 'load', target }));
+  dom.veil.attrs['data-provisional'] = 'thumbnail';
+  dom.bitmap.hidden = true;
+  dom.thumbnail.hidden = false;
+  load(dom.thumbnail);
+  load({ tagName: 'IMG', hasAttribute: () => false });
+  renderer.transferFromImageBitmap(null);
+  dom.veil.hidden = true;
+  delete dom.veil.attrs['data-provisional'];
+  veilObserver.callback([]);
+  const events = p.drain().events;
+  assert.ok(run.documentListeners.load[0].options === true, 'load is caught in the capture phase');
+  const bitmaps = events.filter(event => event.k === 'bmp');
+  assert.deepEqual(bitmaps.map(event => [event.fn, event.c, event.w, event.h]), [
+    ['transfer', 'studioPhotoSwitchFeedback:bitmap', 2112, 1408], ['transfer', 'anon' + bitmaps[1].c.slice(4), 8, 8],
+    ['release', 'studioPhotoSwitchFeedback:bitmap', 0, 0]
+  ], 'sizes are read before the transfer detaches the bitmap');
+  assert.match(bitmaps[1].c, /^anon\d+$/);
+  assert.equal(events.find(event => event.k === 'c2d').c, 'studioPhotoSwitchFeedback:image');
+  assert.deepEqual(events.filter(event => event.k === 'veil').map(event => [event.shown, event.kind, event.surface]), [
+    [false, null, null], [true, 'embedded', 'bitmap'], [false, null, null]
+  ], 'one record per change of the veil');
+  const loads = events.filter(event => event.k === 'veil.load');
+  assert.deepEqual(loads.map(event => [event.surface, event.kind, event.shown, event.w]), [['thumbnail', 'thumbnail', true, 320]]);
+  assert.deepEqual(provisionalPictures(events).map(pic => pic.kind), ['embedded', 'cached', 'thumbnail']);
+}
+
+// ---- the ring buffer keeps the last 30 s (at least 4096 events) in O(1) ----
+{
+  const run = createEnvironment();
+  const p = run.global.__ncPerf;
+  const fireAt = timeStamp => run.listeners.mousemove.forEach(({ listener }) => listener({ type: 'mousemove', isTrusted: true, timeStamp, buttons: 0, clientX: 1, clientY: 1, target: { nodeType: 1, id: 'x' } }));
+  for (let i = 0; i < 12000; i++) fireAt(i * 5);
+  const ring = p.dump().ring;
+  assert.ok(ring.every(Boolean), 'no dropped slot is returned');
+  assert.equal(ring.at(-1).t, 59995);
+  assert.ok(ring[0].t >= 59995 - 30000 - 5 && ring.length >= 4096, `ring from ${ring[0].t}, ${ring.length} events`);
+  assert.equal(p.drain().events.length, 12000, 'the drained log keeps every event');
+  for (let i = 0; i < 100; i++) fireAt(100000 + i);
+  assert.equal(p.dump().ring.length, 4096, 'after a pause the newest 4096 stay');
+}
+
+// ---- windows: the heartbeat is optional and Chrome turns it off ----
+{
+  const run = createEnvironment();
+  const p = run.global.__ncPerf;
+  p.beginWindow('chrome', { ticks: false });
+  assert.equal(run.intervals.filter(timer => timer.ms === 5).length, 0, 'no 5 ms timer');
+  run.flushFrames([10, 26.7]);
+  const window = p.endWindow();
+  assert.deepEqual(window.frames, [10, 26.7]);
+  assert.equal('ticks' in window, false);
+  p.beginWindow('webkit');
+  const timer = run.intervals.find(entry => entry.ms === 5 && !entry.cleared);
+  assert.ok(timer, 'WebKit callers keep the heartbeat');
+  timer.fn();
+  assert.equal(p.endWindow().ticks.length, 1);
+}
+
+// ---- 'analyze-import': each part's own time in the worker (#273) ----
+{
+  const run = createEnvironment();
+  const p = run.global.__ncPerf;
+  const worker = new run.global.Worker('/assets/autoFrameWorker.js');
+  worker.postMessage({ type: 'analyze-import', id: 4, width: 9536, height: 6336, frame: {}, filmEdge: {} });
+  worker.emit({ id: 4, result: { frame: { cropRegion: { width: 9000, height: 6000 }, angle: 0.4 }, filmEdge: { found: false }, frameMs: 642.1, filmEdgeMs: 151.4 } });
+  worker.postMessage({ type: 'analyze-import', id: 5, frame: {} });
+  worker.emit({ id: 5, result: { frame: null } });
+  const results = p.drain().events.filter(event => event.k === 'res');
+  assert.deepEqual([results[0].cls, results[0].frameMs, results[0].filmEdgeMs, results[0].crop.w, results[0].angle], ['analyze-import', 642.1, 151.4, 9000, 0.4]);
+  assert.equal('filmEdgeMs' in results[1], false, 'a reply without the time records none');
+}
 
 // ---- end to end with the metric definitions: a slider drag through the worker ----
 {

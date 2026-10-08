@@ -1,5 +1,6 @@
-// Minimal --no-probe control: just two Wasm-heavy worker round trips. No
-// hashing, debugger, auto-attach, draw wrappers or performance observers.
+// Minimal --no-probe control: just two Wasm-heavy worker round trips, plus
+// the film-edge time an 'analyze-import' reply reports (#273). No hashing,
+// debugger, auto-attach, draw wrappers or performance observers.
 (function installStageControl(global) {
   if (typeof global.Worker !== 'function' || global.__ncPerfControl) return;
   const stages = [];
@@ -15,7 +16,10 @@
         const request = requests.get(event.data?.id);
         if (!request || event.data?.type === 'progress') return;
         requests.delete(event.data?.id);
-        if (!event.data?.error) stages.push({ ...request, ms: performance.now() - request.t });
+        if (event.data?.error) return;
+        stages.push({ ...request, ms: performance.now() - request.t });
+        const edgeMs = request.key === 'autoFrameMs' ? event.data?.result?.filmEdgeMs : undefined;
+        if (typeof edgeMs === 'number') stages.push({ key: 'filmEdgeMs', t: request.t, ms: edgeMs });
       });
       return worker;
     }

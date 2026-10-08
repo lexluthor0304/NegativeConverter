@@ -165,6 +165,7 @@ class FakeSession {
       return true;
     }
     if (expression.includes('return { value: e.value')) return { value: '0', min: -100, max: 100 };
+    if (expression.includes('sliderPressPoint: true')) return { sliderPressPoint: true, x: 208, y: 210, width: 216, value: '0', min: -100, max: 100, fraction: 0.5, hit: null };
     if (expression.includes(".file-list-name')].map")) return this.files.map((_, i) => i);
     const focus = /data-index="(\d+)"\]'\);\s*if \(!button\) return false;/.exec(expression);
     if (focus) { this.focused = Number(focus[1]); return true; }
@@ -389,6 +390,67 @@ try {
   assert.equal(s1.metrics['s1.changeToLibrawOpenMs'], 185);
   assert.equal(s1.metrics['s1.photo0.route'], 'color');
   assert.ok(s1.metrics['s1.firstPositiveVisibleMs'] > s1.metrics['s1.firstPixelsDrawnMs'], 'the negative is drawn before the positive');
+  assert.ok(!('s1.firstProvisionalPixelsMs' in s1.metrics), 'no veil, no provisional pixels (the 1703835 import)');
+
+  // HEAD's RAW import (#235, #251): the photo-switch veil instead of the
+  // full-screen overlay, the embedded preview on its bitmap surface, the
+  // exact positive drawn under it, and one 'analyze-import' request whose
+  // reply times the film-edge read and the frame detection (#273).
+  class VeilSession extends FakeSession {
+    static async open(options) { return new VeilSession(options); }
+    async setFiles(paths) {
+      this.files = paths;
+      this.current = paths[0];
+      const changeT = this.step(5);
+      this.emit({ k: 'input', type: 'change', id: 'fileInput', t: changeT, tr: true, files: paths.length });
+      this.emit({ k: 'veil', t: this.step(3), shown: true, kind: null, surface: null });
+      this.emit({ k: 'vis', t: this.step(1), ov: false, ready: false, busy: true });
+      this.emit({ k: 'bmp', t: this.step(80), fn: 'transfer', c: 'studioPhotoSwitchFeedback:bitmap', w: 2112, h: 1408 });
+      this.emit({ k: 'veil', t: this.step(1), shown: true, kind: 'embedded', surface: 'bitmap' });
+      const decodeT = this.step(100);
+      this.emit({ k: 'req', t: decodeT, wid: 3, cls: 'libraw', fn: 'open', id: 0 });
+      this.emit({ k: 'res', t: this.step(4000), wid: 3, cls: 'libraw', fn: 'open', id: 0, rt: decodeT });
+      const frameT = this.step(1);
+      this.emit({ k: 'req', t: frameT, wid: 4, cls: 'analyze-import', id: 1 });
+      this.emit({ k: 'res', t: this.step(850), wid: 4, cls: 'analyze-import', id: 1, rt: frameT, frameMs: 690.2, filmEdgeMs: 148.6 });
+      this.convert('import', { delay: 60 });
+      const drawnT = this.t;
+      this.emit({ k: 'bmp', t: this.step(250), fn: 'release', c: 'studioPhotoSwitchFeedback:bitmap', w: 0, h: 0 });
+      this.emit({ k: 'veil', t: this.step(1), shown: false, kind: null, surface: null });
+      this.emit({ k: 'vis', t: this.step(5), ov: false, ready: true, busy: false });
+      this.emit({ k: 'mut', t: this.t, what: 'filename', v: basename(paths[0]) });
+      this.veilHiddenAfterDrawMs = this.t - 5 - drawnT;
+      this.step(3000);
+    }
+    async key(key) {
+      if (key !== 'Enter') return super.key(key);
+      // A cold target: its tile's thumbnail on the veil at once, then the
+      // embedded preview, the exact frame under the veil, the veil gone.
+      const t = this.step(5);
+      this.emit({ k: 'input', type: 'keydown', key, t, tr: true });
+      this.current = this.files[this.focused];
+      this.emit({ k: 'veil', t: t + 2, shown: true, kind: 'thumbnail', surface: 'thumbnail' });
+      this.emit({ k: 'mut', t: t + 3, what: 'filename', v: basename(this.current) });
+      this.emit({ k: 'vis', t: t + 4, ov: false, ready: false, busy: true });
+      this.emit({ k: 'veil.load', t: t + 20 + this.focused, surface: 'thumbnail', kind: 'thumbnail', shown: true, w: 320, h: 213 });
+      this.emit({ k: 'bmp', t: t + 90, fn: 'transfer', c: 'studioPhotoSwitchFeedback:bitmap', w: 2112, h: 1408 });
+      this.step(400);
+      this.convert(`switch${this.focused}`, { delay: 5 });
+      this.emit({ k: 'veil', t: this.step(5), shown: false, kind: null, surface: null });
+      this.emit({ k: 'vis', t: this.step(5), ov: false, ready: true, busy: false });
+    }
+  }
+  const veiled = await run('s1', ['--quick'], { sessionFactory: VeilSession.open });
+  assert.equal(veiled.status, 'ok', veiled.detail);
+  assert.equal(veiled.metrics['s1.firstProvisionalPixelsMs'], 84, 'provisional pixels from change');
+  assert.equal(veiled.metrics['s1.provisionalKind'], 'embedded');
+  assert.equal(veiled.metrics['s1.firstEmbeddedPreviewMs'], 84);
+  assert.equal(veiled.metrics['s1.stage.filmEdgeMs'], 148.6, 'the film-edge read on its own');
+  assert.equal(veiled.metrics['s1.stage.frameDetectMs'], 690.2);
+  assert.equal(veiled.metrics['s1.stage.autoFrameMs'], 850, 'the whole request stays autoFrameMs');
+  assert.equal(veiled.metrics['s1.control.stage.filmEdgeMs'], 148.6);
+  assert.equal(veiled.metrics['s1.firstPhotoVisibleMs'] - veiled.metrics['s1.firstPixelsDrawnMs'], 251,
+    'exact pixels drawn under the veil are visible when it hides');
 
   const s2 = await run('s2', ['--dpr', '2']);
   expectKeys(s2, ['s2.coreExposure.dpr2.updatesPerSecond', 's2.coreExposure.dpr2.framesCoveredPct', 's2.coreExposure.dpr2.inputToDrawP95Ms',
@@ -446,6 +508,50 @@ try {
   const s7full = await run('s7', ['--scenarios', 's7']);
   expectRoutes(s7full, roll.length);
   expectKeys(s7full, ['s7.twoBack.firstPixelsMs', 's7.rapid5.firstPixelsMs', 's7.rapid5.fromFirstPressMs', 's7.rapid5.librawDecodes']);
+  assert.ok(!('s7.coldUnanalysed.firstProvisionalPixelsMs' in s7.metrics), 'no veil, no provisional pixels');
+  assert.deepEqual(s7.samples['s7.cold.firstProvisionalPixelsP95Ms'], [s7.metrics['s7.coldUnanalysed.readyMs'], s7.metrics['s7.coldAnalysed.readyMs']],
+    'without provisional pixels a cold sample is the uncovered exact frame (ready)');
+  // HEAD's cold switch: the tile thumbnail on the veil, then the embedded
+  // preview, then the exact frame; provisional and exact pixels apart.
+  const s7veil = await run('s7', ['--quick'], { sessionFactory: VeilSession.open });
+  assert.equal(s7veil.status, 'ok', s7veil.detail);
+  assert.equal(s7veil.metrics['s7.coldUnanalysed.firstProvisionalPixelsMs'], 21);
+  assert.equal(s7veil.metrics['s7.coldUnanalysed.provisionalKind'], 'thumbnail');
+  assert.equal(s7veil.metrics['s7.coldUnanalysed.firstEmbeddedPreviewMs'], 90);
+  assert.equal(s7veil.metrics['s7.coldAnalysed.firstProvisionalPixelsMs'], 22);
+  assert.ok(s7veil.metrics['s7.coldAnalysed.firstPixelsMs'] > 400, 'the exact frame is reported on its own');
+  assert.deepEqual(s7veil.samples['s7.cold.firstProvisionalPixelsP95Ms'], [21, 22], 'one pooled sample per cold switch');
+  assert.ok(findMetricDef(budgets, 's7.cold.firstProvisionalPixelsP95Ms').target <= 200);
+
+  // A press point that misses the slider fails the step (S2's wbR, #273)
+  // instead of recording a drag that moved nothing.
+  class CoveredSliderSession extends FakeSession {
+    static async open(options) { return new CoveredSliderSession(options); }
+    async evaluate(expression) {
+      if (expression.includes('sliderPressPoint: true') && expression.includes('"wbR"')) {
+        this.step(1);
+        this.pressChecks = (this.pressChecks || 0) + 1;
+        return { sliderPressPoint: true, x: 208, y: 210, width: 216, value: '1', min: 0.5, max: 2, fraction: 1 / 3, hit: 'additionalSectionContent' };
+      }
+      return super.evaluate(expression);
+    }
+  }
+  let covered;
+  const coveredRun = await run('s2', ['--dpr', '2'], { sessionFactory: async options => (covered = await CoveredSliderSession.open(options)) });
+  assert.equal(coveredRun.status, 'ui');
+  assert.match(coveredRun.detail, /s2\.wbR\.dpr2: the press point \(208, 210\) hits #additionalSectionContent, not #wbR/);
+  assert.equal(covered.pressChecks, 2, 'revealed and checked once more before failing');
+  assert.ok('s2.coreTemperature.dpr2.inputs' in coveredRun.metrics && !('s2.wbR.dpr2.inputs' in coveredRun.metrics));
+  class StrayPressSession extends FakeSession {
+    static async open(options) { return new StrayPressSession(options); }
+    async drag(options) {
+      if (this.lastId === 'cyan') this.lastId = 'additionalSectionContent';
+      return super.drag(options);
+    }
+  }
+  const stray = await run('s2', ['--dpr', '2'], { sessionFactory: StrayPressSession.open });
+  assert.equal(stray.status, 'ui');
+  assert.match(stray.detail, /s2\.cyan\.dpr2: the press landed on #additionalSectionContent, not #cyan/);
 
   const s5 = await run('s5', ['--scenarios', 's5']);
   expectKeys(s5, ['s5.enterCrop.firstDrawMs', 's5.enterCrop.previewPx', 's5.enterCrop.showsPositive', 's5.edgeDrag.overlayFps', 's5.edgeDrag.moveToFrameP95Ms',

@@ -112,7 +112,12 @@ lock; 4 refused by the pre-flight; 5 no Chrome.
    `Input.dispatchKeyEvent`, wheel events) on an absolute 60 Hz schedule (a late
    step never delays the next). Files through `DOM.setFileInputFiles` on
    `#fileInput`. Controls are revealed (tab, `<details>`, scroll) before a
-   measured window, never inside it.
+   measured window, never inside it. The reveal waits for running finite
+   animations on the control and its ancestors and then for a rect that holds
+   still for 6 frames: an opened Studio drawer slides its body in (160 ms,
+   `steps(4)`, 8 px), and S2's `wbR` press, taken from a rect read during that
+   animation, landed 6 px below its 3 px track until #273, so its drags
+   recorded no input.
 7. **Repetitions.** `--reps` timing repetitions, then one profiled repetition
    with a Chrome trace of all threads (CPU samples source-mapped to `src/`
    file:line; excluded from medians), then scenario-specific verification
@@ -131,13 +136,25 @@ timestamps:
 - WebGL 1 **and** 2: `texImage2D`/`texSubImage2D` with a sparse pixel hash per
   upload, `drawArrays`/`drawElements` (and the WebGL 2 variants) with a state
   signature (program, bound texture contents, uniform values, backing size),
-  and the app's own `readPixels`/`getError` calls.
-- 2D canvas `putImageData`/`drawImage`; `toDataURL`, `toBlob`, `convertToBlob`.
+  and the app's own `readPixels`/`getError` calls. Uniform calls compare their
+  numbers with the location's last ones in place; a change rehashes that
+  location and XORs it into the context's uniform state, so a draw's
+  signature covers every uniform value without walking them (#273).
+- 2D canvas `putImageData`/`drawImage`; `toDataURL`, `toBlob`, `convertToBlob`;
+  `ImageBitmapRenderingContext.transferFromImageBitmap` (`bmp` events, the
+  bitmap's size read before the transfer detaches it).
+- The photo-switch veil `#studioPhotoSwitchFeedback` (#235): a mutation
+  observer records when it is shown or hidden, its `data-provisional` kind and
+  the visible surface (`veil` events). Its canvases are named by their
+  `data-surface` (`studioPhotoSwitchFeedback:bitmap`, `…:image`), and a
+  capturing `load` listener on the document records the thumbnail `<img>`
+  surface's loads (`veil.load`).
 - Worker creation/termination and every request/result, classified by
   `type`/`fn`: `convert` (with film type and cache flags; the result's 8-bit
   pixels hashed like uploads), `suppress`, `analyze-frame`, `read-film-edge`,
   `analyze-import` (#251: an import's frame detection and film edge in one
-  request; its time is `stage.autoFrameMs`),
+  request; its time is `stage.autoFrameMs`, and the reply's `frameMs` and
+  `filmEdgeMs`, each part's own time in the worker, are recorded with it),
   LibRaw `open`/`imageData`, scan decode, export encode, dust, semantic, AI.
 - `File` reads (`arrayBuffer`, `slice`, `stream`, `text`, `FileReader`), Tauri
   `invoke` and its completion, including matching native write windows, with no destination paths or capability tokens; trusted input (capture phase, platform timestamps). Dust `detect`, `inpaint`, `stroke`, `plane` and `maskDelta` payloads record exact binary lengths plus a metadata estimate, with shared-plane lengths separate. Removed `refine` messages are not classified as dust.
@@ -149,9 +166,17 @@ timestamps:
   `studio-ready`/`studioBusy`; mutations of the zoom transform, the file name,
   the crop overlay and film-strip thumbnails.
 - Measurement windows: a rAF-gap recorder and a 5 ms `setInterval` heartbeat
-  (the WebKit long-task proxy), only while a window is open.
-- A 30 s ring buffer that a hang dump reads while the page is paused;
-  `window.__ncMemory?.snapshot()` once #258 adds it.
+  (the WebKit long-task proxy), only while a window is open. Chrome windows
+  run without the heartbeat (`beginWindow(label, { ticks: false })`): Chrome
+  has the Long Tasks API and CDP task time, and its 200 timer tasks a second
+  were probe load that `probeSelfMs` did not count (#273).
+- A 30 s ring buffer (at least 4096 events) that a hang dump reads while the
+  page is paused; old events are dropped by advancing a start index and the
+  array is compacted when half of it is dead. Until #273 every push spliced
+  the ring once it held more than 4096 events of the last 30 s: O(n) per
+  event, 17–70 µs at 200–1000 events/s in V8 (busy scenarios such as roll
+  imports, not S2's drags).
+- `window.__ncMemory?.snapshot()` once #258 adds it.
 
 It never calls `readPixels`, `getError` or `getImageData` itself (GPU or raster
 sync points): "visible" is decided from upload hashes. The one exception is
@@ -170,7 +195,10 @@ a CDP binding (Chrome only). Worker attachment and wrappers still impose some co
 threshold, no debug widget) for trace sites including (`fullResolutionRender`,
 `processNegative`, `imageDataToBlob`, `processFileWithSettings`, `batchExport`,
 `prepareStudioPhoto`, `automaticRollImport`, `linearDngBatch`), and the auto-frame stage timings
-become the `nc:autoFrameStages` measure. `?debug=1` keeps its console output
+become the `nc:autoFrameStages` measure. The `filmEdge` stage of
+`prepareStudioPhoto` carries `readMs`, the read's own time: it arrives in the
+same worker reply as the frame detection, so the stage's mark alone cannot
+time it (#273). `?debug=1` keeps its console output
 above 120 ms. Without either flag no entry is created (unit test
 `perfTrace.test.mjs`; smoke `perf-harness-smoke.mjs`), so the unbounded User
 Timing buffer cannot grow. S9 checks that export pixels are identical with the
@@ -181,6 +209,19 @@ flag on and off.
 Metric keys are `s<N>.<subject>.<metric>`; summaries are keyed
 `<metric>@<fixture>`.
 
+- **Provisional pixels** (#235): the target's own pixels on the photo-switch
+  veil, which covers the viewer while a photo opens: the camera's embedded
+  preview transferred to its bitmap surface (kind `embedded`), the retained
+  1200 px converted copy put on its image surface (`cached`), or its
+  thumbnail `<img>` once loaded (`thumbnail`, or `cached` for a stored
+  converted preview). Visible when the full-screen loading overlay is hidden.
+  They are never on the display canvases, so the exact metrics below do not
+  count them.
+- **Exact pixels visible**: a picture on a display canvas is visible once
+  neither the loading overlay nor the veil covers it. A RAW import opens
+  through the veil instead of the overlay since #235, so S1's first photo and
+  first positive visible wait for the veil to hide; recordings without veil
+  events (older refs) reduce to the overlay alone.
 - **Picture**: a draw on the display canvas whose state signature differs from
   the previous draw's, or a 2D put/draw with new pixels on the CPU display
   canvas. `#glCanvas` only ever shows converted positives (negatives go to the
@@ -209,13 +250,13 @@ Metric keys are `s<N>.<subject>.<metric>`; summaries are keyed
 
 | ID | Steps | Main metrics |
 |---|---|---|
-| S1 import | boot, import one file | boot ms and transferred KB; from `change`: first pixels drawn, first photo visible, first positive visible, ready, settled; stage timeline (worker round trips, `nc:*` measures); long tasks; LibRaw decodes; film type and route |
-| S2 sliders | 3 s drags (180 moves at 60 Hz over 40 % of the track) of `coreExposure`, `coreContrast`, `coreTemperature`, `wbR`, `cyan` at DPR 1 and 2; `coreExposure` and `cyan` on the CPU path (`#coreUseWebGL` off) | updates/s, value changes/s, frames covered %, input→draw p50/p95/max, Event Timing p95 (0 = under the 16 ms reporting threshold), main busy %, long tasks, rAF gaps > 50 ms, worker round trip, final value and last change after release, thumbnail re-encodes; Studio flushes, total/last-flush DOM writes and file-list renders per drag under `?debugCounters=1` |
+| S1 import | boot, import one file | boot ms and transferred KB; from `change`: provisional pixels (`firstProvisionalPixelsMs`, its kind, `firstEmbeddedPreviewMs`), then the exact ones: first pixels drawn, first photo visible, first positive visible, ready, settled; stage timeline (worker round trips, `nc:*` measures), with `stage.filmEdgeMs` and `stage.frameDetectMs` the worker's own times inside the `analyze-import` request (`stage.autoFrameMs` stays the whole request); long tasks; LibRaw decodes; film type and route |
+| S2 sliders | 3 s drags (180 moves at 60 Hz over 40 % of the track) of `coreExposure`, `coreContrast`, `coreTemperature`, `wbR`, `cyan` at DPR 1 and 2; `coreExposure` and `cyan` on the CPU path (`#coreUseWebGL` off). The press point is measured after the reveal has settled and must hit the slider (`elementFromPoint`), and the recorded press must land on it, else the step fails (`ui`) | updates/s, value changes/s, frames covered %, input→draw p50/p95/max, Event Timing p95 (0 = under the 16 ms reporting threshold), main busy %, long tasks, rAF gaps > 50 ms, worker round trip, final value and last change after release, thumbnail re-encodes; Studio flushes, total/last-flush DOM writes and file-list renders per drag under `?debugCounters=1` |
 | S3 curve | add a mid-tone point on the diagonal, drag it up 20 % over 3 s inside the canvas | as S2 plus rAF fps and the same UI counters |
 | S4 zoom/pan | double-click fit→2×, `#zoomInBtn` to 2.5×, 3.9×, 7.6×; fit → true 100 % with the `1:1` button (#248); 24 wheel notches; 2 s pan at 2× | transform applied ms, texture refined at ms, long task during refinement, backing px, backing ÷ needed (texture width ÷ min(source width, on-screen CSS width × DPR)), native detail ms (3000 = not within the observation window; since #248 also reached by the detail layer's region at ≥ 0.95 source px per device px), detail ready ms (first region upload on `glDetailCanvas`), source px per device px on screen, long tasks of the 1:1 step, pan frames/s and move→frame p50/p95 |
 | S5 geometry | enter crop, drag an edge 2 s, ⌘-draw a straighten line, apply, rotate 90° twice, mirror | enter→first draw (the crop canvas's px, positive or not), overlay fps, edge move→frame, straighten release→preview, apply→first frame with the overlay opaque and the longest task before it (#245), apply→positive drawn, rotate/mirror→first redraw, max long task per step |
 | S6 roll | import N files; Brightness and Cyan drags during and after the background work | S1 metrics; settings badge and thumbnail on all N; LibRaw decodes and workers; cores used (Σ process CPU ÷ wall; Σ thread busy ÷ wall in the profiled trace); drag metrics during vs after |
-| S7 navigation | Arrow + Enter on the film strip: cold unanalysed (during analysis), warm 1-back, cold analysed, 2-back, 5 presses in 0.8 s | first pixels of the target, first display-resolution positive, ready, LibRaw decodes, stale results after the target is shown, long tasks, main busy % (median per class and repetition) |
+| S7 navigation | Arrow + Enter on the film strip: cold unanalysed (during analysis), warm 1-back, cold analysed, 2-back, 5 presses in 0.8 s | the target's provisional pixels on the veil (`firstProvisionalPixelsMs`, kind, `firstEmbeddedPreviewMs`), its first exact pixels drawn, first display-resolution positive, ready, LibRaw decodes, stale results after the target is shown, long tasks, main busy % (median per class and repetition); `s7.cold.firstProvisionalPixelsP95Ms`: the p95 over every cold switch of the timing repetitions (a switch without provisional pixels counts its ready time) |
 | S8 light table | open, wheel-scroll 2 s at normal and fast speed, Cyan drag, Sync colours to all | click→first frames, fps, frames > 25 ms, time until every tile is final, thumbnail px ÷ drawn device px, active-tile re-encodes per drag, Sync colours until every tile is final |
 | S9 export | after settled: current photo as PNG8/16, linear DNG, TIFF16, JPEG with the gain map on and off, as imported and after the geometry recipe (straighten, rotate 90°, mirror, crop); Export All ZIP of `--export-count` non-current files (default 3) | total s, s/file, bytes, max long task, main busy %, inputs accepted during export, memory before / peak / 10 s after; verification repetitions stream the bytes to the harness: SHA-256 of decoded pixels (PNG and TIFF in Node, JPEG in the page after the window), PNG/TIFF/DNG bit depth, ZIP JPEG primary-pixel hashes and gain-map bytes; PNG16 encode trace, DNG batch build/total/Blob time and observed batch lane count; `s9.perfFlagParity` compares `?perf=1` on and off |
 | `s9-parallel` | fresh session, four distinct 24 MP DNGs; PNG16 ZIP of three non-current frames, lane ceiling 3 | S9 metrics under `s9.zip.png16.lanes3`; fail if actual lanes <3; decoded 16-bit sample hashes |
@@ -297,6 +338,13 @@ Each metric has a unit, a direction (`better`), an optional `target`, a noise
 `tolerance` (`rel`, `abs`) and baselines (ref, fixture, route, value,
 `range` or `null` when a report gave only a median, source). Keys may use `*`
 per segment; the most specific key wins. Metrics without a target are tracked.
+
+A summary is the median (min–max) over timing repetitions, except two pooled
+kinds: `probe.selfPctMax` (the largest `probeSelfPct` of any drag) and the
+`…P95Ms` keys a scenario fills sample by sample (`ctx.sample`), whose value is
+the p95 over every timing repetition's samples together, with their (min–max)
+and count (`pooled: 'p95'`). A p95 budget such as #235's cold switch is checked
+there, not on a median of per-repetition values.
 
 `--compare BASE HEAD` prints:
 
@@ -399,9 +447,11 @@ and keep both, labelled by route. The full reports are posted on #229;
 | Pan at 2× | ≥ 58 fps, p95 ≤ 16 ms, 0 long tasks | 59.8 / 59.9 fps, p95 8.4 / 14.3 ms (A / B), 0 | meets |
 | Native detail after a zoom step | ≤ 200 ms | never: 0.68 at 2×, 0.35 at 3.9×, 0.26 at 7.6× (A); refinement at 0.34–0.55 s with long tasks up to 283 ms | fails |
 | Warm switch (1-back), first display-resolution positive | ≤ 100 ms | 77.6 ms (72.8–349); 8-photo session 76–477 ms | median meets |
-| Cold switch, provisional pixels | ≤ 300 ms | 9672 ms (9472–10445) | fails |
-| 5 presses in 0.8 s | ≤ 300 ms provisional | target positive 17 376 ms (12 879–26 265); first pixels 6968 (6600–19 416); 5 LibRaw decodes | fails |
+| Cold switch, the target's own pixels (`s7.cold*.firstProvisionalPixelsMs`, p95 `s7.cold.firstProvisionalPixelsP95Ms`) | ≤ 200 ms p95 (#235; #230 had ≤ 300 ms) | 9672 ms (9472–10445), nothing before the exact image | fails |
+| 5 presses in 0.8 s (`s7.rapid5.firstProvisionalPixelsMs`) | ≤ 300 ms provisional | target positive 17 376 ms (12 879–26 265); first pixels 6968 (6600–19 416); 5 LibRaw decodes | fails |
+| Import, provisional pixels (`s1.firstProvisionalPixelsMs`) | ≤ 300 ms (#235) | none: the first visible pixels were the exact negative at 12.3 s (A) | fails |
 | First photo | ≤ 2 s | 13.3 s (A), 5.7 s (B), 13.6 s (12-file roll) | fails |
+| Film-edge stage of an import (`s1.stage.filmEdgeMs`) | ≤ 180 ms (#236) | 272 ms (A), 305 ms (B) | fails |
 | Long tasks in interaction windows | 0 | rotate 90° 2.2 s; apply crop 1.9–2.1 s; cold switch 4 tasks, max 416 ms; drags during roll analysis up to 665 ms; CPU-path drags on A 11–38 per 3 s | fails |
 | Renderer peak `phys_footprint` | ≤ 6 GB | rapid switching 7.9–9.4 GB; ZIP export 8.3–8.8 GB; 12-file import 5.2 GB; single import 2.8 GB | fails |
 | GPU process after import, no AI tool | ≤ 0.5 GB | 1.8 GB (1.66 GB pre-loaded MI-GAN) | fails |
