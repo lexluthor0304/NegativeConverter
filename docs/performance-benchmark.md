@@ -581,7 +581,10 @@ stall in 100 drags" with the conditions); and the Safari and Tauri numbers for
 compare statuses and exit codes, budgets.json validity, the lock (including a
 second CLI process with another `$TMPDIR`), guards and parsers, the
 `proc_pid_rusage` helper against the test process, the probe against stand-in
-browser objects, metric definitions, source maps and trace analysis, the hang
+browser objects (including the veil's surfaces and bitmap transfers, the
+uniform and texture state of draw signatures, the ring's trimming and the
+optional heartbeat), metric definitions (provisional and exact pixels, the
+pooled p95), source maps and trace analysis, the hang
 watchdog and dump collection, worktree creation and removal, the preview
 plugin routes, fixture structure and memory, export verification. Two
 simulation tests run the scenario code itself: `scenarios.test.mjs` drives

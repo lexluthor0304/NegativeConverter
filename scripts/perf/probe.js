@@ -77,11 +77,12 @@
     hash = Math.imul(hash ^ len, 16777619);
     return (hash >>> 0).toString(16);
   }
-  function stringHash(text) {
-    var hash = 2166136261;
+  function stringHashNum(text, seed) {
+    var hash = seed === undefined ? 2166136261 : seed;
     for (var i = 0; i < text.length; i++) hash = Math.imul(hash ^ text.charCodeAt(i), 16777619);
-    return (hash >>> 0).toString(16);
+    return hash;
   }
+  function stringHash(text) { return (stringHashNum(text) >>> 0).toString(16); }
   function viewBytes(value) {
     if (!value) return null;
     if (value instanceof ArrayBuffer) return new Uint8Array(value);
@@ -132,20 +133,28 @@
   var TEXTURE_2D = 0x0DE1;
   var glStates = new WeakMap();
   // `uh`: the context's uniform state as an XOR of one hash per location
-  // (values and location), updated only when a value changes. `texSig`: the
-  // bound textures and their contents as text, rebuilt only after a binding
-  // or an upload changed them. A draw's signature covers both without
-  // walking every uniform and texture (#273).
+  // (values and location), updated only when a value changes. `texKey`: a
+  // hash of the bound textures and their contents, rebuilt only after a
+  // binding or an upload changed them. A draw's signature mixes both with
+  // the program and backing size, without walking every uniform and texture
+  // or building text per draw (#273). `name`: the canvas's id, once it has one.
   function glState(ctx) {
     var state = glStates.get(ctx);
     if (!state) {
-      state = { unit: 0, bound: new Map(), texHash: new Map(), texSig: null, uh: 0, program: 0, ut: null };
+      state = { unit: 0, bound: new Map(), texHash: new Map(), texKey: null, uh: 0, program: 0, ut: null, name: null };
       glStates.set(ctx, state);
     }
     return state;
   }
   // Per uniform location: its last values and their hash.
   var uniformSlots = new WeakMap();
+  function glCanvasName(ctx, state) {
+    if (state.name) return state.name;
+    var canvas = ctx.canvas;
+    var name = canvasName(canvas);
+    if (canvas && canvas.id) state.name = name;
+    return name;
+  }
   function sourceSize(source) {
     if (!source) return [0, 0];
     var w = source.videoWidth || source.naturalWidth || source.displayWidth || source.width || 0;
@@ -170,7 +179,7 @@
         if (target === TEXTURE_2D) {
           var s = glState(this);
           var id = objectId(texture);
-          if (s.bound.get(s.unit) !== id) { s.bound.set(s.unit, id); s.texSig = null; }
+          if (s.bound.get(s.unit) !== id) { s.bound.set(s.unit, id); s.texKey = null; }
         }
         return original.apply(this, arguments);
       };
@@ -197,11 +206,11 @@
           var tex = state.bound.get(state.unit) || 0;
           var contentHash = sub ? stringHash((state.texHash.get(tex) || '') + ':' + hash) : hash;
           state.texHash.set(tex, contentHash);
-          state.texSig = null;
+          state.texKey = null;
           count(counter);
           var format = !sub ? (args.length >= 9 ? args[6] : args[3]) : (args.length >= 9 ? args[6] : args[4]);
           var type = !sub ? (args.length >= 9 ? args[7] : args[4]) : (args.length >= 9 ? args[7] : args[5]);
-          push({ k: 'gl.upload', t: t0, c: canvasName(this.canvas), ctx: label, fn: fnName, w: w, h: h, format: format, type: type, hash: contentHash, tex: tex });
+          push({ k: 'gl.upload', t: t0, c: glCanvasName(this, state), ctx: label, fn: fnName, w: w, h: h, format: format, type: type, hash: contentHash, tex: tex });
         } finally { selfMs += now() - t0; }
         return result;
       };
@@ -259,15 +268,20 @@
           var t0 = now();
           try {
             var state = glState(this);
-            if (state.texSig === null) {
-              var textures = '';
-              state.bound.forEach(function (tex, unit) { textures += ';' + unit + ':' + (state.texHash.get(tex) || tex); });
-              state.texSig = textures;
+            if (state.texKey === null) {
+              var key = 2166136261;
+              state.bound.forEach(function (tex, unit) { key = stringHashNum(unit + ':' + (state.texHash.get(tex) || tex) + ';', key); });
+              state.texKey = key;
             }
-            var text = 'p' + state.program + ';' + this.drawingBufferWidth + 'x' + this.drawingBufferHeight + ';' + state.uh + state.texSig;
+            var w = this.drawingBufferWidth, h = this.drawingBufferHeight;
+            var sig = Math.imul(2166136261 ^ state.program, 16777619);
+            sig = Math.imul(sig ^ w, 16777619);
+            sig = Math.imul(sig ^ h, 16777619);
+            sig = Math.imul(sig ^ state.uh, 16777619);
+            sig = Math.imul(sig ^ state.texKey, 16777619);
             count(counter);
-            push({ k: 'gl.draw', t: t0, c: canvasName(this.canvas), ctx: label, fn: fnName, sig: stringHash(text),
-              w: this.drawingBufferWidth, h: this.drawingBufferHeight, ut: state.ut });
+            push({ k: 'gl.draw', t: t0, c: glCanvasName(this, state), ctx: label, fn: fnName, sig: (sig >>> 0).toString(16),
+              w: w, h: h, ut: state.ut });
           } finally { selfMs += now() - t0; }
           return result;
         };
@@ -282,7 +296,7 @@
         return function () {
           var t0 = now();
           count(counter);
-          push({ k: 'gl.sync', t: t0, c: canvasName(this.canvas), ctx: label, fn: name });
+          push({ k: 'gl.sync', t: t0, c: glCanvasName(this, glState(this)), ctx: label, fn: name });
           selfMs += now() - t0;
           return original.apply(this, arguments);
         };
@@ -587,11 +601,20 @@
   wrapTauri();
 
   // ---- input ----
+  // The id of an event's target (or its nearest ancestor with one). A drag
+  // sends every move and input to one element: the last answer is reused.
+  var lastTarget = null;
+  var lastTargetId = '';
   function targetId(target) {
-    if (!target || target.nodeType !== 1) return '';
-    if (target.id) return target.id;
-    var withId = target.closest && target.closest('[id]');
-    return withId ? withId.id : '';
+    if (target === lastTarget) return lastTargetId;
+    var id = '';
+    if (target && target.nodeType === 1) {
+      id = target.id;
+      if (!id) { var withId = target.closest && target.closest('[id]'); id = withId ? withId.id : ''; }
+    }
+    lastTarget = target;
+    lastTargetId = id;
+    return id;
   }
   // No pointer* listeners: every pointer event the harness causes (CDP mouse
   // input, WebDriver mouse actions) is a mouse one and is recorded once, as
@@ -604,11 +627,12 @@
     global.addEventListener(type, function (event) {
       var t0 = now();
       try {
-        var record = { k: 'input', t: event.timeStamp, h: t0, type: type, id: targetId(event.target), tr: event.isTrusted };
+        var target = event.target;
+        var record = { k: 'input', t: event.timeStamp, h: t0, type: type, id: targetId(target), tr: event.isTrusted };
         if (value) {
-          var target = event.target;
-          if (target && 'value' in target && target.type !== 'file') record.v = target.value;
-          if (target && target.type === 'file') record.files = target.files ? target.files.length : 0;
+          var file = target && target.type === 'file';
+          if (file) record.files = target.files ? target.files.length : 0;
+          else if (target && 'value' in target) record.v = target.value;
         } else if (mouse) {
           record.x = Math.round(event.clientX); record.y = Math.round(event.clientY); record.b = event.buttons;
           if (type === 'wheel') record.dy = event.deltaY;
