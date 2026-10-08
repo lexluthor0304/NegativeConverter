@@ -1,9 +1,12 @@
 // Lens correction's remap (#278) moved out of main.js into lensMaps.js, so
 // the display-proxy fills can run it on row bands in the geometry pool. The
 // whole-image remap and the maps lensfun is asked for are byte-identical to
-// main.js's before the move (its code is kept below as the reference), and
-// a band of rows remapped from only the input rows lensSourceRows names and
-// the grid rows sliceLensMaps keeps is those rows of the whole remap.
+// main.js's before the move (its code is kept below as the reference; the
+// cache key names the profile's identity where it named lensfun's handle),
+// and a band of rows remapped from only the input rows lensSourceRows names
+// and the grid rows sliceLensMaps keeps is those rows of the whole remap.
+// Lenses without distortion calibration are remapped in place; a saved
+// profile resolves to the running build's handle by its identity.
 import assert from 'node:assert/strict';
 
 globalThis.ImageData = class ImageData {
@@ -16,7 +19,8 @@ globalThis.ImageData = class ImageData {
   }
 };
 const {
-  applyLensMapsToImage, applyLensMapRows, buildLensMaps, lensMapRequest, lensMapStep, lensRowExtents, lensSourceRows, sliceLensMaps, lensMapBuffers
+  applyLensMapsToImage, applyLensMapRows, buildLensMaps, lensMapRequest, lensMapStep, lensRowExtents, lensSourceRows, sliceLensMaps, lensMapBuffers,
+  lensProfileIdentity, lensProfileKey, findLensHandle, lensHandleFor, rememberLensHandle, lensMapsMovePixels
 } = await import('./lensMaps.js');
 const { allocPlane16, isSharedPlane, sharedPlanesAvailable } = await import('./crossOriginIsolation.js');
 const { lensTestMaps, lensTestClient } = await import('./lensTestMaps.mjs');
@@ -262,6 +266,9 @@ const MAPS = [
   ['lensfun-like', {}], ['strong', { strength: 0.3 }], ['outward', { strength: -0.08 }],
   ['below the frame', { shift: 1e4 }], ['poisoned', { poison: true }]
 ];
+// A lens without distortion calibration (#278): no geometry map; TCA alone
+// and vignetting, or vignetting alone. Read in place where TCA is off.
+const IN_PLACE_MAPS = [['no distortion, TCA and vignetting', { distortion: false }], ['no distortion, vignetting only', { distortion: false, tca: false }]];
 
 // ---- The whole-image remap is main.js's of before, byte for byte ----
 let cases = 0;
@@ -300,17 +307,24 @@ for (const [width, height] of [[37, 23], [64, 48], [23, 61]]) {
   }
 }
 
-// ---- The maps lensfun is asked for, and their cache key, are as before ----
+// ---- The maps lensfun is asked for are as before, for the handle the
+// profile resolves to; their cache key names the profile's identity where
+// it named the handle (#278) ----
 {
   const lens = (params, modes = MODES[0]) => ({
-    enabled: true, selectedLens: { handle: 2741040, maker: 'Nikon', model: 'Nikkor AF-S 18-55mm f/3.5-5.6G DX VR' },
+    enabled: true, selectedLens: { handle: 2741040, maker: 'Nikon', model: 'Nikkor AF-S 18-55mm f/3.5-5.6G DX VR', cropFactor: 1.528 },
     params: { focal: 18, crop: 1.528, aperture: 5.6, distance: 1000, stepMode: 'auto', step: 2, ...params }, modes
   });
   for (const [width, height] of [[1499, 900], [1500, 1000], [2400, 1600], [3599, 2400], [3600, 2400], [5199, 3466], [5200, 3466], [9000, 6000]]) {
     for (const params of [{}, { stepMode: 'manual', step: 5 }, { stepMode: 'manual', step: 0 }, { stepMode: 'manual', step: 40 }, { focal: 55.123456, aperture: 22 }]) {
       for (const modes of MODES) {
         const block = lens(params, modes);
-        assert.deepEqual(lensMapRequest(block, width, height), pre278Request(block, width, height), `request ${width}x${height} ${JSON.stringify(params)}`);
+        const before = pre278Request(block, width, height);
+        const now = lensMapRequest(block, width, height, 2741040);
+        assert.deepEqual(now.request, before.request, `request ${width}x${height} ${JSON.stringify(params)}`);
+        assert.equal(now.key, [lensProfileKey(block.selectedLens), ...before.key.split('|').slice(1)].join('|'), `key ${width}x${height} ${JSON.stringify(params)}`);
+        // Another build's handle for the same profile: the same maps.
+        assert.equal(lensMapRequest(block, width, height, 917504).key, now.key, 'the key names no handle');
       }
     }
   }
@@ -324,7 +338,7 @@ for (const [width, height] of [[37, 23], [64, 48], [23, 61]]) {
 let bands = 0;
 for (const [width, height] of [[64, 48], [23, 61]]) {
   for (const step of [1, 2, 3, 5]) {
-    for (const [mapLabel, options] of MAPS) {
+    for (const [mapLabel, options] of [...MAPS, ...IN_PLACE_MAPS]) {
       const maps = lensMaps(width, height, step, options);
       for (const modes of MODES) {
         for (const with16 of [true, false]) {
@@ -385,10 +399,10 @@ for (const [width, height] of [[64, 48], [23, 61]]) {
 {
   const LF_TCA = 0x1, LF_VIGNETTING = 0x2, LF_DISTORTION = 0x8;
   const request = lensMapRequest({
-    enabled: true, selectedLens: { handle: 7 },
+    enabled: true, selectedLens: { maker: 'Test', model: 'Test 24mm' },
     params: { focal: 24, crop: 1, aperture: 8, distance: 1000, stepMode: 'manual', step: 4 },
     modes: { includeTca: true, includeVignetting: true }
-  }, 120, 80).request;
+  }, 120, 80, 7).request;
   const expected = lensTestMaps(120, 80, 4);
   const sameArray = (actual, wanted, label) => assert.ok(actual && bytes(actual).equals(bytes(wanted)), label);
 
@@ -465,4 +479,207 @@ for (const [width, height] of [[64, 48], [23, 61]]) {
   }
 }
 
-console.log(`lensMaps: the remap equals main.js's of before (${cases} cases), the map requests too, ${bands} bands equal the rows of the whole remap, and buildLensMaps builds distortion, TCA (with the distortion) and vignetting where the lens has them`);
+// ---- In place (#278): without a geometry map, and without TCA, every
+// pixel is read where it is: its own value exactly, times the vignetting
+// gain; with TCA, red and blue move and green stays. The same as main.js's
+// remap of before given a geometry map of the nodes themselves, where the
+// grid ends on the frame's last row and column (its nodes then interpolate
+// to every pixel exactly) ----
+let inPlaceCases = 0;
+{
+  const identityGrid = (width, height, step) => {
+    const maps = lensTestMaps(width, height, step);
+    const grid = new Float32Array(maps.gridWidth * maps.gridHeight * 2);
+    for (let gy = 0; gy < maps.gridHeight; gy++) {
+      for (let gx = 0; gx < maps.gridWidth; gx++) {
+        grid[(gy * maps.gridWidth + gx) * 2] = gx * step;
+        grid[(gy * maps.gridWidth + gx) * 2 + 1] = gy * step;
+      }
+    }
+    return grid;
+  };
+  for (const [width, height] of [[37, 25], [65, 49]]) {
+    for (const step of [1, 2, 4]) {
+      for (const [mapLabel, options] of IN_PLACE_MAPS) {
+        const maps = lensTestMaps(width, height, step, options);
+        assert.equal(maps.geometry, null, `${mapLabel}: no geometry map`);
+        for (const modes of MODES) {
+          for (const with16 of [true, false]) {
+            const input = image(width, height, { seed: width * step, with16 });
+            const label = `in place ${width}x${height} step ${step} ${mapLabel} ${JSON.stringify(modes)} ${with16 ? '16' : '8'}-bit`;
+            const output = applyLensMapsToImage(input, maps, modes);
+            sameImage(output, pre278(input, { ...maps, geometry: identityGrid(width, height, step) }, modes), label);
+            if (!modes.includeVignetting && !(modes.includeTca && maps.tca)) {
+              const plane = with16 ? input.__image16.data : input.data;
+              const out = with16 ? output.__image16.data : output.data;
+              assert.ok(bytes(out).equals(bytes(plane)), `${label}: the frame itself`);
+            }
+            if (modes.includeTca && maps.tca) {
+              const channel = (plane, c) => plane.filter((_, i) => i % 4 === c);
+              const plane16 = with16 ? input.__image16.data : input.data, out16 = with16 ? output.__image16.data : output.data;
+              if (!modes.includeVignetting) {
+                assert.deepEqual(channel(out16, 1), channel(plane16, 1), `${label}: TCA leaves green in place`);
+                assert.notDeepEqual(channel(out16, 0), channel(plane16, 0), `${label}: and moves red`);
+              }
+            }
+            inPlaceCases++;
+          }
+        }
+      }
+    }
+  }
+  // What a band reads in place: its own rows, the second tap and a row of
+  // margin; no grid row decides it.
+  const maps = lensTestMaps(64, 48, 4, { distortion: false });
+  const modes = { includeTca: false, includeVignetting: true };
+  assert.equal(lensRowExtents(maps, modes), null, 'in place: no row extents');
+  assert.deepEqual(lensSourceRows(maps, modes, 10, 14, 48), { y0: 9, y1: 16 });
+  assert.deepEqual(lensSourceRows(maps, modes, 0, 48, 48), { y0: 0, y1: 48 });
+  assert.deepEqual(lensSourceRows(maps, modes, 46, 48, 48), { y0: 45, y1: 48 });
+  assert.ok(lensRowExtents(maps, { includeTca: true, includeVignetting: true }), 'with TCA: its map\'s rows');
+  const slice = sliceLensMaps(maps, modes, 10, 14);
+  assert.ok(slice.geometry === null && slice.tca === null && slice.vignetting, 'a band of an in-place remap carries its gains only');
+  assert.deepEqual(lensMapBuffers(slice), [slice.vignetting.buffer]);
+  const tcaSlice = sliceLensMaps(maps, { includeTca: true, includeVignetting: false }, 10, 14);
+  assert.ok(tcaSlice.geometry === null && tcaSlice.tca && tcaSlice.vignetting === null);
+  // Whether the remap moves pixels (the repair brush maps strokes only then).
+  assert.equal(lensMapsMovePixels(maps, modes), false, 'vignetting alone moves nothing');
+  assert.equal(lensMapsMovePixels(maps, { includeTca: true }), true, 'TCA moves red and blue');
+  assert.equal(lensMapsMovePixels(lensTestMaps(64, 48, 4), { includeTca: false }), true, 'distortion moves everything');
+}
+
+// ---- Lenses without distortion calibration (#278: 39 of lensfun-wasm
+// 0.1.4's 1558 entries): no geometry map (lensfun fails it, -4), TCA from
+// buildSubpixelGeometryMap alone and vignetting from the client's bound
+// native builder; nothing to apply throws, and the frame converts
+// uncorrected ----
+{
+  const LF_TCA = 0x1, LF_VIGNETTING = 0x2;
+  const request = lensMapRequest({
+    enabled: true, selectedLens: { maker: 'Test', model: 'Test 60mm Macro' },
+    params: { focal: 60, crop: 1, aperture: 5.6, distance: 1000, stepMode: 'manual', step: 4 },
+    modes: { includeTca: true, includeVignetting: true }
+  }, 120, 80, 9).request;
+  const expected = lensTestMaps(120, 80, 4, { distortion: false });
+  const sameArray = (actual, wanted, label) => assert.ok(actual && bytes(actual).equals(bytes(wanted)), label);
+  for (const [label, modifications, tca, vignetting] of [
+    ['TCA and vignetting', LF_TCA | LF_VIGNETTING, true, true],
+    ['TCA only (the Sigma 70mm f/2.8 EX DG Macro)', LF_TCA, true, false],
+    ['vignetting only (the Nikkor AF-S 60 mm f/2.8G ED Micro)', LF_VIGNETTING, false, true]
+  ]) {
+    const client = lensTestClient({ modifications });
+    const maps = buildLensMaps(client, request);
+    assert.equal(maps.geometry, null, `${label}: no geometry map`);
+    assert.deepEqual([maps.gridWidth, maps.gridHeight, maps.step], [expected.gridWidth, expected.gridHeight, 4], `${label}: lensfun's grid`);
+    assert.equal(client.requests.length, 0, `${label}: buildCorrectionMaps is not asked (it fails without distortion)`);
+    if (tca) sameArray(maps.tca, expected.tca, `${label}: TCA alone, buildSubpixelGeometryMap's`);
+    else assert.equal(maps.tca, null, `${label}: no TCA`);
+    if (vignetting) sameArray(maps.vignetting, expected.vignetting, `${label}: the gains alone`);
+    else assert.equal(maps.vignetting, null, `${label}: no vignetting`);
+    assert.equal(client.vignettingRequests.length, vignetting ? 1 : 0, `${label}: the native vignetting builder asked`);
+    if (vignetting) {
+      const { lensHandle, focal, crop, aperture, distance, width, height, step } = request;
+      assert.deepEqual(client.vignettingRequests[0], { lensHandle, focal, crop, aperture, distance, width, height, reverse: 0, step }, `${label}: for the request`);
+    }
+    // TCA switched off: the gains alone, or nothing to correct.
+    const off = lensTestClient({ modifications });
+    if (vignetting) assert.ok(buildLensMaps(off, { ...request, includeTca: false }).tca === null, `${label}: TCA off`);
+    else assert.throws(() => buildLensMaps(off, { ...request, includeTca: false }), /nothing to correct/, `${label}: TCA off leaves nothing`);
+  }
+  // Vignetting only, switched off: nothing to correct.
+  assert.throws(() => buildLensMaps(lensTestClient({ modifications: LF_VIGNETTING }), { ...request, includeVignetting: false }), /nothing to correct/);
+  // No calibration at this crop factor (an image crop under 0.96 of the
+  // calibration's): lensfun reports none.
+  assert.throws(() => buildLensMaps(lensTestClient({ modifications: 0 }), request), /no calibration of this lens for crop factor 1/);
+  // A client without the bound builder, or whose builder cannot read its
+  // maps (lensfun-wasm 0.1.3): no vignetting, and here nothing to correct.
+  for (const patch of [{ fns: undefined }, { runFloatMap() { throw new TypeError("Cannot read properties of undefined (reading 'subarray')"); } }]) {
+    const client = Object.assign(lensTestClient({ modifications: LF_TCA | LF_VIGNETTING }), patch);
+    const maps = buildLensMaps(client, request);
+    assert.ok(maps.tca && maps.vignetting === null, 'TCA still, without vignetting');
+    assert.throws(() => buildLensMaps(Object.assign(lensTestClient({ modifications: LF_VIGNETTING }), patch), request), /nothing to correct/);
+  }
+}
+
+// ---- A lens profile's stable identity (#278): recipes keep lensfun's name
+// for the lens, never its handle ----
+{
+  const legacy = { handle: 2741040, maker: 'Canon', model: 'Canon EF 24-105mm f/4L IS USM', score: 87, minFocal: 24, maxFocal: 105, minAperture: 4, maxAperture: 22, cropFactor: 1 };
+  const identity = lensProfileIdentity(legacy);
+  assert.deepEqual(identity, { maker: 'Canon', model: 'Canon EF 24-105mm f/4L IS USM', cropFactor: 1, minFocal: 24, maxFocal: 105, minAperture: 4, maxAperture: 22, camera: null });
+  assert.equal(lensProfileKey({ ...legacy, handle: 917504, score: 12 }), lensProfileKey(legacy), 'another build\'s handle and score: the same profile');
+  assert.ok(!lensProfileKey(legacy).includes('2741040'), 'the key names no handle');
+  assert.notEqual(lensProfileKey({ ...legacy, cropFactor: 1.611 }), lensProfileKey(legacy), 'another calibration');
+  assert.notEqual(lensProfileKey({ ...legacy, camera: { maker: 'Canon', model: 'Canon EOS 5D Mark III' } }), lensProfileKey(legacy), 'the camera it was found with');
+  assert.equal(lensProfileIdentity({ ...legacy, camera: { maker: 'Canon', model: '' } }).camera, null, 'a camera without a model narrows no search');
+  assert.equal(lensProfileIdentity({ handle: 2741040 }), null, 'a handle alone names no lens');
+  assert.equal(lensProfileKey(null), null);
+}
+
+// ---- Resolving a saved profile in the running lensfun build
+// (findLensHandle, lensHandleFor) ----
+{
+  // A stand-in database searched the way lensfun searches: an exact model
+  // (unless its name parses to other focal lengths: `unparsable`), or words
+  // without digits; a camera narrows to its mount.
+  const searchClient = entries => {
+    const searches = [];
+    const words = text => text.toLowerCase().split(/[^a-z]+/).filter(Boolean);
+    return {
+      searches,
+      searchLenses({ lensMaker, lensModel, cameraModel, searchFlags }) {
+        searches.push({ lensMaker, lensModel, cameraModel: cameraModel || null, searchFlags });
+        return entries.filter(entry => (!lensMaker || entry.maker === lensMaker)
+          && (lensModel === entry.model ? !entry.unparsable : (!/\d/.test(lensModel) && words(lensModel).every(word => words(entry.model).includes(word))))
+          && (!entry.needsCamera || cameraModel) && (!cameraModel || !entry.mounts || entry.mounts.includes(cameraModel)))
+          .map(({ unparsable, needsCamera, mounts, ...lens }) => ({ score: 50, ...lens }));
+      }
+    };
+  };
+  const ranges = { minFocal: 24, maxFocal: 105, minAperture: 4, maxAperture: 22 };
+  const entries = [
+    { handle: 20, maker: 'Canon', model: 'Canon EF 24-105mm f/4L IS USM', cropFactor: 1.611, ...ranges },
+    { handle: 10, maker: 'Canon', model: 'Canon EF 24-105mm f/4L IS USM', cropFactor: 1, ...ranges },
+    { handle: 30, maker: 'Sony', model: 'FE 28mm f/2 + Sony SEL075 UWC', cropFactor: 1, minFocal: 21, maxFocal: 21, minAperture: 2.8, maxAperture: 0, unparsable: true },
+    { handle: 41, maker: 'Canon', model: 'fixed lens', cropFactor: 6, minFocal: 6, maxFocal: 72, minAperture: 0, maxAperture: 0, mounts: ['Canon PowerShot S5 IS'] },
+    { handle: 40, maker: 'Canon', model: 'fixed lens', cropFactor: 6, minFocal: 6, maxFocal: 72, minAperture: 0, maxAperture: 0, mounts: ['Canon PowerShot S2 IS'] },
+    { handle: 50, maker: 'Mamiya', model: '35mm f/22.0-3.5', cropFactor: 0.644, minFocal: 35, maxFocal: 35, minAperture: 3.5, maxAperture: 22, unparsable: true, needsCamera: true }
+  ];
+  const client = searchClient(entries);
+  const profile = (handle, extra = {}) => {
+    const { unparsable, needsCamera, mounts, ...lens } = entries.find(entry => entry.handle === handle);
+    return { ...lens, handle: 999, ...extra };
+  };
+  assert.equal(findLensHandle(client, profile(10)), 10, 'the exact model, the calibration of its crop factor');
+  assert.equal(findLensHandle(client, profile(20)), 20, 'the other calibration of that name');
+  assert.equal(findLensHandle(client, profile(10, { cropFactor: 1.05 })), 10, 'the nearest calibration crop factor');
+  assert.equal(findLensHandle(client, profile(30)), 30, 'a name lensfun rules out by its own focal length: found by its words without digits');
+  assert.equal(client.searches.at(-1).lensModel, 'FE mm f Sony SEL UWC', 'the words lensfun compares, without digits');
+  assert.equal(findLensHandle(client, profile(40)), 40, 'twins that only the mount tells apart: the lowest handle (lensfun\'s database order)');
+  assert.equal(findLensHandle(client, profile(41, { camera: { maker: 'Canon', model: 'Canon PowerShot S5 IS' } })), 41, 'the camera it was found with tells them apart');
+  assert.equal(findLensHandle(client, profile(50)), null, 'a lens found only with a camera, saved without one');
+  assert.equal(findLensHandle(client, profile(50, { camera: { maker: 'Mamiya', model: 'Mamiya ZD' } })), 50, 'with its camera');
+  assert.equal(findLensHandle(client, { ...profile(10), model: 'Canon EF 24-105mm f/4L IS USM II' }), null, 'a lens this database does not have');
+  assert.equal(findLensHandle(client, { handle: 10 }), null, 'a handle alone');
+  assert.equal(findLensHandle({ searchLenses() { throw new Error('[lensfun-wasm] LensfunClient is disposed'); } }, profile(10)), null, 'a search that throws');
+  assert.ok(client.searches.every(search => search.searchFlags === 0), 'every entry of a name: neither loose nor uniquified');
+
+  // Once per profile and client; a profile the build lacks is not searched again.
+  const counted = searchClient(entries);
+  assert.equal(lensHandleFor(counted, profile(10)), 10);
+  assert.equal(lensHandleFor(counted, profile(10, { handle: 4 })), 10, 'any saved handle: the same profile');
+  const missing = { ...profile(10), model: 'Canon EF 24-105mm f/4L IS USM II' };
+  assert.equal(lensHandleFor(counted, missing), null);
+  const searched = counted.searches.length;
+  assert.equal(lensHandleFor(counted, missing), null);
+  assert.equal(lensHandleFor(counted, profile(10)), 10);
+  assert.equal(counted.searches.length, searched, 'resolved once');
+  // The handle of the search a profile was chosen from.
+  const primed = searchClient(entries);
+  rememberLensHandle(primed, profile(41), 41);
+  assert.equal(lensHandleFor(primed, profile(41)), 41, 'the entry chosen, not its twin');
+  assert.equal(primed.searches.length, 0, 'without a search');
+  assert.equal(lensHandleFor(searchClient(entries), profile(41)), 40, 'another client resolves on its own');
+}
+
+console.log(`lensMaps: the remap equals main.js's of before (${cases} cases), the map requests too, ${bands} bands equal the rows of the whole remap, ${inPlaceCases} in-place remaps (lenses without distortion calibration), buildLensMaps builds distortion, TCA (with the distortion) and vignetting where the lens has them, and saved profiles resolve by their identity`);

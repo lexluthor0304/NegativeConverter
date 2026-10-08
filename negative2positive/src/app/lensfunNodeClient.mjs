@@ -26,6 +26,27 @@ export function versionAtLeast(version, minimum) {
 }
 
 /**
+ * Every model name of the installed release's lens database (each `<model>`
+ * of each `<lens>`, translations too), read from the data package its core
+ * preloads (the file list in the core's loadPackage call). Searching them
+ * reaches every entry of the database.
+ */
+export function lensfunDatabaseModels() {
+  const core = readFileSync(resolvePath(`${PACKAGE}/core`), 'utf8');
+  const data = readFileSync(resolvePath(`${PACKAGE}/core-data`));
+  const files = [...core.matchAll(/\{filename:"([^"]+\.xml)",start:(\d+),end:(\d+)\}/g)];
+  const unescape = text => text.replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+  const models = new Set();
+  for (const [, , start, end] of files) {
+    const xml = data.subarray(Number(start), Number(end)).toString('utf8');
+    for (const [, lens] of xml.matchAll(/<lens>([\s\S]*?)<\/lens>/g)) {
+      for (const [, model] of lens.matchAll(/<model(?: lang="[^"]*")?>([^<]*)<\/model>/g)) models.add(unescape(model));
+    }
+  }
+  return { files: files.length, models: [...models] };
+}
+
+/**
  * A LensfunClient of the installed release, and what its core printed to
  * stderr (`errors`).
  */

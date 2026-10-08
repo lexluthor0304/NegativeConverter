@@ -98,7 +98,9 @@ function fixture(boundary) {
     }),
     batchPipelineDiagnostics: { decodeAhead: { admitted: 0, refused: { ceiling: 0, foreground: 0 }, lastEstimate: 0 } }
   });
-  vm.runInContext(['decodePeakBytes', 'decodeReservationBytes', 'loadFileToImageData', 'batchDecodeAhead'].map(fn).join('\n'), c);
+  vm.runInContext(['decodePeakBytes', 'decodeReservationBytes', 'loadFileToImageData', 'batchDecodeAhead', 'rememberShotMetadata'].map(fn).join('\n'), c);
+  // Every decode records the photo's focal length and aperture (#278).
+  c.shotMetadataByFile = new WeakMap();
   const ahead = c.batchDecodeAhead('default', { pixelsPerFile: 16 }), controller = new AbortController();
   const job = { file: new File([new Uint8Array(32)], 'frame.dng'), settings: {} };
   Object.assign(f, { ahead, controller, c });

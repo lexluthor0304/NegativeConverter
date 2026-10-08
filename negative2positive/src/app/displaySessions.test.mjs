@@ -126,9 +126,10 @@ function withLens(h, { client = lensTestClient(), fail = null } = {}) {
     ensureLensfunClient: async () => { if (fail) throw new Error(fail); return { client, source: 'local' }; },
     applyLensMapsToImage: lensMaps.applyLensMapsToImage, lensMapRequest: lensMaps.lensMapRequest,
     buildLensMaps: lensMaps.buildLensMaps, lensMapBuffers: lensMaps.lensMapBuffers,
+    lensHandleFor: lensMaps.lensHandleFor, lensProfileKey: lensMaps.lensProfileKey, lensMapsMovePixels: lensMaps.lensMapsMovePixels,
     sanitizeLensRuntimeError: error => String(error?.message || error), lensMapCache: new Map()
   });
-  vm.runInContext(['lensCorrectionActive', 'applyLensCorrectionWithSettings'].map(functionSource).join('\n'), h.context);
+  vm.runInContext(['lensCorrectionActive', 'lensProfileMissingError', 'formatLensLabel', 'applyLensCorrectionWithSettings'].map(functionSource).join('\n'), h.context);
   // These small frames stand in for large ones: 2 bytes per base pixel of
   // them holds no band (a 16 MP frame's holds hundreds of rows).
   const render = h.pool.renderLensDisplayLevel;
@@ -1202,7 +1203,9 @@ for (const [tier, area, decodes] of [['A', AREA, 0], ['A', AREA3, 1], ['B', AREA
   const geometry = { rotationAngle: 1.3, mirrored: false, cropRegion: { left: 9, top: 7, width: 96, height: 60 } };
   const base = makeBase(120, 80, 21);
   const settings = { ...geometry, autoFrameMeta: { imageArea: AREA }, filmEdge: { checked: true }, lensCorrection: LENS };
-  const signature = JSON.stringify([LENS.selectedLens, LENS.params, LENS.modes]);
+  // The lens part of the key: the profile's identity (never lensfun's handle), its parameters and modes.
+  const signature = JSON.stringify([lensMaps.lensProfileKey(LENS.selectedLens), LENS.params, LENS.modes]);
+  assert.ok(!signature.includes(String(LENS.selectedLens.handle)), 'the key names no lensfun handle');
   const harness = ({ fail = null, client: lensClient } = {}) => {
     const h = createHarness(base, { sessionBudget: 1 << 30, realProcessNegative: true, displayLevels: true, conversionRequests: true });
     Object.assign(h.target, { largeImagePixels: 1000, displayLevelFactor: () => 2, getCanvasContainerSize: () => ({ width: 40, height: 32 }),
@@ -1306,7 +1309,7 @@ for (const [tier, area, decodes] of [['A', AREA, 0], ['A', AREA3, 1], ['B', AREA
     h.target.displayProxySpill = spillOf();
     const item = { id: 'roll-07::1', file: { name: 'roll-07.dng' }, settings };
     h.state.fileQueue = [{ id: 'open', file: { name: 'open.dng' } }, item];
-    h.target.lensMapCache.set(lensMaps.lensMapRequest(LENS, 96, 60).key, lensTestMaps(96, 60, 3));
+    h.target.lensMapCache.set(lensMaps.lensMapRequest(LENS, 96, 60, LENS.selectedLens.handle).key, lensTestMaps(96, 60, 3));
     assert.equal(await c.fillDisplayProxy(item, base, settings), true, 'filled from cached maps');
     assert.equal(client.requests.length, 0, 'lensfun is not asked again');
     assert.equal(h.target.lensMapCache.size, 1);

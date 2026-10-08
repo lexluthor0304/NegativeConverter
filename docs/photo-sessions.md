@@ -102,9 +102,9 @@ base when the photo is left (`analysisSamplesFor`, a few ms per area besides
 the one in use), so Undo and Redo across Confirm image area convert with the
 sample a decoded base gives. The proxy's key is the base
 (size, depth, decode route), the geometry, lens correction (`lensSignature`:
-the selected lens, its parameters and modes as `resolveLensCorrection` gives
-them, null without correction; #278 below) and the analysis area; no
-viewport, since the level serves any window.
+the selected lens's identity, never lensfun's handle, its parameters and
+modes as `resolveLensCorrection` gives them, null without correction; #278
+below) and the analysis area; no viewport, since the level serves any window.
 
 - **Return.** A Tier A or in-RAM Tier B entry whose recipe key matches restores
   in the click's task like a warm switch: no veil, no read, no decode, the same
@@ -245,27 +245,63 @@ the fill. Lens-corrected frames are filled too (below).
 crop: lensfun's maps for the crop's size (`lensCorrectionMaps`, cached by
 `lensMapRequest` within 128 MB, at most 12 sets), then the remap of
 `lensMaps.js` (`applyLensMapsToImage`, moved out of `main.js` byte for
-byte), and builds the level from the corrected source. `buildLensMaps`
-decides the maps: always the distortion map; with TCA on and TCA
-calibration for the lens, lensfun's per-channel map of distortion and TCA
-corrected together (`buildSubpixelGeometryMap`, lensfun-wasm 0.1.4 on:
-lensfun's own order, the distortion first and TCA at the distorted
-position; green stays where the distortion puts it); with vignetting on and
-vignetting calibration, the gains. A lens without TCA calibration, a TCA map
-that fails and a lensfun-wasm without `buildSubpixelGeometryMap` get the
-distortion alone (the TCA map of `buildCorrectionMaps` is built with TCA
-correction alone and carries no distortion, so it is never used); a
-vignetting map that fails is left out. A distortion map that cannot be built
-leaves the frame uncorrected ("Lens correction failed"), as every map did with
-lensfun-wasm 0.1.3, whose module exports no HEAPF32 view. The editor,
-exports, batch lanes and fills all build their maps this way. A fill does the
+byte), and builds the level from the corrected source. A recipe (and a
+project, the roll reference) names its lens profile by its identity
+(`sanitizeLensSelection`, `lensProfileIdentity`): lensfun's maker and model,
+the crop factor its calibration was measured at, its focal and aperture
+ranges and the camera the panel's search was narrowed to; never lensfun's
+handle, the lens's address in one lensfun-wasm build's memory, which
+another build or database lays out elsewhere (none of 0.1.3's handles names
+a lens in 0.1.4). `lensHandleFor` looks the identity up in the running
+build once a session (`findLensHandle`: the exact model, then its words
+without digits, which lensfun cannot rule out by a focal length its name
+parses to, without and then with the camera; among the entries of that
+name the nearest calibration crop factor, the same ranges, the camera's
+mount, then lensfun's database order). Over 0.1.4's 1558 entries every
+identity resolves to its entry, but 8 to a twin with the same name, crop
+factor and ranges (`lensMaps.lensfun.test.mjs`). An older recipe's handle
+is dropped and its name looked up; a handle alone, or a name the running
+build lacks, leaves the frame uncorrected with the panel asking for the
+profile again ("select a lens profile", a console warning). `buildLensMaps`
+decides the maps: the distortion map where the lens has distortion
+calibration; with TCA on and TCA calibration for the lens, lensfun's
+per-channel map of distortion and TCA corrected together
+(`buildSubpixelGeometryMap`, lensfun-wasm 0.1.4 on: lensfun's own order, the
+distortion first and TCA at the distorted position; green stays where the
+distortion puts it); with vignetting on and vignetting calibration, the
+gains. A lens without TCA calibration, a TCA map that fails and a
+lensfun-wasm without `buildSubpixelGeometryMap` get the distortion alone (the
+TCA map of `buildCorrectionMaps` is built with TCA correction alone and
+carries no distortion, so it is never used); a vignetting map that fails is
+left out. A lens without distortion calibration (39 of 0.1.4's entries, the
+Nikkor AF-S 60 mm f/2.8G ED Micro and the Sigma 70mm f/2.8 EX DG Macro among
+them) has no geometry map: its TCA alone (`buildSubpixelGeometryMap`) and its
+gains alone (the client's bound native builder, which lensfun-wasm's
+`buildCorrectionMaps` runs only after a distortion map), and the remap reads
+every pixel in place where TCA is off, its own value exactly; the repair
+brush maps strokes only through maps that move pixels
+(`lensMapsMovePixels`). A distortion map that cannot be built, or maps that
+would correct nothing (no calibration at the image's crop factor, or none
+for the modes on), leave the frame uncorrected ("Lens correction failed"),
+as every map did with lensfun-wasm 0.1.3, whose module exports no HEAPF32
+view. The focal length and aperture are the photo's (`params.focalSource`,
+`apertureSource`): what its file's metadata gives (`rememberShotMetadata`,
+from every RAW decode; a manual lens's zero is unknown), unless the user
+typed them for the photo. A new photo's recipe takes them from its file
+over values carried from the photo before; choosing a profile sets the lens
+only (a focal length nothing gave is guessed from it, a prime's own; the
+aperture never); a copy (apply to selected, the roll reference) keeps the
+receiving photo's own; a lens-corrected photo's restore and its exports put
+its file's values over others the user did not type. The editor, exports,
+batch lanes and fills all build their maps this way. A fill does the
 same in the pool (`renderLensDisplayLevel`): each band renders the crop rows
 its corrected rows read, which `lensSourceRows` bounds by the least and
-greatest source row of the grid nodes those rows interpolate (a row of margin
-each way), remaps its rows with the grid rows `sliceLensMaps` posts with it,
-and box-averages them as `renderDisplayLevel`'s bands do, so its level is the
-editor's byte for byte (`displayPlaneHash` of every fill site equals that of a
-cold open's `conversionPreviewImageData`, `displaySessions.test.mjs`). A band
+greatest source row of the grid nodes those rows interpolate (their own rows
+when the remap reads in place; a row of margin each way), remaps its rows
+with the grid rows `sliceLensMaps` posts with it, and box-averages them as
+`renderDisplayLevel`'s bands do, so its level is the editor's byte for byte
+(`displayPlaneHash` of every fill site equals that of a cold open's
+`conversionPreviewImageData`, `displaySessions.test.mjs`). A band
 holds its copied base rows and the rows it renders: the bands are planned by those
 bytes within the same 2 bytes per base pixel (the maps, about 0.7 bytes per
 pixel at 60 MP, come beside them as the level does), each at most a third over

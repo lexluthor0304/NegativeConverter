@@ -94,11 +94,13 @@ const context = vm.createContext({
   importUserEdited: () => false, importFilmTypeRoll: () => null,
   document: { getElementById: () => null }, i18n: { en: {} }, currentLang: 'en',
   showBatchProgress() {}, updateBatchProgress() {}, updateFileListUI() {}, appAlert() {}, getCurrentQueueItem: () => null,
-  withPendingEdits: (_item, settings) => settings, cloneSettings: structuredClone
+  withPendingEdits: (_item, settings) => settings, cloneSettings: structuredClone,
+  // #278: no file's focal length or aperture is known.
+  shotMetadataByFile: new WeakMap()
 });
 vm.runInContext(['getImageDataPixelCount', 'clampBetween', 'sanitizeNumeric', 'makeLinearCurveLut',
-  'createDefaultLensCorrectionSettings', 'sanitizeLensSelection', 'sanitizeLensCorrection', 'autoDetectFilmBase',
-  'defaultFilmBaseBuffer', 'defaultSettingsInputs', 'createDefaultSettings',
+  'createDefaultLensCorrectionSettings', 'sanitizeLensSelection', 'sanitizeLensShotSource', 'sanitizeLensCorrection', 'autoDetectFilmBase',
+  'defaultFilmBaseBuffer', 'defaultSettingsInputs', 'createDefaultSettings', 'shotMetadataFor', 'applyShotMetadata',
   'settleImportFilmType', 'autoFrameAnalyzerOptions', 'runImportDetections', 'autoFrameEffectiveAngle', 'rotate180CropRegion',
   'analyzeStudioImportFrame', 'autoFrameDetectionFilmType', 'applyAutoFrameToSelected'].map(functionSource).join('\n'), context);
 const createDefaults = context.createDefaultSettings;

@@ -52,7 +52,7 @@ function fixture({ lens = false, brush = false, dust = false, width = 600, heigh
   const settings = {
     filmType: 'color', autoFrameMeta: settled ? {} : null, filmEdge: { checked: settled },
     rotationAngle: 0, mirrored: false, cropRegion: null, ...geometry,
-    lensCorrection: { enabled: lens, selectedLens: lens ? { handle: 7 } : null },
+    lensCorrection: { enabled: lens, selectedLens: lens ? { maker: 'Test', model: 'Test 50mm' } : null },
     repairStrokes: brush ? [{ size: 0.02, points: [{ x: 0.25, y: 0.5 }] }] : [],
     curves: { r: identity, g: identity, b: identity }
   };
@@ -213,7 +213,7 @@ for (const options of [{}, { lens: true }, { brush: true }]) {
   // still read the decoded pixels.
   for (const [label, run] of [
     ['no recipe', f2 => f2.context.processFileWithSettings(f2.file, null, { previewMaxDimension: 288, halfSizeDecode: true })],
-    ['lens', f2 => f2.context.processFileWithSettings(f2.file, { ...f2.settings, lensCorrection: { enabled: true, selectedLens: { handle: 1 } } }, { previewMaxDimension: 288, halfSizeDecode: true })],
+    ['lens', f2 => f2.context.processFileWithSettings(f2.file, { ...f2.settings, lensCorrection: { enabled: true, selectedLens: { maker: 'Test', model: 'Test 50mm' } } }, { previewMaxDimension: 288, halfSizeDecode: true })],
     ['export', f2 => f2.context.processFileWithSettings(f2.file, f2.settings, { halfSizeDecode: true })]
   ]) {
     const f2 = fixture({ settled: true });

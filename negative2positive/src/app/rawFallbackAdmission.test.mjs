@@ -106,7 +106,9 @@ function fixture(route = 'open-timeout', { retry = false, fails = false, workerS
     loadRawImageData: (...args) => rawContext.loadRawFile(...args),
     batchPipelineDiagnostics: { decodeAhead: { admitted: 0, refused: { ceiling: 0, foreground: 0 }, lastEstimate: 0 } }
   });
-  vm.runInContext(['decodePeakBytes', 'decodeReservationBytes', 'loadFileToImageData', 'batchDecodeAhead'].map(fn).join('\n'), c);
+  vm.runInContext(['decodePeakBytes', 'decodeReservationBytes', 'loadFileToImageData', 'batchDecodeAhead', 'rememberShotMetadata'].map(fn).join('\n'), c);
+  // Every decode records the photo's focal length and aperture (#278).
+  c.shotMetadataByFile = new WeakMap();
   const ahead = c.batchDecodeAhead('default', { pixelsPerFile: 16 });
   const job = { file, settings: {} }, controller = new AbortController();
   globalThis.createImageBitmap = async () => {

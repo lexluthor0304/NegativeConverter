@@ -22,7 +22,8 @@
 //    comes back from its display form without a read or decode, with the
 //    nudge and its history, showing what a cold open of that recipe shows;
 //  - the app's own lensfun corrects a colour frame (from lensfun-wasm 0.1.4
-//    on; 0.1.3 builds no maps and leaves it uncorrected), and a
+//    on; 0.1.3 builds no maps and leaves it uncorrected) whose recipe names
+//    its lens by lensfun's maker and model, never a handle, and a
 //    lens-corrected colour frame (#278, test lens maps) left is stored
 //    under its lens and, after a restart, opens from the store within
 //    400 ms without a read or decode, showing and exporting what a cold
@@ -464,7 +465,9 @@ export async function runDisplaySessionSmoke({ send, evaluate, waitFor, fail, in
     // calibration, no vignetting); 0.1.3 builds no maps (its module exports
     // no HEAPF32 view, so the editor leaves the frame uncorrected), which is
     // reported. A lensfun client of test maps (lensTestMaps.mjs, ?debug=1)
-    // then stands in for it, with the lens the search found ----
+    // then stands in for it, with the lens its search finds (a recipe names
+    // its lens by lensfun's maker and model, which the stand-in's search
+    // must find) ----
     const lensState = () => evaluate('window.__ncDisplaySessions.lens()');
     const reopenCold = async () => {
       await open(1, Y);
@@ -501,8 +504,9 @@ export async function runDisplaySessionSmoke({ send, evaluate, waitFor, fail, in
       const status = await lensStatus();
       expect(own.active, 'the lens chosen is not active in the recipe: ' + JSON.stringify(own));
       console.log(`note: the app's own lens runtime (lensfun-wasm ${lensfunVersion}) with ${found}: ${own.source
-        ? `corrected the frame (TCA ${own.corrections?.tca ? 'on' : 'off'}, vignetting ${own.corrections?.vignetting ? 'on' : 'off'}): "${status}"`
-        : `left it uncorrected ("${status}")`}`);
+        ? `corrected the frame (distortion ${own.corrections?.distortion ? 'on' : 'off'}, TCA ${own.corrections?.tca ? 'on' : 'off'}, vignetting ${own.corrections?.vignetting ? 'on' : 'off'}): "${status}"`
+        : `left it uncorrected ("${status}")`}; the recipe names ${JSON.stringify(own.profile && { maker: own.profile.maker, model: own.profile.model, cropFactor: own.profile.cropFactor, camera: own.profile.camera })} at ${JSON.stringify(own.shot)}`);
+      expect(own.profile && !('handle' in own.profile), 'the recipe names a lensfun handle: ' + JSON.stringify(own.profile));
       if (ownCorrects) {
         expect(own.source && own.level && own.status === 'lensStatusApplied' && !/fail|失败|失敗/i.test(status),
           `lensfun-wasm ${lensfunVersion}: the app's own lens runtime did not correct the frame: ${JSON.stringify(own)} "${status}"`);
@@ -515,7 +519,7 @@ export async function runDisplaySessionSmoke({ send, evaluate, waitFor, fail, in
       const { lensTestClient } = await import('/src/app/lensTestMaps.mjs');
       return window.__ncDisplaySessions.lensRuntime(lensTestClient());
     })()`), 'the test lens runtime was not installed (?debug=1)');
-    if (!found) found = await chooseLens();
+    found = await chooseLens();
     expect(found, 'the test lens runtime found no profile: ' + await lensStatus());
     await reopenCold();
     const corrected = await lensState();

@@ -112,7 +112,9 @@ function fixture(route = 'png16') {
     loadRawImageData: loadRawFile, sharedPlanesAvailable: () => false, rememberImageDimensions() {},
     batchPipelineDiagnostics: { decodeAhead: { admitted: 0, refused: { ceiling: 0, foreground: 0, format: 0 }, lastEstimate: 0 } }
   });
-  vm.runInContext(['decodePeakBytes', 'decodeReservationBytes', 'loadFileToImageData', 'batchDecodeAhead'].map(fn).join('\n'), c);
+  vm.runInContext(['decodePeakBytes', 'decodeReservationBytes', 'loadFileToImageData', 'batchDecodeAhead', 'rememberShotMetadata'].map(fn).join('\n'), c);
+  // Every decode records the photo's focal length and aperture (#278).
+  c.shotMetadataByFile = new WeakMap();
   const ahead = c.batchDecodeAhead('default', { pixelsPerFile: 16 });
   const job = { file, settings: {} }, controller = new AbortController();
   Object.assign(f, { c, ahead, job, controller });

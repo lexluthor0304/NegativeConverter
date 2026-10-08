@@ -112,8 +112,10 @@ const FUNCTIONS = [
   'hasSeparateConversionPreview', 'displayProxyShape', 'displayProxyFillPlan', 'storedDisplayProxyKept', 'fillDisplayProxy', 'readStoredDisplaySession',
   'expectedStoredProxyKey', 'persistDisplayProxy', 'displayProxyFileKeyFor', 'persistPresentationPreview',
   'presentStoredPreview', 'encodePresentationJpeg',
-  // #278: the lens part of a proxy's key (null unless a test resolves a lens).
-  'lensSignature', 'lensSignatureOf', 'lensRemapFor', 'lensRemapFailed', 'lensCorrectionMaps', 'storableDisplayLevel'
+  // #278: the lens part of a proxy's key (null unless a test resolves a lens),
+  // and a photo's focal length and aperture from its file's metadata.
+  'lensSignature', 'lensSignatureOf', 'lensRemapFor', 'lensRemapFailed', 'lensCorrectionMaps', 'storableDisplayLevel',
+  'rememberShotMetadata', 'shotMetadataFor', 'applyShotMetadata', 'withReceivingShot'
 ];
 
 // The Apply Crop click handler, as a named function.
@@ -227,8 +229,10 @@ export function createHarness(base, { historyBudget = 768 * 1024 * 1024, session
     // No persistent store unless a test gives one (part 3).
     displayProxyStore: null, displayProxyFileKeys: new WeakMap(), DISPLAY_PROXY_HASHES: { decoder: 'wasm', code: 'code' },
     colorAnalysisSamples: new WeakMap(), colorAnalysisSampleMisses: new WeakSet(), autoWbFromRecords: new WeakSet(),
-    // #278: the lens each corrected source and each display level carries.
+    // #278: the lens each corrected source and each display level carries,
+    // and the photos' focal lengths and apertures from their files.
     lensCorrectedSources: new WeakMap(), displayLevelLenses: new WeakMap(), lensRemapFailures: new Map(),
+    shotMetadataByFile: new WeakMap(), missingLensProfilesWarned: new Set(),
     displayProxyKey: displayProxy.displayProxyKey,
     displayPlaneHash: displayProxy.displayPlaneHash, checksum32: displayProxy.checksum32,
     displayPreviewSize: displayPreview.displayPreviewSize, resizeDisplayPreview: displayPreview.resizeDisplayPreview,

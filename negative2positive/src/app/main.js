@@ -168,7 +168,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     import { compactDustSteps, rebuildDustSteps, frameDigestSteps, coldDustRecordBytes, runSteps, runStepsInSlices } from './dustColdState.js';
     import { createDustHistoryArchive } from './dustHistoryArchive.js';
     import { loadLocalLensfunAssets } from './lensfunLoader.js';
-    import { applyLensMapsToImage, buildLensMaps, lensMapBuffers, lensMapRequest } from './lensMaps.js';
+    import {
+      applyLensMapsToImage, buildLensMaps, lensHandleFor, lensMapBuffers, lensMapRequest, lensMapsMovePixels, lensProfileKey,
+      rememberLensHandle
+    } from './lensMaps.js';
     import { createOpenCvLoader } from './opencvLoader.js';
     import {
       sampleFilmBase as sampleFilmBaseRobust,
@@ -1437,18 +1440,32 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // a selected lens. Such frames keep their native-resolution tile path (#247).
     function lensCorrectionActive(settings) {
       const lensCorrection = resolveLensCorrection(settings);
-      return Boolean(lensCorrection.enabled && lensCorrection.selectedLens?.handle);
+      return Boolean(lensCorrection.enabled && lensCorrection.selectedLens);
     }
+
+    // The error lensCorrectionMaps throws for a saved lens profile the running
+    // lensfun build has no entry for (#278): the frame converts uncorrected
+    // and the lens panel asks for the profile again.
+    function lensProfileMissingError(profile) {
+      const error = new Error(`lensfun has no profile ${formatLensLabel(profile) || 'for this lens'}`);
+      error.code = 'lens-profile-missing';
+      return error;
+    }
+    // The missing profiles already reported: once each a session.
+    const missingLensProfilesWarned = new Set();
 
     // lensfun's maps for a frame of this size under a resolved lens block
     // (buildLensMaps: distortion, with TCA and vignetting where the lens has
-    // them), cached by what they are built from (lensMapRequest).
-    // `remember: false` (a display-proxy fill, #278) reads the cache without
-    // growing it. The cache keeps the newest sets within 128 MB (a 60 MP
-    // crop's distortion, TCA and vignetting maps take about 41 MB at step 8),
-    // at most 12.
+    // them), for the lens its saved profile names in the running lensfun
+    // build (lensHandleFor, looked up once a session), cached by what they
+    // are built from (lensMapRequest). `remember: false` (a display-proxy
+    // fill, #278) reads the cache without growing it. The cache keeps the
+    // newest sets within 128 MB (a 60 MP crop's distortion, TCA and
+    // vignetting maps take about 41 MB at step 8), at most 12.
     function lensCorrectionMaps(runtime, lensCorrection, width, height, { remember = true } = {}) {
-      const { key, request } = lensMapRequest(lensCorrection, width, height);
+      const lensHandle = lensHandleFor(runtime.client, lensCorrection.selectedLens);
+      if (!lensHandle) throw lensProfileMissingError(lensCorrection.selectedLens);
+      const { key, request } = lensMapRequest(lensCorrection, width, height, lensHandle);
       let maps = lensMapCache.get(key);
       if (!maps) {
         maps = buildLensMaps(runtime.client, request);
@@ -1467,8 +1484,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       return maps;
     }
 
+    // `file` (an export's): the photo's own focal length and aperture from its
+    // file's metadata replace values the user did not type (#278), as
+    // restoreSettings does for the editor's photo.
     async function applyLensCorrectionWithSettings(imageData, settings, options = {}) {
-      const { updateUi = false } = options;
+      const { updateUi = false, file = null } = options;
       const lensCorrection = resolveLensCorrection(settings);
       const selectedLens = lensCorrection.selectedLens;
 
@@ -1477,10 +1497,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         return imageData;
       }
 
-      if (!selectedLens || !selectedLens.handle) {
+      if (!selectedLens) {
         if (updateUi) setLensStatus('lensStatusNeedProfile');
         return imageData;
       }
+      if (file) applyShotMetadata(lensCorrection.params, shotMetadataFor(file));
 
       if (updateUi) setLensStatus('lensStatusLoading');
 
@@ -1504,9 +1525,16 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       try {
         const maps = lensCorrectionMaps(runtime, lensCorrection, imageData.width, imageData.height);
         const corrected = applyLensMapsToImage(imageData, maps, lensCorrection.modes);
-        // Keep the display-to-source map for brush coordinates. Non-enumerable
-        // metadata avoids copying the grid into conversion worker messages.
-        Object.defineProperty(corrected, '__lensMapping', { value: { maps, includeTca: lensCorrection.modes.includeTca } });
+        // Keep the display-to-source map for brush coordinates, when the remap
+        // moves pixels (not for vignetting alone). Non-enumerable metadata
+        // avoids copying the grid into conversion worker messages.
+        if (lensMapsMovePixels(maps, lensCorrection.modes)) {
+          Object.defineProperty(corrected, '__lensMapping', { value: { maps, includeTca: lensCorrection.modes.includeTca } });
+        }
+        Object.defineProperty(corrected, '__lensCorrections', { value: {
+          distortion: Boolean(maps.geometry), tca: Boolean(lensCorrection.modes.includeTca && maps.tca),
+          vignetting: Boolean(lensCorrection.modes.includeVignetting && maps.vignetting)
+        } });
         // The lens it carries, which a display proxy of it names (#278).
         lensCorrectedSources.set(corrected, lensSignatureOf(lensCorrection));
         if (updateUi) {
@@ -1516,12 +1544,78 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         return corrected;
       } catch (err) {
         const reason = sanitizeLensRuntimeError(err);
+        if (err?.code === 'lens-profile-missing') {
+          // A profile saved with another lensfun build (or database) that this
+          // one does not have: choose it again (#278).
+          if (!missingLensProfilesWarned.has(reason)) {
+            missingLensProfilesWarned.add(reason);
+            console.warn('Lens correction skipped:', reason);
+          }
+          if (updateUi) {
+            state.lensCorrection.lastError = reason;
+            setLensStatus('lensStatusNeedProfile');
+          }
+          return imageData;
+        }
         if (updateUi) {
           state.lensCorrection.lastError = reason;
           setLensStatus('lensStatusApplyFailed', { reason });
         }
         return imageData;
       }
+    }
+
+    // A photo's shot data for lens correction (#278): the focal length and
+    // aperture its file's metadata gives (a RAW file's, extractRawLensMetadata),
+    // by file, recorded by every decode that reads it. Zero or missing values
+    // (a manual lens reports none) are unknown.
+    const shotMetadataByFile = new WeakMap();
+    function rememberShotMetadata(file, metadata) {
+      if (!file || typeof file !== 'object' || !metadata || typeof metadata !== 'object') return;
+      const known = value => (Number.isFinite(Number(value)) && Number(value) > 0 ? Number(value) : null);
+      const shot = { focal: known(metadata.focal), aperture: known(metadata.aperture) };
+      if (shot.focal !== null || shot.aperture !== null) shotMetadataByFile.set(file, shot);
+    }
+    function shotMetadataFor(file) {
+      return (file && typeof file === 'object' && shotMetadataByFile.get(file)) || null;
+    }
+
+    // A lens block's focal length and aperture are the photo's: what its file's
+    // metadata gives (`shot`, source 'metadata'), unless the user typed the
+    // value for the photo (source 'user'). `replaceUser`: for a new photo's
+    // block taken over from another photo, whose typed values were typed for
+    // that one. Mutates `params`; returns whether anything changed.
+    function applyShotMetadata(params, shot, { replaceUser = false } = {}) {
+      if (!params || !shot) return false;
+      let changed = false;
+      for (const [key, min, max] of [['focal', 1, 10_000], ['aperture', 0.5, 512]]) {
+        const sourceKey = `${key}Source`;
+        if (!Number.isFinite(shot[key]) || shot[key] <= 0 || (params[sourceKey] === 'user' && !replaceUser)) continue;
+        const value = clampBetween(shot[key], min, max);
+        if (params[key] !== value || params[sourceKey] !== 'metadata') changed = true;
+        params[key] = value;
+        params[sourceKey] = 'metadata';
+      }
+      return changed;
+    }
+
+    // A photo's lens block after a copy from another (apply to selected, the
+    // roll reference): its own focal length and aperture stay, from its
+    // file's metadata or as it had them, unless the copied ones were typed.
+    function withReceivingShot(copied, previous, shot) {
+      if (!copied?.params) return copied;
+      const params = { ...copied.params };
+      for (const key of ['focal', 'aperture']) {
+        const sourceKey = `${key}Source`;
+        if (params[sourceKey] === 'user') continue;
+        const own = previous?.params && (previous.params[sourceKey] === 'metadata' || previous.params[sourceKey] === 'user');
+        if (own && Number.isFinite(Number(previous.params[key]))) {
+          params[key] = Number(previous.params[key]);
+          params[sourceKey] = previous.params[sourceKey];
+        }
+      }
+      applyShotMetadata(params, shot);
+      return { ...copied, params };
     }
 
     function applyLensMetadataPrefill(metadata) {
@@ -1531,14 +1625,6 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (!search.lensMaker && metadata.lensMaker) search.lensMaker = metadata.lensMaker;
       if (!search.cameraModel && metadata.cameraModel) search.cameraModel = metadata.cameraModel;
       if (!search.cameraMaker && metadata.cameraMaker) search.cameraMaker = metadata.cameraMaker;
-
-      if (!state.lensCorrection.paramTouched.focal && Number.isFinite(metadata.focal)) {
-        state.lensCorrection.params.focal = clampBetween(metadata.focal, 1, 10_000);
-      }
-      if (!state.lensCorrection.paramTouched.aperture && Number.isFinite(metadata.aperture)) {
-        state.lensCorrection.params.aperture = clampBetween(metadata.aperture, 0.5, 512);
-      }
-
       updateLensCorrectionUI();
     }
 
@@ -1568,7 +1654,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const results = Array.isArray(state.lensCorrection.searchResults)
         ? state.lensCorrection.searchResults
         : [];
-      const selectedHandle = state.lensCorrection.selectedLens?.handle || null;
+      // The selected profile's entry, by its identity without the camera (#278).
+      const entryKey = lens => lensProfileKey(lens ? { ...lens, camera: null } : null);
+      const selectedKey = entryKey(state.lensCorrection.selectedLens);
 
       select.innerHTML = '';
       if (!results.length) {
@@ -1601,7 +1689,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           minFocal,
           maxFocal
         }).trim();
-        if (selectedHandle && lens.handle === selectedHandle) {
+        if (selectedKey && entryKey(lens) === selectedKey) {
           option.selected = true;
         }
         select.appendChild(option);
@@ -1657,7 +1745,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (selectedLens) {
         selectedText.textContent = applyTemplate(
           getLocalizedText('lensSelectedPrefix', 'Selected profile: {lens}'),
-          { lens: formatLensLabel(selectedLens) || `#${selectedLens.handle}` }
+          { lens: formatLensLabel(selectedLens) }
         );
       } else {
         selectedText.textContent = getLocalizedText('lensSelectedNone', 'Selected profile: none');
@@ -2137,13 +2225,17 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           cameraMaker: ''
         },
         searchResults: [],
+        // The camera the search of `searchResults` was narrowed to, which a
+        // profile chosen from them keeps (sanitizeLensSelection).
+        searchCamera: null,
         statusKey: 'lensStatusIdle',
         statusVars: {},
         source: null,
+        // Session-wide: a crop factor, distance or grid step the user typed
+        // is kept when a profile is chosen. A typed focal length or aperture
+        // is the photo's own (params.focalSource / apertureSource 'user').
         paramTouched: {
-          focal: false,
           crop: false,
-          aperture: false,
           distance: false,
           stepMode: false,
           step: false
@@ -2151,23 +2243,44 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       };
     }
 
+    // A lens profile as recipes and projects store it (#278): lensfun's maker
+    // and model for the lens, the crop factor its calibration was measured
+    // at, its focal and aperture ranges, and the camera the search that found
+    // it was narrowed to (lensProfileIdentity in lensMaps.js). The running
+    // lensfun build's handle for it is looked up when maps are built
+    // (lensHandleFor): a handle is an address in one build's memory. Recipes
+    // saved before kept the handle besides the name: the name is read, the
+    // handle and the search score dropped. A record without a maker or model
+    // (a handle alone) names no lens: enabled lens correction then asks for a
+    // profile.
     function sanitizeLensSelection(input, fallback = null) {
       const source = (input && typeof input === 'object') ? input : fallback;
       if (!source || typeof source !== 'object') return null;
-      const handleRaw = Number(source.handle);
-      const handle = Number.isFinite(handleRaw) ? Math.trunc(handleRaw) : NaN;
-      if (!Number.isFinite(handle) || handle < 1) return null;
+      const maker = String(source.maker || '').trim();
+      const model = String(source.model || '').trim();
+      if (!maker && !model) return null;
+      const cameraModel = String(source.camera?.model || '').trim();
       return {
-        handle,
-        maker: String(source.maker || '').trim(),
-        model: String(source.model || '').trim(),
-        score: sanitizeNumeric(source.score, 0, 0, 1_000_000),
+        maker,
+        model,
         minFocal: sanitizeNumeric(source.minFocal, 0, 0, 10_000),
         maxFocal: sanitizeNumeric(source.maxFocal, 0, 0, 10_000),
         minAperture: sanitizeNumeric(source.minAperture, 0, 0, 512),
         maxAperture: sanitizeNumeric(source.maxAperture, 0, 0, 512),
-        cropFactor: sanitizeNumeric(source.cropFactor, 1, 0.1, 10)
+        cropFactor: sanitizeNumeric(source.cropFactor, 1, 0.1, 10),
+        camera: cameraModel ? { maker: String(source.camera.maker || '').trim(), model: cameraModel } : null
       };
+    }
+
+    // Where a lens block's focal length or aperture came from (#278): the
+    // photo's file metadata ('metadata') or the user ('user'); null for a
+    // default, a guess or a value of unknown origin. Kept with its value: a
+    // value taken from the fallback brings the fallback's source.
+    function sanitizeLensShotSource(key, sourceParams, fallbackParams) {
+      const value = Number(sourceParams[key]);
+      const from = Number.isFinite(value) ? sourceParams : fallbackParams;
+      const source = from?.[`${key}Source`];
+      return source === 'metadata' || source === 'user' ? source : null;
     }
 
     function sanitizeLensCorrection(input, fallback = null) {
@@ -2190,6 +2303,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         : createDefaultLensCorrectionSettings().modes;
       const sourceModes = (source.modes && typeof source.modes === 'object') ? source.modes : {};
 
+      const focalSource = sanitizeLensShotSource('focal', sourceParams, fallbackParams);
+      const apertureSource = sanitizeLensShotSource('aperture', sourceParams, fallbackParams);
+
       return {
         enabled: Boolean(source.enabled ?? fallbackValue.enabled),
         selectedLens,
@@ -2199,7 +2315,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           aperture: sanitizeNumeric(sourceParams.aperture, fallbackParams.aperture ?? 8, 0.5, 512),
           distance: sanitizeNumeric(sourceParams.distance, fallbackParams.distance ?? 1000, 0.1, 100_000),
           stepMode,
-          step: Math.round(sanitizeNumeric(sourceParams.step, fallbackParams.step ?? 2, 1, 16))
+          step: Math.round(sanitizeNumeric(sourceParams.step, fallbackParams.step ?? 2, 1, 16)),
+          ...(focalSource ? { focalSource } : {}),
+          ...(apertureSource ? { apertureSource } : {})
         },
         modes: {
           includeTca: (sourceModes.includeTca ?? fallbackModes.includeTca) !== false,
@@ -13022,15 +13140,18 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
     // The lens remap applyLensCorrectionWithSettings runs, or null: the lens
     // part of a display proxy's key. Everything lensfun's maps and the remap
-    // are built from (the crop's size is the geometry part).
+    // are built from (the crop's size is the geometry part): the profile's
+    // stable identity (lensProfileKey, never lensfun's handle, which another
+    // build does not share), the parameters and the modes.
     function lensSignature(settings = state) {
       return lensSignatureOf(resolveLensCorrection(settings));
     }
 
     // The same of a resolved lens block (resolveLensCorrection).
     function lensSignatureOf(lens) {
-      if (!(lens?.enabled && lens.selectedLens?.handle)) return null;
-      return JSON.stringify([lens.selectedLens, lens.params, lens.modes]);
+      if (!(lens?.enabled && lens.selectedLens)) return null;
+      const { focal, crop, aperture, distance, stepMode, step } = lens.params;
+      return JSON.stringify([lensProfileKey(lens.selectedLens), { focal, crop, aperture, distance, stepMode, step }, lens.modes]);
     }
 
     function analysisAreaOf(meta) {
@@ -13574,6 +13695,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       state.baseDescriptor = entry.baseDescriptor;
       state.sourcePending = entry.sourcePending || null;
       state.rawMetadata = entry.rawMetadata || null;
+      rememberShotMetadata(fileItem.file, state.rawMetadata);
       state.filmEdge = entry.filmEdge || null;
       expiredAnalysisKey = null;
       state.displayImageData = null;
@@ -13751,6 +13873,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           const samplesMatch = sameDescriptorSamples(descriptor, base);
           state.loadedBaseImageData = base;
           if (!state.rawMetadata && decoded.rawMetadata) state.rawMetadata = decoded.rawMetadata;
+          rememberShotMetadata(state.loadedFile, decoded.rawMetadata);
           state.baseDescriptor = null;
           reviveFrameDescriptor();
           const missed = colorAnalysisSampleMisses.delete(descriptor);
@@ -14402,6 +14525,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           state.localExposure = null;
           state.repairStrokes = [];
           state.rawMetadata = extractedRawMeta;
+          rememberShotMetadata(file, extractedRawMeta);
           if (webglState.gl) {
             webglState.sourceDirty = true;
             webglState.sourceSize = { w: 0, h: 0 };
@@ -14632,9 +14756,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
             ramBytes: memoryRuntime.ramBytes,
             onMetadata(meta) {
               record.rawMetadata = meta;
+              rememberShotMetadata(record.file, meta);
               if (state.fullDecode === record && meta && !state.rawMetadata) {
                 state.rawMetadata = meta;
                 applyLensMetadataPrefill(meta);
+                // The photo's own focal length and aperture, now known (#278).
+                if (applyShotMetadata(state.lensCorrection.params, shotMetadataFor(record.file))) updateLensCorrectionUI();
               }
             }
           });
@@ -15317,7 +15444,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       state.filmBase = { ...ref.filmBase };
       state.filmBaseSet = true;
       if (ref.lensCorrection) {
-        const safeLens = sanitizeLensCorrection(ref.lensCorrection, state.lensCorrection);
+        // The reference's lens, with this photo's own focal length and
+        // aperture unless the reference's were typed (#278).
+        const safeLens = withReceivingShot(sanitizeLensCorrection(ref.lensCorrection, state.lensCorrection),
+          state.lensCorrection, shotMetadataFor(state.loadedFile));
         state.lensCorrection.enabled = Boolean(safeLens.enabled);
         state.lensCorrection.selectedLens = safeLens.selectedLens ? { ...safeLens.selectedLens } : null;
         state.lensCorrection.params = { ...safeLens.params };
@@ -15502,24 +15632,30 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       return state.lensCorrection.search;
     }
 
+    // A profile chosen from the search results sets the lens, not the shot
+    // (#278): the photo's focal length and aperture stay what its file's
+    // metadata gives or the user typed. Only a focal length neither gave is
+    // guessed from the profile (a prime's own). The profile is stored by its
+    // identity, with the camera the search was narrowed to; the handle the
+    // search returned is the running build's for it.
     function applyLensProfileSelection(lens) {
-      const selected = sanitizeLensSelection(lens, null);
+      const selected = sanitizeLensSelection({ ...lens, camera: state.lensCorrection.searchCamera || null }, null);
       if (!selected) return false;
+      if (lensfunRuntime.client) rememberLensHandle(lensfunRuntime.client, selected, Number(lens?.handle));
       state.lensCorrection.selectedLens = selected;
       state.lensCorrection.enabled = true;
       state.lensCorrection.search.lensModel = selected.model || state.lensCorrection.search.lensModel;
       state.lensCorrection.search.lensMaker = selected.maker || state.lensCorrection.search.lensMaker;
+      const params = state.lensCorrection.params;
       if (!state.lensCorrection.paramTouched.crop && Number.isFinite(selected.cropFactor) && selected.cropFactor > 0) {
-        state.lensCorrection.params.crop = clampBetween(selected.cropFactor, 0.1, 10);
+        params.crop = clampBetween(selected.cropFactor, 0.1, 10);
       }
-      if (!state.lensCorrection.paramTouched.focal) {
-        state.lensCorrection.params.focal = clampBetween(guessFocalFromLensProfile(selected), 1, 10_000);
-      }
-      if (!state.lensCorrection.paramTouched.aperture && Number.isFinite(selected.maxAperture) && selected.maxAperture > 0) {
-        state.lensCorrection.params.aperture = clampBetween(selected.maxAperture, 0.5, 512);
+      applyShotMetadata(params, shotMetadataFor(state.loadedFile));
+      if (!params.focalSource) {
+        params.focal = clampBetween(guessFocalFromLensProfile(selected), 1, 10_000);
       }
       state.lensCorrection.lastError = '';
-      setLensStatus('lensStatusSelected', { lens: formatLensLabel(selected) || `#${selected.handle}` });
+      setLensStatus('lensStatusSelected', { lens: formatLensLabel(selected) });
       updateLensCorrectionUI();
       markCurrentFileDirty();
       return true;
@@ -15554,6 +15690,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         });
 
         state.lensCorrection.searchResults = Array.isArray(results) ? results.slice(0, 200) : [];
+        // lensfun narrows a search to a camera only by its model.
+        state.lensCorrection.searchCamera = query.cameraModel ? { maker: query.cameraMaker, model: query.cameraModel } : null;
         renderLensSearchResults();
 
         if (!state.lensCorrection.searchResults.length) {
@@ -15584,8 +15722,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       } else if (!state.lensCorrection.enabled) {
         setLensStatus('lensStatusSkipped');
       } else if (state.lensCorrection.selectedLens) {
+        // The photo's own focal length and aperture (#278).
+        applyShotMetadata(state.lensCorrection.params, shotMetadataFor(state.loadedFile));
         setLensStatus('lensStatusSelected', {
-          lens: formatLensLabel(state.lensCorrection.selectedLens) || `#${state.lensCorrection.selectedLens.handle}`
+          lens: formatLensLabel(state.lensCorrection.selectedLens)
         });
       }
       updateLensCorrectionUI();
@@ -15635,10 +15775,21 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const input = document.getElementById(id);
       if (!input) return;
       const handler = () => {
-        const value = sanitizeNumeric(input.value, state.lensCorrection.params[key], min, max);
+        const previous = state.lensCorrection.params[key];
+        const value = sanitizeNumeric(input.value, previous, min, max);
+        const shot = key === 'focal' || key === 'aperture';
+        // A focal length or aperture left as the field shows it (rounded) is
+        // not typed: the photo's own value stays, unrounded (#278).
+        if (shot && value === Number(Number(previous).toFixed(decimals))) return;
         state.lensCorrection.params[key] = value;
         input.value = String(Number(value).toFixed(decimals)).replace(/\.?0+$/, '');
-        state.lensCorrection.paramTouched[key] = true;
+        if (shot) {
+          // The photo's shot, as the user typed it: kept over its file's
+          // metadata and profile choices.
+          state.lensCorrection.params[`${key}Source`] = 'user';
+        } else {
+          state.lensCorrection.paramTouched[key] = true;
+        }
         markCurrentFileDirty();
       };
       input.addEventListener('change', handler);
@@ -16839,18 +16990,21 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           return true;
         },
         // What lens correction did to the photo on screen: its status,
-        // whether its source and display level carry the recipe's lens, and
-        // the corrections its source got (distortion always; TCA and
-        // vignetting where the lens has them).
+        // whether its source and display level carry the recipe's lens, the
+        // corrections its source got (distortion where the lens has it, TCA
+        // and vignetting where the lens has them) and the recipe's focal
+        // length and aperture with their sources (#278).
         lens: () => {
           const signature = lensSignature(state);
           const source = state.conversionSourceImageData;
-          const mapping = source?.__lensMapping || null;
+          const { focal, aperture, focalSource = null, apertureSource = null } = state.lensCorrection.params;
           return {
+            profile: state.lensCorrection.selectedLens ? { ...state.lensCorrection.selectedLens } : null,
+            shot: { focal, aperture, focalSource, apertureSource },
             active: Boolean(signature), status: state.lensCorrection.statusKey || null,
             source: source ? lensCorrectedSources.get(source) === signature && Boolean(signature) : null,
             level: state.displayLevelImageData ? displayLevelLenses.get(state.displayLevelImageData) === signature && Boolean(signature) : null,
-            corrections: mapping ? { tca: Boolean(mapping.includeTca && mapping.maps.tca), vignetting: Boolean(mapping.maps.vignetting) } : null
+            corrections: source?.__lensCorrections ? { ...source.__lensCorrections } : null
           };
         },
         // A photo that is not on screen opens cold next time (or, with
@@ -20826,6 +20980,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         next.repairStrokes = structuredClone(item.settings?.repairStrokes || []);
         // These describe the receiving photograph, not the copied colour recipe.
         next.reviewed = Boolean(item.settings?.reviewed);
+        // Its focal length and aperture too, unless the copied ones were typed (#278).
+        if (next.lensCorrection) next.lensCorrection = withReceivingShot(next.lensCorrection, item.settings?.lensCorrection, shotMetadataFor(item.file));
         next.frameMetadata = sanitizeFrameMetadata(item.settings?.frameMetadata);
         next.filmEdge = item.settings?.filmEdge ? structuredClone(item.settings.filmEdge) : null;
         // Keep the receiving frame's roll share only after interpretation
@@ -21113,6 +21269,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const aborted = () => signal?.reason?.name === 'AbortError' ? signal.reason : new DOMException('Decode was aborted', 'AbortError');
       const ownClaim = claim ? null : createFrameClaim(file, { priority, signal, label: label || `decode ${file.name}` });
       const memoryClaim = claim || ownClaim;
+      // Every decode records the photo's focal length and aperture (#278).
+      const metadataSink = meta => {
+        rememberShotMetadata(file, meta);
+        onMetadata?.(meta);
+      };
       let image;
       try {
         if (isRawLikeFileName(fileName)) {
@@ -21128,7 +21289,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
             // A background lane's decode leaves the cores to the photo on
             // screen (#264: native and threaded WASM alike).
             priority,
-            ...(onMetadata ? { onMetadata } : {}),
+            onMetadata: metadataSink,
             ...(onStage ? { onStage } : {}),
             ...(halfSize ? { halfSize: true, outputBps: 16, suppressSensorDefects: false, knownFullSize: knownImageDimensions(file) } : {}),
             ...(postDecode ? { postDecode } : {}),
@@ -21352,6 +21513,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const borderBuffer = inputs.borderBuffer;
       const borderBufferBorderValue = sanitizeNumeric(state.coreBorderBufferBorderValue, 10, 0, 30);
       const filmBase = autoDetectFilmBase(imageData, borderBuffer);
+      // The editor's lens block carries over to the next photo of the roll,
+      // with the photo's own focal length and aperture where its file gives
+      // them, over values carried from another photo, typed ones too (#278).
+      const lensCorrection = state.lensCorrection
+        ? sanitizeLensCorrection(state.lensCorrection, createDefaultLensCorrectionSettings())
+        : createDefaultLensCorrectionSettings();
+      if (item?.file) applyShotMetadata(lensCorrection.params, shotMetadataFor(item.file), { replaceUser: true });
       trace.end();
       return {
         cropRegion: null,
@@ -21362,9 +21530,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         filmBase: filmBase,
         filmEdge: null,
         rollFrame: null,
-        lensCorrection: state.lensCorrection
-          ? sanitizeLensCorrection(state.lensCorrection, createDefaultLensCorrectionSettings())
-          : createDefaultLensCorrectionSettings(),
+        lensCorrection,
         coreFilmPreset: 'none',
         coreColorModel: 'standard',
         coreEnhancedProfile: 'none',
@@ -21747,7 +21913,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         const planes = options.releaseEarly && !previewMax && !tileMax && options.stage !== 'source'
           && !lensCorrectionActive(settings) ? '16' : null;
         workingData = own(await renderGeometryChain(imageData, geometry, { isCurrent, maxInFlight: options.geometryBands, planes }), imageData);
-        workingData = own(await applyLensCorrectionWithSettings(workingData, settings, { updateUi: false }), workingData);
+        workingData = own(await applyLensCorrectionWithSettings(workingData, settings, { updateUi: false, file }), workingData);
         assertRepairCurrent(isCurrent);
         fullWorkingShortSide = Math.min(workingData.width, workingData.height);
       }
@@ -21882,7 +22048,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           isCurrent, maxInFlight: options.geometryBands,
           planes: options.releaseEarly && !lensCorrectionActive(settings) ? '16' : null
         }), imageData);
-        rebuilt = own(await applyLensCorrectionWithSettings(rebuilt, settings, { updateUi: false }), rebuilt);
+        rebuilt = own(await applyLensCorrectionWithSettings(rebuilt, settings, { updateUi: false, file }), rebuilt);
         assertRepairCurrent(isCurrent);
         workingData = rebuilt;
         rebuilt = null;
@@ -23359,6 +23525,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           state.sourcePending = cached.base ? null : cached.sourcePending || null;
           if (displayForm) displaySessionDiagnostics.ramHits++;
           state.rawMetadata = cached.rawMetadata;
+          rememberShotMetadata(fileItem.file, cached.rawMetadata);
           state.filmEdge = cached.filmEdge;
           expiredAnalysisKey = null;
           state.displayImageData = null;
@@ -23631,6 +23798,18 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (state.lensCorrection.selectedLens) {
         state.lensCorrection.search.lensModel = state.lensCorrection.selectedLens.model || state.lensCorrection.search.lensModel;
         state.lensCorrection.search.lensMaker = state.lensCorrection.selectedLens.maker || state.lensCorrection.search.lensMaker;
+      }
+      // A lens-corrected photo converts with its own focal length and aperture
+      // where its file gives them and the user typed none (#278): a recipe
+      // saved before their source was recorded, or built without the file's
+      // metadata, may hold another photo's or a guess. The photo's recipe
+      // takes them too, so its exports, fills and stored proxies agree.
+      if (state.lensCorrection.enabled && state.lensCorrection.selectedLens
+        && applyShotMetadata(state.lensCorrection.params, shotMetadataFor(state.loadedFile))) {
+        const item = getCurrentQueueItem();
+        if (item && item.settings === settings && settings.lensCorrection) {
+          item.settings = { ...settings, lensCorrection: { ...settings.lensCorrection, params: { ...state.lensCorrection.params } } };
+        }
       }
       state.lensCorrection.statusKey = state.lensCorrection.enabled
         ? (state.lensCorrection.selectedLens ? 'lensStatusSelected' : 'lensStatusNeedProfile')
@@ -28621,7 +28800,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         rollMetadata: state.rollMetadata,
         rollReference: state.rollReference,
         rollAnalysis: state.rollAnalysis,
-        lensCorrection: state.lensCorrection
+        // The lens block as recipes keep it: the profile's identity, never a
+        // lensfun handle (#278), nor the panel's search results.
+        lensCorrection: sanitizeLensCorrection(state.lensCorrection, createDefaultLensCorrectionSettings())
       });
     }
 

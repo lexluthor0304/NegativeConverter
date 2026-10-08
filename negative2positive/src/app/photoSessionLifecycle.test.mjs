@@ -120,6 +120,8 @@ function fixture() {
     cancelPendingTimers: noop, cancelScheduledFullResolutionRender: noop, cancelGeometryJob: noop,
     hasPendingCropDetection: () => false, settlePendingCropDetection: async () => {},
     dropDetailLayer: noop,
+    // #278: the photo's focal length and aperture from its file (none here).
+    rememberShotMetadata: noop,
     geometryDiagnostics: { coldSessions: false },
     getLoadingOverlay: () => ({ hide: noop }), noteCoreReprocessSettled: noop,
     assertRepairCurrent: valid => { if (!valid()) throw new DOMException('Superseded', 'AbortError'); },

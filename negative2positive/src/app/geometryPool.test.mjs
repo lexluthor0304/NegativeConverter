@@ -404,8 +404,10 @@ for (const failure of [{ failOn: 1 }, { crashOn: 0 }, { throwOnPost: true }]) {
 // the grid rows it was sent and box-averages them. It equals buildDisplayLevel
 // of applyLensMapsToImage of the whole output (what the editor converts),
 // byte for byte, on workers and on this thread, planned or in fixed bands,
-// from a shared base, with TCA and vignetting or without, for a strong lens
-// and for grids with NaN, infinite and far-off nodes. A worker that fails
+// from a shared base, with TCA and vignetting or without, for a strong lens,
+// for a lens without distortion calibration (no geometry map: TCA alone, or
+// vignetting alone read in place) and for grids with NaN, infinite and
+// far-off nodes. A worker that fails
 // leaves its band to this thread; a stale job stops; a band that cannot
 // keep to the budget skips the frame; an 8-bit plan has none.
 {
@@ -422,7 +424,9 @@ for (const failure of [{ failOn: 1 }, { crashOn: 0 }, { throwOnPost: true }]) {
     ['lensfun-like', options => lensTestMaps(options.width, options.height, 2), all],
     ['geometry only', options => lensTestMaps(options.width, options.height, 3, { tca: false, vignetting: false }), { includeTca: false, includeVignetting: false }],
     ['strong', options => lensTestMaps(options.width, options.height, 2, { strength: 0.3 }), all],
-    ['poisoned', options => lensTestMaps(options.width, options.height, 4, { poison: true }), all]
+    ['poisoned', options => lensTestMaps(options.width, options.height, 4, { poison: true }), all],
+    ['no distortion: TCA alone', options => lensTestMaps(options.width, options.height, 3, { distortion: false, vignetting: false }), all],
+    ['no distortion: vignetting alone, in place', options => lensTestMaps(options.width, options.height, 2, { distortion: false, tca: false }), all]
   ];
   for (const geometry of [geometries[0], geometries[1], geometries[2], geometries[5]]) {
     const plan = planGeometry(source, geometry);
