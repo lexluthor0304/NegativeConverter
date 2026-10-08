@@ -22,6 +22,8 @@ const displayProxy = await import('./displayProxy.js');
 const displayPreview = await import('./displayPreview.js');
 const analysisRegion = await import('./analysisRegion.js');
 const { DISPLAY_SESSION_HELPERS, displaySessionDiagnosticsStub, emptyDisplayProxySpill } = await import('./displaySessionHarness.mjs');
+const { createRepairStamps } = await import('./repairReuse.js');
+const { compactDustSteps, runSteps } = await import('./dustColdState.js');
 
 export { geometry, imageDataOps, backingBuffers, createPhotoSessionCache };
 
@@ -88,6 +90,8 @@ const FUNCTIONS = [
   'mapCropRegionAfterRotation', 'sanitizeCropRegionForImage', 'restoreSettings', 'offerAutoFrameRotation',
   'isCurrentLoad', 'applyZoomPanTransform', 'resetZoomPan', 'captureSnapshot', 'restoreSnapshot',
   'restoreColdSnapshotPixels', 'liveHistoryRoots', 'hotGeometrySnapshot', 'historyExclusiveBytes',
+  // Cold entries' dust states (#281).
+  'coldRefsFor', 'heldDustObjects', 'compactColdDust', 'startColdDustJob', 'endColdDustJob', 'coldDustWanted', 'finishColdDustJobs',
   'pushHistoryEntry', 'pruneHistoryForMemory', 'trimHistorySnapshot', 'commitUndoSnapshot', 'pushUndo', 'performUndo', 'performRedo',
   'rememberPhotoSession', 'rememberUnsettledDisplaySession', 'releaseOutgoingPhotoPlanes', 'photoSettingsKey', 'switchToFile',
   'reactivateReleasedPhoto', 'resumeDeferredPhotoReactivation', 'reopenLivePhoto', 'invalidatePhotoActivation', 'getCropDraftTotalAngle', 'scaleCropRect',
@@ -158,6 +162,10 @@ export function createHarness(base, { historyBudget = 768 * 1024 * 1024, session
     importDetectionAbort: null,
     // No learned-repair refresh of dust-brush rects is pending (#259).
     dustAiRefresh: { rects: [], timer: null },
+    // No dust state is being restored or compacted (#259, #281).
+    restoredDust: null, coldRestoredDust: null, coldDustJobs: new Map(), cleanSourceDigests: new WeakMap(),
+    coldDustDiagnostics: { compacted: 0, failed: 0, kept: 0 }, heldJobFrames: new Set(), memoryBudget: { poke() {} },
+    repairStamps: createRepairStamps(), compactDustSteps, runSteps, yieldTaskForJob: yieldToEventLoop,
     // #263: no reduced preview-tier session is open.
     previewTier: 'normal', previewTierKept: null, reducedDisplayImages: new WeakSet(), displayIsReduced: () => false,
     // No GPU preview frame is ahead of its exact frame (#239).
@@ -274,7 +282,7 @@ export function createHarness(base, { historyBudget = 768 * 1024 * 1024, session
       return undefined;
     }
   }));
-  vm.runInContext(['SNAPSHOT_SCALAR_KEYS', 'SNAPSHOT_REF_KEYS', 'GEOMETRY_UNDO_LABELS'].map(constSource).join('\n'), context);
+  vm.runInContext(['SNAPSHOT_SCALAR_KEYS', 'SNAPSHOT_REF_KEYS', 'GEOMETRY_UNDO_LABELS', 'COLD_DUST_MAX_BYTES'].map(constSource).join('\n'), context);
   if (realProcessNegative) {
     delete target.processNegative;
     Object.assign(target, {

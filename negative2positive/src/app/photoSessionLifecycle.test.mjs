@@ -71,6 +71,8 @@ function fixture() {
     // A photo switch releases the comparison canvas (#242).
     comparisonReleases: 0, releaseBeforeAfterCanvas: () => { context.comparisonReleases++; },
     dustDrawing: false, undoStack: [], redoStack: [], parkedPhoto: null, parkingPhoto: false,
+    // No cold history entry's dust state is being compacted (#281).
+    finishColdDustJobs() {},
     coreReprocessGeneration: 3, coreReprocessToken: 4, dustDetectionRevision: 5,
     loadGeneration: 6, _coreReprocessPending: null, importDetectionAbort: null,
     fullResolutionRenderAbort: null, analyzeFrameInWorker: { abortReleases: 0 }, rewarmAutoFrameWorker: false,

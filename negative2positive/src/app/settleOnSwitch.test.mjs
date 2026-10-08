@@ -29,6 +29,7 @@ function switchFixture() {
     persistCurrentFileSettings: noop, document: { body: { dataset: {} } }, loadGeneration: 0,
     beginActivation: () => { throw new SwitchStopped(); },
     hiddenJobs: { safeMode: false }, processNegativeInFlight: null, pendingBrushRepairs: 0, dustDrawing: false,
+    finishColdDustJobs() {},
     dustAiRefresh: { rects: [] }, undoStack: [{ label: 'coreExposure' }], redoStack: [], photoSettingsKey: () => 'key',
     captureSnapshot: () => ({ refs: { processedImageData: f.state.processedImageData } }),
     photoPreviews: { put: () => true }, geometryDiagnostics: { coldSessions: false },

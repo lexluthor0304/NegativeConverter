@@ -151,8 +151,9 @@ consumer that holds it:
    Storage failure keeps the real buffers and their ledger charge;
 4. **stores**: the prefetch slot, tile sources, watch-folder roll samples and
    the roll-analysis sample stores in use;
-5. **jobs**: frames a job keeps between its items, and an Export All frame
-   decoded ahead until a lane takes it (#256);
+5. **jobs**: frames a job keeps between its items, an Export All frame
+   decoded ahead until a lane takes it (#256), and the planes a cold history
+   entry's dust compaction reads until it ends (#281);
 6. **workers**: long-lived worker residents: the default export bridge (the
    planes of its last request until it is terminated), the auto-frame
    worker's OpenCV heap (`cv.HEAPU8`, reported with each reply) and a warmed
@@ -220,7 +221,8 @@ the shortfall is freed, then `poke()`:
    while no export, repair or full-resolution render needs it; the next export
    converts it again;
 4. history: the oldest snapshots lose their pixel references (their steps
-   stay; a cold step restores its scalars and rebuilds from the base).
+   stay; a cold step restores its scalars and rebuilds from the base, and
+   keeps its dust state, #281).
 
 ## Lane planning
 

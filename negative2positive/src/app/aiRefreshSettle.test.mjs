@@ -98,6 +98,8 @@ function settleFixture({ loadFails = false } = {}) {
     setTimeout: (callback, ms) => { timers.push({ callback, ms }); return timers.length; }, clearTimeout: () => {},
     photoSessions: createPhotoSessionCache({ maxBytes: 1 << 30 }), photoPreviews: createPhotoSessionCache({ maxBytes: 1 << 30 }),
     hiddenJobs: { safeMode: false }, exactSettingsKey, processNegativeInFlight: null, coreReprocessTimer: null,
+    // No cold history entry's dust state is being compacted (#281).
+    finishColdDustJobs() {},
     coreReprocessBusy: () => false, dustDrawing: false, previewTier: 'normal', displayIsReduced: () => false,
     captureSnapshot: () => ({ refs: { processedImageData: state.processedImageData,
       dustInpaintedImageData: state.dustRemoval.inpaintedImageData, dustMask: state.dustRemoval.mask } }),

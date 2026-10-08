@@ -182,4 +182,33 @@ export async function runDustUndoSmoke({ send, evaluate, waitFor, wait, fail, in
   const exportedAgain = { png8: await exportFile('second undo', 'png', 8) };
   if (exportedAgain.png8 !== exportedBefore.png8) fail('the export after the second undo differs: ' + JSON.stringify({ exportedBefore, exportedAgain }));
   console.log(`ok: undo across an Exposure drag keeps the dust state (${before.text}; ${dragged.text} after the drag) with no detection after its conversion (${undone.convert}/${redone.convert}/${again.convert} conversion messages for undo/redo/undo); PNG8 ${exportedBefore.png8.slice(0, 16)} and TIFF16 ${exportedBefore.tiff16.slice(0, 16)} equal the exports before the drag`);
+
+  // A cold entry (#281): redo the drag, then run history's budget pass at a
+  // limit of 0 (what 768 MiB does from about 30 MP), so the step before the
+  // drag keeps only its scalars and its dust state, compacted; the stroke
+  // that held its planes goes, as before. Its undo rebuilds and converts the
+  // frame and still detects nothing: the count, the stroke's refinement and
+  // both exports are those from before the drag.
+  const redoneAgain = await step('redo before the cold undo', 'redoBtn');
+  if (redoneAgain.exposure !== dragged.exposure) fail('redo before the cold undo: ' + JSON.stringify({ dragged, redoneAgain }));
+  await evaluate(`window.__ncMemory.pruneHistory(0)`);
+  await waitFor('cold undo: dust state compacted', `(() => {
+    const cold = window.__ncMemory.coldDust();
+    return cold.pending === 0 && cold.entries.some(entry => entry.kind === 'compact' && entry.bytes > 0);
+  })()`, 60_000);
+  const compacted = await evaluate(`window.__ncMemory.coldDust()`);
+  const coldEntry = compacted.entries.find(entry => entry.kind === 'compact');
+  const coldUndone = await step('cold undo', 'undoBtn');
+  if (coldUndone.exposure !== before.exposure || coldUndone.text !== before.text) {
+    fail('the cold undo did not bring the state before the drag back: ' + JSON.stringify({ before, coldUndone }));
+  }
+  const kept = await evaluate(`window.__ncMemory.coldDust().kept`);
+  if (kept !== compacted.kept + 1) fail('the cold undo did not keep its dust state: ' + JSON.stringify({ compacted, kept }));
+  const exportedCold = await exportBoth('after the cold undo');
+  if (exportedCold.png8 !== exportedBefore.png8 || exportedCold.tiff16 !== exportedBefore.tiff16) {
+    fail('the export after the cold undo differs from the one before the drag: ' + JSON.stringify({ exportedBefore, exportedCold }));
+  }
+  const coldRedone = await step('redo after the cold undo', 'redoBtn');
+  if (coldRedone.exposure !== dragged.exposure || coldRedone.text !== dragged.text) fail('redo after the cold undo: ' + JSON.stringify({ dragged, coldRedone }));
+  console.log(`ok: a cold entry (${coldEntry.label}, ${coldEntry.bytes} bytes of dust state) undoes with no detection (${before.text}, ${coldUndone.convert} conversion messages); PNG8 and TIFF16 equal the exports before the drag; redo brings the drag back`);
 }

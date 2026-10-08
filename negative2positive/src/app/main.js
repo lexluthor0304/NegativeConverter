@@ -164,6 +164,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       pinDustWorker, unpinDustWorker, disposeDustWorker, dustWorker, dustMaskInfo, forgetDustMaskInfo
     } from './dustWorkerClient.js';
     import { applyStrokePatch, applyDustDelta, amendDustDelta, copyImageRect, pasteImageRect, sameFramePixels } from './dustStrokeHistory.js';
+    import { compactDustSteps, rebuildDustSteps, frameDigestSteps, coldDustRecordBytes, runSteps, runStepsInSlices } from './dustColdState.js';
     import { createDustHistoryArchive } from './dustHistoryArchive.js';
     import { loadLocalLensfunAssets } from './lensfunLoader.js';
     import { applyLensMapsToImage, lensMapRequest } from './lensMaps.js';
@@ -2502,6 +2503,21 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // goes whenever the dust state is replaced (noteDustReplaced) and with
     // the photo.
     let restoredDust = null;
+    // The same for a cold history entry (#281): the dust state it kept,
+    // compacted or by reference, from its undo or redo until the detection
+    // after the conversion that rebuilds its clean source
+    // (keepColdRestoredDust). That conversion replaces the dust state itself,
+    // so only a history move, clearDustState and the photo let it go.
+    let coldRestoredDust = null;
+    // Compactions of cold entries' dust states in progress, by the pixel
+    // record they fill (startColdDustJob), and the digests of clean sources.
+    const coldDustJobs = new Map();
+    const cleanSourceDigests = new WeakMap();
+    // A record larger than this is not kept: that entry detects again.
+    const COLD_DUST_MAX_BYTES = 96 * 1024 * 1024;
+    // Compactions that filled a record or ended without one, and cold undos
+    // or redos that kept their dust state (?debug=1: __ncMemory.coldDust()).
+    const coldDustDiagnostics = { compacted: 0, failed: 0, kept: 0 };
 
     let fullResolutionRenderTimer = null;
     // The exact render above 16 MP in flight: { controller, token, generation }
@@ -2956,6 +2972,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // it resolves once the planes are rebuilt and converted.
     function restoreSnapshot(snapshot, { reprocess = true, previewOnly } = {}) {
       cancelPendingTimers();
+      coldRestoredDust = null;
       coreReprocessToken += 1;
       abortSupersededFullResolutionConversion();
       // A pending geometry build belongs to the state being replaced, and so
@@ -3070,7 +3087,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
       // Restore Category B refs
       const r = snapshot.refs;
-      if (r.cold) return restoreColdSnapshotPixels(s);
+      if (r.cold) return restoreColdSnapshotPixels(s, r.dust || null);
       for (const key of SNAPSHOT_REF_KEYS) {
         state[key] = r[key];
       }
@@ -3141,8 +3158,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // A cold history entry keeps its scalars only: rotationAngle, mirrored and
     // cropRegion are exact, so its planes are rebuilt from the base in the
     // pool while the current frame stays on screen, then converted without
-    // new automatic measurements. It never falls back to the negative.
-    function restoreColdSnapshotPixels(s) {
+    // new automatic measurements. It never falls back to the negative. The
+    // dust state it kept (`dust`, #281) comes back once that conversion has
+    // landed and the detection after it has compared the frame
+    // (keepColdRestoredDust).
+    function restoreColdSnapshotPixels(s, dust = null) {
       geometryDiagnostics.coldRestores++;
       invalidateProcessedPipelineState();
       const base = state.loadedBaseImageData;
@@ -3159,6 +3179,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       state.dustRemoval.cleanSource = null;
       state.dustRemoval._state = null;
       noteDustReplaced();
+      const kept = dust?.kind === 'objects' || (dust?.kind === 'compact' && (dust.pixels.pending || dust.pixels.record));
+      coldRestoredDust = kept && s.currentStep >= 3 && hasFrameRepairs() ? {
+        dust, token: coreReprocessToken, generation: loadGeneration, strokes: state.repairStrokes,
+        enabled: state.dustRemoval.enabled, strength: state.dustRemoval.strength, maxParticleSize: state.dustRemoval.maxParticleSize
+      } : null;
       updateFilmModeUI();
       updateSlidersFromState();
       renderCurve();
@@ -3275,11 +3300,15 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // (redoStack[0]; the next redo is its last entry).
       for (const snapshot of [...undoStack, ...redoStack]) {
         if (historyExclusiveBytes(hot) <= limit) return;
-        if (snapshot === hot || snapshot.dustDelta || snapshot.refs.cold) continue;
-        if (![...backingBuffers(snapshot.refs)].some(buffer => !owned.has(buffer))) continue;
-        // Only references are dropped; buffers are never detached, so the
-        // session cache and live state keep theirs.
-        snapshot.refs = { cold: true };
+        if (snapshot === hot || snapshot.dustDelta) continue;
+        if (!snapshot.refs.cold) {
+          if (![...backingBuffers(snapshot.refs)].some(buffer => !owned.has(buffer))) continue;
+          // Only references are dropped; buffers are never detached, so the
+          // session cache and live state keep theirs. The dust state the
+          // entry settled stays with it (#281).
+          snapshot.refs = coldRefsFor(snapshot.refs);
+        }
+        compactColdDust(snapshot);
       }
       if (stripOnly) return;
       // A dust-stroke entry (#259) patches the objects it holds and cannot go
@@ -3292,6 +3321,134 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           stack.splice(0, i + 1);
           i = -1;
         }
+      }
+      // The strokes that held a cold entry's mask and repaired image may be
+      // gone now: compact them. Past that, the oldest records go, and their
+      // entries detect dust again as before.
+      for (const snapshot of [...undoStack, ...redoStack]) {
+        if (historyExclusiveBytes(hot) <= limit) return;
+        if (snapshot.refs?.cold) compactColdDust(snapshot);
+      }
+      for (const snapshot of [...undoStack, ...redoStack]) {
+        if (historyExclusiveBytes(hot) <= limit) return;
+        if (snapshot.refs?.cold && snapshot.refs.dust?.pixels?.record) snapshot.refs = { cold: true };
+      }
+    }
+
+    // What a stripped entry keeps (#281): its scalars, and the dust state it
+    // had settled (refs.dustSettled), first by reference. compactColdDust
+    // compacts that once nothing else holds its mask and repaired image.
+    // `stamp` is the committed repair's recipe (#246) without identities, so
+    // the rebuilt image can carry it as a session restore's does; only one
+    // without a lens mapping, whose object a rebuild does not bring back.
+    function coldRefsFor(refs) {
+      if (!refs?.dustSettled || !refs.dustCleanSource || !refs.dustMask) return { cold: true };
+      const recipe = repairStamps.recipeOf(refs.dustInpaintedImageData);
+      const stamp = recipe && recipe.source === refs.dustCleanSource && recipe.lensMapping === null
+        && (!recipe.dustEnabled || recipe.dustMask === refs.dustMask)
+        ? { dustEnabled: recipe.dustEnabled, dustUsedAi: recipe.dustUsedAi, revision: recipe.revision, strokes: recipe.strokes } : null;
+      return { cold: true, dust: { kind: 'objects', cleanSource: refs.dustCleanSource, mask: refs.dustMask,
+        inpaintedImageData: refs.dustInpaintedImageData || null, maskTag: refs.dustMaskTag ?? null,
+        particleCount: refs.dustParticleCount, settled: refs.dustSettled, stamp } };
+    }
+
+    // The masks and repaired images held outside cold entries: by live state,
+    // a restore in progress, a stroke entry or an entry that keeps its
+    // pixels. A cold entry's dust state that names one stays by reference:
+    // its bytes are held anyway, and only the history position that matches
+    // their content (LIFO, as for hot entries) may read them, since strokes
+    // and their undo write into them.
+    function heldDustObjects() {
+      const dust = state.dustRemoval;
+      const held = new Set([dust.mask, dust.inpaintedImageData, state.processedImageData,
+        restoredDust?.mask, restoredDust?.inpaintedImageData]);
+      const restoring = coldRestoredDust?.dust;
+      if (restoring?.kind === 'objects') held.add(restoring.mask).add(restoring.inpaintedImageData);
+      for (const entry of [...undoStack, ...redoStack]) {
+        if (entry.dustDelta) held.add(entry.dustDelta.target).add(entry.dustDelta.mask);
+        else if (!entry.refs?.cold) held.add(entry.refs.dustMask).add(entry.refs.dustInpaintedImageData).add(entry.refs.processedImageData);
+      }
+      held.delete(null);
+      held.delete(undefined);
+      return held;
+    }
+
+    // A cold entry's dust state kept by reference is compacted (#281) once
+    // nothing else holds its mask or repaired image. Then nothing can write
+    // into them any more: every cold entry that names them is compacted here
+    // too (each keeps its own count and inpainter, all share one pixel
+    // record), no stroke or hot entry names them, and only live state can
+    // give them to a stroke. So their content is these entries' and stays so
+    // while the record is filled, off the edit's task.
+    function compactColdDust(entry) {
+      const dust = entry.refs?.dust;
+      if (dust?.kind !== 'objects') return;
+      const held = heldDustObjects();
+      if (held.has(dust.mask) || held.has(dust.inpaintedImageData)) return;
+      const pixels = { pending: true, record: null };
+      for (const other of [...undoStack, ...redoStack]) {
+        const kept = other.refs?.dust;
+        if (kept?.kind === 'objects' && kept.mask === dust.mask && kept.inpaintedImageData === dust.inpaintedImageData
+          && kept.cleanSource === dust.cleanSource) {
+          other.refs.dust = { kind: 'compact', particleCount: kept.particleCount, settled: kept.settled, stamp: kept.stamp, pixels };
+        }
+      }
+      startColdDustJob(pixels, dust);
+    }
+
+    // Fills `pixels.record` from `objects` across tasks (dustColdState.js):
+    // the clean source's digest (once per source), the mask's runs and bytes,
+    // the repaired pixels that differ from the clean source. About 0.5 s of
+    // slices of a few ms at 60 MP; the ledger counts what it holds until it
+    // ends. It stops when no entry (nor a restore in progress) wants the
+    // record any more, or with the photo: `record` stays null, and an undo of
+    // such an entry detects dust again.
+    function startColdDustJob(pixels, { cleanSource, mask, inpaintedImageData }) {
+      const objects = { cleanSource, mask, inpaintedImageData };
+      const job = { pixels, objects, generation: loadGeneration,
+        steps: compactDustSteps(objects, { digest: cleanSourceDigests.get(cleanSource) || null, maxBytes: COLD_DUST_MAX_BYTES }) };
+      coldDustJobs.set(pixels, job);
+      heldJobFrames.add(objects);
+      job.done = (async () => {
+        try {
+          for (;;) {
+            await yieldTaskForJob();
+            if (coldDustJobs.get(pixels) !== job) return;
+            if (!isCurrentLoad(job.generation) || !coldDustWanted(pixels)) { endColdDustJob(job, null); return; }
+            const { done, value } = job.steps.next();
+            if (done) { endColdDustJob(job, value); return; }
+          }
+        } catch (error) {
+          console.warn('Compacting the dust state of a history step failed:', error);
+          endColdDustJob(job, null);
+        }
+      })();
+    }
+
+    function endColdDustJob(job, record) {
+      if (coldDustJobs.get(job.pixels) !== job) return;
+      coldDustJobs.delete(job.pixels);
+      if (heldJobFrames.delete(job.objects)) memoryBudget.poke();
+      if (record) cleanSourceDigests.set(job.objects.cleanSource, record.digest);
+      coldDustDiagnostics[record ? 'compacted' : 'failed']++;
+      job.pixels.pending = false;
+      job.pixels.record = record || null;
+      job.objects = job.steps = null;
+    }
+
+    function coldDustWanted(pixels) {
+      const wants = entry => entry.refs?.dust?.pixels === pixels;
+      return coldRestoredDust?.dust?.pixels === pixels || undoStack.some(wants) || redoStack.some(wants);
+    }
+
+    // Runs compactions to their end in this task, before history goes into a
+    // photo session or the parking archive (which end them with the photo).
+    function finishColdDustJobs() {
+      for (const job of [...coldDustJobs.values()]) {
+        let record = null;
+        try { record = runSteps(job.steps); }
+        catch (error) { console.warn('Compacting the dust state of a history step failed:', error); }
+        endColdDustJob(job, record);
       }
     }
 
@@ -10050,7 +10207,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
         // An undo or redo across a conversion (#259): the dust state it
         // restored, once this frame proves to have its clean source's pixels.
+        // A cold entry's (#281) is rebuilt on this frame from what it kept.
         if (await keepRestoredDust(source, isCurrent)) return;
+        if (await keepColdRestoredDust(source, isCurrent)) return;
         if (!isCurrent() || source !== getDustSource()) return;
 
         const prevState = state.dustRemoval._state;
@@ -10160,6 +10319,90 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       return true;
     }
 
+    // The detection after the conversion a cold entry's undo or redo started
+    // (#281): the dust state the entry kept comes back, mask, repaired image
+    // and count bit for bit, when nothing changed the dust state or its inputs
+    // since the restore, the inpainter is the one recorded, and the converted
+    // frame `source` has the clean source's pixels. A state kept by reference
+    // is compared with its clean source in slices and comes back as those
+    // objects; a compacted one is compared by the digest of the 8- and
+    // 16-bit planes, and its mask and repaired image are rebuilt on `source`,
+    // which becomes their clean source. A compaction still running finishes
+    // first. False: detect from scratch, as before.
+    async function keepColdRestoredDust(source, isCurrent) {
+      const kept = coldRestoredDust;
+      if (!kept) return false;
+      // Held until this step ends: the compaction it may wait for goes on
+      // only while someone wants its record (coldDustWanted).
+      try {
+        return await keepColdDust(kept, source, isCurrent);
+      } finally {
+        if (coldRestoredDust === kept) coldRestoredDust = null;
+      }
+    }
+
+    async function keepColdDust(kept, source, isCurrent) {
+      const dust = state.dustRemoval;
+      const revision = dust.revision;
+      const untouched = () => isCurrent() && coldRestoredDust === kept && isCurrentLoad(kept.generation)
+        && coreReprocessToken === kept.token && dust.revision === revision && dust.cleanSource === source && !dust.mask
+        && restoredDustInputsHold(kept);
+      if (!untouched()) return false;
+      const cold = kept.dust;
+      if (cold.kind === 'compact' && cold.pixels.pending) await coldDustJobs.get(cold.pixels)?.done;
+      if (!untouched() || (cold.kind === 'compact' && !cold.pixels.record)) return false;
+      if (dust.ai && aiRepair.status === 'loading') await settleAiRepairModel({ load: false, isCurrent });
+      if (!untouched() || dustPassUsesAi() !== cold.settled.usedAi || aiRepair.revision !== cold.settled.revision) return false;
+      let restored;
+      if (cold.kind === 'compact') {
+        let digest = cleanSourceDigests.get(source);
+        if (!digest) {
+          digest = await runStepsInSlices(frameDigestSteps(source), { pause: yieldTaskForJob, isCurrent: untouched });
+          if (!digest || !untouched()) return false;
+          cleanSourceDigests.set(source, digest);
+        }
+        if (digest !== cold.pixels.record.digest) return false;
+        const rebuilt = await runStepsInSlices(rebuildDustSteps(cold.pixels.record, source), { pause: yieldTaskForJob, isCurrent: untouched });
+        if (!rebuilt || !untouched()) return false;
+        restored = { cleanSource: source, mask: rebuilt.mask, inpaintedImageData: rebuilt.inpaintedImageData, maskTag: nextDustMaskTag() };
+        dustMaskSources.set(rebuilt.mask, source);
+      } else {
+        if (!(await sameFramePixels(cold.cleanSource, source, { isCurrent: untouched, pause: yieldTaskForJob })) || !untouched()) return false;
+        restored = { cleanSource: cold.cleanSource, mask: cold.mask, inpaintedImageData: cold.inpaintedImageData,
+          maskTag: cold.maskTag ?? nextDustMaskTag() };
+      }
+      dust.cleanSource = restored.cleanSource;
+      dust.mask = restored.mask;
+      dust.maskTag = restored.maskTag;
+      dust._state = null;
+      dust.particleCount = cold.particleCount;
+      dust.inpaintedImageData = restored.inpaintedImageData;
+      noteDustReplaced();
+      if (cold.kind === 'compact') stampColdRestoredRepair(cold.stamp);
+      else carryRestoredRepairStamp();
+      coldDustDiagnostics.kept++;
+      if (dust.particleCount > 0 || state.repairStrokes.length) showDustParticleCount();
+      else updateDustStatusUI(getLocalizedText('dustStatusNone', 'No dust detected'));
+      cancelFullUpdate();
+      applyDustResultToState();
+      updatePreview();
+      rememberRepairMasks(restored.cleanSource);
+      return true;
+    }
+
+    // A compacted state's committed repair (#246) carries its stamp over to
+    // the rebuilt image, as carryRestoredRepairStamp does for restored
+    // objects, so export takes it as it would have before the step.
+    function stampColdRestoredRepair(stamp) {
+      const dust = state.dustRemoval;
+      if (!stamp || !dust.inpaintedImageData || dust.inpaintedImageData === dust.cleanSource
+        || !sameRepairStrokes(stamp.strokes, state.repairStrokes) || state.conversionSourceImageData?.__lensMapping) return;
+      repairStamps.stamp(dust.inpaintedImageData, { source: dust.cleanSource, token: coreReprocessToken,
+        dustEnabled: stamp.dustEnabled, dustMask: stamp.dustEnabled ? dust.mask : null,
+        dustRevision: stamp.dustEnabled ? dust.revision : null, strokes: state.repairStrokes,
+        lensMapping: null, revision: stamp.revision, dustUsedAi: stamp.dustUsedAi });
+    }
+
     // Whether the dust state is a finished repair of its clean source: a mask
     // of that source, and a repaired image that no detection, brush repair or
     // learned refresh still owes anything, from a known inpainter. A state an
@@ -10190,6 +10433,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
     function clearDustState() {
       dustDetectionRevision += 1;
+      coldRestoredDust = null;
       dustPassCache = null;
       dustRefreshRepairMask = null;
       unpinDustWorker();
@@ -10863,6 +11107,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     function restoreDustDelta(delta, direction) {
       dustDetectionRevision += 1;
       if (dustDetectionTimer) { clearTimeout(dustDetectionTimer); dustDetectionTimer = null; }
+      coldRestoredDust = null;
       const dust = state.dustRemoval;
       repairStamps.forget(delta.target);
       forgetDustMaskInfo(delta.mask);
@@ -11524,7 +11769,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       persistCurrentFileSettings({ silent: true, force: true });
       const entries = [...undoStack, ...redoStack];
       let dustHistoryKey = null;
-      const hasDust = entries.some(entry => entry.dustDelta) || state.dustRemoval.mask;
+      // Cold entries' dust states (#281) are archived finished.
+      finishColdDustJobs();
+      const hasDust = entries.some(entry => entry.dustDelta || entry.refs?.dust) || state.dustRemoval.mask;
       if (hasDust) {
         parkingPhoto = true;
         const generation = loadGeneration, editRevision = manualEditRevision, dustRevision = state.dustRemoval.revision;
@@ -11571,7 +11818,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // neither the full mutable planes nor their patch bytes remain live.
       for (const entry of entries) {
         if (entry.dustDelta) entry.dustDelta = { cold: true, patches: [] };
-        else if (!entry.refs?.cold) entry.refs = { cold: true };
+        else if (!entry.refs?.cold || entry.refs.dust?.kind === 'objects') entry.refs = { cold: true };
       }
       parkedPhoto = {
         item, file: item.file, base: state.loadedBaseImageData, rawMetadata: state.rawMetadata,
@@ -12146,6 +12393,17 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         log: () => memoryEvents.slice(),
         clearLog: () => { memoryEvents.length = 0; },
         runIdleCheck: () => runMemoryIdleCheck(),
+        // History's budget pass at another limit (the dust-undo smoke makes
+        // entries cold on a small frame with it), and the cold entries' dust
+        // states (#281): their kind and the bytes their records keep.
+        pruneHistory: (limit) => { pruneHistoryForMemory({ limit }); updateUndoRedoButtons(); },
+        coldDust: () => ({
+          ...coldDustDiagnostics, pending: coldDustJobs.size,
+          entries: [...undoStack, ...redoStack].filter(entry => entry.refs?.cold).map(entry => ({
+            label: entry.label, kind: entry.refs.dust?.kind || null, pending: Boolean(entry.refs.dust?.pixels?.pending),
+            bytes: coldDustRecordBytes(entry.refs.dust?.pixels?.record || null)
+          }))
+        }),
         // The pixel buffers the open photo (state, history) and the budgeted
         // photo caches hold: the photo-session smoke's retained-plane check
         // (#234) finds every other live plane through the heap.
@@ -12181,6 +12439,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const base = state.loadedBaseImageData;
       // A session restored without its base (#249) is remembered again too.
       if (!item || item.file !== state.loadedFile || !(base || state.baseDescriptor) || state.rawDecodePending) return;
+      // The history it keeps carries finished dust records (#281).
+      finishColdDustJobs();
       // A reduced preview-tier frame (#263) is never a settled view, nor is
       // one still waiting for its normal-size tick, nor one whose original is
       // being rebuilt (#249), nor a full-resolution plane kept while its
@@ -12361,6 +12621,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       state.dustRemoval._state = null;
       dustRefreshRepairMask = null;
       restoredDust = null;
+      coldRestoredDust = null;
       clearFullResolutionRenderState();
       undoStack.length = 0;
       redoStack.length = 0;
@@ -12581,7 +12842,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // they hold and cannot go cold, so they are left out, as for #244's cold
     // sessions.
     function coldHistory(entries) {
-      return entries.filter(entry => !entry.dustDelta).map(entry => (entry.refs?.cold ? entry : { ...entry, refs: { cold: true } }));
+      // A cold entry keeps a compacted dust state (#281), not one by reference.
+      return entries.filter(entry => !entry.dustDelta)
+        .map(entry => (entry.refs?.cold && entry.refs.dust?.kind !== 'objects' ? entry : { ...entry, refs: { cold: true } }));
     }
 
     // Stand-ins for a Tier B session's planes, with the memo of the geometry
@@ -12681,7 +12944,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       };
       const history = entries => entries.flatMap(snapshot => {
         if (snapshot.dustDelta) return pinsDropped(snapshot.dustDelta) ? [] : [snapshot];
-        if (snapshot.refs?.cold) return [snapshot];
+        // A dust state a cold entry keeps by reference (#281) goes as a hot
+        // entry's planes do.
+        if (snapshot.refs?.cold) {
+          const dust = snapshot.refs.dust;
+          return dust?.kind === 'objects' && (pinsDropped(dust) || (stripPinned && pinsOwn(dust))) ? [{ ...snapshot, refs: { cold: true } }] : [snapshot];
+        }
         const hot = { ...snapshot, refs: releaseFrame(snapshot.refs) };
         return pinsDropped(hot.refs) || (stripPinned && pinsOwn(hot.refs)) ? [{ ...snapshot, refs: { cold: true } }] : [hot];
       });
@@ -13618,6 +13886,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       dustAiRefresh.rects.length = 0;
       dustRefreshRepairMask = null;
       restoredDust = null;
+      coldRestoredDust = null;
       cancelScheduledFullResolutionRender();
       coreReprocessGeneration += 1;
       coreReprocessToken += 1;

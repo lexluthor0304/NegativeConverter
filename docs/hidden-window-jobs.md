@@ -125,7 +125,8 @@ and the undo history are kept, and showing the window rebuilds the planes from
 that base through the cold photo-switch path, without a decode. Every history
 step stays, as a cold entry (#244: its pixels are rebuilt from the base on
 restore): a hot one pins the very planes parking drops, so the held item would
-stay held. Dust-brush history (#259) and the current repair are persisted
+stay held. Cold entries' dust states (#281) are compacted first and archived
+with the history. Dust-brush history (#259) and the current repair are persisted
 losslessly to IndexedDB before their target, clean-source and mask references
 are dropped. Shared image/array identities, 8-bit and 16-bit pixels, stroke
 patches and ordinary snapshots around those strokes are restored together;

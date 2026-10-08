@@ -72,6 +72,8 @@ function fixture() {
     dustMaskTagSequence: 0, dustAiRefresh: { rects: [], timer: null }, syncDustWorkerPin() {},
     // No undo or redo restored a dust state here (#259).
     restoredDust: null,
+    // No cold history entry's undo is waiting for its dust state (#281).
+    keepColdRestoredDust: async () => false,
     Uint8Array, DOMException, console,
     // A loaded model; the release (#236, #241) and the reload are the real ones.
     aiRepair: { status: 'ready', revision: 4, run() {}, release: async () => {}, trim: null, resident: null,

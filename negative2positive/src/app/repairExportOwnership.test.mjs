@@ -47,6 +47,8 @@ function fixture({ enabled = false, mask = null, model = null } = {}) {
     dustDetectionTimer: null, Uint8Array, dustMaskTagSequence: 0, dustAiRefresh: { rects: [] },
     // No undo or redo restored a dust state here (#259).
     restoredDust: null,
+    // No cold history entry's undo is waiting for its dust state (#281).
+    keepColdRestoredDust: async () => false,
     syncDustWorkerPin: noop,
     aiRepair: model || { status: 'ready', revision: 5 }, repairStamps: createRepairStamps(), dustPassCache: null,
     aiRepairLoadWatcher: null, DEFAULT_MODEL_URL: '/m.onnx',
