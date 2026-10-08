@@ -6,8 +6,13 @@ converted photo and applies the same automatic rescue defaults to the current
 photo, without changing the roll's import mode, geometry, film type or active
 tab. The action is one undo step; CMYD remains available for manual refinement.
 Pressing it again remeasures the uncorrected conversion instead of stacking
-corrections. Preview, export, saved projects and color sync share the existing
-rescue settings.
+corrections. It measures the frame on screen with its 16-bit plane, inside
+the analysis area when there is one: right after a slider release (the plane
+still in the preview worker) or while Apply Crop's crop-area detection runs,
+the click waits for them, as do the rescue checkbox, Analyze and Reset colour
+(`settleMeasurementInputs`, docs/crop-apply-and-analysis-worker.md).
+Preview, export, saved projects and color sync share the existing rescue
+settings.
 
 The separate expired-roll entry remains available for rolls that were shot
 or developed long past their date. It applies to both kinds of input:
@@ -45,19 +50,26 @@ would have to be a separate, opt-in tool.
 
 The correction has a global part (per-channel curves) and a spatial part
 (what varies across the frame). The spatial part is measured with OpenCV.js
-on the main thread — the same lazily loaded build the auto frame, dust
-removal and lab match use — and stored as a few numbers, so it is applied
-everywhere without OpenCV: in the export worker, the 16-bit export and batch
-exports.
+in the auto-frame worker, which already loads the build (#245; the page
+loads its own copy only when the worker request fails), and stored as a few
+numbers, so it is applied everywhere without OpenCV: in the export worker,
+the 16-bit export and batch exports.
 
-`negative2positive/src/app/expiredRescueOpenCv.js` (needs `globalThis.cv`):
+`negative2positive/src/app/expiredRescueOpenCv.js`:
 
-- `measureExpiredSpatialMaps(image, { region, borderBuffer, placement })`
-  area-averages the analysis region to ~160 px, and per channel runs
-  `cv.erode` with an elliptical kernel 22 % of the width (the local dark
-  floor), a light `cv.GaussianBlur`, and `cv.resize` (INTER_AREA) to a 32-wide
-  grid; the luminance goes through a 5 % blur to the same grid for the local
-  mean. Every Mat is released.
+- `sampleExpiredSpatialInput(image, { region, borderBuffer, placement })`
+  (page, no OpenCV) area-averages the analysis region to ~160 px; its sliced
+  variant sums the rows in ~12 ms slices with the same arithmetic, so the
+  sample is identical, and stops when the photo or conversion source
+  changes. Only this sample (~0.14 MB) goes to the worker.
+- `measureExpiredSpatialMapsFromSample(sample)` (worker, needs
+  `globalThis.cv`) runs, per channel, `cv.erode` with an elliptical kernel
+  22 % of the width (the local dark floor), a light `cv.GaussianBlur`, and
+  `cv.resize` (INTER_AREA) to a 32-wide grid; the luminance goes through a
+  5 % blur to the same grid for the local mean. Every Mat is released.
+  `measureExpiredSpatialMaps` is the two in one call.
+- `expiredAnalysisFromMaps(maps, sample, settings)` fits the surface and
+  re-measures the curves on the flattened sample, on the page.
 
 `negative2positive/src/pipeline/expiredRescue.js` is a pure module with no
 DOM and no OpenCV:
@@ -94,19 +106,40 @@ DOM and no OpenCV:
 
 The spatial stage, the colour table and the tone curve are the first stages
 of the Step-3 adjustment chain in `workers/pixelAdjustments.js` and
-`workers/pixelAdjustments16.js`, ahead of the WB gains, so the preview (CPU
-path, like the lab-match look), the export worker, the 16-bit export and
-batch exports all render the same result. The chain receives the frame size
+`workers/pixelAdjustments16.js`, ahead of the WB gains, so the export
+worker, the 16-bit export, batch exports and the settled CPU display all
+render the same result. The chain receives the frame size
 (`computeAdjustmentParams(settings, { width, height })`) for the pixel
-positions; without it the spatial stage is left out. A never-opened frame in
+positions; without it the spatial stage is left out.
+
+The on-screen preview runs the same stages in the preview shader (#253,
+`render/previewShader.js`, the mode variants of both programs; see
+`docs/gpu-preview.md`), with the values `computeAdjustmentParams` gives the
+CPU: the fog coefficients and limits as uniforms, the mean grid, the colour
+table and the tone curve as float textures holding the module's float32
+values, positions normalised to the display frame from the texel index. A
+strength tick rebuilds only the stages (`buildExpiredRescueStages`) and
+uploads 2 KB; the grid uploads once per analysis. Hold-to-compare turns the
+stages off on screen and in the histogram. Exports and the settled CPU
+display stay on `pixelAdjustments.js` / `pixelAdjustments16.js`; the shader
+is display-only and checked against them (mean ≤ 1 level, p99.9 ≤ 3). Until
+its idle self-test has passed (and for good where it fails, or on WebGL1)
+a rescued photo keeps the CPU display. A never-opened frame in
 a batch export is measured from its own positive before the adjustment
-stage, with OpenCV when it loads.
+stage, with OpenCV (in the worker) when it can run.
 
 Interactively the measurement runs in two phases: the global curves show at
-once, then OpenCV (loaded once per session) measures the fog surface and the
-curves are re-measured on the flattened frame and swapped in. The diagnosis
-shows "OpenCV is loading…", then the measured unevenness; if OpenCV cannot
-load, the global rescue stays and the two spatial sliders are disabled.
+once, then the worker measures the fog surface and the curves are
+re-measured on the flattened frame and swapped in. The diagnosis shows
+"OpenCV is loading…" until then, then the measured unevenness; if OpenCV
+cannot run in the worker or the page, the global rescue stays and the two
+spatial sliders are disabled. See `docs/crop-apply-and-analysis-worker.md`.
+A fog-surface request joins the one in flight only when it measures the same
+inputs (the positive and its 16-bit plane, the analysis area, the border
+buffer, the uneven-fog strength of the flattening stage, the semantic map);
+otherwise it measures again and supersedes it, so the stored measurement is
+always the newest request's, taken with the settings of its call, as 1703835
+measured every request (`expiredSpatialInputs`, #229 review R1-074).
 
 ## Settings
 
@@ -119,6 +152,67 @@ mean grid). The strengths travel with "Sync color", recipes and
 "Apply strengths to selected"; the analysis is never copied, each frame is
 measured on its own tones. A frame's first measurement fills brightness and
 contrast unless they were already moved off the defaults.
+
+A measurement belongs to the interpretation it was taken on (film type and
+positive mode). A film-type change through a frame's recipe (the roll
+decision's automatic retype of #231, "These are positives", Apply film type
+to roll; `filmTypeOverride.js`) drops it, and puts brightness and contrast
+that still hold the values it set back to the defaults; values the user moved
+stay. The frame is then measured in its new mode like a first measurement:
+when it is opened or converted (the automatic retype converts the open photo
+through `processNegative`), or in its export. "These are positives" only
+converts the open photo again: `remeasureExpiredAfterRetype` measures the
+first frame of the new mode once it has settled, with its 16-bit plane, and
+Studio is busy until then. A semantic colour pass still running when the
+film type changes is dropped (#229 review R1-017). Completed semantic anchors
+are invalidated by the same interpretation rule, including the live film-type
+buttons and positive-mode select in Step 3. Those controls remeasure the new
+converted frame through `remeasureExpiredAfterRetype`; user strengths, other
+settings and manual white balance survive. Undo restores the old interpretation
+and its anchors together.
+
+Roll histogram levels, density equalization and outlier records belong to the
+same interpretation too. The shared reset drops `rollFrame` on an actual type
+or mode change, before conversion and rescue measurement. `markCurrentFileDirty`
+updates the active queue recipe and any deferred baseline/choice before a
+background consumer can reuse them; the changed recipe key also prevents an old
+photo session from restoring its snapshot. Window overlays use this invariant
+and cannot reinstall old roll, semantic or rescue records from the overlay.
+Re-selecting the same interpretation keeps its completed analysis and automatic
+WB, including a matching manual roll override. Paired saved/history restores
+retain their corresponding records; explicit WB/base and strength ownership
+survive a crossing. Other photos and the global roll analysis are untouched by
+the live invalidation.
+
+Full-decode promotion keeps this ownership in cold Undo/Redo entries too.
+WB from the full import belongs to its type/mode and cannot overwrite a
+retyped entry's reset gains. An automatic WB measurement keeps its original
+interpretation through promotion and asynchronous replay. The new frame
+measures rescue using its own interpretation; matching saved analysis,
+manual/gray-point WB, manual film bases and explicit strengths remain paired.
+Pending crop hits measure each historical interpretation from its own
+converted positive, including its film base, semantic map and roll inputs.
+Dispatch captures those settings before awaiting the worker; a type/mode or
+measurement-input change during conversion is converted again before live
+adoption. Matching old and new history entries retain their genuine completed
+WB/rescue measurements. A WB lock does not suppress a missing rescue
+measurement during cold replay.
+
+The same rule applies to recipes on the current/selected photos, detected-film
+application, film-edge import merges, the Step-2 roll reference and the positive
+conversion entry. These are changes to the interpretation of existing pixels;
+restoring a saved source/recipe or history entry instead retains its matching
+measurement. Current recipes and detected-film application arm measurement
+before queuing the new conversion token. Selected recipes leave analysis empty
+for the real batch/open-photo processor to measure; unopened and provisional
+photos retain the recipe over their own full-source defaults.
+
+Explicit recipe WB is sampled/user-owned after a copy. Brightness/contrast
+ownership (`expiredBrightnessUserOverride`, `expiredContrastUserOverride`) is
+stored with the frame and its history, so a recipe or slider value equal to an
+automatic/default value still survives remeasurement, including OpenCV's second
+phase. Reset/One-click colour correct restores automatic ownership. The recipe
+format continues to share strengths, never a per-frame measurement.
 
 `state.expiredSession` is the session-level entry: photos added while it is
 on start rescued, and the Studio shows the rescue tab first. It is switched
@@ -143,8 +237,27 @@ are auto-framed exactly as outside the flow.
 ```bash
 node negative2positive/src/pipeline/expiredRescue.test.mjs
 node negative2positive/src/app/expiredRescueOpenCv.test.mjs
+node negative2positive/src/app/expiredMeasurement.test.mjs
+node negative2positive/src/app/interpretationRoutes.test.mjs
 node scripts/smoke-test.mjs --expired-only
+node scripts/smoke-test.mjs --interpretation-routes-only
 ```
+
+`expiredMeasurement.test.mjs` runs the real main.js functions: a fog-surface
+request with other inputs measures again, and the stored measurement equals
+1703835's (frozen copy) when One-click colour correct resets the strengths
+while a request is in flight; the open photo's automatic retype and "These
+are positives" measure the new mode, equal to the photo opened in that mode.
+
+`interpretationRoutes.test.mjs` executes the production recipe/detected/reference/
+edge/positive writers and batch processor with tiny real conversion/rescue and
+8/16 adjustment kernels. Frozen-base controls fail on retained completed anchors
+and zero batch measurements. The targeted browser check covers actual current,
+selected and positive-mode recipes, the detected-film button, saved restoration
+and Undo/Redo, with exact consecutive PNG8/TIFF16 bytes, single/batch samples and
+a fresh new-interpretation export reference. The semantic-model answer is a
+bounded test leaf; these checks do not establish model quality, 60MP timing or
+native acceptance.
 
 The OpenCV test loads the real opencv-js build in Node, ages a scene with a
 left-edge fog gradient and a bright wall, and checks the floor map follows

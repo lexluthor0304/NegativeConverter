@@ -109,4 +109,60 @@ for (const id of PAPER_IDS) {
   assert.equal(normalizeToningId('gold'), 'none');
 }
 
+// #239: the cached strength-independent base gives the LUTs of the full build at
+// 1703835, kept here as the reference, for every paper, toning and strength, in any
+// order (cache hits, misses and evictions).
+{
+  const clamp01 = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
+  const smoothstep = (t) => { const x = clamp01(t); return x * x * (3 - 2 * x); };
+  function referencePaperLuts(paperId, { toning = 'none', toningStrength = 1, strength = 1 } = {}) {
+    const paper = paperProfiles[paperId];
+    if (!paper || paper.kind === 'none') return null;
+    const tone = paper.kind === 'bw' && paperTonings[toning] && toning !== 'none' ? paperTonings[toning] : null;
+    const toneAmount = tone ? clamp01(toningStrength) : 0;
+    const blend = clamp01(strength);
+    const black = paperBlackLevel(paper, tone);
+    const white = paper.whiteTint || [1, 1, 1];
+    const image = paper.imageTone || [1, 1, 1];
+    const luts = [new Uint16Array(65536), new Uint16Array(65536), new Uint16Array(65536)];
+    for (let i = 0; i < 65536; i++) {
+      const x = i / 65535;
+      const curve = paperCurve(paper, x);
+      const linear = black + (1 - black) * Math.pow(clamp01(curve), 2.2);
+      const base = Math.pow(clamp01(linear), 1 / 2.2);
+      for (let ch = 0; ch < 3; ch++) {
+        let tint = white[ch] * base + (image[ch] - 1) * (1 - base) * base;
+        if (tone) {
+          const shadowWeight = 1 - smoothstep(base / 0.65);
+          const highlightWeight = smoothstep((base - 0.35) / 0.65);
+          const shadow = 1 + (tone.shadowTint[ch] - 1) * shadowWeight * toneAmount;
+          const highlight = 1 + (tone.highlightTint[ch] - 1) * highlightWeight * toneAmount;
+          tint *= shadow * highlight;
+        }
+        const value = clamp01(tint);
+        const mixed = x * (1 - blend) + value * blend;
+        luts[ch][i] = Math.round(mixed * 65535);
+      }
+    }
+    return { r: luts[0], g: luts[1], b: luts[2], paperId, toning: tone ? toning : 'none' };
+  }
+  let checked = 0;
+  for (const paperId of PAPER_IDS) {
+    for (const toning of Object.keys(paperTonings)) {
+      for (const options of [{}, { toningStrength: 0 }, { toningStrength: 0.37 }, { toningStrength: 1, strength: 0.6 }, { toningStrength: 1.4, strength: -1 }]) {
+        const expected = referencePaperLuts(paperId, { toning, ...options });
+        const actual = buildPaperLuts(paperId, { toning, ...options });
+        if (!expected) { assert.equal(actual, null); continue; }
+        assert.equal(actual.toning, expected.toning);
+        for (const ch of ['r', 'g', 'b']) assert.deepEqual(actual[ch], expected[ch], `${paperId}/${toning}/${JSON.stringify(options)}/${ch}`);
+        checked++;
+      }
+    }
+  }
+  // Revisit a pair after it was evicted.
+  const again = buildPaperLuts('fomatone', { toning: 'sepia', toningStrength: 0.5 });
+  assert.deepEqual(again.g, referencePaperLuts('fomatone', { toning: 'sepia', toningStrength: 0.5 }).g);
+  assert.ok(checked > 100);
+}
+
 console.log('PaperProfiles.test.mjs passed');

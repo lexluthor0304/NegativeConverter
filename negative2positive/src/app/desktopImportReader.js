@@ -1,4 +1,6 @@
-export const IMPORT_CHUNK_BYTES = 1024 * 1024;
+// Must equal IMPORT_CHUNK_LIMIT in src-tauri/src/import_folder.rs (the test
+// reads it): a 90 MB DNG takes 12 reads instead of about 90.
+export const IMPORT_CHUNK_BYTES = 8 * 1024 * 1024;
 export async function readDesktopImportFile(arrival, invoke, isCurrent = () => true) {
   if (!Number.isSafeInteger(arrival.size) || arrival.size <= 0 || arrival.size > 1024 * 1024 * 1024) throw new Error('Invalid import size');
   const parts = [];

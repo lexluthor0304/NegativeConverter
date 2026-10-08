@@ -14,11 +14,18 @@
 // IFD parsing is no longer needed for the simple "find largest embedded
 // preview" task.
 
-const SOF_PARSER_SCAN_LIMIT = 65_536; // SOF is always near the JPEG header
+import { parseJpegFrameHeader, SOF_PARSER_SCAN_LIMIT } from './jpegHeader.js';
+import { decodeJpegInWorker } from './scanDecodeClient.js';
+
+export { parseJpegFrameHeader, SOF_PARSER_SCAN_LIMIT };
+
 const MIN_PREVIEW_WIDTH = 1000;       // skip tiny thumbnails (320x240 etc.)
+const MIN_PREVIEW_HEIGHT = 300;
 
 /**
  * Read width/height from a JPEG byte stream's SOF (Start Of Frame) marker.
+ * Keeps the HE NEF fallback's floor: previews narrower than 1000 px or
+ * shorter than 300 px are thumbnails, not usable decode sources.
  *
  * @param {ArrayBuffer} buffer  full container buffer
  * @param {number} offset       byte offset of the JPEG within the container
@@ -30,86 +37,23 @@ export function readJpegDimensionsFromSOF(buffer, offset, length) {
   if (offset < 0 || length <= 4) return null;
   const end = Math.min(offset + Math.min(length, SOF_PARSER_SCAN_LIMIT), buffer.byteLength);
   if (end - offset < 4) return null;
-  const bytes = new Uint8Array(buffer, offset, end - offset);
-
-  // Verify SOI (Start Of Image)
-  if (bytes[0] !== 0xFF || bytes[1] !== 0xD8) return null;
-
-  let p = 2;
-  while (p + 1 < bytes.length) {
-    if (bytes[p] !== 0xFF) return null;
-    // Skip marker padding bytes (0xFF fill before the actual marker code)
-    let q = p + 1;
-    while (q < bytes.length && bytes[q] === 0xFF) q++;
-    if (q >= bytes.length) return null;
-    const marker = bytes[q];
-    p = q;
-
-    // Standalone markers — no segment length, just the 2 bytes
-    if (marker === 0xD8 || marker === 0xD9 || (marker >= 0xD0 && marker <= 0xD7) || marker === 0x01) {
-      p += 1;
-      continue;
-    }
-
-    // Start Of Frame markers (carry width/height).
-    // Only SOF0/1/2 (baseline, extended sequential, progressive) at 8-bit
-    // precision are decodable by a browser. SOF3 and the 5-7/9-11/13-15 range
-    // are lossless/arithmetic frames — that is exactly how Canon CR2 and many
-    // DNGs store the raw mosaic, and picking one as "the largest preview"
-    // hands createImageBitmap a stream it can never decode.
-    // C4 (DHT), C8 (JPG reserved) and CC (DAC) are not frames at all and fall
-    // through to the generic segment skip below.
-    const isFrameMarker = marker >= 0xC0 && marker <= 0xCF
-      && marker !== 0xC4 && marker !== 0xC8 && marker !== 0xCC;
-    if (isFrameMarker) {
-      if (marker > 0xC2) return null;
-      // Layout from marker byte: marker(1) + segLen(2) + precision(1) + height(2) + width(2) + numComponents(1)
-      if (p + 8 >= bytes.length) return null;
-      const segLen = (bytes[p + 1] << 8) | bytes[p + 2];
-      const precision = bytes[p + 3];
-      const height = (bytes[p + 4] << 8) | bytes[p + 5];
-      const width = (bytes[p + 6] << 8) | bytes[p + 7];
-      const numComponents = bytes[p + 8];
-
-      // Validate: 8-bit precision only, segment length must match the number
-      // of components, dimensions must be plausible for a camera preview.
-      if (precision !== 8) return null;
-      if (segLen < 8) return null;
-      // Expected segLen = 8 + 3*numComponents (8 = marker+segLen+precision+h+w)
-      // Allow some tolerance for different JPEG variants.
-      const expectedSegLen = 8 + 3 * numComponents;
-      if (segLen !== expectedSegLen && segLen !== expectedSegLen + 1) return null;
-      if (width < MIN_PREVIEW_WIDTH || height < 300) return null;
-      if (width > 20000 || height > 20000) return null;
-
-      return { w: width, h: height };
-    }
-
-    // SOS = Start Of Scan = compressed image data. If we hit it before any
-    // SOF, the JPEG is malformed for our purposes.
-    if (marker === 0xDA) return null;
-
-    // Otherwise: variable-length segment, skip it
-    if (p + 3 >= bytes.length) return null;
-    const segLen = (bytes[p + 1] << 8) | bytes[p + 2];
-    if (segLen < 2) return null;
-    p = p + 1 + segLen;
-  }
-  return null;
+  const header = parseJpegFrameHeader(new Uint8Array(buffer, offset, end - offset), {
+    minWidth: MIN_PREVIEW_WIDTH, minHeight: MIN_PREVIEW_HEIGHT
+  });
+  return header && !header.truncated ? { w: header.width, h: header.height } : null;
 }
 
 /**
  * Find every position in the buffer that begins with the canonical JPEG
- * "FF D8 FF" SOI-followed-by-marker pattern. Cheap O(n) scan, ~30 ms on a
- * 20 MB NEF.
+ * "FF D8 FF" SOI-followed-by-marker pattern. O(n), but the native indexOf
+ * skips from one 0xFF byte to the next instead of testing every byte in JS;
+ * it visits the same candidates in the same order.
  */
-function findJpegSoiPositions(u8) {
+export function findJpegSoiPositions(u8) {
   const positions = [];
   const limit = u8.length - 2;
-  for (let i = 0; i < limit; i++) {
-    if (u8[i] === 0xFF && u8[i + 1] === 0xD8 && u8[i + 2] === 0xFF) {
-      positions.push(i);
-    }
+  for (let i = u8.indexOf(0xFF); i !== -1 && i < limit; i = u8.indexOf(0xFF, i + 1)) {
+    if (u8[i + 1] === 0xD8 && u8[i + 2] === 0xFF) positions.push(i);
   }
   return positions;
 }
@@ -207,16 +151,70 @@ export function extractNefPreviewJpeg(arrayBuffer) {
   return { jpegBytes, width: best.width, height: best.height };
 }
 
+function standaloneCopy(extracted) {
+  if (!extracted) return null;
+  const jpegBytes = new Uint8Array(extracted.jpegBytes.byteLength);
+  jpegBytes.set(extracted.jpegBytes);
+  return { jpegBytes, width: extracted.width, height: extracted.height };
+}
+
+/**
+ * The embedded preview a LibRaw decode falls back to (open or imageData
+ * timeout, empty result, garbled output, a post-decode worker that lost the
+ * pixels).
+ *
+ * LibRaw transfers the container ArrayBuffer to its worker on open(), which
+ * DETACHES it on this thread — extracting after open() silently finds nothing,
+ * which is exactly how the Zf/Z8/Z9 high-efficiency fallback once regressed.
+ *  - Without `sourceBlob` the preview is extracted and copied now, before the
+ *    buffer goes (a whole-container scan plus a 5–8 MB copy on every decode).
+ *  - With the source File/Blob nothing happens up front: only a fallback
+ *    re-reads the file and runs the same extractNefPreviewJpeg on the same
+ *    bytes, so it finds the same preview. A file that can no longer be read
+ *    (moved or deleted mid-decode) then fails like any other decode error.
+ *
+ * @param {ArrayBuffer} buffer the container, before it is handed to LibRaw
+ * @param {Blob | null} [sourceBlob] the File/Blob `buffer` was read from
+ * @param {{ extract?: Function }} [deps] injectable for tests
+ * @returns {{ lazy: boolean, read(): Promise<{ jpegBytes: Uint8Array, width: number, height: number } | null> }}
+ */
+export function createEmbeddedPreviewSource(buffer, sourceBlob = null, { extract = extractNefPreviewJpeg } = {}) {
+  const lazy = Boolean(sourceBlob) && typeof sourceBlob.arrayBuffer === 'function';
+  let stashed = null;
+  if (!lazy) {
+    try { stashed = standaloneCopy(extract(buffer)); } catch {}
+  }
+  let reading = null;
+  return {
+    lazy,
+    read() {
+      if (!lazy) return Promise.resolve(stashed);
+      if (!reading) {
+        reading = (async () => {
+          try {
+            return standaloneCopy(extract(await sourceBlob.arrayBuffer()));
+          } catch (err) {
+            console.warn('[RAW] could not re-read the file for its embedded preview:', err?.message || err);
+            return null;
+          }
+        })();
+      }
+      return reading;
+    }
+  };
+}
+
 /**
  * Try to extract a usable embedded JPEG preview from a TIFF-based RAW (NEF, etc.)
  * and decode it via the browser's native JPEG decoder. Returns an `ImageData`
  * on success, or `null` if no suitable preview was found / decoding failed.
- * Never throws.
+ * Abort or admission errors propagate; an unavailable decoder returns null.
  *
  * @param {ArrayBuffer} arrayBuffer
  * @returns {Promise<ImageData | null>}
  */
-export async function tryNefJpegPreview(arrayBuffer) {
+export async function tryNefJpegPreview(arrayBuffer, options = {}) {
+  throwIfPreviewAborted(options.signal);
   const extracted = extractNefPreviewJpeg(arrayBuffer);
   if (!extracted) return null;
 
@@ -234,7 +232,12 @@ export async function tryNefJpegPreview(arrayBuffer) {
     jpegBytes: standalone,
     width: extracted.width,
     height: extracted.height,
-  });
+  }, options);
+}
+
+function throwIfPreviewAborted(signal) {
+  if (signal?.aborted) throw signal.reason?.name === 'AbortError' ? signal.reason
+    : new DOMException('Embedded preview decode was aborted', 'AbortError');
 }
 
 /**
@@ -244,12 +247,43 @@ export async function tryNefJpegPreview(arrayBuffer) {
  * container ArrayBuffer to its worker, which detaches it on this thread and
  * makes any later extraction from it silently return nothing.
  *
+ * The scan-decode worker is tried first: WebKit's createImageBitmap(Blob)
+ * decodes on the calling thread, and the readback plus the ×257 mirror are
+ * full-frame loops. The worker result carries `__image16` already. It returns
+ * null (bytes intact) where workers cannot decode images, and this falls back
+ * to the main-thread decoder below, which produces the same planes.
+ *
  * @param {{ jpegBytes: Uint8Array, width?: number, height?: number } | null} extracted
+ * @param {{ decodeInWorker?: Function | null, signal?: AbortSignal | null, reserveDecode?: Function | null }} [options]
  * @returns {Promise<ImageData | null>}
  */
-export async function decodeNefPreviewJpeg(extracted) {
+export async function decodeNefPreviewJpeg(extracted, { decodeInWorker = decodeJpegInWorker, signal = null, reserveDecode = null } = {}) {
+  throwIfPreviewAborted(signal);
   if (!extracted || !extracted.jpegBytes || extracted.jpegBytes.byteLength < 4) return null;
+  let admissionError = null;
+  const admit = async () => {
+    try {
+      if (reserveDecode) await reserveDecode({ kind: 'scan', width: extracted.width, height: extracted.height });
+    } catch (error) { admissionError = error; throw error; }
+    throwIfPreviewAborted(signal);
+  };
+  if (decodeInWorker) {
+    if (reserveDecode) await admit();
+    const decoded = await decodeInWorker(extracted, { signal, ...(reserveDecode ? { reserveDecode: admit } : {}) }).catch(error => {
+      throwIfPreviewAborted(signal);
+      if (error?.name === 'AbortError' || error === admissionError) throw error;
+      return null;
+    });
+    throwIfPreviewAborted(signal);
+    if (decoded) return decoded;
+    if (!extracted.jpegBytes || extracted.jpegBytes.byteLength < 4) return null;
+  }
   const { jpegBytes, width, height } = extracted;
+
+  // Worker startup/decoding may have yielded to an editor open. Every real
+  // dispatch, including the browser retry, needs the caller's admission.
+  if (reserveDecode) await admit();
+  throwIfPreviewAborted(signal);
 
   let blob;
   try {
@@ -263,11 +297,14 @@ export async function decodeNefPreviewJpeg(extracted) {
   try {
     bitmap = await createImageBitmap(blob);
   } catch (err) {
+    throwIfPreviewAborted(signal);
+    if (err?.name === 'AbortError') throw err;
     console.warn('[NEF fallback] createImageBitmap failed:', err);
     return null;
   }
 
   try {
+    throwIfPreviewAborted(signal);
     const w = bitmap.width || width;
     const h = bitmap.height || height;
     const canvas = document.createElement('canvas');
@@ -277,6 +314,8 @@ export async function decodeNefPreviewJpeg(extracted) {
     ctx.drawImage(bitmap, 0, 0);
     return ctx.getImageData(0, 0, w, h);
   } catch (err) {
+    throwIfPreviewAborted(signal);
+    if (err?.name === 'AbortError') throw err;
     console.warn('[NEF fallback] canvas paint/getImageData failed:', err);
     return null;
   } finally {

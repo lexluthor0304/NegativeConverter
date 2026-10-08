@@ -9,6 +9,14 @@ export function edgeTextTemplate(text) {
   chars.forEach((char, i) => { const rows = YEAR_SYMBOL_BITMAPS[char] || BITMAP_FONT[char]; if (!rows) return; rows.forEach((row, y) => [...row].forEach((v, x) => { data[y * width + i * 6 + x] = Number(v); })); });
   return { width, height: 7, data };
 }
+// The vocabulary is fixed, so every line and orientation reuses one template
+// per word instead of rebuilding its bitmap. Callers never mutate a template.
+const templateCache = new Map();
+function cachedTemplate(text) {
+  let template = templateCache.get(text);
+  if (!template) { template = edgeTextTemplate(text); templateCache.set(text, template); }
+  return template;
+}
 export function normalizedCorrelation(a, b) {
   if (a.length !== b.length || !a.length) return 0;
   const meanA = a.reduce((s, v) => s + v, 0) / a.length;
@@ -40,14 +48,14 @@ function matches(line, template, cv) {
 }
 export function readEdgeTextLine(line, { cv = null } = {}) {
   const candidates = [];
-  for (const word of WORDS) for (const match of matches(line, edgeTextTemplate(word), cv)) candidates.push({ ...match, word });
+  for (const word of WORDS) for (const match of matches(line, cachedTemplate(word), cv)) candidates.push({ ...match, word });
   const stock = candidates.filter(c => STOCKS.includes(c.word)).sort((a, b) => b.word.length - a.word.length || b.score - a.score)[0];
   const maker = candidates.find(c => ['KODAK', 'FUJIFILM', 'FUJI', 'ILFORD', 'FOMA'].includes(c.word));
   let date = { year: null, candidates: [] };
   if (maker?.word === 'KODAK') {
     const codes = [];
     for (const symbols of Object.keys(KODAK_YEAR_CODES).filter(s => s.length >= 2)) {
-      for (const match of matches(line, edgeTextTemplate(symbols), cv)) {
+      for (const match of matches(line, cachedTemplate(symbols), cv)) {
         if (match.x >= maker.x + 5 * 6 && match.x <= maker.x + 5 * 6 + 18) codes.push({ symbols, ...match });
       }
     }
@@ -60,7 +68,7 @@ export function readEdgeTextLine(line, { cv = null } = {}) {
   const spans = candidates.map(c => [c.x - 2, c.x + c.word.length * 6 + 2]);
   const numbers = [];
   for (let n = 1; n <= 40; n++) for (const suffix of ['', 'A']) {
-    const word = String(n) + suffix, template = edgeTextTemplate(word);
+    const word = String(n) + suffix, template = cachedTemplate(word);
     for (const match of matches(line, template, cv)) {
       if (spans.some(([a, b]) => match.x < b && match.x + template.width > a)) continue;
       let boundary = 0;
@@ -77,12 +85,22 @@ export function readEdgeTextLine(line, { cv = null } = {}) {
   const filmName = `${maker ? maker.word + ' ' : ''}${stock?.word || ''}`.trim();
   return { text: filmName, filmName, ...classifyFilmName(filmName), frameNumber: numbers[0]?.word || null, confidence: stock?.score || maker.score, year: date.year, yearCandidates: date.candidates };
 }
+// Median of the finite samples of a band. A typed copy sorts numerically
+// without a comparator: the same order as spreading the ~700k Float32 samples
+// of a 60 MP frame into an array and sorting with (a, b) => a - b, at a quarter
+// of the cost. A plain-array caller keeps its exact values (no Float32 rounding)
+// and its Number.isFinite filter on the original entries.
+export function bandMedian(values) {
+  const finite = ArrayBuffer.isView(values)
+    ? values.filter(Number.isFinite).sort()
+    : Float64Array.from(Array.prototype.filter.call(values, Number.isFinite)).sort();
+  return finite.length ? finite[Math.floor(finite.length * 0.5)] : null;
+}
 function lineCandidates(band) {
   // Uniform rebate is the dominant population; reject highly textured image
   // rows. Try dense and clear printing. Projection locates the text baseline.
-  const finite = [...band.values].filter(Number.isFinite).sort((a, b) => a - b);
-  if (!finite.length) return [];
-  const base = finite[Math.floor(finite.length * 0.5)];
+  const base = bandMedian(band.values);
+  if (base === null) return [];
   const lines = [];
   for (const polarity of [-1, 1]) {
     const ink = new Float32Array(band.values.length);

@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 // Exercise the actual keyboard handler without a browser-only DOM package or
 // exposing a test-only API from the application module.
 const source = readFileSync(new URL('./fileListView.js', import.meta.url), 'utf8');
-const { installKeyboardNavigation, renderFileList } = await import('data:text/javascript;base64,'
+const { installKeyboardNavigation, renderFileList, setFileListRowDirty } = await import('data:text/javascript;base64,'
   + Buffer.from(source + '\nexport { installKeyboardNavigation };').toString('base64'));
 const previousDocument = globalThis.document;
 globalThis.document = { activeElement: null };
@@ -239,6 +239,57 @@ try {
   assert.equal(dom.srcWrites.length, 1);
   assert.equal(dom.created(), settledNodeCount);
   console.log('fileListView: sorting reuses rows/thumbnails, keeps original-index callbacks and active/selected state, and restores focus without scrolling');
+
+  // #234: the unsaved marker changes in place. The open photo's first edit
+  // marks its own row (setFileListRowDirty) without a list render, a render
+  // keeps that row, its tile and its controls, and a persist clears the
+  // marker in place. The badge sits where a new row has it.
+  {
+    const dirtyDom = rendererFixture();
+    const rows = [
+      { file: { name: 'a.png' }, thumbnail: 'data:image/jpeg;base64,a', settings: { exposure: 1 }, status: 'done' },
+      { file: { name: 'b.png' }, status: 'done' },
+      { file: { name: 'c.png' }, settings: { exposure: 2 }, isDirty: true, status: 'done' },
+    ];
+    const dirtyOptions = {
+      ...dirtyDom, items: rows, currentFileIndex: 0, onOpenFile() {}, onToggleSelected() {},
+      labels: { customSettings: 'Custom', unsaved: 'Unsaved', configured: 'configured', statusText: status => status },
+    };
+    renderFileList(dirtyOptions);
+    const [rowA, rowB, rowC] = dirtyDom.container.children;
+    const layout = row => row.querySelector('.file-list-name').children.map(child => child.className);
+    assert.deepEqual(layout(rowC), ['file-list-placeholder', 'file-list-filename', 'file-list-settings-badge', 'file-list-unsaved-badge']);
+    assert.ok(rowC.classList.contains('is-dirty'));
+    // B already carries its preview-state span (refreshThumbnailState appends it).
+    const state = document.createElement('span');
+    state.className = 'file-list-preview-state';
+    rowB.querySelector('.file-list-name').append(state);
+    const nodes = dirtyDom.created();
+    rows[0].isDirty = true;
+    setFileListRowDirty(dirtyDom.container, rows[0], 'Unsaved');
+    rows[1].isDirty = true;
+    setFileListRowDirty(dirtyDom.container, rows[1], 'Unsaved');
+    assert.equal(dirtyDom.created(), nodes + 2, 'only the two badges are created');
+    assert.deepEqual(dirtyDom.container.children, [rowA, rowB, rowC], 'the rows stay the same elements');
+    assert.ok(rowA.classList.contains('is-dirty') && rowB.classList.contains('is-dirty'));
+    assert.deepEqual(layout(rowA), ['file-list-thumbnail', 'file-list-filename', 'file-list-settings-badge', 'file-list-unsaved-badge']);
+    assert.deepEqual(layout(rowB), ['file-list-placeholder', 'file-list-filename', 'file-list-unsaved-badge', 'file-list-preview-state']);
+    assert.equal(rowA.querySelector('.file-list-unsaved-badge').textContent, 'Unsaved');
+    setFileListRowDirty(dirtyDom.container, rows[0], 'Unsaved');
+    assert.equal(dirtyDom.created(), nodes + 2, 'marking it again changes nothing');
+    const srcWrites = dirtyDom.srcWrites.length;
+    renderFileList(dirtyOptions);
+    assert.equal(dirtyDom.created(), nodes + 2, 'a render keeps the marked rows');
+    assert.deepEqual(dirtyDom.container.children, [rowA, rowB, rowC]);
+    assert.equal(dirtyDom.srcWrites.length, srcWrites, 'and their tiles');
+    // A persist: settled settings, no unsaved marker; the same row again.
+    rows[0].isDirty = false;
+    renderFileList(dirtyOptions);
+    assert.equal(dirtyDom.container.children[0], rowA);
+    assert.ok(!rowA.classList.contains('is-dirty'));
+    assert.deepEqual(layout(rowA), ['file-list-thumbnail', 'file-list-filename', 'file-list-settings-badge']);
+    console.log('fileListView: the unsaved marker changes in place, where a new row has it, without rebuilding the row');
+  }
 } finally {
   if (previousDocument === undefined) delete globalThis.document;
   else globalThis.document = previousDocument;

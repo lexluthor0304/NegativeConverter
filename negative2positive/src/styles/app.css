@@ -613,10 +613,69 @@ body {
   object-fit: contain;
 }
 
-#glCanvas {
+#glCanvas,
+#cropCanvas {
   max-width: 100%;
   max-height: 100%;
   object-fit: contain;
+}
+
+/* The "before" of the comparison: a display-size copy of the negative laid
+   over the image. It follows zoom and pan with the wrapper and never resizes
+   #canvas; main.js places it over the photo when the film border is shown. */
+.before-after-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 10;
+}
+
+/* The display overlay (#253, #254): the dust-mask tint and the saved
+   dodge-and-burn strokes over the photo, whichever canvas shows it, following
+   zoom and pan with the wrapper. main.js sizes its backing to the display
+   photo and places it over the photo's rectangle when the film border is
+   shown. Under the comparison (z-index 10); the stroke being painted is on
+   .brush-feedback, outside the wrapper. */
+.display-overlay {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  display: none;
+  pointer-events: none;
+  z-index: 5;
+}
+
+/* The detail layer (#248): native pixels of a zoomed view over the base image,
+   at the region's rect in the wrapper's untransformed space. main.js sets the
+   rect and shows it. */
+#glDetailCanvas {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: none;
+  pointer-events: none;
+}
+
+/* The stroke being painted (#254): over the whole view at device resolution,
+   outside the zoom transform, so it stays sharp at any zoom; main.js sets its
+   opacity per brush. */
+.brush-feedback {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: none;
+  pointer-events: none;
+  z-index: 20;
+}
+
+/* While a brush can paint, a touch or pen drag paints instead of panning. */
+.canvas-container.brush-tool-active {
+  touch-action: none;
 }
 
 .canvas-transform-wrapper {
@@ -1736,7 +1795,6 @@ body.studio-enlarger #studioSliders {
 
 body.dodge-burn-active #canvas,
 body.dodge-burn-active #glCanvas {
-  touch-action: none;
   cursor: crosshair;
 }
 
@@ -2216,6 +2274,15 @@ body.dodge-burn-active #glCanvas {
   box-shadow: 0 2px 8px rgba(0,0,0,0.3); white-space: nowrap;
 }
 .toast-message.toast-visible { opacity: 1; }
+.toast-message.toast-with-action {
+  pointer-events: auto; display: flex; align-items: center; gap: 12px;
+  white-space: normal; max-width: calc(100vw - 32px);
+}
+.toast-action {
+  flex-shrink: 0; background: none; border: 1px solid var(--accent); color: var(--accent);
+  font: inherit; padding: 3px 10px; cursor: pointer; white-space: nowrap;
+}
+.toast-action:hover { background: var(--accent); color: var(--bg-primary); }
 
 .footer-btn.primary {
   background: var(--accent);
@@ -2816,6 +2883,28 @@ body.dodge-burn-active #glCanvas {
   white-space: nowrap;
 }
 
+/* Only jobs that can stop at once (the multi-shot merge worker) show it. */
+.batch-progress-cancel {
+  display: block;
+  margin: 16px auto 0;
+  padding: 6px 18px;
+  background: transparent;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.batch-progress-cancel:hover {
+  background: var(--accent);
+  color: var(--bg-primary, #000);
+}
+
+.batch-progress-cancel[hidden] {
+  display: none;
+}
+
 /* Loading Overlay — spinning film reel + sprocket progress strip */
 .loading-overlay {
   position: fixed;
@@ -2834,6 +2923,18 @@ body.dodge-burn-active #glCanvas {
 .loading-overlay.visible {
   opacity: 1;
   pointer-events: all;
+  /* Work that ends within 150 ms never shows the overlay; it still blocks
+     input at once, and studioBusy/inert remain the real lock. */
+  transition-delay: 150ms;
+}
+/* The hidden-state rule lives in studio.css (fade length and leaving
+   rendering), so one rule decides it whatever the stylesheet order. */
+/* show({ immediate: true }): opaque in the first painted frame, for work that
+   blocks the main thread right after it (WebKit runs Studio's steps() fade on
+   the main thread, so it would stay at opacity 0). hide() drops the class, so
+   the fade-out is unchanged. */
+.loading-overlay.visible.loading-overlay-immediate {
+  transition: none;
 }
 
 .loading-reel-wrap {

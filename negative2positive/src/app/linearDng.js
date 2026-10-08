@@ -34,6 +34,77 @@ function toLinear16(value) {
   return LINEAR[i0] * (1 - f) + LINEAR[Math.min(STEPS, i0 + 1)] * f;
 }
 
+/** True when typed arrays store 16-bit samples little-endian (every shipped target). */
+export const LITTLE_ENDIAN_HOST = new Uint8Array(new Uint16Array([1]).buffer)[0] === 1;
+
+// Once the film base, film type and gain are fixed, an output sample depends
+// only on its channel and its 16-bit input code, so the kernel is two table
+// lookups. `linLut[c][v]` holds exactly the Float32 value the per-pixel
+// buffer used to hold for that code (a Float32Array store rounds the same
+// way), and `outLut[c][v]` applies the gain and rounding to it, so the output
+// is bit-identical to the per-pixel kernel it replaced (#257).
+function linearTables(filmBase, positive) {
+  const base = filmBase && [filmBase.r, filmBase.g, filmBase.b].every((v) => Number.isFinite(v) && v > 0)
+    ? [filmBase.r, filmBase.g, filmBase.b].map((v) => Math.max(1e-4, toLinear16(Math.min(255, v) * 257)))
+    : null;
+  const floor = 1 / 65535;
+  const neg = new Float64Array(65536);
+  for (let v = 0; v < 65536; v++) neg[v] = Math.max(floor, toLinear16(v));
+  const shared = !base ? new Float32Array(65536) : null;
+  if (shared) for (let v = 0; v < 65536; v++) shared[v] = positive ? neg[v] : 1 / neg[v];
+  return [0, 1, 2].map((c) => {
+    if (shared) return shared;
+    const table = new Float32Array(65536);
+    for (let v = 0; v < 65536; v++) table[v] = positive ? neg[v] : base[c] / neg[v];
+    return table;
+  });
+}
+
+// The kernel as steps: it yields after each channel's percentile and, when
+// `shouldYield()` says so, between rows of the output pass. The synchronous
+// build runs every step at once; the batch build waits a task in between.
+function* linearPositiveSteps(image16, filmBase, { whitePercentile = 0.999, positive = false } = {}, shouldYield = () => false) {
+  const { width, height, data } = image16;
+  const pixels = width * height;
+  const linLut = linearTables(filmBase, positive);
+  // White per channel from the percentile so a few specular holes do not
+  // decide the exposure; the gain is reported for the metadata. The samples
+  // are the same strided positions as before; every value is finite and
+  // positive, so the typed array's numeric sort puts the same element at the
+  // percentile index as a comparator sort.
+  const gain = [1, 1, 1];
+  const sampleStep = Math.max(1, Math.floor(pixels / 200000));
+  const sampleCount = Math.ceil(pixels / sampleStep);
+  for (let c = 0; c < 3; c++) {
+    const lut = linLut[c];
+    const samples = new Float32Array(sampleCount);
+    for (let p = 0, i = 0; p < pixels; p += sampleStep, i++) samples[i] = lut[data[p * 4 + c]];
+    samples.sort();
+    const white = samples[Math.min(samples.length - 1, Math.floor(samples.length * whitePercentile))] || 1;
+    gain[c] = 1 / white;
+    yield;
+  }
+  const outLut = linLut.map((lut, c) => {
+    const table = new Uint16Array(65536);
+    for (let v = 0; v < 65536; v++) {
+      const x = lut[v] * gain[c];
+      table[v] = x >= 1 ? 65535 : x <= 0 ? 0 : Math.round(x * 65535);
+    }
+    return table;
+  });
+  const [outR, outG, outB] = outLut;
+  const out = new Uint16Array(pixels * 3);
+  for (let y = 0; y < height; y++) {
+    for (let o = y * width * 4, q = y * width * 3, end = o + width * 4; o < end; o += 4, q += 3) {
+      out[q] = outR[data[o]];
+      out[q + 1] = outG[data[o + 1]];
+      out[q + 2] = outB[data[o + 2]];
+    }
+    if ((y & 7) === 7 && y + 1 < height && shouldYield()) yield;
+  }
+  return { width, height, data: out, gain };
+}
+
 /**
  * Inverts a negative into a linear positive, normalised by the film base:
  * positive = base / negative in linear light per channel, then scaled so the
@@ -45,40 +116,59 @@ function toLinear16(value) {
  * @param {{r:number,g:number,b:number}|null} filmBase 0..255 per channel
  * @returns {{width:number,height:number,data:Uint16Array,gain:number[]}} RGB (3 samples) linear positive
  */
-export function buildLinearPositive(image16, filmBase, { whitePercentile = 0.999, positive = false } = {}) {
-  const { width, height, data } = image16;
-  const pixels = width * height;
-  const out = new Uint16Array(pixels * 3);
-  const base = filmBase && [filmBase.r, filmBase.g, filmBase.b].every((v) => Number.isFinite(v) && v > 0)
-    ? [filmBase.r, filmBase.g, filmBase.b].map((v) => Math.max(1e-4, toLinear16(Math.min(255, v) * 257)))
-    : null;
-  const linear = new Float32Array(pixels * 3);
-  const floor = 1 / 65535;
-  for (let p = 0; p < pixels; p++) {
-    const o = p * 4;
-    for (let c = 0; c < 3; c++) {
-      const neg = Math.max(floor, toLinear16(data[o + c]));
-      linear[p * 3 + c] = positive ? neg : (base ? base[c] / neg : 1 / neg);
+export function buildLinearPositive(image16, filmBase, options = {}) {
+  const steps = linearPositiveSteps(image16, filmBase, options);
+  for (;;) {
+    const step = steps.next();
+    if (step.done) return step.value;
+  }
+}
+
+// A message task rather than a timer: hidden windows throttle timers, and a
+// desktop batch may run in one (#241).
+function yieldToEventLoop() {
+  if (typeof MessageChannel !== 'function') return new Promise((resolve) => setTimeout(resolve, 0));
+  return new Promise((resolve) => {
+    const channel = new MessageChannel();
+    channel.port1.onmessage = () => {
+      channel.port1.close();
+      resolve();
+    };
+    channel.port2.postMessage(null);
+  });
+}
+
+/**
+ * `buildLinearPositive` in slices of about `sliceMs`, waiting a task between
+ * them, for the desktop batch, whose editor stays live while frames build.
+ * Same result. The caller must own `image16` for the duration (the batch's
+ * own decoded source), since other tasks run between slices.
+ *
+ * @param {object} [schedule]
+ * @param {number} [schedule.sliceMs]
+ * @param {() => Promise<void>} [schedule.yieldTask]
+ * @param {() => number} [schedule.now]
+ * @param {AbortSignal} [schedule.signal] checked between slices
+ */
+export async function buildLinearPositiveAsync(image16, filmBase, options = {}, {
+  sliceMs = 16,
+  yieldTask = yieldToEventLoop,
+  now = () => performance.now(),
+  signal = null
+} = {}) {
+  let sliceStart = now();
+  const steps = linearPositiveSteps(image16, filmBase, options, () => now() - sliceStart >= sliceMs);
+  for (;;) {
+    const step = steps.next();
+    if (step.done) return step.value;
+    await yieldTask();
+    if (signal && signal.aborted) {
+      const err = new Error('Linear DNG build cancelled');
+      err.name = 'AbortError';
+      throw err;
     }
+    sliceStart = now();
   }
-  // White per channel from the percentile so a few specular holes do not
-  // decide the exposure; the gain is reported for the metadata.
-  const gain = [1, 1, 1];
-  const sampleStep = Math.max(1, Math.floor(pixels / 200000));
-  for (let c = 0; c < 3; c++) {
-    const samples = [];
-    for (let p = 0; p < pixels; p += sampleStep) samples.push(linear[p * 3 + c]);
-    samples.sort((a, b) => a - b);
-    const white = samples[Math.min(samples.length - 1, Math.floor(samples.length * whitePercentile))] || 1;
-    gain[c] = 1 / white;
-  }
-  for (let p = 0; p < pixels; p++) {
-    for (let c = 0; c < 3; c++) {
-      const v = linear[p * 3 + c] * gain[c];
-      out[p * 3 + c] = v >= 1 ? 65535 : v <= 0 ? 0 : Math.round(v * 65535);
-    }
-  }
-  return { width, height, data: out, gain };
 }
 
 /**
@@ -89,11 +179,18 @@ export function buildLinearPositive(image16, filmBase, { whitePercentile = 0.999
  *
  * @returns {Uint8Array[]} parts for a Blob
  */
-export function buildLinearDngParts(linear, { metadata = null, software = 'NeoAnalogLab Negative Converter', model = 'NeoAnalogLab Negative Converter' } = {}) {
+export function buildLinearDngParts(linear, { metadata = null, software = 'NeoAnalogLab Negative Converter', model = 'NeoAnalogLab Negative Converter', littleEndianHost = LITTLE_ENDIAN_HOST } = {}) {
   const { width, height, data } = linear;
-  const strip = new Uint8Array(data.length * 2);
-  const view = new DataView(strip.buffer);
-  for (let i = 0; i < data.length; i++) view.setUint16(i * 2, data[i], true);
+  // The strip is little-endian 16-bit samples: on a little-endian host that is
+  // exactly the bytes of `data`, so the strip is a view of it, not a copy.
+  let strip;
+  if (littleEndianHost) {
+    strip = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+  } else {
+    strip = new Uint8Array(data.length * 2);
+    const view = new DataView(strip.buffer);
+    for (let i = 0; i < data.length; i++) view.setUint16(i * 2, data[i], true);
+  }
   const exif = metadata?.exif || {};
   const entries = [
     longEntry(TIFF_TAGS.NewSubfileType, 0),

@@ -7,10 +7,12 @@ samples the film base from the unexposed rebate.
 
 ## What happens on import
 
-`prepareStudioPhoto` (and the headless `processFileWithSettings` path used for
-unopened files in batch export) calls `analyzeImportFilmEdge` once per file.
-The reader runs in the auto-frame worker (`read-film-edge` message; no OpenCV
-needed) with a main-thread fallback. For a fresh file the detection also sets
+`prepareStudioPhoto`, the roll lanes and the headless `processFileWithSettings`
+path used for unopened files in batch export read the rebate once per file.
+The reader runs in the auto-frame worker in the same `analyze-import` request
+as the frame detection, on the same buffer (#251; no OpenCV needed for the
+lanes and barcode), with a main-thread fallback; `mergeImportFilmEdge` folds
+the read into the settings after the frame result. For a fresh file the detection also sets
 the film type when the database says the stock is B&W or a slide film. The
 matched preset (`gold-warm` for Gold/Ultra Max, `portra-classic` for Portra,
 `superia-vivid` for Fuji consumer films, ...) and the film base sampled from

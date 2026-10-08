@@ -6,33 +6,53 @@ export const ANALYSIS_SAMPLE_DATABASE_PREFIX = 'negativeconverter-analysis-sampl
 const lockName = name => `negativeconverter-analysis-database:${name}`;
 
 function sampleBytes(sample) {
-  const buffers = new Set([sample?.data?.buffer, sample?.__image16?.data?.buffer]);
+  const buffers = new Set([sample?.data?.buffer, sample?.__image16?.data?.buffer, sample?.__analysisReference?.data?.buffer,
+    sample?.__tileWorking?.data?.buffer, sample?.__tileWorking?.__image16?.data?.buffer]);
   let bytes = 0;
   for (const buffer of buffers) if (buffer) bytes += buffer.byteLength;
   return bytes;
 }
 
 // ImageData's custom __image16 property is not preserved by native structured
-// cloning. Store an explicit plain container to retain the attached precision.
-function serializableSample(sample) {
+// cloning. Store an explicit plain container to retain the attached precision,
+// and what the sample's canonical tile needs (#247): the base's size, the
+// small analysis reference taken from it and the tile's working image. A
+// sample of a small base references the base's planes, which may live in
+// shared memory (#264): IndexedDB cannot store a SharedArrayBuffer, so such a
+// plane is stored as a copy.
+const storable = data => (typeof SharedArrayBuffer === 'function' && data?.buffer instanceof SharedArrayBuffer ? data.slice() : data);
+export function serializableSample(sample) {
+  const plane = value => ({ width: value.width, height: value.height, data: storable(value.data) });
+  const image = value => ({ ...plane(value), ...(value.__image16 ? { __image16: plane(value.__image16) } : {}) });
   return {
-    width: sample.width,
-    height: sample.height,
-    data: sample.data,
-    ...(sample.__image16 ? { __image16: {
-      width: sample.__image16.width,
-      height: sample.__image16.height,
-      data: sample.__image16.data,
-    } } : {}),
+    ...image(sample),
+    ...(sample.__baseSize ? { __baseSize: { width: sample.__baseSize.width, height: sample.__baseSize.height } } : {}),
+    ...(sample.__analysisReference ? { __analysisReference: plane(sample.__analysisReference) } : {}),
+    ...(sample.__tileWorking ? { __tileWorking: image(sample.__tileWorking) } : {}),
   };
 }
 
 export function createIndexedDbSampleBackend(indexedDB = globalThis.indexedDB, locks = globalThis.navigator?.locks) {
+  return createPrivateIndexedDbBackend({
+    prefix: ANALYSIS_SAMPLE_DATABASE_PREFIX, lockName, serialize: serializableSample, indexedDB, locks
+  });
+}
+
+/**
+ * A private, per-tab IndexedDB database (#214), reused by the display-proxy
+ * spill (#249) under its own prefix: the tab holds a Web Lock on its
+ * database for its lifetime, and a database of the prefix whose lock is free
+ * belongs to a closed or crashed tab and is deleted. Values pass through
+ * `serialize` on put. Null without IndexedDB.databases or Web Locks.
+ */
+export function createPrivateIndexedDbBackend({
+  prefix, lockName, serialize = value => value, indexedDB = globalThis.indexedDB, locks = globalThis.navigator?.locks
+}) {
   // Without both APIs a crashed tab's spill cannot be reclaimed safely. The
   // store still provides its bounded RAM cache and lossless decode fallback.
   if (!indexedDB || typeof indexedDB.databases !== 'function' || typeof locks?.request !== 'function') return null;
   const token = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  const name = `${ANALYSIS_SAMPLE_DATABASE_PREFIX}${token}`;
+  const name = `${prefix}${token}`;
   let databasePromise = null;
   let releaseOwnership = null;
   let ownershipFinished = null;
@@ -65,7 +85,7 @@ export function createIndexedDbSampleBackend(indexedDB = globalThis.indexedDB, l
     try {
       for (const entry of await indexedDB.databases()) {
         const orphan = entry.name;
-        if (!orphan?.startsWith(ANALYSIS_SAMPLE_DATABASE_PREFIX) || orphan === name) continue;
+        if (!orphan?.startsWith(prefix) || orphan === name) continue;
         // The versioned prefix is reserved for this lock protocol. A live tab
         // owns the lock before its database exists; tab/process termination
         // releases it automatically, without relying on timestamps or unload.
@@ -120,7 +140,7 @@ export function createIndexedDbSampleBackend(indexedDB = globalThis.indexedDB, l
     });
   }
   return {
-    put: (key, sample) => transact('readwrite', store => store.put(serializableSample(sample), key)),
+    put: (key, sample) => transact('readwrite', store => store.put(serialize(sample), key)),
     get: key => transact('readonly', store => store.get(key)),
     delete: key => transact('readwrite', store => store.delete(key)),
     async clear() {

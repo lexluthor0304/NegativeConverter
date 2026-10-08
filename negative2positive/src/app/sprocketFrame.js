@@ -277,6 +277,26 @@ export function getSprocketFrameMetrics(width, height, options = {}) {
   };
 }
 
+/**
+ * Where a width x height photo sits in its film-border frame, portrait photos
+ * included (composeSprocketFrame turns them, frames them and turns them
+ * back): the frame's size and the photo's rectangle inside it.
+ */
+export function getSprocketFrameLayout(width, height, options = {}) {
+  const portrait = Number(height) > Number(width);
+  const metrics = portrait
+    ? getSprocketFrameMetrics(height, width, options)
+    : getSprocketFrameMetrics(width, height, options);
+  return {
+    frameWidth: portrait ? metrics.outputHeight : metrics.outputWidth,
+    frameHeight: portrait ? metrics.outputWidth : metrics.outputHeight,
+    x: portrait ? metrics.bandHeight : metrics.sideMargin,
+    y: portrait ? metrics.sideMargin : metrics.bandHeight,
+    width: portrait ? metrics.sourceHeight : metrics.sourceWidth,
+    height: portrait ? metrics.sourceWidth : metrics.sourceHeight
+  };
+}
+
 function blendPixel(data, index, fill, alpha) {
   const amount = clamp(alpha, 0, 1);
   const keep = 1 - amount;

@@ -2,7 +2,7 @@
  * DustRemoval.js - Film dust detection and inpainting engine
  *
  * Ported from Python (Scharr edge detection + contour analysis + TELEA inpaint).
- * Uses OpenCV.js when available, with pure-JS fallbacks for missing functions.
+ * Uses OpenCV.js; only the brush's Scharr step has a pure-JS fallback.
  *
  * Pipeline: Scharr edges → threshold → HoughLinesP line exclusion →
  *           highpass filter → contour analysis → dilate → inpaint
@@ -30,7 +30,7 @@ function ensureFeatureDetection() {
   if (_hasScharr === null) detectFeatures();
 }
 
-// ─── Pure-JS fallback implementations ────────────────────────────────────────
+// ─── Pure-JS helpers ─────────────────────────────────────────────────────────
 
 /**
  * 3x3 Scharr convolution (JS fallback).
@@ -74,47 +74,6 @@ function normalizeToUint8(src, len) {
   const range = max - min || 1;
   for (let i = 0; i < len; i++) {
     out[i] = Math.round(((src[i] - min) / range) * 255);
-  }
-  return out;
-}
-
-/**
- * TELEA-style Fast Marching Method inpainting (JS fallback).
- * Simplified implementation for small masked regions.
- */
-function inpaintTeleaJS(imageData, mask, radius) {
-  const { width, height, data } = imageData;
-  const out = new Uint8ClampedArray(data);
-  const r = radius || 3;
-
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      if (mask[y * width + x] === 0) continue;
-
-      let rSum = 0, gSum = 0, bSum = 0, wSum = 0;
-      for (let dy = -r; dy <= r; dy++) {
-        for (let dx = -r; dx <= r; dx++) {
-          const ny = y + dy, nx = x + dx;
-          if (ny < 0 || ny >= height || nx < 0 || nx >= width) continue;
-          if (mask[ny * width + nx] > 0) continue;
-          const dist = Math.sqrt(dx * dx + dy * dy);
-          if (dist > r) continue;
-          const w = 1 / (dist + 0.001);
-          const idx = (ny * width + nx) * 4;
-          rSum += data[idx] * w;
-          gSum += data[idx + 1] * w;
-          bSum += data[idx + 2] * w;
-          wSum += w;
-        }
-      }
-
-      if (wSum > 0) {
-        const idx = (y * width + x) * 4;
-        out[idx] = Math.round(rSum / wSum);
-        out[idx + 1] = Math.round(gSum / wSum);
-        out[idx + 2] = Math.round(bSum / wSum);
-      }
-    }
   }
   return out;
 }
@@ -172,35 +131,6 @@ function cropRgba(source, region) {
     data.set(source.data.subarray(start, start + region.width * 4), y * region.width * 4);
   }
   return new ImageData(data, region.width, region.height);
-}
-
-function cloneImage(source) {
-  const result = new ImageData(new Uint8ClampedArray(source.data), source.width, source.height);
-  if (source.__image16) {
-    result.__image16 = {
-      width: source.width, height: source.height,
-      data: new Uint16Array(source.__image16.data),
-    };
-  }
-  return result;
-}
-
-// 修復対象以外の画素とアルファは元の精度のまま保持する。
-function preserveImagePrecision(source, result, mask) {
-  const plane = source.__image16;
-  const data16 = plane ? new Uint16Array(plane.data) : null;
-  for (let p = 0; p < mask.length; p++) {
-    const i = p * 4;
-    result.data[i + 3] = source.data[i + 3];
-    for (let channel = 0; channel < 3; channel++) {
-      if (!mask[p]) result.data[i + channel] = source.data[i + channel];
-      else if (data16) data16[i + channel] = result.data[i + channel] * 257;
-    }
-  }
-  if (data16) {
-    result.__image16 = { width: source.width, height: source.height, data: data16 };
-  }
-  return result;
 }
 
 // ─── Core detection algorithm ────────────────────────────────────────────────
@@ -439,112 +369,312 @@ export function updateDustStrength(imageData, existingState, newStrength, maxPar
   return { mask, particleCount, _state: existingState };
 }
 
+// ─── Inpainting ──────────────────────────────────────────────────────────────
+//
+// TELEA is local. A masked pixel takes its value from known pixels within the
+// inpaint radius, weighted by distances the fast-marching pass computes one or
+// two pixels further out. Mask pixels more than 2 × (radius + 2) apart
+// therefore never influence each other, so each cluster of nearby dust is
+// repaired in its own small crop. That is bit-identical to one full-frame
+// cv.inpaint (DustRemoval.partition.test.mjs), and unlike it the crops fit the
+// 1 GiB heap compiled into OpenCV.js: the full-frame call needs about 19 B per
+// pixel and failed above about 50 MP, where a JS stand-in left every speck in
+// place (#259).
+
+const INPAINT_WINDOW = 2048; // core of a split window, when one cluster exceeds the heap
+
+/** Margin TELEA reads around a masked pixel: the radius, one FMM step and one gradient step. */
+export function dustInpaintPad(radius) {
+  return radius + 2;
+}
+
+function openCvError(error) {
+  if (typeof error === 'number') {
+    // OpenCV.js throws C++ exceptions as heap pointers.
+    let message = '';
+    try { message = cv()?.exceptionFromPtr?.(error)?.msg || ''; } catch { /* keep the pointer */ }
+    return new Error(message || `OpenCV exception ${error}`);
+  }
+  return error instanceof Error ? error : new Error(String(error));
+}
+
+function isOutOfMemory(error) {
+  return /Insufficient memory|Failed to allocate|out of memory|Cannot enlarge memory|\bOOM\b/i.test(error?.message || '');
+}
+
 /**
- * Inpaint masked regions using TELEA algorithm.
+ * Groups mask pixels that TELEA may couple. The mask is looked at through a
+ * grid of cells 2 × pad wide, aligned to the frame origin, and 8-connected
+ * occupied cells form one cluster. Pixels of different clusters are more than
+ * 2 × pad apart, so their pad-grown boxes never overlap. The grid can merge
+ * clusters that did not need merging, but it never separates two that
+ * interact. `bounds` limits the scan to a rectangle that no cluster crosses
+ * (the regional stroke passes one); by default the whole frame is scanned.
+ *
+ * @returns {{ cell: number, grid: {c0,r0,columns,rows}, labels: Int32Array,
+ *   clusters: Array<{x: number, y: number, width: number, height: number}> }}
+ *   `labels` holds 1 + the cluster index of each occupied cell of the grid.
+ */
+export function dustMaskClusters(mask, width, height, pad, bounds = null) {
+  const cell = Math.max(1, 2 * pad);
+  const bx = bounds ? bounds.x : 0, by = bounds ? bounds.y : 0;
+  const bw = bounds ? bounds.width : width, bh = bounds ? bounds.height : height;
+  const c0 = Math.floor(bx / cell), r0 = Math.floor(by / cell);
+  const columns = Math.max(0, Math.ceil((bx + bw) / cell) - c0);
+  const rows = Math.max(0, Math.ceil((by + bh) / cell) - r0);
+  const cells = columns * rows;
+  // Pixel extent inside each occupied cell, relative to the cell origin.
+  const minX = new Uint16Array(cells).fill(0xffff), minY = new Uint16Array(cells).fill(0xffff);
+  const maxX = new Uint16Array(cells), maxY = new Uint16Array(cells);
+  const occupied = new Uint8Array(cells);
+  const mark = (x, y) => {
+    const cx = (x / cell) | 0, cy = (y / cell) | 0;
+    const k = (cy - r0) * columns + (cx - c0);
+    const lx = x - cx * cell, ly = y - cy * cell;
+    occupied[k] = 1;
+    if (lx < minX[k]) minX[k] = lx;
+    if (lx > maxX[k]) maxX[k] = lx;
+    if (ly < minY[k]) minY[k] = ly;
+    if (ly > maxY[k]) maxY[k] = ly;
+  };
+  if (!bounds && (mask.byteOffset & 3) === 0) {
+    // Whole frame: skip empty 4-pixel words.
+    const words = new Uint32Array(mask.buffer, mask.byteOffset, mask.length >>> 2);
+    for (let w = 0; w < words.length; w++) {
+      if (words[w] === 0) continue;
+      for (let i = w << 2, end = i + 4; i < end; i++) {
+        if (!mask[i]) continue;
+        const y = (i / width) | 0;
+        mark(i - y * width, y);
+      }
+    }
+    for (let i = words.length << 2; i < mask.length; i++) {
+      if (!mask[i]) continue;
+      const y = (i / width) | 0;
+      mark(i - y * width, y);
+    }
+  } else {
+    for (let y = by; y < by + bh; y++) {
+      const row = y * width;
+      for (let x = bx; x < bx + bw; x++) if (mask[row + x]) mark(x, y);
+    }
+  }
+  const labels = new Int32Array(cells);
+  const clusters = [];
+  const stack = [];
+  for (let start = 0; start < cells; start++) {
+    if (!occupied[start] || labels[start]) continue;
+    const label = clusters.length + 1;
+    let x0 = Infinity, y0 = Infinity, x1 = -1, y1 = -1;
+    labels[start] = label;
+    stack.push(start);
+    while (stack.length) {
+      const k = stack.pop();
+      const lc = k % columns, lr = (k - lc) / columns;
+      const ox = (lc + c0) * cell, oy = (lr + r0) * cell;
+      if (ox + minX[k] < x0) x0 = ox + minX[k];
+      if (ox + maxX[k] > x1) x1 = ox + maxX[k];
+      if (oy + minY[k] < y0) y0 = oy + minY[k];
+      if (oy + maxY[k] > y1) y1 = oy + maxY[k];
+      for (let dr = -1; dr <= 1; dr++) for (let dc = -1; dc <= 1; dc++) {
+        const nc = lc + dc, nr = lr + dr;
+        if (nc < 0 || nr < 0 || nc >= columns || nr >= rows) continue;
+        const n = nr * columns + nc;
+        if (occupied[n] && !labels[n]) { labels[n] = label; stack.push(n); }
+      }
+    }
+    clusters.push({ x: x0, y: y0, width: x1 - x0 + 1, height: y1 - y0 + 1 });
+  }
+  return { cell, grid: { c0, r0, columns, rows }, labels, clusters };
+}
+
+function clusterLabelAt(partition, x, y) {
+  const { cell, grid: { c0, r0, columns, rows } } = partition;
+  const column = ((x / cell) | 0) - c0, row = ((y / cell) | 0) - r0;
+  if (column < 0 || row < 0 || column >= columns || row >= rows) return 0;
+  return partition.labels[row * columns + column];
+}
+
+function padRect(rect, pad, width, height) {
+  const x = Math.max(0, rect.x - pad), y = Math.max(0, rect.y - pad);
+  return {
+    x, y,
+    width: Math.min(width, rect.x + rect.width + pad) - x,
+    height: Math.min(height, rect.y + rect.height + pad) - y,
+  };
+}
+
+/**
+ * One cv.inpaint over `crop`, whose mask holds only the pixels of cluster
+ * `label`. Values of that cluster's pixels inside `write` go to `target`
+ * (RGB8, and 8-bit × 257 in its 16-bit plane); alpha and every other pixel
+ * are left alone. `target` is an RGBA image placed at (target.x, target.y).
+ */
+function inpaintClusterCrop(source, mask, partition, label, crop, write, target, radius) {
+  const c = cv();
+  const { width } = source;
+  const { x: cx, y: cy, width: cw, height: ch } = crop;
+  let rgb, maskMat, dst;
+  try {
+    rgb = new c.Mat(ch, cw, c.CV_8UC3);
+    maskMat = new c.Mat(ch, cw, c.CV_8UC1);
+    const rgbData = rgb.data, maskData = maskMat.data, src = source.data;
+    for (let row = 0; row < ch; row++) {
+      const y = cy + row;
+      let s = (y * width + cx) * 4, d = row * cw * 3, m = row * cw;
+      for (let x = cx; x < cx + cw; x++, s += 4, d += 3, m++) {
+        rgbData[d] = src[s]; rgbData[d + 1] = src[s + 1]; rgbData[d + 2] = src[s + 2];
+        maskData[m] = mask[y * width + x] && clusterLabelAt(partition, x, y) === label ? 255 : 0;
+      }
+    }
+    dst = new c.Mat();
+    c.inpaint(rgb, maskMat, dst, radius, c.INPAINT_TELEA);
+    const out = dst.data;
+    const data8 = target.data, data16 = target.__image16?.data || null;
+    const tw = target.width;
+    for (let y = write.y; y < write.y + write.height; y++) {
+      for (let x = write.x; x < write.x + write.width; x++) {
+        const m = (y - cy) * cw + (x - cx);
+        if (!maskData[m]) continue;
+        const t = ((y - target.y) * tw + (x - target.x)) * 4;
+        for (let channel = 0; channel < 3; channel++) {
+          const value = out[m * 3 + channel];
+          data8[t + channel] = value;
+          if (data16) data16[t + channel] = value * 257;
+        }
+      }
+    }
+  } catch (error) {
+    throw openCvError(error);
+  } finally {
+    deleteMats(rgb, maskMat, dst);
+  }
+}
+
+// Only a cluster too big for the heap lands here (a stroke or a dense chain
+// across most of a 50 MP+ frame). Windows overlap by 4 × pad, which bounds
+// but does not remove the influence of the cut; this is the one inexact case,
+// and a single full-frame call already failed there.
+let _splitWarned = false;
+function inpaintClusterInWindows(source, mask, partition, label, box, target, radius) {
+  const pad = dustInpaintPad(radius);
+  if (!_splitWarned) {
+    _splitWarned = true;
+    console.warn(`DustRemoval: a ${box.width}×${box.height} dust cluster exceeds the OpenCV heap; repairing it in overlapping windows`);
+  }
+  const { width, height } = source;
+  for (let y = box.y; y < box.y + box.height; y += INPAINT_WINDOW) {
+    for (let x = box.x; x < box.x + box.width; x += INPAINT_WINDOW) {
+      const write = {
+        x, y,
+        width: Math.min(INPAINT_WINDOW, box.x + box.width - x),
+        height: Math.min(INPAINT_WINDOW, box.y + box.height - y),
+      };
+      inpaintClusterCrop(source, mask, partition, label, padRect(write, 4 * pad, width, height), write, target, radius);
+    }
+  }
+}
+
+function inpaintCluster(source, mask, partition, index, target, radius) {
+  const { width, height } = source;
+  const box = partition.clusters[index];
+  const crop = padRect(box, dustInpaintPad(radius), width, height);
+  try {
+    inpaintClusterCrop(source, mask, partition, index + 1, crop, crop, target, radius);
+  } catch (error) {
+    if (!isOutOfMemory(error) || (box.width <= INPAINT_WINDOW && box.height <= INPAINT_WINDOW)) throw error;
+    inpaintClusterInWindows(source, mask, partition, index + 1, box, target, radius);
+  }
+}
+
+function requireInpaint() {
+  const c = cv();
+  ensureFeatureDetection();
+  if (!c || !c.Mat || !_hasInpaint) throw new Error('OpenCV.js inpaint is not available');
+}
+
+function validateRadius(radius) {
+  if (!Number.isInteger(radius) || radius < 1) {
+    throw new RangeError('Inpaint radius must be a positive integer');
+  }
+}
+
+function cloneImage(source) {
+  const result = new ImageData(new Uint8ClampedArray(source.data), source.width, source.height);
+  if (source.__image16) {
+    result.__image16 = {
+      width: source.width, height: source.height,
+      data: new Uint16Array(source.__image16.data),
+    };
+  }
+  return result;
+}
+
+/**
+ * Inpaint masked regions using TELEA, one cluster at a time.
+ *
+ * Masked pixels take the TELEA value (16-bit plane: 8-bit × 257); alpha and
+ * unmasked pixels keep their source values in both planes. An OpenCV error is
+ * thrown to the caller: there is no JS stand-in, which could not reach the
+ * inside of a dilated speck.
  *
  * @param {ImageData} imageData - Input RGBA image
- * @param {Uint8Array} mask - Single-channel mask (h*w), 255 = inpaint
+ * @param {Uint8Array} mask - Single-channel mask (h*w), non-zero = inpaint
  * @param {number} [radius=3] - Inpaint radius
  * @returns {ImageData} New ImageData with dust removed
  */
 export function inpaintMasked(imageData, mask, radius = 3) {
   const { width, height } = imageData;
   validateMask(mask, width * height);
-  if (!Number.isInteger(radius) || radius < 1) {
-    throw new RangeError('Inpaint radius must be a positive integer');
-  }
-  const bounds = maskBounds(mask, width, height);
-  if (!bounds) return cloneImage(imageData);
-
-  // 全マスクと周辺画素を含め、TELEAの近傍・勾配計算に必要な余白を確保する。
-  const pad = radius + 2;
-  const x = Math.max(0, bounds.x - pad), y = Math.max(0, bounds.y - pad);
-  const right = Math.min(width, bounds.x + bounds.width + pad);
-  const bottom = Math.min(height, bounds.y + bounds.height + pad);
-  const region = { x, y, width: right - x, height: bottom - y };
-  if (region.width * region.height >= width * height * 0.75) {
-    return inpaintRegion(imageData, mask, radius);
-  }
-
-  const croppedMask = new Uint8Array(region.width * region.height);
-  for (let row = 0; row < region.height; row++) {
-    const start = (y + row) * width + x;
-    croppedMask.set(mask.subarray(start, start + region.width), row * region.width);
-  }
-  const patch = inpaintRegion(cropRgba(imageData, region), croppedMask, radius);
+  validateRadius(radius);
+  const partition = dustMaskClusters(mask, width, height, dustInpaintPad(radius));
   const result = cloneImage(imageData);
-  for (let row = 0; row < region.height; row++) for (let col = 0; col < region.width; col++) {
-    const p = row * region.width + col;
-    if (!croppedMask[p]) continue;
-    const target = ((y + row) * width + x + col) * 4;
-    for (let channel = 0; channel < 3; channel++) {
-      result.data[target + channel] = patch.data[p * 4 + channel];
-      if (result.__image16) result.__image16.data[target + channel] = patch.data[p * 4 + channel] * 257;
-    }
+  if (!partition.clusters.length) return result;
+  requireInpaint();
+  const target = { data: result.data, __image16: result.__image16, x: 0, y: 0, width };
+  for (let i = 0; i < partition.clusters.length; i++) {
+    inpaintCluster(imageData, mask, partition, i, target, radius);
   }
   return result;
 }
 
-function inpaintRegion(imageData, mask, radius) {
+/**
+ * The repaired pixels of `rect` alone: the source everywhere in it, except
+ * mask pixels, which take TELEA values. `rect` must not cut a cluster of
+ * `mask` (the regional stroke closes it over them), so the patch equals the
+ * same rectangle of inpaintMasked(imageData, mask, radius).
+ *
+ * @returns {{ rgba8: Uint8ClampedArray, rgba16: Uint16Array|null }}
+ */
+export function inpaintMaskedRect(imageData, mask, rect, radius = 3) {
   const { width, height } = imageData;
-  const c = cv();
-  ensureFeatureDetection();
-
-  if (c && c.Mat && _hasInpaint) {
-    // Use OpenCV inpaint
-    let src, bgr, maskMat, dst, rgba;
-    try {
-      src = imageDataToMat(imageData);
-      bgr = new c.Mat();
-      c.cvtColor(src, bgr, c.COLOR_RGBA2RGB);
-      maskMat = uint8ArrayToMat(mask, height, width);
-      dst = new c.Mat();
-      c.inpaint(bgr, maskMat, dst, radius, c.INPAINT_TELEA);
-      rgba = new c.Mat();
-      c.cvtColor(dst, rgba, c.COLOR_RGB2RGBA);
-      const result = new ImageData(new Uint8ClampedArray(rgba.data), width, height);
-      return preserveImagePrecision(imageData, result, mask);
-    } catch (e) {
-      // If inpaint fails, fall through to JS fallback
-      console.warn('DustRemoval: cv.inpaint failed, using JS fallback', e);
-    } finally {
-      deleteMats(src, bgr, maskMat, dst, rgba);
+  validateMask(mask, width * height);
+  validateRadius(radius);
+  const { x, y, width: rw, height: rh } = rect;
+  const rgba8 = new Uint8ClampedArray(rw * rh * 4);
+  const plane = imageData.__image16?.data || null;
+  const rgba16 = plane ? new Uint16Array(rw * rh * 4) : null;
+  for (let row = 0; row < rh; row++) {
+    const start = ((y + row) * width + x) * 4;
+    rgba8.set(imageData.data.subarray(start, start + rw * 4), row * rw * 4);
+    if (rgba16) rgba16.set(plane.subarray(start, start + rw * 4), row * rw * 4);
+  }
+  const partition = dustMaskClusters(mask, width, height, dustInpaintPad(radius), rect);
+  if (partition.clusters.length) {
+    requireInpaint();
+    const target = { data: rgba8, __image16: rgba16 ? { data: rgba16 } : null, x, y, width: rw };
+    for (let i = 0; i < partition.clusters.length; i++) {
+      inpaintCluster(imageData, mask, partition, i, target, radius);
     }
   }
-
-  return inpaintMaskedJS(imageData, mask, radius);
+  return { rgba8, rgba16 };
 }
 
-/**
- * JS-only inpaint fallback.
- */
-function inpaintMaskedJS(imageData, mask, radius) {
-  const { width, height } = imageData;
-  const outData = inpaintTeleaJS(imageData, mask, radius);
-  return preserveImagePrecision(imageData, new ImageData(outData, width, height), mask);
-}
-
-/**
- * Intelligent brush refinement: detect dust within brush region using Scharr.
- *
- * @param {ImageData} imageData - Source image (RGBA)
- * @param {Uint8Array} existingMask - Current dust mask (h*w)
- * @param {Uint8Array} brushMask - Brush stroke mask (h*w), 255 = brushed
- * @returns {Uint8Array} Updated mask
- */
-export function refineMaskIntelligent(imageData, existingMask, brushMask) {
-  validateMask(existingMask, imageData.width * imageData.height);
-  validateMask(brushMask, imageData.width * imageData.height);
+// Low-edge areas inside `region` (Scharr magnitude normalised over the crop,
+// then blurred and filled): the candidates the intelligent brush may add.
+function intelligentSelection(imageData, region) {
   const c = cv();
-  if (!c || !c.Mat) return existingMask;
-  ensureFeatureDetection();
-
-  const { width: w, height: h } = imageData;
-
-  // 輪郭抽出と全画像のグレースケール化を省き、筆跡範囲だけ変換する。
-  const region = maskBounds(brushMask, w, h);
-  if (!region) return existingMask;
-  const { x: rx, y: ry, width: rw, height: rh } = region;
+  const { width: rw, height: rh } = region;
   let src, grayMat, croppedGray;
   try {
     src = imageDataToMat(cropRgba(imageData, region));
@@ -598,6 +728,33 @@ export function refineMaskIntelligent(imageData, existingMask, brushMask) {
   c.drawContours(filled, edgeContours, -1, new c.Scalar(255), c.FILLED);
 
   const filledData = new Uint8Array(filled.data);
+  deleteMats(threshMat, blurred, edgeHierarchy, filled);
+  edgeContours.delete();
+  return filledData;
+}
+
+/**
+ * Intelligent brush refinement: detect dust within brush region using Scharr.
+ *
+ * @param {ImageData} imageData - Source image (RGBA)
+ * @param {Uint8Array} existingMask - Current dust mask (h*w)
+ * @param {Uint8Array} brushMask - Brush stroke mask (h*w), 255 = brushed
+ * @returns {Uint8Array} Updated mask
+ */
+export function refineMaskIntelligent(imageData, existingMask, brushMask) {
+  validateMask(existingMask, imageData.width * imageData.height);
+  validateMask(brushMask, imageData.width * imageData.height);
+  const c = cv();
+  if (!c || !c.Mat) return existingMask;
+  ensureFeatureDetection();
+
+  const { width: w, height: h } = imageData;
+
+  // 輪郭抽出と全画像のグレースケール化を省き、筆跡範囲だけ変換する。
+  const region = maskBounds(brushMask, w, h);
+  if (!region) return existingMask;
+  const { x: rx, y: ry, width: rw, height: rh } = region;
+  const filledData = intelligentSelection(imageData, region);
 
   // Create full-size edge mask and combine with brush
   const result = new Uint8Array(existingMask);
@@ -611,11 +768,44 @@ export function refineMaskIntelligent(imageData, existingMask, brushMask) {
       }
     }
   }
-
-  deleteMats(threshMat, blurred, edgeHierarchy, filled);
-  edgeContours.delete();
-
   return result;
+}
+
+/**
+ * The three brush modes applied in place to `mask`, inside `rect` only.
+ * `brush` is the rect's own stroke raster, and `rect` must be its tight
+ * bounds: the intelligent mode normalises edges over exactly that crop, so
+ * the result equals refineMaskIntelligent / Direct / Remove with the same
+ * stroke rasterised over the whole frame.
+ */
+export function refineMaskInRect(imageData, mask, rect, brush, mode) {
+  const { width: w, height: h } = imageData;
+  validateMask(mask, w * h);
+  const { x: rx, y: ry, width: rw, height: rh } = rect;
+  if (!(brush instanceof Uint8Array) || brush.length !== rw * rh) {
+    throw new RangeError(`Brush raster must be a Uint8Array with ${rw * rh} pixels`);
+  }
+  let filled = null;
+  if (mode === 'intelligent') {
+    const c = cv();
+    if (!c || !c.Mat) return;
+    ensureFeatureDetection();
+    filled = intelligentSelection(imageData, rect);
+  }
+  for (let y = 0; y < rh; y++) {
+    const row = (ry + y) * w + rx;
+    for (let x = 0; x < rw; x++) {
+      const b = brush[y * rw + x];
+      const gi = row + x;
+      if (mode === 'intelligent') {
+        if (filled[y * rw + x] > 0 && b > 0) mask[gi] = 255;
+      } else if (mode === 'direct') {
+        mask[gi] = mask[gi] | b;
+      } else {
+        mask[gi] = mask[gi] & (~b & 0xFF);
+      }
+    }
+  }
 }
 
 /**

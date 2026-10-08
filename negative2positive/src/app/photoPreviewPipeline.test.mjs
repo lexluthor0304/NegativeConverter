@@ -4,6 +4,12 @@ import vm from 'node:vm';
 import { downsampleImageDataForMaxDim } from './imageDataOps.js';
 import { createAdjustedPhotoPreview } from './photoPreview.js';
 import { applyPreparedAdjustmentsToBuffer, applyPreparedAdjustmentsToBuffer16 } from './adjustmentPipeline.js';
+import { markOwnedPlanes, planeBuffersOf, sharesPlaneBuffers } from './planeRelease.js';
+import { reducedTileGeometry, renderReducedGeometry, tileGeometryKey } from './reducedGeometry.js';
+import { sanitizeCropRect, normalizeAngleDegrees, rotatedDimensions } from './imageGeometry.js';
+import { isRawLikeFileName } from './imageFileLoaders.js';
+import { knownImageDimensions, resolveHalfDecodeFullSize } from './imageDimensions.js';
+import { ROLL_MONOCHROME } from './rollFilmType.js';
 
 // Execute the real orchestration with actual downsampling/final adjustments.
 // Only expensive conversion, Lensfun and AI operations are substituted. Their
@@ -13,14 +19,22 @@ class TestImageData {
 }
 globalThis.ImageData = TestImageData;
 const source = readFileSync(new URL('./main.js', import.meta.url), 'utf8');
-const start = source.indexOf('    async function processFileWithSettings(');
-assert.ok(start >= 0);
-const end = source.indexOf('\n    }', start);
-const runtime = source.slice(start, end + '\n    }'.length);
+function functionSource(name) {
+  const match = new RegExp(`^    (?:async )?function ${name}\\(`, 'm').exec(source);
+  assert.ok(match, `${name} exists`);
+  return source.slice(match.index, source.indexOf('\n    }', match.index) + '\n    }'.length);
+}
+// processFileWithSettings and the tile helpers it shares with the lane and
+// roll tiles (#247); everything else is a stub below.
+const runtime = ['processFileWithSettings', 'renderPreviewFromWorkingImage', 'removeFrameDust', 'frameWantsAutoWhiteBalance',
+  'applyFrameAutoWhiteBalance', 'applyFrameExpiredAnalysis', 'tileAnalysisReference', 'resolveLensCorrection',
+  'lensCorrectionActive', 'tileRecipeSettled', 'perPhotoSettingsFallback', 'expiredImportKeepsFullFrame',
+  'reconcileHalfSizeImage', 'autoFrameDetectionFilmType']
+  .map(functionSource).join('\n');
 const noop = () => {};
 const identity = Uint8Array.from({ length: 256 }, (_, value) => value);
 
-function fixture({ lens = false, brush = false, dust = false, width = 600, height = 400 } = {}) {
+function fixture({ lens = false, brush = false, dust = false, width = 600, height = 400, geometry = {}, settled = true } = {}) {
   const plane = new Uint16Array(width * height * 4);
   for (let i = 0; i < plane.length; i += 4) {
     plane[i] = 0x1234; plane[i + 1] = 0x5678; plane[i + 2] = 0x9abc; plane[i + 3] = 65535;
@@ -33,27 +47,38 @@ function fixture({ lens = false, brush = false, dust = false, width = 600, heigh
   corrected.__image16 = image.__image16;
   if (lens) Object.defineProperty(corrected, '__lensMapping', { value: mapping });
   const file = { name: 'fixture.png', size: image.data.byteLength };
+  // A selected lens is what makes lens correction active (#247): only then
+  // does a frame keep the native path.
   const settings = {
-    filmType: 'color', autoFrameMeta: {}, filmEdge: { checked: true },
-    rotationAngle: 0, mirrored: false, cropRegion: null,
-    lensCorrection: { enabled: lens },
+    filmType: 'color', autoFrameMeta: settled ? {} : null, filmEdge: { checked: settled },
+    rotationAngle: 0, mirrored: false, cropRegion: null, ...geometry,
+    lensCorrection: { enabled: lens, selectedLens: lens ? { handle: 7 } : null },
     repairStrokes: brush ? [{ size: 0.02, points: [{ x: 0.25, y: 0.5 }] }] : [],
     curves: { r: identity, g: identity, b: identity }
   };
-  const calls = { conversions: [], dust: [], brushes: [], adjustments: [], previews: [], downsample: [], decoded: 0 };
+  const calls = { conversions: [], dust: [], brushes: [], adjustments: [], previews: [], downsample: [], decoded: 0,
+    loads: [], geometry: 0, lens: 0 };
   const context = vm.createContext({
-    state: { fileQueue: [{ file, settings }], dustRemoval: { enabled: dust, strength: 3, maxParticleSize: 40 }, exportFormat: 'png' },
+    // A photo left inside a two-stage window (#255): none here.
+    pendingGeometryEdits: () => null, withPendingEdits: (item, settings) => settings,
+    state: { fileQueue: [{ file, settings }], dustRemoval: { enabled: dust, strength: 3, maxParticleSize: 40 }, exportFormat: 'png',
+      autoFrame: { enabled: true } },
     createPerfTrace: () => ({ mark: noop, end: noop }),
     getImageDataPixelCount: image => image.width * image.height,
-    loadFileToImageData: async () => { calls.decoded++; return image; },
+    loadFileToImageData: async (_file, options) => { calls.decoded++; calls.loads.push(options); return image; },
     assertRepairCurrent: isCurrent => { if (!isCurrent()) throw Object.assign(new Error('stale'), { name: 'AbortError' }); },
     sanitizeSettings: settings => structuredClone(settings),
-    applyGeometryChainToImageData: () => image, exportGeometrySteps: {},
-    applyLensCorrectionWithSettings: async () => corrected,
+    renderGeometryChain: async () => { calls.geometry++; return image; },
+    applyLensCorrectionWithSettings: async () => { calls.lens++; return corrected; },
     downsampleImageDataForMaxDim: (source, max) => {
       calls.downsample.push([source.width, source.height, max]);
       return downsampleImageDataForMaxDim(source, max);
     },
+    reducedTileGeometry, renderReducedGeometry, tileGeometryKey,
+    sanitizeCropRegionForImage: sanitizeCropRect, normalizeAngleDegrees, rotatedDimensions,
+    hasExactPlane16: () => true,
+    sampleAnalysisArea: () => ({ width: 1, height: 1, data: new Uint16Array(4) }),
+    TILE_ANALYSIS_REFERENCE_PIXELS: 16384,
     buildRouterSettings: settings => settings,
     getColorAnalysisSample: () => image,
     convertFrameOffMainThread: async request => {
@@ -80,7 +105,11 @@ function fixture({ lens = false, brush = false, dust = false, width = 600, heigh
       (options.bitDepth === 16 ? applyPreparedAdjustmentsToBuffer16 : applyPreparedAdjustmentsToBuffer)(source, settings, output);
       return output;
     },
-    safeStorageGet: () => 'off'
+    usesSilverCoreConversion: () => false,
+    sanitizePresetType: type => type,
+    safeStorageGet: () => 'off',
+    markOwnedPlanes, planeBuffersOf, sharesPlaneBuffers,
+    isRawLikeFileName, knownImageDimensions, resolveHalfDecodeFullSize, ROLL_MONOCHROME
   });
   vm.runInContext(runtime, context);
   return { context, calls, image, corrected, mapping, settings, file };
@@ -105,6 +134,7 @@ function fixture({ lens = false, brush = false, dust = false, width = 600, heigh
   assert.equal(f.calls.previews[0].source.width, 600);
   assert.deepEqual([result.width, result.height], [288, 192]);
   assert.equal(f.calls.adjustments.length, 0, 'no separate full-frame adjustment pass for a thumbnail');
+  assert.equal(f.calls.geometry, 1, 'an active lens keeps the full-resolution chain');
 }
 
 // Ordinary thumbnails retain the small-conversion path, including lens-only or
@@ -120,6 +150,10 @@ for (const options of [{}, { lens: true }, { brush: true }]) {
   assert.deepEqual([result.width, result.height], [200, 133]);
   assert.equal(f.calls.adjustments.length, 0);
   if (options.brush) assert.equal(f.calls.brushes[0].source.width, 200);
+  // Without an active lens the tile never builds the full-resolution frame.
+  assert.equal(f.calls.geometry, options.lens ? 1 : 0, 'reduced geometry skips the full-resolution chain');
+  assert.equal(f.calls.lens, options.lens ? 1 : 0);
+  if (options.brush) assert.equal(f.calls.brushes[0].base, f.image, 'the stroke mapping reads the full base size');
 }
 
 {
@@ -136,6 +170,89 @@ for (const options of [{}, { lens: true }, { brush: true }]) {
   const f = fixture({ dust: true, width: 12, height: 8 });
   await f.context.processFileWithSettings(f.file, f.settings, { previewMaxDimension: 288 });
   assert.equal(f.calls.dust[0].options.maxParticleSize, 40);
+}
+
+// The reduced branch: the crop and rotation apply at tile scale, the dust
+// size scales from the analytic full-resolution crop, and the working image
+// is offered as the frame's tile source with its geometry key (#247).
+{
+  const geometry = { rotationAngle: 0.75, cropRegion: { left: 40, top: 30, width: 510, height: 340 } };
+  const f = fixture({ dust: true, geometry });
+  let tileSource = null;
+  const result = await f.context.processFileWithSettings(f.file, f.settings, {
+    previewMaxDimension: 288, onTileSource: entry => { tileSource = entry; }
+  });
+  const request = f.calls.conversions[0];
+  assert.deepEqual([request.imageData.width, request.imageData.height], [255, 170], 'the 510x340 crop at step 2');
+  assert.equal(f.calls.geometry, 0);
+  assert.equal(f.calls.dust[0].options.maxParticleSize, Math.round(40 * 170 / 340));
+  assert.deepEqual([result.width, result.height], [255, 170]);
+  assert.equal(tileSource.working, request.imageData, 'the tile source is the converted working image');
+  assert.equal(tileSource.geometryKey, tileGeometryKey(f.settings, { width: 600, height: 400 }));
+  assert.deepEqual([tileSource.baseSize.width, tileSource.baseSize.height], [600, 400]);
+  // An active lens renders natively and offers no tile source.
+  const lensed = fixture({ lens: true, geometry });
+  let offered = false;
+  await lensed.context.processFileWithSettings(lensed.file, lensed.settings, { previewMaxDimension: 288, onTileSource: () => { offered = true; } });
+  assert.equal(offered, false);
+}
+
+// #247 1b: a half-size decode for a frame with a settled recipe. The recipe's
+// crop and the dust size refer to the full size the decode reports.
+{
+  const geometry = { cropRegion: { left: 100, top: 60, width: 1020, height: 680 } };
+  const f = fixture({ dust: true, geometry });
+  f.image.__fullSize = { width: 1200, height: 800 };
+  const result = await f.context.processFileWithSettings(f.file, f.settings, { previewMaxDimension: 288, halfSizeDecode: true });
+  assert.deepEqual([f.calls.loads[0].filmStats, f.calls.loads[0].halfSize], [false, true]);
+  const request = f.calls.conversions[0];
+  assert.deepEqual([request.imageData.width, request.imageData.height], [255, 170], 'the full-scale crop scaled by 600 / 1200');
+  assert.equal(f.calls.dust[0].options.maxParticleSize, Math.round(40 * 170 / 680));
+  assert.deepEqual([result.width, result.height], [255, 170]);
+  // Never without a recipe, with an active lens, or when detection would
+  // still read the decoded pixels.
+  for (const [label, run] of [
+    ['no recipe', f2 => f2.context.processFileWithSettings(f2.file, null, { previewMaxDimension: 288, halfSizeDecode: true })],
+    ['lens', f2 => f2.context.processFileWithSettings(f2.file, { ...f2.settings, lensCorrection: { enabled: true, selectedLens: { handle: 1 } } }, { previewMaxDimension: 288, halfSizeDecode: true })],
+    ['export', f2 => f2.context.processFileWithSettings(f2.file, f2.settings, { halfSizeDecode: true })]
+  ]) {
+    const f2 = fixture({ settled: true });
+    await run(f2).catch(() => {});
+    assert.equal(f2.calls.loads[0]?.halfSize, false, `no half-size decode: ${label}`);
+  }
+  const unsettled = fixture({ settled: false });
+  // Frame and film edge in one request (#251), then folded into the recipe.
+  unsettled.context.runImportDetections = async image => ({ image, detection: { result: null }, read: null });
+  unsettled.context.analyzeStudioImportFrame = async (_image, settings) => settings;
+  unsettled.context.mergeImportFilmEdge = async () => null;
+  await unsettled.context.processFileWithSettings(unsettled.file, unsettled.settings, { previewMaxDimension: 288, halfSizeDecode: true });
+  assert.equal(unsettled.calls.loads[0].halfSize, false, 'no half-size decode while frame detection reads the pixels');
+}
+
+// Contact-sheet cells (#247 part 3): geometry and lens correction as for an
+// export, then the cell converts and adjusts at its own size, 8-bit at full
+// quality, without dust removal, and never writes a recipe.
+{
+  const f = fixture({ lens: true, dust: true });
+  f.context.state.fileQueue[0].settings = null;
+  const result = await f.context.processFileWithSettings(f.file, f.settings, { tileMaxDimension: 150, updateItemSettings: false });
+  assert.equal(f.calls.geometry, 1, 'the export chain');
+  assert.equal(f.calls.lens, 1, 'and lens correction, exact');
+  assert.deepEqual(f.calls.downsample, [[600, 400, 150]], 'then one reduction to the cell size');
+  const request = f.calls.conversions[0];
+  assert.deepEqual([request.imageData.width, request.imageData.height], [150, 100]);
+  assert.equal(request.options.forceFullProcess, true);
+  assert.equal(request.options.analysisImageData, f.image, 'the full-base analysis sample');
+  assert.equal(f.calls.dust.length, 0, 'no dust removal on a proof sheet');
+  assert.equal(f.calls.adjustments.length, 1);
+  assert.equal(f.calls.adjustments[0].options.bitDepth, 8);
+  assert.deepEqual([result.width, result.height], [150, 100]);
+  assert.equal(f.context.state.fileQueue[0].settings, null);
+  // Lens-mapped repairs stay native, as for previews.
+  const native = fixture({ lens: true, brush: true });
+  await native.context.processFileWithSettings(native.file, native.settings, { tileMaxDimension: 150 });
+  assert.equal(native.calls.conversions[0].imageData.width, 600);
+  assert.equal(native.calls.brushes[0].lensMapping, native.mapping);
 }
 
 // Default full-resolution exports keep the existing precision/dimensions and
@@ -158,6 +275,13 @@ for (const bitDepth of [8, 16]) {
   if (bitDepth === 16) assert.deepEqual(result.__image16.data, planeBefore);
   assert.deepEqual(f.image.__image16.data, planeBefore, 'source precision is never modified');
   assert.deepEqual(result.data, f.image.data, 'identity final adjustments preserve all RGBA8 samples');
+}
+// Exports without an active lens still build the full-resolution chain.
+{
+  const f = fixture({ dust: true, width: 24, height: 16 });
+  await f.context.processFileWithSettings(f.file, f.settings, { bitDepth: 8 });
+  assert.equal(f.calls.geometry, 1);
+  assert.equal(f.calls.loads[0].halfSize, false);
 }
 
 console.log('photoPreviewPipeline tests passed');

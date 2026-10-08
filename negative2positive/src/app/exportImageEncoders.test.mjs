@@ -206,7 +206,7 @@ for (const imageData of [make8BitImageData(), make16BitImageData()]) {
 
   const appPng = await bytesOf(encodePng16Blob(imageData));
   const workerPng = await bytesOf(
-    workerEncodePng16Samples(samples, imageData.width, imageData.height, pako.deflate)
+    workerEncodePng16Samples(samples, imageData.width, imageData.height, pako)
   );
   assert.deepEqual(Array.from(workerPng), Array.from(appPng), 'PNG entry points must agree');
 
@@ -239,6 +239,18 @@ console.log('exportImageEncoders tests passed');
 {
   const width = 13, height = 7;
   const pixels = Uint16Array.from({ length: width * height * 4 }, (_, i) => (i * 15313) & 65535);
-  const png = decodePng(await bytesOf(workerEncodePng16Samples(pixels, width, height, pako.deflate)));
+  const png = decodePng(await bytesOf(workerEncodePng16Samples(pixels, width, height, pako)));
   assert.deepEqual(png.samples, Uint16Array.from(pixels, (value, i) => i % 4 === 3 ? 65535 : value));
+}
+
+// #250: the owned-plane TIFF compaction exists only in the export worker. The
+// main-thread fallback encodes the editor's own plane and must never touch it.
+{
+  const { createHash } = await import('node:crypto');
+  const hash = (view) => createHash('sha256').update(new Uint8Array(view.buffer, view.byteOffset, view.byteLength)).digest('hex');
+  const imageData = make16BitImageData();
+  const before = hash(imageData.__image16.data);
+  await bytesOf(encodeTiffBlob(imageData, 16));
+  await bytesOf(encodePng16Blob(imageData));
+  assert.equal(hash(imageData.__image16.data), before, "a fallback encode leaves the caller's plane byte for byte");
 }

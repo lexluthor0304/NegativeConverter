@@ -1,7 +1,7 @@
-import { findWindowLineQuads } from './imageWindowLines.js';
+import { findWindowLineQuads, sampleMedian } from './imageWindowLines.js';
 
 // OpenCV の四辺形から実際の撮影窓を求める。画幅比率のテンプレートで切り抜かない。
-const median = values => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)];
+const median = values => sampleMedian(values);
 const axisAngle = angle => {
   while (angle > 45) angle -= 90;
   while (angle <= -45) angle += 90;
@@ -43,8 +43,13 @@ export function boundaryEvidence(image, points, targeted = false, { consistentBa
       signed.push(inside.reduce((sum, v, c) => sum + v - out[c], 0));
       deltas.push(Math.max(...inside.map((v, c) => Math.abs(v - out[c]))));
     }
-    contrasts.push(median(deltas));
-    supports.push(deltas.filter(v => v >= (targeted ? 10 : 22)).length / deltas.length);
+    const sideContrast = median(deltas);
+    const sideSupport = deltas.filter(v => v >= (targeted ? 10 : 22)).length / deltas.length;
+    // The result needs every side's contrast and support (their minimum is
+    // tested below), so the first failing side decides it (#251).
+    if (sideContrast < (targeted ? 12 : 25) || sideSupport < (targeted ? .6 : .74)) return null;
+    contrasts.push(sideContrast);
+    supports.push(sideSupport);
     outerEdges.push([0, 1, 2].map(c => median(edgeOutside.map(p => p[c]))));
     polarities.push(Math.sign(median(signed)));
   }
@@ -79,10 +84,12 @@ export function boundaryEvidence(image, points, targeted = false, { consistentBa
   return { contrast, support, variation };
 }
 
-export function detectImageWindow(image, targets, { targeted = false } = {}) {
+// The three contour variants (a bright base, a dark holder, closed edges):
+// the window candidates their convex quadrilaterals give (#252 part 4: the
+// first stage of the window search).
+export function contourWindowCandidates(image, src, targets, { targeted = false } = {}) {
   const cv = globalThis.cv;
-  if (!cv?.Mat) return null;
-  const src = cv.matFromImageData(image), gray = new cv.Mat(), smooth = new cv.Mat();
+  const gray = new cv.Mat(), smooth = new cv.Mat();
   const mask = new cv.Mat(), contours = new cv.MatVector(), hierarchy = new cv.Mat();
   const candidates = [];
   try {
@@ -130,48 +137,79 @@ export function detectImageWindow(image, targets, { targeted = false } = {}) {
         } finally { contour.delete(); approx.delete(); }
       }
     }
-    const lineResult = candidates.length ? { quads: [], incomplete: false } : findWindowLineQuads(image, src);
-    for (const points of lineResult.quads) {
-      if (points.some(p => p.x < 3 || p.y < 3 || p.x > image.width - 4 || p.y > image.height - 4)) continue;
-      const lengths = points.map((p, i) => Math.hypot(p.x - points[(i + 1) % 4].x, p.y - points[(i + 1) % 4].y));
-      const width = (lengths[0] + lengths[2]) / 2, height = (lengths[1] + lengths[3]) / 2;
-      const coverage = width * height / (image.width * image.height);
-      if (coverage < .12 || coverage > .96) continue;
-      const ratio = Math.max(width, height) / Math.min(width, height);
-      const match = targets.map(target => ({ ...target, delta: Math.abs(ratio / target.ratio - 1) })).sort((a, b) => a.delta - b.delta)[0];
-      if (!match || match.delta > .09) continue;
-      const evidence = boundaryEvidence(image, points, targeted, { consistentBase: true })
-        // 黒いホルダーの薄い反射縁は数画素外で再確認する。四辺の外側が
-        // 本当に黒く均一な場合だけ許可し、橙色片基の条件は緩めない。
-        || boundaryEvidence(image, points, targeted, { consistentBase: true, gapRatio: .012, darkHolder: true });
-      if (!evidence) continue;
-      const angles = points.map((p, i) => {
-        const q = points[(i + 1) % 4];
-        return axisAngle(Math.atan2(q.y - p.y, q.x - p.x) * 180 / Math.PI);
-      });
-      const tilt = windowTilt(points);
-      if (angles.some(angle => Math.abs(angle - tilt) > 2.5)) continue;
-      candidates.push({ points, angle: Math.abs(tilt) < .12 ? 0 : -tilt, detectedFormat: match.key,
-        confidence: Math.min(.94, .84 + evidence.support * .08 - match.delta),
-        score: coverage * .45 + evidence.support * .25 + .20 + (1 - match.delta) * .10,
-        evidence, method: 'opencv-line-window' });
-    }
-    candidates.sort((a, b) => b.score - a.score);
-    // 離れた二つの有力な窓がある画像は、単一コマと断定しない。
-    if (candidates[1]) {
-      const center = candidate => candidate.points.reduce((c, p) => ({ x: c.x + p.x / 4, y: c.y + p.y / 4 }), { x: 0, y: 0 });
-      const a = center(candidates[0]);
-      // 二値化の表裏や線分経路が同じ窓を重複提案しても、他の窓を隠さない。
-      const ambiguous = candidates.slice(1).some(candidate => {
-        const b = center(candidate);
-        return candidates[0].score - candidate.score < .025
-          && Math.hypot(a.x - b.x, a.y - b.y) > Math.min(image.width, image.height) * .15;
-      });
-      if (ambiguous) return targeted ? null : { requiresReview: true, ambiguous: true };
-    }
-    return candidates[0] || (!targeted && lineResult.incomplete ? { incomplete: true } : null);
   } finally {
-    src.delete(); gray.delete(); smooth.delete(); mask.delete(); contours.delete(); hierarchy.delete();
+    gray.delete(); smooth.delete(); mask.delete(); contours.delete(); hierarchy.delete();
+  }
+  return candidates;
+}
+
+/**
+ * The window search's tail (#252 part 4): the line search's quads (only
+ * when the contour variants found nothing; `lineResult` is then
+ * lineQuadsFromUnits' result) become candidates next to the contour ones,
+ * then the best, an ambiguity or an incomplete frame. Pure JS.
+ */
+export function windowFromCandidates(image, targets, contourCandidates, lineResult, { targeted = false } = {}) {
+  const candidates = [...contourCandidates];
+  for (const points of lineResult.quads) {
+    if (points.some(p => p.x < 3 || p.y < 3 || p.x > image.width - 4 || p.y > image.height - 4)) continue;
+    const lengths = points.map((p, i) => Math.hypot(p.x - points[(i + 1) % 4].x, p.y - points[(i + 1) % 4].y));
+    const width = (lengths[0] + lengths[2]) / 2, height = (lengths[1] + lengths[3]) / 2;
+    const coverage = width * height / (image.width * image.height);
+    if (coverage < .12 || coverage > .96) continue;
+    const ratio = Math.max(width, height) / Math.min(width, height);
+    const match = targets.map(target => ({ ...target, delta: Math.abs(ratio / target.ratio - 1) })).sort((a, b) => a.delta - b.delta)[0];
+    if (!match || match.delta > .09) continue;
+    // The pure tilt check first: it rejects without sampling (#251).
+    const angles = points.map((p, i) => {
+      const q = points[(i + 1) % 4];
+      return axisAngle(Math.atan2(q.y - p.y, q.x - p.x) * 180 / Math.PI);
+    });
+    const tilt = windowTilt(points);
+    if (angles.some(angle => Math.abs(angle - tilt) > 2.5)) continue;
+    const evidence = boundaryEvidence(image, points, targeted, { consistentBase: true })
+      // 黒いホルダーの薄い反射縁は数画素外で再確認する。四辺の外側が
+      // 本当に黒く均一な場合だけ許可し、橙色片基の条件は緩めない。
+      || boundaryEvidence(image, points, targeted, { consistentBase: true, gapRatio: .012, darkHolder: true });
+    if (!evidence) continue;
+    candidates.push({ points, angle: Math.abs(tilt) < .12 ? 0 : -tilt, detectedFormat: match.key,
+      confidence: Math.min(.94, .84 + evidence.support * .08 - match.delta),
+      score: coverage * .45 + evidence.support * .25 + .20 + (1 - match.delta) * .10,
+      evidence, method: 'opencv-line-window' });
+  }
+  candidates.sort((a, b) => b.score - a.score);
+  // 離れた二つの有力な窓がある画像は、単一コマと断定しない。
+  if (candidates[1]) {
+    const center = candidate => candidate.points.reduce((c, p) => ({ x: c.x + p.x / 4, y: c.y + p.y / 4 }), { x: 0, y: 0 });
+    const a = center(candidates[0]);
+    // 二値化の表裏や線分経路が同じ窓を重複提案しても、他の窓を隠さない。
+    const ambiguous = candidates.slice(1).some(candidate => {
+      const b = center(candidate);
+      return candidates[0].score - candidate.score < .025
+        && Math.hypot(a.x - b.x, a.y - b.y) > Math.min(image.width, image.height) * .15;
+    });
+    if (ambiguous) return targeted ? null : { requiresReview: true, ambiguous: true };
+  }
+  return candidates[0] || (!targeted && lineResult.incomplete ? { incomplete: true } : null);
+}
+
+export const NO_LINE_QUADS = Object.freeze({ quads: Object.freeze([]), incomplete: false });
+
+// `lineChannels`: the planes the line search reads (default grey, R, G, B;
+// see findWindowLineQuads), or a function that returns them, called only when
+// the line search runs. The serial composition of the stages above.
+export function detectImageWindow(image, targets, { targeted = false, lineChannels = undefined } = {}) {
+  const cv = globalThis.cv;
+  if (!cv?.Mat) return null;
+  const src = cv.matFromImageData(image);
+  try {
+    const candidates = contourWindowCandidates(image, src, targets, { targeted });
+    const channels = candidates.length ? null : (typeof lineChannels === 'function' ? lineChannels() : lineChannels);
+    const lineResult = candidates.length ? NO_LINE_QUADS
+      : findWindowLineQuads(image, src, null, channels ? { channels } : undefined);
+    return windowFromCandidates(image, targets, candidates, lineResult, { targeted });
+  } finally {
+    src.delete();
   }
 }
 

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { normalizeFileListSort, orderedFileIndices, selectionRangeIndices } from './fileListOrder.js';
+import { displaySessionStubs, DISPLAY_SESSION_HELPERS } from './displaySessionHarness.mjs';
 
 // Run actual application handlers: sorted presentation must not renumber queue
 // ownership, schedule a photo activation, or associate edits with another File.
@@ -23,22 +24,27 @@ const storage = new Map();
 let sorts = 0, ui = null, syncs = 0, locked = false;
 const noop = () => {};
 const context = vm.createContext({
+    // #249: no photo here takes a display form.
+    ...displaySessionStubs(),
   state, normalizeFileListSort, selectionRangeIndices,
   orderedFileIndices: (...args) => { sorts++; return orderedFileIndices(...args); },
   singleExportActive: false, isDesktopBatchExportLocked: () => locked,
   safeStorageSet: (key, value) => storage.set(key, value),
-  studioWorkspace: { sync: () => syncs++ },
-  photoSessions: { retainKeys: noop }, photoPreviews: { retainKeys: noop },
+  studioWorkspace: { sync: () => syncs++, markRowsChanged: noop }, uiDebugCounters: { fileListRenders: 0 },
+  photoSessions: { retainKeys: noop }, photoPreviews: { retainKeys: noop }, photoPrefetch: { retainKeys: noop },
+  thumbnailSources: { retainKeys: noop }, watchRollSamples: { retainKeys: noop },
   document: { getElementById: id => ({ id }), body: { dataset: {} } },
   updateReviewFilter: noop, renderFileList: options => { ui = options; },
   reviewForItem: item => ({ needs: item.needs }),
   getLocalizedText: (_key, fallback) => fallback, getInterpolatedText: (_key, _values, fallback) => fallback,
   currentLang: 'en', i18n: { en: {} },
   updateAutoFrameButtons: noop, syncBatchUIState: noop, refreshThumbnailStates: noop,
-  loadStudioThumbnails: noop, updateExportButtons: noop,
+  kickBackgroundPhotoWork: noop, forgetRemovedBackgroundPhotos: noop, observeBackgroundVisibility: noop, supersedeActivation: noop, updateExportButtons: noop,
+  syncEmbeddedPreviewQueue: noop, tileVisibility: null, observeTileVisibility: noop,
 });
 vm.runInContext('let fileOrderCache = null, fileSelectionAnchor = null, reviewFilter = false;\n'
-  + ['getFileListOrder', 'getSelectedFiles', 'setFileListSort', 'updateFileListUI'].map(functionSource).join('\n'), context);
+  + 'let fileListRefreshDeferrals = 0, fileListRefreshDeferred = false;\n'
+  + ['getFileListOrder', 'getSelectedFiles', 'setFileListSort', 'updateFileListUI', 'renderFileListUI'].map(functionSource).join('\n'), context);
 const order = () => [...context.getFileListOrder()];
 const selected = () => files.map((item, index) => item.selected ? index : -1).filter(index => index >= 0);
 assert.deepEqual(order(), [3, 0, 2, 1]);

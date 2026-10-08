@@ -1,5 +1,9 @@
+import { yieldTaskForJob } from './yieldToPaint.js';
 import { loadInferenceRuntime } from './inferenceRuntime.js';
 import { defaultInferencePreference } from './inferenceBackend.js';
+import { murmurHash3x86_128 } from './contentHash.js';
+import { fetchModelBytes as fetchCachedModelBytes } from './modelCache.js';
+export { readCachedModel, writeCachedModel } from './modelCache.js';
 // On-device AI inpainting for dust and scratches: a learned inpainter (the
 // MI-GAN Places2 pipeline, MIT) run by onnxruntime-web on WebGPU where the
 // browser has it and on WASM otherwise, over 512-px tiles restricted to the
@@ -13,15 +17,21 @@ import { defaultInferencePreference } from './inferenceBackend.js';
 // asset next to the lazy chunk), so the runtime works offline in the desktop
 // build and needs no CDN entry in the CSP.
 // Bundled with web and desktop builds; no third-party request is required.
-export const DEFAULT_MODEL_URL = `${import.meta.env?.BASE_URL || '/'}models/migan_pipeline_v2.onnx`;
+// A literal new URL() so Vite fingerprints it into immutable /assets: a
+// replaced model gets a new URL, and with it a new IndexedDB key.
+export const DEFAULT_MODEL_URL = new URL('../assets/models/migan_pipeline_v2.onnx', import.meta.url).href;
+const DEFAULT_MODEL_FAMILY = 'migan_pipeline_v2';
 export const MODEL_LICENCE = 'MI-GAN (Picsart AI Research), MIT; see models/MI-GAN-LICENSE.txt';
 export const TILE = 512;
 export const CONTEXT = 64;
 export const OVERLAP = 32;
 export const FEATHER = 4;
-
-const MODEL_DB = 'nc_ai_models';
-const MODEL_STORE = 'models';
+// Inference results kept per session: about 244 tiles of 512 px in the AI
+// worker, fewer when the session runs in the page itself.
+export const TILE_MEMO_BYTES = 192 * 1024 * 1024;
+export const MAIN_REALM_TILE_MEMO_BYTES = 48 * 1024 * 1024;
+// Frame copies are split so that no task holds the page for long.
+export const CLONE_CHUNK_BYTES = 8 * 1024 * 1024;
 
 // ---- tiling maths ----
 
@@ -43,15 +53,21 @@ export function maskBounds(mask, width, height) {
  * Boxes around the masked areas: the mask is looked at through a coarse grid,
  * touching occupied cells are merged, and each box grows by `context` pixels so
  * the model sees what surrounds a speck. Far-apart specks get their own boxes,
- * so only the tiles that hold dust are inferred.
+ * so only the tiles that hold dust are inferred. `bounds` ({ x, y, width,
+ * height }), when the caller knows it, is a rectangle outside which the mask is
+ * empty: only its rows and columns are scanned, and the boxes are the same.
  */
-export function maskBoundingBoxes(mask, width, height, { cell = 64, context = CONTEXT } = {}) {
+export function maskBoundingBoxes(mask, width, height, { cell = 64, context = CONTEXT, bounds = null } = {}) {
   const cols = Math.ceil(width / cell); const rows = Math.ceil(height / cell);
   const occupied = new Uint8Array(cols * rows);
-  for (let y = 0; y < height; y++) {
+  const left = bounds ? Math.max(0, bounds.x) : 0;
+  const right = bounds ? Math.min(width, bounds.x + bounds.width) : width;
+  const top = bounds ? Math.max(0, bounds.y) : 0;
+  const bottom = bounds ? Math.min(height, bounds.y + bounds.height) : height;
+  for (let y = top; y < bottom; y++) {
     const row = y * width;
     const cy = (y / cell) | 0;
-    for (let x = 0; x < width; x++) if (mask[row + x]) occupied[cy * cols + ((x / cell) | 0)] = 1;
+    for (let x = left; x < right; x++) if (mask[row + x]) occupied[cy * cols + ((x / cell) | 0)] = 1;
   }
   const seen = new Uint8Array(cols * rows);
   const boxes = [];
@@ -179,8 +195,40 @@ export function createSparseBlendWeights(width, { blockSize = 64 } = {}) {
       block[offset] = value;
       return true;
     },
+    blockSize, columns,
+    // Keys (row * columns + column) of the blocks holding a written pixel.
+    keys() { return [...blocks.keys()]; },
     get allocatedBytes() { return blocks.size * blockSize * blockSize * Float32Array.BYTES_PER_ELEMENT; }
   };
+}
+
+const yieldToEventLoop = () => (typeof globalThis.scheduler?.yield === 'function'
+  ? globalThis.scheduler.yield() : yieldTaskForJob());
+
+async function copyInChunks(target, source, chunkBytes, check) {
+  const step = Math.max(1, Math.floor(chunkBytes / source.BYTES_PER_ELEMENT));
+  for (let offset = 0; offset < source.length; offset += step) {
+    if (offset) { await yieldToEventLoop(); check?.(); }
+    target.set(source.subarray(offset, Math.min(source.length, offset + step)), offset);
+  }
+}
+
+/**
+ * Copies an ImageData (and its 16-bit plane, when present) in chunks with a
+ * yield between them: the bytes of a one-shot copy, without one long task on
+ * a 60 MP frame. `check` runs after each yield and may throw to abandon it.
+ */
+export async function cloneImageDataChunked(imageData, { chunkBytes = CLONE_CHUNK_BYTES, check = null } = {}) {
+  const { width, height } = imageData;
+  const data = new Uint8ClampedArray(imageData.data.length);
+  await copyInChunks(data, imageData.data, chunkBytes, check);
+  const result = new ImageData(data, width, height);
+  if (imageData.__image16 && imageData.__image16.data instanceof Uint16Array) {
+    const plane = new Uint16Array(imageData.__image16.data.length);
+    await copyInChunks(plane, imageData.__image16.data, chunkBytes, check);
+    result.__image16 = { width, height, data: plane };
+  }
+  return result;
 }
 
 function checkInpaintCurrent(signal, shouldContinue) {
@@ -241,38 +289,65 @@ export function blendTile(result, source, tile, output, weights, applied = null)
 /**
  * Runs the model over every tile the mask needs. `run(image, mask, size)` is
  * the inference call: it receives the NCHW inputs and resolves to the NCHW
- * output. Returns a new ImageData (16-bit plane copied when present).
+ * output. Returns a new ImageData (16-bit plane copied when present), the
+ * tile count and the 64 px blocks the blend wrote (`blocks.keys`, in rows of
+ * `blocks.columns`); pixels outside them equal the input.
+ * `maskBounds` is maskBoundingBoxes' scan hint. `memoInsert: false` asks a
+ * memoising session to look tiles up without storing new ones (batch lanes).
+ * Boxes and the first tile come before the copy of the frame: that tile infers
+ * while the copy proceeds in chunks.
  */
 export async function inpaintWithModel(imageData, mask, run, {
-  tile = TILE, onProgress = null, feather = FEATHER, signal = null, shouldContinue = null
+  tile = TILE, onProgress = null, feather = FEATHER, signal = null, shouldContinue = null,
+  maskBounds = null, memoInsert = true, cloneChunkBytes = CLONE_CHUNK_BYTES
 } = {}) {
   checkInpaintCurrent(signal, shouldContinue);
   const { width, height } = imageData;
-  const result = new ImageData(new Uint8ClampedArray(imageData.data), width, height);
-  if (imageData.__image16 && imageData.__image16.data instanceof Uint16Array) {
-    result.__image16 = { width, height, data: new Uint16Array(imageData.__image16.data) };
-  }
-  const boxes = maskBoundingBoxes(mask, width, height);
+  const boxes = maskBoundingBoxes(mask, width, height, { bounds: maskBounds });
   const tiles = uniqueTiles(boxes.flatMap((box) => tilesForBox(box, width, height, { tile })));
-  const applied = createSparseBlendWeights(width);
-  let done = 0;
-  for (const t of tiles) {
-    checkInpaintCurrent(signal, shouldContinue);
+  const runOptions = { transferInputs: true, signal, shouldContinue };
+  if (!memoInsert) runOptions.insert = false;
+  // Tile-local inputs are no longer needed once the weights exist. Worker
+  // sessions can transfer them instead of copying 4 MB on every tile.
+  const start = (t) => {
     const inputs = extractTile(imageData, mask, t);
     let anyMask = false;
     for (let i = 0; i < inputs.mask.length; i++) if (inputs.mask[i]) { anyMask = true; break; }
-    if (anyMask) {
-      // These tile-local inputs are no longer needed after this point. Worker
-      // sessions can transfer them instead of copying 4 MB on every tile.
-      const weights = featherWeights(inputs.mask, t.size, feather);
-      const output = await run(inputs.image, inputs.mask, t.size, { transferInputs: true, signal, shouldContinue });
+    if (!anyMask) return null;
+    const weights = featherWeights(inputs.mask, t.size, feather);
+    return { weights, output: run(inputs.image, inputs.mask, t.size, runOptions) };
+  };
+  let next = 0, early = null;
+  while (next < tiles.length && !early) {
+    checkInpaintCurrent(signal, shouldContinue);
+    early = start(tiles[next]);
+    if (!early) next++;
+  }
+  // A superseded pass may abandon the copy while this inference is queued.
+  early?.output.catch(() => {});
+  const result = await cloneImageDataChunked(imageData, { chunkBytes: cloneChunkBytes,
+    check: () => checkInpaintCurrent(signal, shouldContinue) });
+  const applied = createSparseBlendWeights(width);
+  let done = 0;
+  for (let index = 0; index < tiles.length; index++) {
+    const t = tiles[index];
+    // Tiles before `next` hold no mask; without an early tile none does.
+    let task = null;
+    if (index === next) task = early;
+    else if (index > next) {
       checkInpaintCurrent(signal, shouldContinue);
-      blendTile(result, imageData, t, output, weights, applied);
+      task = start(t);
+    }
+    if (task) {
+      const output = await task.output;
+      checkInpaintCurrent(signal, shouldContinue);
+      blendTile(result, imageData, t, output, task.weights, applied);
     }
     done++;
     if (onProgress) onProgress(done, tiles.length);
   }
-  return { imageData: result, tiles: tiles.length };
+  return { imageData: result, tiles: tiles.length,
+    blocks: { size: applied.blockSize, columns: applied.columns, keys: applied.keys() } };
 }
 
 // ---- runtime glue (browser only) ----
@@ -286,87 +361,96 @@ export function inpaintBackends() {
 
 export const loadOrt = loadInferenceRuntime;
 
-function openModelDb() {
-  return new Promise((resolve, reject) => {
-    if (typeof indexedDB === 'undefined') { resolve(null); return; }
-    const request = indexedDB.open(MODEL_DB, 1);
-    request.onupgradeneeded = () => { request.result.createObjectStore(MODEL_STORE); };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
+/**
+ * Downloads the model once (IndexedDB afterwards; see modelCache.js). Writing
+ * the bundled model deletes its older keys, including the unversioned
+ * models/migan_pipeline_v2.onnx key of builds before the URL was hashed.
+ */
+export function fetchModelBytes(url, { onProgress = null } = {}) {
+  return fetchCachedModelBytes(url, { onProgress, family: url === DEFAULT_MODEL_URL ? DEFAULT_MODEL_FAMILY : null });
 }
 
-function requestToPromise(request) {
-  return new Promise((resolve, reject) => {
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
-}
-
-export async function readCachedModel(key) {
-  const db = await openModelDb();
-  if (!db) return null;
-  try {
-    const record = await requestToPromise(db.transaction(MODEL_STORE, 'readonly').objectStore(MODEL_STORE).get(key));
-    return record && record.bytes instanceof ArrayBuffer ? record.bytes : null;
-  } finally { db.close(); }
-}
-
-export async function writeCachedModel(key, bytes) {
-  const db = await openModelDb();
-  if (!db) return false;
-  try {
-    await requestToPromise(db.transaction(MODEL_STORE, 'readwrite').objectStore(MODEL_STORE).put({ bytes, savedAt: Date.now() }, key));
-    return true;
-  } catch (error) {
-    console.warn('AI model cache write failed:', error);
-    return false;
-  } finally { db.close(); }
-}
-
-/** Downloads the model once (IndexedDB afterwards), reporting bytes received. */
-export async function fetchModelBytes(url, { onProgress = null } = {}) {
-  const cached = await readCachedModel(url).catch(() => null);
-  if (cached) return cached;
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`model download failed (${response.status})`);
-  const total = Number(response.headers.get('content-length')) || 0;
-  const reader = response.body?.getReader();
-  if (!reader) {
-    const bytes = await response.arrayBuffer();
-    await writeCachedModel(url, bytes).catch(() => false);
-    return bytes;
-  }
-  const chunks = [];
-  let received = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-    received += value.length;
-    if (onProgress) onProgress(received, total);
-  }
-  const bytes = new Uint8Array(received);
-  let offset = 0;
-  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
-  await writeCachedModel(url, bytes.buffer).catch(() => false);
-  return bytes.buffer;
+/**
+ * Model outputs by the exact bytes of their inputs, in a byte-bounded LRU.
+ * MI-GAN's output for a tile depends only on that tile's uint8 image and mask,
+ * and a WASM session returns the same bytes for the same inputs, so a stroke
+ * that leaves a tile's inputs unchanged reuses its earlier result. The key is
+ * the tile size plus a 128-bit hash of each feed. `verify` also keeps the feeds
+ * and compares them on a hit (tests).
+ */
+export function createTileMemo({ capBytes = TILE_MEMO_BYTES, verify = false } = {}) {
+  const entries = new Map();
+  let bytes = 0, hits = 0, misses = 0, inserts = 0, collisions = 0;
+  const same = (a, b) => a.length === b.length && a.every((value, i) => value === b[i]);
+  const evictTo = (target) => {
+    for (const [key, entry] of entries) {
+      if (bytes <= target) break;
+      entries.delete(key);
+      bytes -= entry.bytes;
+    }
+  };
+  return {
+    key: (size, rgb, known) => `${size}:${murmurHash3x86_128(rgb, size)}:${murmurHash3x86_128(known, size)}`,
+    get(key, rgb, known) {
+      const entry = entries.get(key);
+      if (!entry || (verify && !(same(entry.rgb, rgb) && same(entry.known, known)))) {
+        if (entry) collisions++;
+        misses++;
+        return null;
+      }
+      entries.delete(key);
+      entries.set(key, entry);
+      hits++;
+      return entry.output;
+    },
+    set(key, output, rgb, known) {
+      const entry = { output: new Uint8Array(output) };
+      if (verify) { entry.rgb = rgb.slice(); entry.known = known.slice(); }
+      entry.bytes = entry.output.byteLength + (verify ? rgb.byteLength + known.byteLength : 0);
+      if (entry.bytes > capBytes) return;
+      const previous = entries.get(key);
+      if (previous) { entries.delete(key); bytes -= previous.bytes; }
+      entries.set(key, entry);
+      bytes += entry.bytes;
+      inserts++;
+      evictTo(capBytes);
+    },
+    trim(target) { evictTo(Math.max(0, Number(target) || 0)); return this.stats(); },
+    clear() { entries.clear(); bytes = 0; },
+    stats: () => ({ entries: entries.size, bytes, capBytes, hits, misses, inserts, collisions })
+  };
 }
 
 // Official MI-GAN pipeline: uint8 NCHW RGB, 255 = known / 0 = repair.
 // Keep the tiling API in 0..1 with 1 = repair, converting only at this boundary.
-export function runnerFor(ort, session) {
+// With a `memo`, a tile whose feeds were seen before returns the stored output;
+// `insert: false` (batch lanes) looks up without storing.
+export function runnerFor(ort, session, { memo = null } = {}) {
   if (!session.inputNames.includes('image') || !session.inputNames.includes('mask') ||
       !session.outputNames.includes('result')) {
     throw new Error('Expected the MI-GAN pipeline ONNX model (image, mask → result)');
   }
-  return async (image, mask, size) => {
+  // Explicit normalization also handles nearly black results without guessing scale.
+  const normalized = (bytes) => {
+    const out = new Float32Array(bytes.length);
+    for (let i = 0; i < bytes.length; i++) out[i] = bytes[i] / 255;
+    return out;
+  };
+  return async (image, mask, size, { insert = true } = {}) => {
     const pixels = size * size;
     if (image.length !== pixels * 3 || mask.length !== pixels) throw new RangeError('Invalid MI-GAN tile');
     // Empty masks need no inference (also avoids empty-bounds model operators).
-    if (!mask.some((value) => value > 0)) return image.slice();
-    const rgb = Uint8Array.from(image, (value) => Math.round(Math.min(1, Math.max(0, value)) * 255));
-    const known = Uint8Array.from(mask, (value) => value > 0 ? 0 : 255);
+    let anyMask = false;
+    for (let i = 0; i < mask.length; i++) if (mask[i] > 0) { anyMask = true; break; }
+    if (!anyMask) return image.slice();
+    // Plain loops store what Uint8Array.from(..., fn) stored, without a call per value.
+    const rgb = new Uint8Array(image.length);
+    for (let i = 0; i < image.length; i++) rgb[i] = Math.round(Math.min(1, Math.max(0, image[i])) * 255);
+    const known = new Uint8Array(mask.length);
+    for (let i = 0; i < mask.length; i++) known[i] = mask[i] > 0 ? 0 : 255;
+    const key = memo ? memo.key(size, rgb, known) : null;
+    const cached = memo ? memo.get(key, rgb, known) : null;
+    if (cached) return normalized(cached);
     const feeds = {
       image: new ort.Tensor('uint8', rgb, [1, 3, size, size]),
       mask: new ort.Tensor('uint8', known, [1, 1, size, size])
@@ -378,13 +462,17 @@ export function runnerFor(ort, session) {
       if (output.type !== 'uint8' || output.dims.length !== 4 ||
           output.dims.some((value, index) => value !== [1, 3, size, size][index]) ||
           output.data.length !== pixels * 3) throw new Error('Invalid MI-GAN output');
-      // Explicit normalization also handles nearly black results without guessing scale.
-      return Float32Array.from(output.data, (value) => value / 255);
+      // Stored before the tensors are disposed; the worker transfers the result.
+      if (memo && insert) memo.set(key, output.data, rgb, known);
+      return normalized(output.data);
     } finally {
       for (const tensor of new Set([...Object.values(feeds), ...Object.values(results || {})])) tensor.dispose?.();
     }
   };
 }
+
+const inWorkerRealm = () => typeof globalThis.WorkerGlobalScope === 'function'
+  && globalThis instanceof globalThis.WorkerGlobalScope;
 
 /**
  * Creates the inference session, WebGPU first, WASM otherwise. A WebGPU
@@ -392,31 +480,42 @@ export function runnerFor(ort, session) {
  * operators the WebGPU provider cannot run (LaMa's Fourier layers today)
  * creates fine and fails on the first inference, so the failure has to be
  * caught here and the session rebuilt on WASM. Returns { session, provider,
- * run } where `run` matches inpaintWithModel's callback.
+ * run, release, trim, memoStats } where `run` matches inpaintWithModel's
+ * callback. Each session owns its tile memo: a new session, a provider
+ * fallback or a release starts empty, and `trim(bytes)` shrinks it on demand.
  */
-export async function createInpaintSession(modelBytes, { prefer = defaultInferencePreference(), warmUp = true } = {}) {
-  const ort = await loadOrt();
-  const backends = inpaintBackends();
-  const attempts = defaultInferencePreference() !== 'wasm' && prefer === 'webgpu' && backends.webgpu ? [['webgpu', 'wasm'], ['wasm']] : [['wasm']];
+export async function createInpaintSession(modelBytes, {
+  prefer = defaultInferencePreference(), warmUp = true, memoBytes = null
+} = {}, { loadRuntime = loadOrt, backends = inpaintBackends } = {}) {
+  const ort = await loadRuntime();
+  const available = backends();
+  const attempts = defaultInferencePreference() !== 'wasm' && prefer === 'webgpu' && available.webgpu ? [['webgpu', 'wasm'], ['wasm']] : [['wasm']];
+  const capBytes = Number.isFinite(memoBytes) && memoBytes >= 0 ? memoBytes
+    : inWorkerRealm() ? TILE_MEMO_BYTES : MAIN_REALM_TILE_MEMO_BYTES;
   let lastError = null;
   for (const executionProviders of attempts) {
     let session = null;
     try {
       session = await ort.InferenceSession.create(modelBytes, { executionProviders, graphOptimizationLevel: 'all' });
-      const infer = runnerFor(ort, session);
+      const memo = createTileMemo({ capBytes });
+      const infer = runnerFor(ort, session, { memo });
       let pending = Promise.resolve();
       const run = (...args) => {
         const task = pending.then(() => infer(...args));
         pending = task.catch(() => {});
         return task;
       };
-      const release = async () => { await pending; await session.release(); };
+      const release = async () => { await pending; memo.clear(); await session.release(); };
       if (warmUp) {
         const mask = new Float32Array(TILE * TILE);
         mask[(TILE / 2) * TILE + TILE / 2] = 1;
-        await run(new Float32Array(3 * TILE * TILE).fill(0.5), mask, TILE);
+        await run(new Float32Array(3 * TILE * TILE).fill(0.5), mask, TILE, { insert: false });
       }
-      return { session, release, provider: executionProviders[0], run, inputNames: session.inputNames, outputNames: session.outputNames };
+      // ORT's WASM threads in this realm (#264): more than one only when the
+      // realm is cross-origin isolated.
+      const threads = Number(ort.env?.wasm?.numThreads) || 1;
+      return { session, release, provider: executionProviders[0], threads, run, inputNames: session.inputNames, outputNames: session.outputNames,
+        trim: (bytes) => memo.trim(bytes), memoStats: () => memo.stats() };
     } catch (error) {
       lastError = error;
       if (session) { try { await session.release?.(); } catch {} }

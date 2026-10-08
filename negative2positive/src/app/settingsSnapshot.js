@@ -64,6 +64,8 @@ export function deepCopySanitizedSettings(safe, { autoFrameMeta = safe.autoFrame
     expiredCrossover: safe.expiredCrossover,
     expiredBrightness: safe.expiredBrightness,
     expiredContrast: safe.expiredContrast,
+    expiredBrightnessUserOverride: Boolean(safe.expiredBrightnessUserOverride),
+    expiredContrastUserOverride: Boolean(safe.expiredContrastUserOverride),
     expiredUnevenFog: safe.expiredUnevenFog,
     expiredLocalContrast: safe.expiredLocalContrast,
     expiredAnalysis: safe.expiredAnalysis ? structuredClone(safe.expiredAnalysis) : null,

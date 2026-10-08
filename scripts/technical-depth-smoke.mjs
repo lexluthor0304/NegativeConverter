@@ -135,13 +135,20 @@ async function runAiRepairScenario({ send, evaluate, waitFor, wait, fail, instal
   const input = await send('DOM.querySelector', { nodeId: doc.result.root.nodeId, selector: '#fileInput' });
   await send('DOM.setFileInputFiles', { files: [fixture], nodeId: input.result.nodeId });
   await waitFor('sample converted', `${ready} && document.getElementById('studioFilename').textContent === 'negative-sample.jpg'`, 150_000);
-  await waitFor('model automatically loads after photo import', `/Model ready/.test(document.getElementById('dustAiStatus').textContent)`, 180_000);
+  // MI-GAN loads on intent (#236): importing a photo with dust removal off
+  // must leave it unloaded; opening the Repair tab loads it.
+  await wait(2000);
+  const afterImport = await evaluate(`document.getElementById('dustAiStatus').textContent`);
+  if (!/No model loaded/.test(afterImport)) fail('A photo import must not load the repair model: ' + afterImport);
+  await evaluate(`document.getElementById('studioTab-repair').click()`);
+  await waitFor('model loads when the Repair tab opens', `/Model ready/.test(document.getElementById('dustAiStatus').textContent)`, 180_000);
   await wait(600);
-  await evaluate(`document.getElementById('studioTab-repair').click(); document.getElementById('dustRemovalEnabled').click();`);
+  await evaluate(`document.getElementById('dustRemovalEnabled').click();`);
   await waitFor('dust detected with TELEA', `/Detected \\d+ dust/.test(document.getElementById('dustStatus').textContent)`, 60_000);
   const idle = await evaluate(`document.getElementById('dustAiStatus').textContent`);
   console.log('technical ai repair idle:', idle);
-  if (!/Model ready/.test(idle) || /last run/.test(idle)) fail('Model should preload without repairing when AI dust is off: ' + idle);
+  if (!/Model ready/.test(idle) || /last run/.test(idle)) fail('The Repair tab should load the model without repairing when AI dust is off: ' + idle);
+  if (await evaluate(`window.__aiToasts.some((t) => /AI repair model loaded/.test(t))`)) fail('An implicit model load must not toast');
 
   // Invalid local bytes exercise real runtime failure without depending on a 404.
   await evaluate(`(() => {
@@ -184,12 +191,14 @@ async function runAiRepairScenario({ send, evaluate, waitFor, wait, fail, instal
     window.__aiBrushRuns = 0;
     new MutationObserver(() => { window.__aiBrushRuns++; }).observe(document.getElementById('dustAiStatus'), { childList: true });
     if (!document.getElementById('dustShowMask').checked) document.getElementById('dustShowMask').click();
-    const canvas = document.getElementById('canvas');
+    // A shown mask keeps the GL display (#253): paint on the canvas on screen,
+    // with pointer events, which the dust brush takes since #254.
+    const canvas = document.getElementById(document.getElementById('glCanvas').style.display === 'block' ? 'glCanvas' : 'canvas');
     const rect = canvas.getBoundingClientRect();
-    const options = { bubbles: true, clientX: rect.x + rect.width / 2,
-      clientY: rect.y + rect.height / 2, button: 0, altKey: true };
-    canvas.dispatchEvent(new MouseEvent('mousedown', options));
-    document.dispatchEvent(new MouseEvent('mouseup', options));
+    const options = { bubbles: true, cancelable: true, pointerId: 9, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 1,
+      clientX: rect.x + rect.width / 2, clientY: rect.y + rect.height / 2, altKey: true };
+    canvas.dispatchEvent(new PointerEvent('pointerdown', options));
+    canvas.dispatchEvent(new PointerEvent('pointerup', { ...options, buttons: 0 }));
   })()`);
   await waitFor('MI-GAN replaces brush preview', `window.__aiBrushRuns > 0 && /last run/.test(document.getElementById('dustAiStatus').textContent)`, 120_000);
   await evaluate(`document.getElementById('dustShowMask').click()`);
@@ -233,6 +242,15 @@ async function runAiRepairScenario({ send, evaluate, waitFor, wait, fail, instal
       const { imageData: result } = await ai.inpaintWithModel(source, mask, session.run, { feather: 0 });
       const ms = Math.round(performance.now() - started);
       clearInterval(heartbeatTimer);
+      // The worker's tile memo (#246): the same tile again is a hit with the
+      // same pixels; a lookup-only run (batch lanes) stores nothing.
+      const again = await ai.inpaintWithModel(source, mask, session.run, { feather: 0 });
+      const memo = await session.trim(Infinity);
+      const memoSame = again.imageData.data.every((value, i) => value === result.data[i])
+        && again.imageData.__image16.data.every((value, i) => value === result.__image16.data[i]);
+      const laneMask = new Uint8Array(width * width); laneMask.fill(255, 3 * width + 3, 3 * width + 9);
+      await ai.inpaintWithModel(source, laneMask, session.run, { feather: 0, memoInsert: false });
+      const afterLane = await session.trim(Infinity);
       let changed = 0; let outsideChanges = 0;
       for (let i = 0; i < mask.length; i++) for (let c = 0; c < 3; c++) {
         if (mask[i]) changed += result.data[i * 4 + c] !== source.data[i * 4 + c] ? 1 : 0;
@@ -247,10 +265,12 @@ async function runAiRepairScenario({ send, evaluate, waitFor, wait, fail, instal
           && result.__image16.data.every((value, i) => value === baseline.imageData.__image16.data[i]);
       } finally { await direct.release(); }
       return { provider: session.provider, ms, changed, outsideChanges, equalsDirect,
-        heartbeatTicks, maxHeartbeatGapMs: Math.round(maxHeartbeatGapMs) };
+        heartbeatTicks, maxHeartbeatGapMs: Math.round(maxHeartbeatGapMs),
+        memoHits: memo.hits, memoEntries: memo.entries, memoSame, laneEntries: afterLane.entries };
     } finally { clearInterval(heartbeatTimer); await session.release(); }
   })()`);
   if (cpu.provider !== 'wasm' || !cpu.changed || cpu.outsideChanges || !cpu.equalsDirect || (cpu.ms > 50 && !cpu.heartbeatTicks)) fail('MI-GAN CPU worker/compositing regression: ' + JSON.stringify(cpu));
+  if (cpu.memoHits < 1 || cpu.memoEntries !== 1 || !cpu.memoSame || cpu.laneEntries !== 1) fail('MI-GAN tile memo regression: ' + JSON.stringify(cpu));
   console.log('ok: real MI-GAN CPU worker matches direct pixels and keeps UI responsive:', JSON.stringify(cpu));
 
   await runManualBrushSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port, root });
@@ -283,6 +303,25 @@ async function runManualBrushSmoke({ send, evaluate, waitFor, wait, fail, instal
     return { width: png.width, height: png.height, data: new Uint8Array(UPNG.toRGBA8(png)[0]) };
   };
   const before = await exportPixels();
+  // A settled repair is exported as it is on screen (#246): no MI-GAN tile
+  // runs between the export click and the download.
+  const exportWithoutRepair = async (label) => {
+    await evaluate(`(() => {
+      const seen = window.__exportInference = { tiles: 0, texts: [] };
+      seen.observer = new MutationObserver(records => {
+        for (const record of records) for (const node of record.addedNodes) {
+          if (/AI repair: tile/.test(node.textContent)) { seen.tiles++; seen.texts.push(node.textContent); }
+        }
+      });
+      for (const id of ['dustAiStatus', 'dustStatus']) seen.observer.observe(document.getElementById(id), { childList: true });
+    })()`);
+    const pixels = await exportPixels();
+    const seen = await evaluate(`(() => { const seen = window.__exportInference; seen.observer.disconnect();
+      delete window.__exportInference; return { tiles: seen.tiles, texts: seen.texts.slice(0, 5) }; })()`);
+    if (seen.tiles) fail(`${label}: export re-ran MI-GAN on a settled repair: ` + JSON.stringify(seen));
+    console.log(`ok: ${label} exported without inference`);
+    return pixels;
+  };
   await evaluate(`document.getElementById('zoomInBtn').click(); document.getElementById('zoomInBtn').click(); document.getElementById('zoomInBtn').click()`);
   await wait(500);
   await evaluate(`document.getElementById('aiBrushEnabled').click()`);
@@ -339,10 +378,12 @@ async function runManualBrushSmoke({ send, evaluate, waitFor, wait, fail, instal
     probe.observer.observe(status, { childList: true, subtree: true, characterData: true });
     probe.arm('redo');
   })()`);
-  const brushDiagnostics = `(() => {
+  // #254: the stroke is drawn on the view's feedback overlay at the next frame.
+  const brushDiagnostics = `(async () => {
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     const surface = [...document.querySelectorAll('#canvas, #glCanvas')].find(el => getComputedStyle(el).display !== 'none');
     const points = [{ x: ${location.x}, y: ${location.y + 55} }, { x: ${location.x + 30}, y: ${location.y + 55} }];
-    const overlay = document.getElementById('aiBrushOverlay');
+    const overlay = document.getElementById('brushFeedback');
     let alpha = 0;
     if (overlay.width && overlay.height) {
       const pixels = overlay.getContext('2d').getImageData(0, 0, overlay.width, overlay.height).data;
@@ -373,7 +414,7 @@ async function runManualBrushSmoke({ send, evaluate, waitFor, wait, fail, instal
   try {
     await evaluate(`document.getElementById('redoBtn').click()`);
     await awaitBrushCycle('redo background repair completed before export');
-    const redone = await exportPixels();
+    const redone = await exportWithoutRepair('redo repair');
     if (!redone.data.some((v, i) => v !== before.data[i])) fail('Redo lost manual repair');
     await awaitBrushCycle('manual brush ready after redo export');
     await send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 2 });
@@ -385,17 +426,24 @@ async function runManualBrushSmoke({ send, evaluate, waitFor, wait, fail, instal
       fail('Touch brush target is not ready at its original coordinates: ' + JSON.stringify(beforeTouch));
     }
     const touchTransform = beforeTouch.transform;
-    await evaluate(`window.__manualBrushUi.arm('touch')`);
+    await evaluate(`window.__manualBrushUi.arm('touch'); window.__ncBrush.resetCounters()`);
     await send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: location.x, y: location.y + 55 }] });
     const touchStart = await evaluate(brushDiagnostics);
     if (!touchStart.alpha) fail('Touch start was not admitted by the brush: ' + JSON.stringify(touchStart));
     await send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: location.x + 30, y: location.y + 55 }] });
     const touchMove = await evaluate(brushDiagnostics);
     if (touchMove.alpha <= touchStart.alpha) fail('Touch move did not extend the admitted brush stroke: ' + JSON.stringify({ touchStart, touchMove }));
-    console.log('manual brush touch admitted:', JSON.stringify({ startAlpha: touchStart.alpha, moveAlpha: touchMove.alpha }));
+    // #254: the stroke is drawn on the feedback overlay only; #canvas takes no
+    // put or draw between pointerdown and pointerup, and the overlay is at most
+    // the view's size at device resolution.
+    const aiStroke = await evaluate(`window.__ncBrush.state()`);
+    if (aiStroke.canvasWrites.put || aiStroke.canvasWrites.draw) fail('the AI brush wrote into #canvas while painting: ' + JSON.stringify(aiStroke.canvasWrites));
+    const aiView = await evaluate(`(() => { const c = document.getElementById('canvasContainer'); const d = window.devicePixelRatio || 1; return Math.ceil(c.clientWidth * d) * Math.ceil(c.clientHeight * d); })()`);
+    if (aiStroke.feedback.width * aiStroke.feedback.height > aiView) fail('the AI brush overlay is larger than the view: ' + JSON.stringify(aiStroke.feedback));
+    console.log('manual brush touch admitted:', JSON.stringify({ startAlpha: touchStart.alpha, moveAlpha: touchMove.alpha, writes: aiStroke.canvasWrites, overlay: [aiStroke.feedback.width, aiStroke.feedback.height] }));
     await send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
     await awaitBrushCycle('touch background repair completed before export');
-    const touched = await exportPixels();
+    const touched = await exportWithoutRepair('touch repair');
     if (!touched.data.some((v, i) => v !== redone.data[i])) fail('Touch brush did not repair the photo');
     const afterTouchTransform = await evaluate(`document.getElementById('canvasTransformWrapper').style.transform`);
     if (afterTouchTransform !== touchTransform) fail('Touch brush panned the photo: ' + JSON.stringify({ before: touchTransform, after: afterTouchTransform }));

@@ -45,11 +45,28 @@ the roll metadata, frames in a grid with the frame number under each, and
 optionally the sprocket border with the frame number on the rebate. Layouts:
 35mm 6 × 6, half-frame 8 × 9, 120 in 6×6 (4 × 5), 6×7 (4 × 4) and 6×9
 (3 × 4) grids, panoramic 2 × 6; more frames continue on further pages.
-Frames go through the batch conversion path, are downscaled to twice the
-cell size and drawn with a neutral sans; the sheet is a PNG, or a TIFF when
-that is the export format, with the roll's XMP attached. `contactSheet.js`
-holds the layout maths (tested) and draws through any 2D context. A sheet
-renders in about half a second once the frames are converted.
+Each frame's geometry and lens correction run exactly as for an export;
+the frame is then reduced to twice the cell size and converted and adjusted
+at that size (#247), on one conversion worker for the whole sheet, and drawn
+with a neutral sans; the sheet is a PNG, or a TIFF when that is the export
+format, with the roll's XMP attached. A frame whose full-resolution base is
+already decoded (a cached photo session, or the open photo) is not decoded
+again, and the sheet never writes a frame's recipe. `contactSheet.js` holds
+the layout maths (tested) and draws through any 2D context. A sheet renders
+in about half a second once the frames are converted.
+
+**Proof-sheet approximation (a flagged quality trade-off).** The conversion
+takes its levels from the full frame's analysis reference whenever an image
+area or analysis area exists. Without either area, it measures levels on the
+decimated cell instead; those levels can differ from a full-resolution render.
+With a reference, every per-pixel stage (conversion, white balance, curves,
+colour, CMY, look) runs unchanged, so without spatial effects a cell equals
+the nearest-decimated full-resolution render (`contactSheetCells.test.mjs`). Spatial effects
+(sharpening, glow, the dodge-and-burn raster, the expired fog surface) and
+the measurements that read the converted frame (the automatic gray point of
+a frame without an image area or with a semantic map, the expired-rescue
+analysis) are evaluated at cell scale, and dust is not removed. Single and
+batch exports are unchanged.
 
 ## Roll project file (#159)
 
@@ -65,6 +82,22 @@ and reported as changed; missing originals are listed. Curve LUTs and
 strokes survive as plain arrays and pass through the same sanitisers as a
 live edit. A version bump gets a step in `MIGRATIONS` and a case in
 `rollProject.test.mjs` (the unversioned prototype layout migrates today).
+
+A frame's light-table tile is saved with it (#247) when the tile is final
+and current for the saved recipe: `thumbnail` (the 144 px JPEG data URL,
+3-7 KB) and `thumbnailContext` (`renderVersion`, the global dust settings,
+the flat field the frame used, and whether the automatic gray point was
+applied). Frames with dust removal on or repair strokes, whose key holds a
+per-session AI-repair counter, are left out, as is the open photo in the
+recovery copy. Reopening restores the tiles of frames matched by content,
+never of changed ones, when the context still holds: the same
+`THUMB_RENDER_VERSION` (bumped whenever conversion, adjustment or tile
+rendering changes), dust settings and flat-field availability, and no
+automatic gray point (a reopened recipe is restored as saved, so such tiles
+are rendered again). The light table is then complete without decoding the
+roll again. Both fields are optional: older files restore no tiles and older
+readers ignore them, so the version stays 1; only JPEG data URLs of a tile's
+size are accepted. A 116-frame roll grows by less than 1 MB.
 
 A recovery copy of the roll is written to IndexedDB a few seconds after
 every change; on the next launch a toast points at **Restore last roll** in

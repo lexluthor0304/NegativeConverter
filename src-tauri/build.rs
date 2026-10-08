@@ -1,4 +1,9 @@
+// The native RAW decoder (#264 part C): vendored LibRaw + the C shim.
+#[path = "native/build_libraw.rs"]
+mod build_libraw;
+
 fn main() {
+    build_libraw::build();
     // Capability files are validated against the permissions of every plugin
     // that is compiled in, so the updater capability may only be picked up
     // when the `updater` cargo feature is on. The Mac App Store build

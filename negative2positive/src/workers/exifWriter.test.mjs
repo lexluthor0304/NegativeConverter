@@ -4,6 +4,7 @@
 import assert from 'node:assert/strict';
 import { buildExifPayload, jpegApp1Exif, jpegApp1Xmp, jpegInsertOffset } from './exifWriter.js';
 import { parseTiff, TIFF_TAGS, EXIF_TAGS } from './tiffWriter.js';
+import * as pako from 'pako';
 import { encodeTiffBlob, encodePng16Blob } from './imageEncoders.js';
 import { attachMetadataToBlob, listPngChunks, listJpegSegments } from '../app/exportMetadata.js';
 import { buildExportMetadata, sanitizeRollMetadata, sanitizeFrameMetadata, frameNumberFor, buildXmpPacket } from '../app/analogMetadata.js';
@@ -74,11 +75,11 @@ const metadata = buildExportMetadata({ roll, frame, index: 4 });
 // PNG: eXIf and iTXt chunks are spliced in after IHDR; the image data is untouched.
 {
   const pixels = new Uint16Array(2 * 2 * 4).fill(30000);
-  const deflate = (raw) => raw; // structure test only: an "uncompressed" IDAT is enough
-  const png = encodePng16Blob(pixels, 2, 2, deflate);
+  const png = encodePng16Blob(pixels, 2, 2, pako);
   const withMeta = await attachMetadataToBlob(png, 'png', metadata);
   const chunks = listPngChunks(new Uint8Array(await withMeta.arrayBuffer()));
-  assert.deepEqual(chunks.map((c) => c.type), ['IHDR', 'iCCP', 'eXIf', 'iTXt', 'IDAT', 'IEND']);
+  // One IDAT per row band, then the zlib trailer in an IDAT of its own.
+  assert.deepEqual(chunks.map((c) => c.type), ['IHDR', 'iCCP', 'eXIf', 'iTXt', 'IDAT', 'IDAT', 'IEND']);
   const exif = parseTiff(chunks[2].data);
   assert.deepEqual(exif.exif[EXIF_TAGS.ISOSpeedRatings].values, [400]);
   const itxt = new TextDecoder().decode(chunks[3].data);

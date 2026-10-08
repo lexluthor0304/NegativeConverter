@@ -98,14 +98,15 @@ export function applyAdjustmentsToPixels16(input16, output16, pixelCount, params
     rMult, gMult, bMult, contrastFactor, doContrast, highlightsFactor, shadowsFactor, doHighlights, doShadows,
     tempRMult, tempBMult, tintGMult, doTempTint, satFactor, vibFactor, doHsl, cmyRShift, cmyGShift, cmyBShift, doCMY,
     curveR, curveG, curveB, doLook, doLookMatrix, lookMatrix, lookOffset, lookR, lookG, lookB,
-    doRescue, rescueR, rescueG, rescueB, doRescueSpatial, rescueSpatial, doRescuePixel, rescueStages, frameWidth, frameHeight
+    doRescue, rescueR, rescueG, rescueB, doRescueSpatial, rescueSpatial, doRescuePixel, rescueStages, frameWidth, frameHeight, frameStartRow
   } = params;
   const lumaScale = 2 / 255;
   const spatialWidth = doRescueSpatial && frameWidth > 0 ? frameWidth : 0;
   const spatialHeight = doRescueSpatial && frameHeight > 0 ? frameHeight : 1;
   const rescuePx = doRescueSpatial || doRescuePixel ? new Float32Array(3) : null;
   let px = 0;
-  let py = 0;
+  // A row band (#256) starts at its frame row.
+  let py = frameStartRow || 0;
 
   for (let i = 0; i < total; i += 4) {
     let r = input16[i] * SCALE_16_TO_8;

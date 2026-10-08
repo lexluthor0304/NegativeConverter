@@ -14,6 +14,37 @@ verified stale claims removed here are accounted for in
 distinguishes completed local changes from pending browser/release validation.
 Remaining performance proposals below are not claims of completed work.
 
+The #229 roll follow-up's regression contracts are documented in
+[auto-frame-regression.md](auto-frame-regression.md),
+[batch-export-pipeline.md](batch-export-pipeline.md) and
+[memory-budget.md](memory-budget.md). The shared page-path roll-plane copy
+target (R1-097) remains in the worker-residency entry below; small-fixture
+checks do not establish desktop peak RSS or the original 60 MP timing targets.
+The supplemental caller regressions also cover remembered full dimensions
+through page/held/shared/reopened tiles, queued dust source downsizing, and
+Current/Selected detection parity across Studio's undo boundary.
+
+The #229/#230 supplemental harness review and its remaining large/native
+measurement limits are documented in [performance-benchmark.md](performance-benchmark.md).
+Caller regressions cover retained WebKit metrics, per-photo metadata, safe
+process attribution, saved full-probe/subset-control comparisons and fixture disk policy.
+The developer Tauri harness now has a native view/XPC association provider,
+isolates its startup cache with an opt-in native feature, and revalidates PID
+identity before cleanup. A separate tiny actual-app caller proof is available;
+its page and guard inputs are synthetic and its app uses the debug cache.
+Initial self-drive waits for bounded attribution and positive renderer/GPU
+footprints; acquired scope loss or sampling failure automatically stops the
+verified native host and launcher. Changed endpoints remain excluded from
+signals, partial metrics survive, and the tiny controlled-revocation proof
+measures real host disappearance separately from callback latency.
+Admission drains earlier in-flight sampling and requires a new guarded sample;
+native identity is checked after asynchronous guards and immediately before
+the grant write against the exact renderer/GPU readings. Late failure retains
+genuine partial observations and denies workload admission.
+Safari's exclusive GPU association
+remains unavailable and is refused before navigation; tiny native attribution
+proof does not establish the unmeasured performance targets.
+
 ## Auto frame detection
 
 - **medium/ux** — Non-sprocket density templates are capped at 0.68 < highConfidence 0.72, so 'high' confidence and the 'Auto-apply high confidence' setting are unreachable for 120 film and most single 135 frames _(verified)_  
@@ -26,22 +57,12 @@ Remaining performance proposals below are not claims of completed work.
   Only getAutoFrameAspectTargets is tested. `inferAutoFrameConfidenceLevel` (:1311, the 0.72/0.55 classifier that round 1 found duplicated three times), `buildDensityAnalysis` (:276) and `scoreDensityRect` (:518) contain no OpenCV references between lines 276-560 and run in plain Node, yet have no tests. main.js:116-130 re-declares DEFAULT_FORMAT_RATIOS/DEFAULT_120_FORMATS/DEFAULT_SCORE_WEIGHTS verb…  
   _Suggested fix:_ Export DEFAULT_FORMAT_RATIOS/DEFAULT_120_FORMATS/DEFAULT_SCORE_WEIGHTS from the analyzer, import them in main.js and the test. Add tests: `inferAutoFrameConfidenceLevel` at 0.72/0.719/0.55/0.549 and with custom thresholds; `buildDensityAnalysis` on a synthetic dark frame inside a…
 
-- **low/research** — Profile the remaining full auto-frame detector after exact preprocessing reuse
-  `negative2positive/src/app/autoFrameAnalyzer.js` / `negative2positive/src/app/imageWindowLines.js`
-  Issue #216 now reuses identical per-detection zero-angle edge preprocessing and density candidates, and skips later line evidence once a candidate already fails. Its isolated repeated preprocessing fixture fell from 99.05 ms to 2.40 ms with equal candidate order. This does not eliminate the detector's necessary per-channel Hough searches or distinct rotated passes; the earlier 3–4 s fallback estimate is historical, not a measurement of current code.
-  _Next step:_ The five available RAW fixtures passed the regression checks recorded in `docs/performance-audit-2026-09-22.md`. Profile remaining stages before choosing additional lossless work. Coarser Hough/search thresholds previously changed detections and are not an accepted shortcut.
-
 ## Dust removal
 
 - **medium/bug** — Thin real content (power lines, antennas, masts, fence wire, thin branches against sky) is classified as a 'scratch' and inpainted: any line up to 60 % of the short side and <= max(3, maxSize/3) px thick is kept with no area cap  
   `negative2positive/src/silvercore/engine/DustRemoval.js:197`  
   classifyDustBlob keeps every blob whose long side exceeds maxSize as long as area/longSide <= max(3, maxSize/3) and longSide <= 0.6*min(W,H); the DUST_MAX_AREA_RATIO guard is bypassed on that branch. On a 6000x4000 scan (maxSize 64 -> thickness limit 21 px) a probe shows: 2000x8 px line keep=true, 2300x20 px line keep=true (46,000 px = 0.19 % of the frame), 1500x21 keep=true; only a 2401 px line i…  
   _Suggested fix:_ Make scratch removal opt-in (separate 'remove scratches' toggle, default off) and, when on, require evidence specific to film scratches: response in BOTH top-hat and black-hat along the blob (the comment already notes real scratches do both, a wire is dark-only), a much smaller t…
-
-- **medium/ux** — Dust brush is wired to mouse events only, so painting a dust mask is impossible on touch devices  
-  `negative2positive/src/app/main.js:5419`  
-  The brush uses `mousedown` on the canvases and `mousemove`/`mouseup` on document. Touch input only synthesises a single `mousedown`/`mouseup` pair at tap time (and Chrome emits at most one `mousemove`), so a finger drag never produces a stroke; additionally, without `touch-action:none` the drag scrolls/rubber-bands instead. Brush size adjustment is Ctrl+wheel only (5425-5437). Scenario: iPad user …  
-  _Suggested fix:_ Convert the brush to pointer events (`pointerdown` with `setPointerCapture`, `pointermove`, `pointerup`/`pointercancel`) and set `touch-action: none` on the canvas while `state.dustRemoval.showMask` is true; the brush-size slider already exists (`#dustBrushSize`) so no extra UI i…
 
 - **low/bug** — RAW error classification shows the 'not supported in this Safari version' message on any browser for any error containing 'worker', while the real module-worker failure path is unreachable  
   `negative2positive/src/app/main.js:5705`  
@@ -69,11 +90,6 @@ Remaining performance proposals below are not claims of completed work.
   `negative2positive/src/app/main.js:6716`  
   Typing into a slider's value box applies each keystroke via the `input` handler (state mutated, no undo). On blur/Enter commitFromInput() calls pushUndo(stateKey) *after* the mutation, so the snapshot equals the current state and undo is a no-op. It also pushes unconditionally, so merely focusing and leaving a value box adds a junk undo entry and clears the redo stack.  
   _Suggested fix:_ Capture `preEditSnapshot = captureSnapshot(stateKey)` on `focus` of valueInput, and in commitFromInput push it only when the committed value differs from the snapshot's value; reset it to null afterwards (same pattern as preDragSnapshot).
-
-- **medium/bug** — applyAutoFrameToSelected discards the current file's unsaved adjustments  
-  `negative2positive/src/app/main.js:7451`  
-  The batch builds each item's settings from item.settings (last persisted) or createDefaultSettings(), never from live state, sets item.isDirty = false, and finally calls restoreSettings(currentItem.settings). For the current file that overwrites every live adjustment with the stale persisted copy — or, if the file was never saved, with factory defaults (film type, film base, all sliders). switchTo…  
-  _Suggested fix:_ Call persistCurrentFileSettings({ silent: true }) before the loop, or for `item === getCurrentQueueItem()` seed `existing` from extractCurrentSettings() instead of item.settings.
 
 - **medium/bug** — Auto Frame Selected stores createDefaultSettings as the file's saved settings, so auto-framed unviewed files skip the automatic gray point and keep a film base sampled before the crop  
   `negative2positive/src/app/main.js:7451`  
@@ -105,12 +121,50 @@ Remaining performance proposals below are not claims of completed work.
   clearFileListBtn empties the queue and sets currentFileIndex = 0 but keeps the loaded image on screen. openAddFilesPicker then appends files and only loads one `if (!state.originalImageData ...)` — which is false — so nothing is loaded. Now getCurrentQueueItem() returns the first newly added (never loaded) file: the 'Current File' label shows its name, markCurrentFileDirty flags it on every slider…  
   _Suggested fix:_ Either keep the displayed image as a queue entry when clearing (clear everything except the current item), or set `state.currentFileIndex = -1` after clearing and make openAddFilesPicker load the first added file when the index is invalid; guard persistCurrentFileSettings/markCur…
 
-- **medium/bug** — Resizing/rotating the viewport at Step 3 clears the WebGL preview to black until the next slider move  
-  `negative2positive/src/app/main.js:10772`  
-  The window resize handler calls `adjustCanvasDisplay(canvas.width, canvas.height)`, which (line ~5453) calls `resizeWebGLCanvas()` when WebGL is active. `resizeWebGLCanvas` assigns `glCanvas.width/height` when the CSS size changed (4130-4131); assigning a canvas's width/height attribute discards the drawing buffer, and the context was created with `preserveDrawingBuffer: false` (3861). Nothing re-…  
-  _Suggested fix:_ In the resize handler, after `adjustCanvasDisplay(...)`, call `if (isWebGLActive()) schedulePreviewUpdate();` (or have `resizeWebGLCanvas` set a `webglState.needsRedraw` flag consumed by a rAF that calls `renderWebGL()`). Also listen to `window.visualViewport` `resize` for iOS to…
+- **medium/bug** — "Find blank frame in selection" never runs: detectBlankFrameInSelection reads `items` and `automatic`, which it does not declare, and throws a ReferenceError on every click  
+  `negative2positive/src/app/main.js detectBlankFrameInSelection`  
+  Its first lines (`const selectedItems = items || state.fileQueue.filter(...)`, `selectedItems.length < (automatic ? 3 : 2)`) come from runRollAnalysis's signature, but the function takes no parameters, so the promise the click handler drops rejects before anything is selected or decoded; the button shows no result and no message. Present at 1703835. Found while auditing the persist-then-read flows of #255 (review R2-029).  
+  _Suggested fix:_ `const selectedItems = state.fileQueue.filter(item => item.selected); if (selectedItems.length < 2) return;` and a test that runs it with two selected frames. Its full-decode barrier is in place: flatFieldDefaultsImage waits for a two-stage import's full decode before it reads the open frame (#255, review R2-034).
 
+- **medium/bug** — An export right after Analyze roll can carry a full-resolution render armed by an edit made just before the click: it lands after the roll's conversion and is exported as the exact frame  
+  `negative2positive/src/app/main.js runRollAnalysis (the commit's restoreSettings + processNegative), scheduleFullResolutionRender`  
+  Likely path (the symptom and its timing are confirmed, the render was not traced): an edit arms the idle full-resolution render (FULL_RESOLUTION_IDLE_DELAY_MS, 2.5 s, below 16 MP); the roll analysis commits the open photo with restoreSettings and processNegative, which keep the conversion source, coreReprocessToken and generation, so a render that started before the commit with the pre-roll settings still passes every currency check when it lands. Seen in the two-stage smoke's parity loop on _DSC3111.NEF (one decode, exposure edit, Analyze roll clicked at once): the single exports (PNG 8 7a14f483…) differ from the same recipe's Export All render (ac134115…, also what a two-stage import exports, whose swap drops such renders); with 8 s between the edit and the click they are equal. The same class as #245's crop-area hit (review R1-070, fixed there).  
+  _Suggested fix:_ Supersede pending and in-flight full-resolution renders when the roll analysis (and any other restoreSettings + processNegative commit) installs new settings, as applyCropDetectionOutcome does: `coreReprocessToken += 1`, abortSupersededFullResolutionConversion(), clearFullResolutionRenderState(), keeping the provisional frame's flags.
 
+- **low/bug** — An automatic roll analysis that finishes during Export Current restores and reconverts the open photo while the export runs  
+  `negative2positive/src/app/main.js studioBackgroundReady, runRollAnalysis (the automatic commit)`  
+  studioBackgroundReady() checks the desktop Export All lock but not `singleExportActive`, so the automatic commit's wait (`while (automatic && (!studioBackgroundReady() || state.cropping))`) and its `updateCurrent` test both pass while a single export is between its freeze (`manualEditRevision++`) and its reads. The commit then pushes an undo step, restores the roll recipe onto the open photo and calls processNegative: depending on when that conversion lands, the file carries the old or the new recipe, and the view after the export no longer shows what was exported. The background lanes already stay out (foregroundBusyForBackground). Present at 1703835; found by static analysis in the #229 final review, not reproduced.  
+  _Suggested fix:_ Make the automatic commit wait while `singleExportActive`, in its wait loop and again right before it restores the open photo. Waiting matters at the second point: skipping the open photo there (as `updateCurrent` does for a parked one) would leave its pre-roll state live while its saved recipe is the roll's, and the next edit or forced persist would write the pre-roll state back. Add unit cases for an export that is running when the commit is reached and for one that starts during it.
+
+- **low/bug** — scheduleFullResolutionRender hands a caller the in-flight exact render even when that render's source has been replaced; the replaced render is discarded and nothing is armed for the new source  
+  `negative2positive/src/app/main.js scheduleFullResolutionRender, startFullResolutionRender (finally)`  
+  `if (state.fullResolutionPromise) return state.fullResolutionPromise;` ignores which source the promise renders. When processNegative installs a new conversion source while an exact render of the old one runs, its `initial-preview` request gets that promise; the render is later dropped for its replaced source, and the stale retry only re-arms for an unchanged source, so `fullResolutionPending` stays true with no timer or promise until the next input. The display keeps its preview; exports render on demand. A geometry build no longer reaches this through the stale retry (the retry is skipped while one runs); other installs of a new source during an exact render still can. Found by the #229 final review.  
+  _Suggested fix:_ Have the render's `finally` arm a render for the current source when the source changed while it ran and nothing else is armed, or have processNegative cancel an in-flight exact render of the source it replaces.
+
+- **low/perf** — The Studio page stays eligible for the back-forward cache while it holds its photos, so a navigation to another page of the site keeps gigabytes of planes alive  
+  `negative2positive/src/app/main.js (no pagehide handling of the editor's planes)`  
+  The complete smoke run navigates between pages of the app; Chrome kept every page it left in the back-forward cache, and the browser's footprint grew from 2.5 GB to 5.5 GB in ten minutes (about 1 GB with the cache disabled), enough for a 16 GB CI runner's renderer to crash. A user who opens guide.html or about.html from Studio leaves the same kind of frozen page behind until the browser evicts it. Found while fixing the #229 CI run; the smoke now disables the cache.  
+  _Suggested fix:_ On `pagehide` with `persisted`, release the open photo's derived planes and caches (as hidden-window parking does) and rebuild them on `pageshow`, or keep the page out of the cache while a photo is open.
+
+- **low/perf** — The pending-frame white balance of an Export All DNG sends its 16-bit colour-analysis sample to the conversion worker as 8-bit RGBA; the worker rejects it and the main thread converts it  
+  `negative2positive/src/app/main.js processFileWithSettings (options.stage === 'source', pendingFrame)`  
+  sampleAnalysisArea returns `{ width, height, data: Uint16Array }` without `__image16`, so conversionWorkerClient posts its bytes as `rgba` and the worker's `new ImageData(...)` throws "The input data length is not equal to (4 * width * height)". convertFrameOffMainThread logs "Conversion failed in worker, retrying on main thread" and converts the sample on the page, with the same result, so exports are unaffected; the worker round trip and the copy are wasted on every such export. Found while tracing the #229 two-stage crop-leave failure.  
+  _Suggested fix:_ Pass the sample as a 16-bit-only image (`{ width, height, data, __image16: sample }`), which the worker already accepts, or convert it on the page directly; assert in a unit case that no `rgba` is posted for it.
+
+- **low/bug** — Opt-in hidden-job parking can drop a pending crop-area detection or expired-film spatial run  
+  `negative2positive/src/app/main.js parkOpenPhotoForHiddenJob`  
+  switchToFile settles a pending crop-area detection before it persists the photo it leaves. The park admission checks `fullBaseHistoryPending` but neither hasPendingCropDetection() nor `expiredSpatialRun`, so a hit still pending when the hidden grace period ends is lost with the planes. Parking is off by default (`nc_hidden_park_v1`). Present since b6d85953; #229 final review (N4), static analysis.  
+  _Suggested fix:_ Refuse to park while either is pending, at the first admission and again after the archive write, as for `fullBaseHistoryPending`.
+
+- **low/bug** — Export Current can start while a parked photo is being restored  
+  `negative2positive/src/app/main.js exportSingleBtn, unparkOpenPhoto`  
+  The button is gated only by the export locks, and the export menu closes only on a document click, so a menu left open across hide, park and show can start Export Current during unparkOpenPhoto. With archived brush history it fails closed ("No image available for export"); a cold rebuild relies on the activation barriers an export clicked during an ordinary photo switch uses. Same lock-only gating at 1703835; parking is opt-in. #229 final review (N3), static analysis.  
+  _Suggested fix:_ Before the export's freeze, refuse while `parkingPhoto` and `await unparkOpenPhoto()` when `parkedPhoto` is set.
+
+- **low/behaviour** — Opt-in parking stays off for a whole desktop Export All, and a park refused because of an export is not retried  
+  `negative2positive/src/app/main.js parkOpenPhotoForHiddenJob`  
+  The admission refuses under isDesktopBatchExportLocked() as well as `singleExportActive`. Only the single export was shown to need it (it can wait for the repair model with the window hidden); desktop folder batches clone each recipe up front and decode every frame from its file, so they never read the derived planes parking drops. Yet that batch is the main hidden job on macOS (R1-136's own scenario), while a ZIP export, which takes no desktop lock, still parks. A refused park also waits for the next show: the hidden-job gate calls `onChange` only when `paused` flips. #229 final review (N1, N2).  
+  _Suggested fix:_ Before parking becomes the default, decide whether to keep the batch term (drop it and add a case that a locked desktop batch still parks), and call onHiddenJobPaused() from the single export's `finally` when the gate is paused and the window is hidden.
 
 - **medium/quality** — main.js refactor map: 10,779 lines decompose into ~20 cohesive blocks; six can be extracted with almost no coupling _(verified)_  
   `negative2positive/src/app/main.js:76`  
@@ -122,10 +176,10 @@ Remaining performance proposals below are not claims of completed work.
   The same ~45 scalar setting keys are listed by hand in: the `state` literal (1858-2044, 92 keys), SNAPSHOT_SCALAR_KEYS for undo (2259-2271), sanitizeSettings (3251-3358; 54 `source.x` reads with per-key clamps), createDefaultSettings for batch items (9471-9531) and restoreSettings (10199-10326, one `state.x = safe.x` line per key), plus a sixth partial list in undoLabelMap (2190-2251, in three lan…  
   _Suggested fix:_ Introduce `app/settingsSchema.js` exporting a table `{ key: { default, min, max, kind: 'number'|'enum'|'bool', undoLabelKey, snapshot: true } }`. Derive `createDefaultSettings`, the scalar part of `sanitizeSettings`, SNAPSHOT_SCALAR_KEYS and the scalar assignments in `restoreSett…
 
-- **medium/quality** — Step-3 adjustment math is maintained three times: GLSL shader in main.js, CPU path in pixelAdjustments.js, and (partially) in ImageProcessor.js _(verified)_  
-  `negative2positive/src/app/main.js:3900`  
-  The preview shader (main.js:3900-3947 hue2rgb/rgbToHsl/hslToRgb; 3956-3999 exposure→contrast→highlights/shadows→temp/tint→HSL sat/vibrance→CMY→curves) is a hand transliteration of workers/pixelAdjustments.js (hue2rgb 6-13; per-pixel stages 127-237). ImageProcessor.js carries a third hue2rgb (373-380) and a third RGB↔HSL round-trip (309-364). Verified drift today: the CPU *preview* quality path (pi…  
-  _Suggested fix:_ (1) Export hue2rgb/rgbToHsl/hslToRgb once from a `colorMath.js` and import it in both pixelAdjustments.js and ImageProcessor.js. (2) Move the fragment shader into `render/adjustmentShader.glsl.js` next to a small table of stage constants (TEMP_TINT_GAIN=0.3, LUMA coefficients, co…
+- **low/quality** — Step-3 adjustment math is maintained twice on the CPU: pixelAdjustments.js and (partially) ImageProcessor.js _(updated by #239, #253)_  
+  `negative2positive/src/workers/pixelAdjustments.js:16`  
+  #239 moved the display shaders into `render/previewShader.js`: with WebGL2 one GLSL Step-3 function (shared by applyProgram and step3Program) is the only display implementation, its constants come from the JS stage modules, and the WebGL1 fallback lost the legacy tone uniforms. #253 added the expired-film rescue and the lab-match look to that module (the mode variants of both programs); `expiredRescue.js` and `pixelAdjustments.js` stay their definition, the GLSL takes its constants from them, and an fp32 model (`render/displayModes.test.mjs`), the idle self-test and `display-modes-smoke` hold the copy to them. What remains is the CPU side: pixelAdjustments.js (hue2rgb and the per-pixel Step-3 stages, used by exports and the CPU display) and ImageProcessor.js, which carries another hue2rgb and RGB↔HSL round-trip for the HSL colour model.  
+  _Suggested fix:_ Export hue2rgb/rgbToHsl/hslToRgb once from a `colorMath.js` and import it in both pixelAdjustments.js and ImageProcessor.js (bit-identical, checked against the current functions).
 
 - **medium/ux** — Film-base / gray-point sampling has no touch flow: a tap samples immediately and the loupe is positioned under the finger  
   `negative2positive/src/app/main.js:6497`  
@@ -177,11 +231,6 @@ Remaining performance proposals below are not claims of completed work.
   sanitizeNumeric(value, NaN, ...) returns 0 (not NaN) when both value and fallback are non-finite (3153-3158), so the `if (!Number.isFinite(x) || !Number.isFinite(y)) return;` check at 3173 never triggers. A malformed point in a saved/pasted settings object (e.g. {x:'abc', y:null}) is coerced to {x:0,y:0}; after sort/dedupe it overwrites the y of the genuine x=0 point (3187: `last.y = point.y`), fo…  
   _Suggested fix:_ Check `Number.isFinite(Number(point.x)) && Number.isFinite(Number(point.y))` before calling sanitizeNumeric (or give sanitizeNumeric an explicit 'return NaN on failure' mode).
 
-- **low/bug** — applyProcessedImageToState sizes the sprocket-frame canvas without edge-marking options or the portrait swap used elsewhere _(verified)_  
-  `negative2positive/src/app/main.js:4556`  
-  When sprocket preview is on, applyProcessedImageToState calls getSprocketFrameMetrics(processed.width, processed.height) with no options and no portrait handling, whereas getFullResDisplayReference (5442-5460) passes getSprocketFrameComposeOptions() and swaps width/height for portrait images, and composeSprocketFrame pre-rotates portrait input. Because bandMin depends on whether markings are visib…  
-  _Suggested fix:_ Factor the portrait-aware, options-aware computation out of getFullResDisplayReference into `getSprocketOutputSize(w, h)` and use it in applyProcessedImageToState.
-
 - **low/bug** — handleFilmPresetChange (and the auto-frame click handlers) are fire-and-forget with no rejection handling, and applyFilmPresetSettingsToState mutates state before awaiting the preset chunk  
   `negative2positive/src/app/main.js:6842`  
   applyFilmPresetSettingsToState sets state.coreFilmPreset synchronously (line 445-446) and only then awaits loadFilmPresets() (a dynamic import). handleFilmPresetChange chains .then() with no .catch(), so if the chunk fails to load (offline, stale deploy hash) the promise rejects, the `.then` never runs, the rejection is unhandled, and the select shows the new preset while the image is never refres…  
@@ -192,15 +241,42 @@ Remaining performance proposals below are not claims of completed work.
   The Ctrl/Cmd+Z handler and #undoBtn/#redoBtn have no state.cropping/samplingMode guard, and setCropActionUi disables mirror/auto-frame but not undo/redo. restoreSnapshot (2328-2386) swaps originalImageData/croppedImageData and calls displayNegative() without exiting crop mode, so the canvas shows the restored image while cropOverlay and state.cropDraft (sourceImageData captured at beginCropMode) s…  
   _Suggested fix:_ In performUndo/performRedo (or the callers here) return early when state.cropping || state.samplingMode, and disable #undoBtn/#redoBtn in setCropActionUi(true), re-enabling via updateUndoRedoButtons() on exit.
 
+- **low/bug** — A single JPEG export reads the editor twice: the SDR's adjust request takes the processed plane and recipe at one moment, the gain map takes them again once that request returns; an undo or redo in between (any step, or a #259 dust-stroke undo that rewrites the plane in place) gives the map the other state  
+  `negative2positive/src/app/main.js renderCurrentImageDataForExport`  
+  Each read is whole since the #229 review (R1-049/R1-126: a plane the editor patches in place is copied in one task), so no copy mixes rows of two states, but the SDR frame and the map can still describe different edits, inside a stroke's rect or over the whole frame for a recipe step. Undo is not blocked while an export runs (the overlay covers the buttons, not the shortcut). Not new: at 1703835 the JPEG's 16-bit plane came from a second getCurrentExportImageData after the first had returned.  
+  _Suggested fix:_ Capture the processed plane, `state.dustRemoval.revision` and the adjustment settings once, in the SDR request's task, give the map those settings, and fail the export ("Photo changed while exporting") when the plane or the revision moved before the map's plane is copied; or ignore undo/redo shortcuts while a single export runs.
+
+- **low/bug** — The canvas fallback of a PNG8/JPEG export never releases the frame the export worker hands back; it waits for a major GC  
+  `negative2positive/src/app/main.js imageDataToBlob`  
+  When the worker cannot encode (no `OffscreenCanvas` encode before WebKit 16.4, a non-opaque frame), it hands the transferred frame back and `restore8` wraps the returned buffer in a new ImageData (`onRestore`, imageDataToBlob's local `frame`). The canvas encodes that frame, but the caller's `ownedPlanes` hold the original, now detached one, so `releaseOwnedPlanes` at the end of the export or batch frame frees nothing and the restored frame (240 MB at 60 MP) stays until the next major GC: one per frame in a batch on the macOS 10.15-12 system WebKit. Found while adding the #229 review's canvas-fallback lifecycle case (R1-096, `exportPlaneLifecycle.test.mjs`).  
+  _Suggested fix:_ Release the restored frame in imageDataToBlob once the canvas encode and the gain map are done (it is export-owned and nothing reads it again), or have `onRestore` push it to the caller's `ownedPlanes`; assert the release in that lifecycle case.
+
+- **low/bug** — Save Project and the recovery copy drop the window edits of a photo left inside a two-stage window without a recipe  
+  `negative2positive/src/app/main.js buildCurrentProject`  
+  Such a photo keeps what the user changed in `item.pendingEdits` (with `pendingUserEdited`) until its recipe is computed (switch-back, Export All, roll analysis). buildCurrentProject writes `settings: item.settings || null` and has no field for them, so a project saved or recovered in between opens the photo as a fresh one, without the edits. One decode had persisted that photo's recipe, edits included, when it was left (#255).  
+  _Suggested fix:_ Carry `pendingEdits` and `pendingUserEdited` in the project's file entry and put them back on the queue item when its settings are null, or give the photo the recipe Export All would compute before saving.
+
+- **low/bug** — Analyze roll, Auto Frame Selected and the flat field give a photo left inside a two-stage window a recipe without learned defaults  
+  `negative2positive/src/app/main.js runRollAnalysis, applyAutoFrameToSelected, applyFlatFieldToItems`  
+  For a frame without a recipe they build createDefaultSettings (plus the roll's film type in the first two) with the pending edits on top and never call learnedImportSettings, as for frames never opened. A window-left photo was opened: one decode had persisted its recipe with learned defaults, and switch-back and Export All now apply them, deciding as the window's pass began (#255, review R2-031). The recipe these three write becomes the photo's.  
+  _Suggested fix:_ For an item with `pendingUserEdited`, take `learnedImportSettings(settleImportFilmType(item, settings), item)` as processFileWithSettings does, or compute such a photo's recipe once, as switch-back would, before these passes read it.
+
+- **low/bug** — Until its recipe exists, a photo left inside a two-stage window votes in the roll's film-type decision as an edited frame with its own verdict, not with the type its recipe would carry  
+  `negative2positive/src/app/main.js refreshImportFilmTypeDecision, importFilmTypeLocked`  
+  `item.userEdited` stays set (the automatic roll import must leave the edited photo alone) and liveImportSettings has no recipe to read, so the frame is locked with its own verdict: a noMask frame breaks a B&W segment ('break', not 'bw'), and one left before the settle voted counts as unknown. After one decode its recipe carried the roll's type and it counted as 'bw', so neighbours decided in between can type differently. Its own recipe, once computed, decides as its pass began (#255, review R2-031).  
+  _Suggested fix:_ For a locked frame without a recipe, vote with `pendingUserEdited` (as its own recipe does) or with the type its recipe would get; keep `userEdited` for the import's eligibility.
+
+- **resolved/bug** — Undo/Redo source promotion no longer restores stand-in automatic recipes or crop diagnostics (#229 R2-052)
+  `negative2positive/src/app/main.js rebaseProvisionalHistory, captureSnapshot, processNegative, restoreColdSnapshotPixels`
+  Both stacks overlay each entry's own window edits on the full-import recipe before replaying Apply/Confirm diagnostics. Automatic film base/geometry come from the full import; manual film base and WB remain user edits. Stand-in hit tokens are discarded. Automatic WB's measurement recipe, geometry and intent also promote, preserving whether a crop hit measured before or after a core edit. A detector still pending at the swap retains shared unresolved WB intent: its full-base replacement hit supplies the actual event settings, including when detection finishes before conversion. A miss falls back to the preceding completed event. The swap and cold restoration remeasure that event on the full base and settle before persistence/export. Real Silver conversion regressions cover automatic/manual base and WB, late manual/gray-point/semantic overrides, pending/completed/cancelled-at-swap hits and misses, and complete Confirm/Crop/Exposure Undo/Redo histories with exact 8/16 samples. Browser history parity holds the preview worker through cancellation, replacement and live PNG8/TIFF16 export; live/Undo/Redo diagnostics, WB, recipe fields and decoded samples/bytes must equal one stage.
+  WB provenance now captures the immutable recipe/geometry before awaiting conversion, preserving controls changed while its reply is pending. Matching post-install history entries share the pending event after the detector finishes and rebuild full-source pixels on restoration. Independent tiny negative controls isolate both defects, and actual-browser coverage withholds the exposure-15 conversion reply while creating exposure-0 history; live/Undo/Redo exports retain exact single-stage parity.
+  Snapshots captured during a pending full-base history rebuild or WB replay also stay cold after provisional promotion has ended. They retain the same WB event and rebuild/replay it when restored. Tiny actual-caller regressions cover edits during cold Undo and Redo, superseded/nested/repeated restoration, the separate WB replay reply, and late manual/gray-point/semantic ownership; the frozen pre-fix caller fails strict Undo samples at both depths. The browser crop-history scene makes new exposure edits during held cold Undo/Redo conversion replies and compares live and repeated Undo/Redo PNG8/TIFF16 samples and bytes with one stage.
+  Superseding operations now detach the old live history promise/event at geometry cancellation, including hot restores, direct restoration, saved-settings replacement and photo transitions. Apply/Confirm captures the outgoing entry before cancellation, including analysis-only Confirm with unchanged planes. Reset all adjustments also captures before replacing WB intent, rebuilding any still-requested geometry before converting the reset recipe. A new positive recipe captured without its required positive stays cold after the old owner is detached. Old finalizers retain their promise-identity guard. Conversion replies and full-swap WB replay require the installed operation token, so reused source objects and an unchanged photo record cannot admit obsolete results. Completed measurements/intent owned by saved entries are preserved. Bounded actual-caller coverage exercises hot/cold Undo/Redo targets, nested/repeated history, edits at conversion/WB phases, old/new WB completion orders and direct/session lifecycle replacement. The browser adds hot Redo superseding cold WB or conversion, then new exposure history, with strict live and repeated Undo/Redo PNG8/TIFF16 samples/bytes.
+
 - **low/bug** — Touch pinch-zoom and pointer panning run simultaneously and fight over panX/panY  
   `negative2positive/src/app/main.js:8465`  
   pointerdown (8387) starts a pan for any non-mouse pointer when canPan() (zoom > 1) and captures the pointer; touchstart with two fingers (8465) then starts a pinch without cancelling that pan. On every move both fire: pointermove sets `state.panX = panStartPanX + (clientX - panStartX)` from finger 1 while touchmove's zoomAtPoint recomputes panX/panY around the pinch centre, so the image jitters be…  
   _Suggested fix:_ When a second touch begins, call finishPan() and release pointer capture; ignore pointermove while `pinchStartDist > 0`; handle touchcancel like touchend; on returning to one finger re-seed panStart from the current pointer position.
-
-- **low/bug** — Apply-crop compounds rotations on an already-rotated buffer while restore/export rotate the base once, so crop rectangles drift and the preview is double-resampled  
-  `negative2positive/src/app/main.js:8515`  
-  beginCropMode seeds the draft with `state.originalImageData`, which after any previous rotate/straighten is already a rotated, padded buffer. applyCropBtn then rotates that buffer again by the new delta and stores the sum in state.rotationAngle, with cropRegion expressed in the twice-rotated image's coordinates. restoreSettings (10210) and processFileWithSettings (9549-9551) instead rotate loadedB…  
-  _Suggested fix:_ Always derive from the base: in applyCropBtn compute `total = normalizeAngleDegrees(state.rotationAngle + angle)` and `rotatedImageData = applyRotationToImageData(state.loadedBaseImageData || draft.sourceImageData, total)`, mapping the draft rect from the draft's (delta-rotated) …
 
 - **low/bug** — downloadBlobInBrowser revokes the object URL synchronously after click(), which can abort large downloads in Firefox/Safari  
   `negative2positive/src/app/main.js:8793`  
@@ -214,7 +290,7 @@ Remaining performance proposals below are not claims of completed work.
 
 - **low/bug** — Automatic gray point is estimated from a different image in batch (full-res, post-inpaint, full analysis) than interactively (250k-px preview conversion, pre-dust), and the batch result is never written back to the item  
   `negative2positive/src/app/main.js:9601`  
-  maybeAutoWhiteBalance samples `state.previewSourceImageData`, i.e. a 250k-pixel downsample of the preview-slot conversion (whose histogram analysis ran on conversionPreviewImageData) and runs only once per processNegative, before dust inpainting. processFileWithSettings samples the full-resolution `processed` buffer after inpaintMasked. estimateAutoWhiteBalance stride-samples ~120k pixels and appl…  
+  (Since #248 maybeAutoWhiteBalance reads a positive converted from the display level reduced to a 1024 px long side with processNegative's first frame, independent of the viewport; the batch path still reads the full-resolution, post-inpaint frame.) maybeAutoWhiteBalance samples `state.previewSourceImageData`, i.e. a 250k-pixel downsample of the preview-slot conversion (whose histogram analysis ran on conversionPreviewImageData) and runs only once per processNegative, before dust inpainting. processFileWithSettings samples the full-resolution `processed` buffer after inpaintMasked. estimateAutoWhiteBalance stride-samples ~120k pixels and appl…  
   _Suggested fix:_ Estimate from the same input in both paths: in processFileWithSettings call `estimateAutoWhiteBalance(buildPreviewSourceImageData(processed))` on the pre-inpaint positive (or switch the interactive path to estimate from the full-res result when it lands). After a batch file is pr…
 
 - **low/bug** — On every mobile browser (no showSaveFilePicker) ZIP export silently turns into N programmatic <a download> clicks, which Chrome blocks after the first without the batch noticing  
@@ -227,12 +303,51 @@ Remaining performance proposals below are not claims of completed work.
   updateDesktopBatchExportControlLock (2135-2159) disables a fixed list of buttons, and most handlers in this range check isDesktopBatchExportLocked(), but switchToFile — reachable via renderFileList's onOpenFile — has no guard. During exportBatchIndividuallyDesktop (which deliberately has no blocking overlay) clicking another row runs persistCurrentFileSettings + loadFile, resetting the displayed s…  
   _Suggested fix:_ Add `if (isDesktopBatchExportLocked()) return;` at the top of switchToFile and pass a `disabled` flag to renderFileList so rows render non-interactive while locked.
 
+- **low/bug** — A conversion setting edited while Apply Crop's crop-area detection runs is part of the positive the hit's auto white balance measures (#245)  
+  `negative2positive/src/app/main.js:17057`  
+  Apply converts at once with the miss outcome and releases the UI; a hit converts again (applyCropDetectionOutcome) with the settings of the moment it lands, and maybeAutoWhiteBalance measures that positive. A core exposure, film preset or colour model change made in that window (about 0.3-1 s) is therefore part of the measurement, while 1703835 measured auto white balance in Apply, before any edit: the white balance, and the export, can differ from applying, waiting for the hit and then editing. Step-3 edits (C/M/Y, curves, gains) are unaffected (the crop-apply smoke compares a magenta drag across the hit).  
+  _Suggested fix:_ Measure the hit's auto white balance on the settings Apply converted with (one more wbSample conversion when they changed since), or hold conversion edits until the hit has landed.
+
+- **low/bug** — Undoing a geometry edit made while Apply Crop's crop-area detection ran brings Apply's frame back with the miss outcome (#245)  
+  `negative2positive/src/app/main.js:3370`  
+  A geometry edit or a second Apply ends the pending detection (pushUndo), so its hit never lands. Undoing that edit, like redo right after an undo of Apply (the edge case #245 accepted), restores Apply's frame with analysisNeedsReview and no auto white balance, where 1703835 had the hit in place before the edit. The restored entry carries the ended detection's token (captureSnapshot), so it can be recognised.  
+  _Suggested fix:_ Mark the token when cancelCropDetection ends a detection without a reply, and start the detection again (as Apply does) when an undo or redo restores an entry carrying such a token.
+
+- **low/bug** — A recipe applied while Apply Crop's crop-area detection runs loses its white balance to the hit's auto white balance (#245)  
+  `negative2positive/src/app/main.js:25970`  
+  applyRecipeToCurrent writes the recipe's wbR/wbG/wbB and wbUserOverride (false in a recipe of an auto-balanced photo) while the detection is pending. A hit then converts again, and maybeAutoWhiteBalance, whose gates the recipe left open, replaces those gains with its own; 1703835 applied the hit before the UI was free, so the recipe's gains won. The measurement barriers (settleMeasurementInputs) and the copy barriers (Copy recipe, Apply film type to roll, sync) do not cover writes like this one.  
+  _Suggested fix:_ Have applyRecipeToCurrent wait for settlePendingCropDetection() first, as Copy recipe does.
+
+- **low/bug** — Import background tasks persist and restore the open photo while Apply Crop's crop-area detection runs (#245)  
+  `negative2positive/src/app/main.js:21685`  
+  studioBackgroundReady() does not look at a pending detection, so the import's film-type flip (flipImportPhoto) and applyImportPositives can persist the open photo with the miss outcome and restore it; the restore installs new diagnostics, which ends the detection without its hit (it counts as stale).  
+  _Suggested fix:_ Add `!hasPendingCropDetection()` to studioBackgroundReady (its callers already retry until it holds).
+
+- **resolved/bug** — Interpretation-changing controls, recipes and detected-film routes invalidate old rescue measurements and completed semantic anchors (#229 R1-017)
+  `negative2positive/src/app/main.js`, `app/filmTypeOverride.js`
+  Both production listeners and the current/selected recipe, detected-film, film-edge merge, Step-2 roll-reference and positive-entry writers use shared interpretation invalidation. The live writers remeasure after the new conversion settles; selected recipes are remeasured by the actual batch/open-photo processor. Explicit recipe WB and strength ownership survive, including default-valued strengths; saved/manual/same-type state and Undo/Redo retain matching measurements. Tiny real-caller/conversion/rescue/batch regressions fail on the frozen supplemental base for stale anchors and zero batch measurements, then require fresh 8/16 samples and consecutive exports. Targeted Studio coverage uses actual recipe/detected actions and exact PNG8/TIFF16 export/history comparisons. Native/60MP acceptance and final integration full smoke remain separate.
+  Full-settings copying also retains recipient roll histograms/density offsets only from the interpretation-invalidated recipe. Frozen `f71dd41` controls reproduce thousands of wrong 8/16 samples through both copy buttons despite rescue remeasurement. Real core/router tests cover color-to-B&W/positive and positive-mode changes, exclude donor roll ownership on import lock, and retain valid recipient lock/equalization/outlier semantics and saved history. The small Studio scenario constructs locked recipients through Analyse roll and checks exact PNG8/TIFF16 current/batch/fresh exports.
+  The shared reset also invalidates direct controls' roll records, the active queue recipe and deferred window overlays. Frozen `e21cbbcb` actual listeners reproduce exposure 213 instead of 19 and wrong 8/16 samples; recipe/detected/reference/positive-entry actions leave stale backing records, and a pending overlay retains all old analysis and skips measurement. The corrected crossing matrix uses real snapshot/core/router/conversion/rescue kernels and keeps the prior 51 routes and 180 parity cases. Actual Analyse roll records exercise direct controls, exact current/batch/fresh PNG8/TIFF16, switching, project save/reopen and Undo/Redo. Unchanged type/mode confirmations preserve genuine completed roll/rescue/semantic analysis and automatic WB; manual provenance and explicit ownership persist.
+  Full-source history promotion also seeds automatic WB only from a matching film type/mode, and immutable WB events retain that interpretation through promotion and both asynchronous replay guards. Frozen `616e6d4` actual install/Undo reproduces color WB in a BW entry and 24307/24452 wrong 8/16 samples. Real caller/kernel tests cover all type/mode crossings, matching/manual/gray-point ownership, pending/applied events on both stacks, and rotation/mirror/crop. A bounded RAW Studio scene verifies window/full installation, Undo/Redo and actual single/batch/fresh PNG8/TIFF16 samples and complete files; true TIFF16 low bits are required. Prior routes, saved strengths and distinct original identities remain covered. Native and empirical acceptance still require independent measurement.
+  Frozen `6b0a558` additionally reproduces pending color detection completed with BW pixels: actual Undo differs by 3846/4480 samples and real PNG8/TIFF16 export samples/files. Crop completion now measures the historical recipe's own positive, matches film-base/semantic/roll inputs and retains genuine old/new measurements. Dispatch settings remain immutable across awaits; changed type/mode or measurement inputs convert again before adoption. WB locks remain independent of missing rescue analysis in cold replay. The expanded real-caller matrix covers rescue off/on, automatic/manual/gray/semantic ownership and held detection, conversion and replay; bounded Studio probes exercise real gain sliders, gray-point clicks, both interpretation controls and full swaps.
+  The same input guard covers both sides of promoted WB replay, using the target entry's captured inputs while the earlier event retains its own recipe. A frozen `31ddd8a` full-install/new-conversion control found 9576/21240 wrong 8/16 samples after a late manual-base edit; replay now retains the newer genuine measurement. Real helper/kernel checks cover late film-base, semantic and roll inputs with actual Undo/Redo and exact live/batch arrays. The prior full-base measurement-event tests still require their legitimate earlier recipe.
+
 - **low/i18n** — Export failure alert and several export-path Error messages are hard-coded English; 'selected folder' fallback leaks into localized toast  
   `negative2positive/src/app/main.js:9010`  
   notifyExportError shows alert(`Export failed: ${message}`) where message is one of several English-only Error strings thrown in the export path ('Full-resolution processing is not ready yet. Please wait…', 'Export payload is not a Blob.', 'No image available for export.', 'JSZip module is unavailable'). Chinese/Japanese users see an English dialog for the most important failure in the app. showDes…  
   _Suggested fix:_ Add exportFailed: 'Export failed: {message}' (plus zh/ja) and use getInterpolatedText; attach an i18n key (err.i18nKey) to the known thrown errors so notifyExportError can localize them, falling back to err.message only for unknown errors. Add a desktopBatchExportFolderFallback k…
 
 
+
+- **low/perf** — A watch-folder arrival's full-resolution recipe render runs under its tile job's memory claim (#247, #258)  
+  `negative2positive/src/app/main.js:22325`  
+  The light-table lane makes a watch-folder arrival's recipe as 1703835's arrival handler did, with a full-resolution render (geometry, conversion, dust removal, the gray point and the expired-film measurement; #229 review, R1-124), inside the tile job. That job reserved decode peak + 12 B/px (frameReservationBytes), or nothing when its base is a retained session or the prefetch slot. A RAW's decode peak is past by then and about covers the working and converted planes; a PNG, JPEG or TIFF scan's come on top (roughly 12-24 B/px), and a retained base reserves nothing for them. 1703835 ran the render outside any budget.  
+  _Suggested fix:_ In runBackgroundPhotoJob, reserve laneReservationBytes (the export lane's constant) for a tile job whose item is a watch-folder arrival without a recipe, also when its base is retained.
+
+- **low/perf** — The lane's first render of an 8-bit frame at a non-right angle rotates the whole frame on the main thread (#247)  
+  `negative2positive/src/app/main.js:19206`  
+  A lane render that prepares a recipe measures 1703835's tile (#229 review, R1-081): where the geometry core cannot plan the chain (an 8-bit source at a non-right angle, the usual auto-frame straighten of a JPEG or 8-bit TIFF scan), renderGeometryChain falls back to applyGeometryChainToImageData, the 2D-canvas rotation of the full frame, once per frame before its recipe exists. #247 had avoided it with a decimated tile whose measurements, and so exports, differed from 1703835's. Later renders of the frame keep the reduced tile.  
+  _Suggested fix:_ Rotate 8-bit frames in the geometry pool with an OffscreenCanvas once its bytes are shown equal to the page canvas's in Chrome and WebKit, or measure lane recipes from an input that does not depend on the tile (a flagged change).
 
 - **low/quality** — Update check bookkeeping: 'Later' is not persisted (dead last-seen key), a failed/offline launch suppresses the next check for 24 h, and any pre-release tag silently disables the check _(verified)_  
   `negative2positive/src/app/main.js:1629`  
@@ -243,25 +358,20 @@ Remaining performance proposals below are not claims of completed work.
   The three 16-bit mirror fields are declared at 1877-1879 with a comment saying they are 'dormant' until a later stage; the codebase has since moved to attaching `__image16` directly on ImageData (silverAdapter.js:23-33, 264-266). The fields are still assigned at 5657-5659 and 5738 but no code reads them, so they only pin a second reference to the largest buffer in the app.  
   _Suggested fix:_ Delete the three fields, the comment block at 1873-1876, and the four assignments.
 
-- **low/quality** — Legacy non-SilverCore WebGL export/readback path is unreachable dead code _(verified)_  
-  `negative2positive/src/app/main.js:4437`  
-  PRESET_TYPES is ['color','bw','positive'] and sanitizePresetType coerces anything else to 'color', so usesSilverCoreConversion() always returns true. Consequently renderFullWebGL (4437-4507, including a full-res gl.readPixels + Y-flip + canvas resize to image size), the WebGL branch of ensureFullRender (4513-4522), the `useLegacyTone` branch of webglSetUniforms (4222-4238), buildRouterSettings's `…  
-  _Suggested fix:_ Remove renderFullWebGL and the legacy branches, or reduce usesSilverCoreConversion to `return true` with a comment and delete the dead callers; keep webglSetUniforms passing zeros for the legacy uniforms.
+- **low/quality** — usesSilverCoreConversion() is always true, so its callers keep dead non-SilverCore branches _(updated by #239 and #242)_  
+  `negative2positive/src/app/main.js:3988`  
+  PRESET_TYPES is ['color','bw','positive'] and sanitizePresetType coerces anything else to 'color', so usesSilverCoreConversion() always returns true. #239 deleted renderFullWebGL, the WebGL branch of ensureFullRender and the legacy tone uniforms with the `useLegacyTone` branch of webglSetUniforms; #242 deleted ensureFullRender and updateFullCpu. The `usesSilverCoreConversion()` guards and buildRouterSettings's non-SilverCore branch remain.  
+  _Suggested fix:_ Reduce usesSilverCoreConversion to `return true` with a comment and delete the dead branches of its callers.
 
-- **low/quality** — File-type dispatch (RAW / PNG / standard) and the 100 MiB 'heavy RAW' threshold are duplicated between loadFile and loadFileToImageData  
-  `negative2positive/src/app/main.js:9388`  
-  main.js:5600-5637 (loadFile) and 9388-9400 (loadFileToImageData, used by batch/auto-frame) both implement `isRawLikeFileName → loadRawImageData; file.type==='image/png' → loadPngImageData; else loadStandardImage`. loadFile additionally checks `arrayBuffer.byteLength > 100 * 1024 * 1024` at 5603 to choose the two-stage preview path — the same constant rawFileLoader.js:19 defines as RAW_SIZE_HEAVY. …  
-  _Suggested fix:_ Move `loadFileToImageData(file, { preview, onMetadata })` into app/imageFileLoaders.js (it already owns isRawLikeFileName and the three loaders), export RAW_SIZE_HEAVY from rawFileLoader.js, and have loadFile call the shared function with the extra options.
+- **low/quality** — File-type dispatch (RAW / PNG / standard) is duplicated between loadFile and loadFileToImageData  
+  `negative2positive/src/app/main.js` (`loadFile`, `loadFileToImageData`)  
+  Both implement `isRawLikeFileName → loadRawImageData; isPngFile → loadPngImageData; else loadStandardImage`. The duplicated 100 MiB 'heavy RAW' threshold is gone (#255): `RAW_SIZE_HEAVY` lives only in imageDimensions.js, and loadFile asks `rawDecodePlan` whether a RAW takes the two-stage path.  
+  _Suggested fix:_ Move `loadFileToImageData(file, { onMetadata, signal, halfSize })` into app/imageFileLoaders.js (it already owns isRawLikeFileName and the three loaders) and have loadFile call it for its single-stage decodes.
 
 - **low/ux** — Export path silently drops lens correction when the runtime fails, with no user-visible warning _(verified)_  
   `negative2positive/src/app/main.js:1287`  
   applyLensCorrectionWithSettings returns the uncorrected imageData on ensureLensfunClient failure or buildCorrectionMaps/apply exceptions and only surfaces the reason through setLensStatus when updateUi is true. The export/batch path calls it with `{ updateUi: false }` (line 9559), so an exported or batch-exported file can silently lack the distortion/TCA/vignetting correction the user enabled and …  
   _Suggested fix:_ Always console.warn the reason, and return `{ imageData, skipped: true, reason }` (or set a flag on the export result) so the export routine can show a toast / mark the item in the batch summary when lens correction was requested but not applied.
-
-- **low/ux** — Curve editor renders blank when first revealed because renderCurve sizes the canvas from a hidden element _(verified)_  
-  `negative2positive/src/app/main.js:3499`  
-  renderCurve sets curveCanvas.width/height from offsetWidth/offsetHeight. The canvas lives in additionalSection (display:none, content collapsed in index.html ~1180-1187) and renderCurve is only called from curve interactions, restoreSnapshot (2366), reset (8597) and restoreSettings (10321) - all of which can run while the section is hidden, producing a 0x0 canvas. Nothing calls renderCurve when th…  
-  _Suggested fix:_ Call renderCurve() from the section-header toggle for 'additional' and from setPanelMode('detail'), or attach a ResizeObserver to curveCanvas that calls renderCurve when its size becomes non-zero; skip resizing when offsetWidth === 0.
 
 - **low/ux** — Histogram does not follow core-control changes in WebGL mode until the full-res render lands _(verified)_  
   `negative2positive/src/app/main.js:4687`  
@@ -293,6 +403,26 @@ Remaining performance proposals below are not claims of completed work.
   `supportsFolderPicker()` returns `'webkitdirectory' in folderInput`, which is true on every Chromium/WebKit/Gecko build because the property exists on the prototype regardless of whether the engine can actually present a directory chooser. Two concrete platforms expose this: (1) Linux Tauri/AppImage: WebKitGTK's default file chooser (`webkitWebViewRunFileChooser` in WebKitWebViewGtk.cpp) always cr…  
   _Suggested fix:_ Strengthen the detection instead of relying on property presence: (a) on Linux desktop (`isTauriDesktop()` plus a tiny `get_platform` command, or `navigator.platform`/`navigator.userAgent` containing 'Linux'), treat the folder picker as unsupported and run the existing `applyFold…
 
+- **low/ux** — A settings refresh whose geometry cannot be built (restoreSettings on open, a roll commit, Sync) keeps the geometry of the planes on screen, and leaving the photo saves it, so a transient allocation failure drops the saved crop  
+  `negative2positive/src/app/main.js:15316`  
+  rollBackFailedGeometry (R1-065) makes the settings name the planes' geometry for every failed build, so a conversion, an export and the saved recipe agree. For an edit that is an undo; for a settings refresh the recipe's own geometry is lost once the photo is left (switchToFile saves the live settings), with only the toast to say so.  
+  _Suggested fix:_ For builds no edit asked for, hold the recipe's geometry: keep it in what persistCurrentFileSettings saves, refuse single export while it is held, and build it again on the next open.
+
+- **low/ux** — A geometry edit that fails is undone without a redo step, but the redo entries its push cleared do not come back  
+  `negative2positive/src/app/main.js:3334`  
+  commitUndoSnapshot clears the redo stack for every new entry; rollBackFailedGeometry pops the failed edit's entry only.  
+  _Suggested fix:_ Keep the cleared redo entries with a geometry edit's entry until its build lands (counted by the history budget) and put them back on a rollback.
+
+- **low/bug** — A photo switch that supersedes a geometry build holding `studioBusy` loses that lock for the rest of the switch  
+  `negative2positive/src/app/main.js:15252`  
+  switchToFile sets studioBusy, then invalidatePhotoActivation cancels the outgoing build, and releaseGeometryBusy deletes the flag because the build still owns it: the next photo decodes with only photoSwitching set. The workspace stays inert (studioWorkspace counts photoSwitching as busy), and the film strip is inert while such a build runs (the detection tail's builds do not own the lock), so no click starts this switch today; handlers that check studioBusy alone (runStudioAutoFrame, mergeSelectedShots, detectBlankFrameInSelection) would run during it. Found while adding R1-069's test (#229 review).  
+  _Suggested fix:_ Let whoever sets studioBusy while a build owns it take the lock over (geometryBusyOwner = null), or cancel the outgoing build before the switch sets its flags.
+
+- **low/ux** — A photo left before it settled (a geometry build, a conversion or the reprocess debounce still running) loses its undo history  
+  `negative2positive/src/app/main.js:11263`  
+  rememberPhotoSession keeps a snapshot and the undo/redo stacks only for a settled photo; otherwise it stores the base and the recipe, and the return opens the recipe with an empty history. A slider nudged just before clicking the next photo is enough (the reprocess debounce). Sessions without their base already keep their history as scalars in that case (rememberUnsettledDisplaySession, R2-002); the brush-repair case is the same gap. Seen while adding R1-069's test (#229 review).  
+  _Suggested fix:_ Store coldHistory(undoStack) / coldHistory(redoStack) with the base-and-recipe entry, as the unsettled display session does, and restore them under the reopened photo's entries.
+
 ## Engine and rendering
 
 - **medium/bug** — softHigh/softLow (profile defaultSoftHigh/-SoftLow) are 8-bit offsets added to 16-bit clip points, and softClipLayer divides 16-bit overflow by 255  
@@ -301,7 +431,7 @@ Remaining performance proposals below are not claims of completed work.
   _Suggested fix:_ Scale the soft offsets to the pixel domain in computeClipPoints (`softHigh * 257`, `softLow * 257`) and normalise overflow by PIXEL_MAX in softClipLayer (`whiteScale = (PIXEL_MAX - wc) / PIXEL_MAX; blackScale = bc / PIXEL_MAX`). Add a test that base_flat produces a measurably lif…
 
 - **medium/bug** — Coloured point lights on a colour negative (red/blue LEDs, distant signal lamps, coloured stars) match the 'dead photosite' signature and are erased from every RAW decode  
-  `negative2positive/src/silvercore/util/sensorDefects.js:131`  
+  `negative2positive/src/silvercore/util/sensorDefects.js:176`  
   The header assumes real content is neutral, but on C-41 a small red light source becomes a single-channel dip (cyan dye absorbs only red) and a blue light a blue-only dip; both are isolated 3x3 features after demosaic. The CORRELATED_FRACTION test (other channel must move >= 25 % of the defect's excess) does not fire because the other channels are genuinely unchanged, so the pixel is rewritten wit…  
   _Suggested fix:_ Only repair values that sit at a sensor rail (v <= absoluteThreshold for dead, v >= PIXEL_MAX - absoluteThreshold for hot) rather than any isolated outlier: a stuck photosite reads the black level or clips, an optical point light does not. Also expose the repair as a setting (def…
 
@@ -309,19 +439,9 @@ Remaining performance proposals below are not claims of completed work.
 
 - **low/research** — Evaluate exact pass fusion only where enabled stages and rounding semantics permit it
   `negative2positive/src/silvercore/engine/Engine.js:_applyLuts`
-  The old blanket nine-pass accounting is stale: optional saturation/profile/paper/sharpening stages are conditional, B&W preparation occurs elsewhere, and #202 replaced full-frame sharpening scratch with row buffers. Cross-channel color operations and spatial neighborhoods still require real computation. No additional fusion is implemented by this audit.
-  _Next step:_ Profile a concrete enabled-stage combination and preserve intermediate clamping/rounding, profile strength and bit-exact reference output before accepting a fused implementation.
+  The old blanket nine-pass accounting is stale: optional saturation/profile/paper/sharpening stages are conditional, B&W preparation occurs elsewhere, and #202 replaced full-frame sharpening scratch with row buffers. Cross-channel color operations and spatial neighborhoods still require real computation. #238 measured a monolithic fused copy + LUT + HSL + 8-bit kernel slower than the multi-pass chain with the HSL pre-test (99–107 vs 79–92 ms at 4 MP, 1.83 vs 1.58 s at 60 MP) and did not adopt it. The exact fusions adopted instead are the prepared prefix planes (mix, pre-saturation, positive gain/WB and dodge-and-burn cached per slot, the first curve pass reading the cached plane into the output), the positive gain-1 fold into the curve LUT for forced conversions, and the B&W grey plane with one grey → RGB table (`docs/silvercore-conversion-cache.md`).
+  _Next step:_ Only colour ticks still run the full multi-pass tail (LUT, HSL on active-band pixels, 3D profile, saturation, paper, 8-bit). Profile a concrete enabled-stage combination and preserve intermediate clamping/rounding, profile strength and bit-exact reference output before accepting any further fused implementation.
 
-- **low/research** — Exact HSL model transforms still cost a per-pixel color conversion
-  `negative2positive/src/silvercore/engine/ImageProcessor.js:applyHSLAdjustments`
-  The basic/frontier/noritsu model adjustment requires cross-channel RGB/HSL arithmetic when enabled. Baking that transform into a coarse 33³/65³ trilinear LUT would approximate its output, so the historical suggestion is not an accepted lossless fix. Existing enhanced profiles already use prepared 3D tables.
-  _Next step:_ Consider only measured implementations that preserve the current 16-bit transform, or make a separately reviewed quality/speed mode explicit; this audit does not silently replace exact HSL with interpolation.
-
-
-- **medium/quality** — silvercore WebGLRenderer.js (369 lines) is dead code shipped in the worker bundle — Engine.initWebGL is never called — and, with other unreachable engine exports, hides latent bugs (256-entry LUT upload, null matrices, log(1) division)  
-  `negative2positive/src/silvercore/engine/WebGLRenderer.js:134`  
-  Engine.js:28-35 defines initWebGL(canvas) and Engine.js:10 imports WebGLRenderer, but grep shows no call to `initWebGL(` or `.glRenderer` outside Engine.js (main.js has its own unrelated initWebGLRenderer); `this.glRenderer` stays null forever and Engine.js:92-94 even documents 'WebGL path is currently disabled'. The module is nevertheless pulled into the conversionWorker bundle (conversionWorker.…  
-  _Suggested fix:_ Delete WebGLRenderer.js, the import at Engine.js:10, initWebGL() and every `this.glRenderer` branch (Engine.js:20,28-35,44,48). If a GPU path for SilverCore is planned, keep it in git history rather than shipping it in the worker bundle; if the GL renderer is ever revived, resize…
 
 - **low/bug** — Auto curve-resolution thresholds (30/70/128) are 8-bit widths compared against 16-bit widths, so 'auto' always yields 9 points  
   `negative2positive/src/silvercore/engine/CurveEngine.js:125`  
@@ -344,9 +464,9 @@ Remaining performance proposals below are not claims of completed work.
   _Suggested fix:_ Sample an 8x8 grid per tile with independent x and y strides (x = x0 + (i+0.5)*innerW/8, y = y0 + (j+0.5)*innerH/8), and add a test that asserts the visited columns cover the tile for a 6720x4480 and a 4096x4096 input.
 
 - **low/bug** — Outer two rows/columns are never scanned, so a dead photosite within 2 px of the frame edge still exports as a coloured dot  
-  `negative2positive/src/silvercore/util/sensorDefects.js:108`  
+  `negative2positive/src/silvercore/util/sensorDefects.js:122`  
   The main loop runs y from 2 to height-3 and x from 2 to width-3 because the Chebyshev-2 ring would fall outside the image. Defects in the 2-px border are skipped entirely. Probe: four dead red photosites placed at (1,1), (1,30), (W-2,30), (30,H-2) -> repaired=0. On a full-frame scan that is cropped afterwards this is usually invisible, but on a frame used edge-to-edge (sprocket export, borderless …  
-  _Suggested fix:_ Clamp/mirror ring coordinates at the border (readRing with clamped dx/dy) and scan from 0 to width-1/height-1, or run a reduced 3x3-ring variant on the two border rows/columns. Add a test with a defect at x=1.
+  _Suggested fix:_ Clamp/mirror ring coordinates at the border (ring reads with clamped dx/dy; the frozen parity reference in sensorDefects.reference.mjs must move with it) and scan from 0 to width-1/height-1, or run a reduced 3x3-ring variant on the two border rows/columns. Add a test with a defect at x=1.
 
 
 - **low/quality** — pipeline/legacyPositive.js is unreachable: settings.positiveEngine is never set to 'legacy'  
@@ -366,7 +486,7 @@ Remaining performance proposals below are not claims of completed work.
 
 - **low/quality** — 65535 is redefined under seven local names although image16.js already exports IMAGE16_MAX  
   `negative2positive/src/silvercore/engine/CurveEngine.js:14`  
-  CurveEngine.js:14 PIXEL_MAX, sensorDefects.js:43 PIXEL_MAX, Sharpening.js:142 PIXEL_MAX, EnhancedProfiles.js:102 PIXEL_MAX, ImageProcessor.js:12 MAX_16, filmBaseCompensation.js:1 PIXEL_MAX_16, filmBaseDetection.js:3 UINT16_MAX — plus bare literals at garbledCheck.js:32, pngFileLoader.js:34, EnhancedProfiles.js:65 and WebGLRenderer.js:286-288 — while silvercore/util/image16.js:6 exports `IMAGE16_MA…  
+  CurveEngine.js:14 PIXEL_MAX, sensorDefects.js:43 PIXEL_MAX, Sharpening.js:142 PIXEL_MAX, EnhancedProfiles.js:102 PIXEL_MAX, ImageProcessor.js:12 MAX_16, filmBaseCompensation.js:1 PIXEL_MAX_16, filmBaseDetection.js:3 UINT16_MAX — plus bare literals at garbledCheck.js:32, pngFileLoader.js:34 and EnhancedProfiles.js:65 — while silvercore/util/image16.js:6 exports `IMAGE16_MA…  
   _Suggested fix:_ Import IMAGE16_MAX from util/image16.js in the seven modules and delete the local constants. Export `LUMA_R/G/B` (or a `luma(r,g,b)` helper) from a shared colorMath.js and reference it from the JS sites; keep the GLSL literal but add a comment pointing at the constant.
 
 - **low/quality** — ImageProcessor.boxBlur (97 lines) and negateImage are exported but never called  
@@ -465,11 +585,26 @@ Remaining performance proposals below are not claims of completed work.
 
 ## Other
 
+- **low/bug** — The native RAW plane worker gets its error handler only after the decode, so a worker that fails to load stalls every native decode until the transfer timeout  
+  `negative2positive/src/app/nativeRawTransfer.js readInWorker`  
+  The plane worker is created when the native decode starts (`createWorker()`), but `onerror` and `onmessage` are attached in readInWorker, after `native_raw_process` returns. If the worker script fails to load in between, its `error` event has no listener and the read is posted to a dead worker: the decode waits for the transfer timeout (2–20 s) before the WASM fallback, and again on the next decode, because a timeout never sets `workerReachesScheme`. Desktop only; present since d9981bcb (#264), before 9a89764. Found by the #229 decoder-protocol audit, static analysis.  
+  _Suggested fix:_ Attach `onerror` (and keep the failure) when the worker is created, and have readInWorker reject at once with that failure; treat a load failure like `workerReachesScheme === false` for later decodes.
 
-- **low/research** — Full-resolution conversion preserves an independent source by copying it into the worker
+- **low/ux** — A HEIC whose page-side read fails before the worker transfer shows the generic error instead of "Could not decode this HEIC/HEIF photo"  
+  `negative2positive/src/app/heifLoader.js decodeHeifInWorker`  
+  Since the decode admission (b8846691/53d196b2) the page reads the file and posts the buffer after the worker's `ready`; errors there (`file.arrayBuffer()` NotReadableError, a DataCloneError from `postMessage`) go through `finish(error)` without `HEIC_DECODE_FAILED`, which 4e9ee959's loader added to every non-abort error (the read then happened in the worker). Abort and admission rejection must stay uncoded. Found by the #229 decoder-protocol audit.  
+  _Suggested fix:_ Route non-abort, non-admission errors of the read/transfer step through `failed()`, with a unit case for a rejected `arrayBuffer()`.
+
+- **low/export** — A Chrome JPEG export carries two ICC profiles
+  `negative2positive/src/app/exportMetadata.js:attachMetadataToBlob`
+  Chrome's canvas JPEG encoder (main-thread canvas and `OffscreenCanvas` in the export worker alike) already writes an sRGB `ICC_PROFILE` APP2 segment. `attachMetadataToBlob` inserts its own after APP0 and keeps the encoder's, so the file has two ICC_PROFILE sequences, each numbered 1 of 1 (found by the #250 export-ownership smoke; baseline behaviour, both paths identical). The PNG path already replaces the encoder's colour chunks with its `iCCP`.
+  _Suggested fix:_ Drop the encoder's APP2 `ICC_PROFILE` segments before the scan when inserting the sRGB profile, as the PNG path does. Pixels are unchanged; JPEG file bytes change, so re-check every JPEG hash comparison (gain-map, export-ownership, batch/single parity smokes).
+
+
+- **low/research** — Interactive full-resolution conversion preserves an independent source by copying it into the worker (targets without shared memory, and 8-bit files)
   `negative2positive/src/app/conversionWorkerClient.js:createConversionWorkerClient`
-  The preview client already caches source/analysis inputs, and #204 adds main-thread per-slot 8-bit promotion reuse. Full-resolution conversions still copy the required source plane because the caller continues using it; large one-off worker heaps are then released, while batch workers live only for their batch. This is an explicit ownership/memory tradeoff, not a claim that all current slider previews clone full scans.
-  _Next step:_ Measure repeated full-resolution workloads before changing residency or ownership. Any redesign must retain caller usability, bound resident worker heaps, avoid detached cache buffers and preserve cancellation/export behavior.
+  Batch export no longer copies: its lanes borrow the decoded base or take over a geometry output (`handoff`, #250) and release their caches after each frame, and #256 releases the base and the geometry output as soon as a batch frame is converted (`releaseEarly`) and slices large frames into the conversion band pool, releasing a batch-owned geometry output once sliced. On a cross-origin isolated page (#264, docs/cross-origin-isolation.md) the editor's RAW and 16-bit TIFF/PNG planes and their geometry frames live in shared memory: the open photo's full-resolution conversion posts the plane without a copy and its worker reads a view, and the band pool's bands copy their rows in their workers. Lens correction preserves a shared input in a new fully written shared output (#229 review, R2-042). Auto Frame-adopted and roll-adopted worker rotations can still supply plain 16-bit frames on isolated pages; those full-resolution conversion sources still clone and remain outside the zero-copy acceptance claim. What still clones: those adopted frames; the copy path on every target without shared memory (the macOS desktop app, whose WKWebView reports `crossOriginIsolated` without `SharedArrayBuffer`; a host serving the app without COOP/COEP; until checked, Windows WebView2 and Linux WebKitGTK; see `docs/raw-decoding.md`), 8-bit files everywhere (promoted to 16 bits in the worker), and the preview client's cached source/analysis inputs on the copy path (#204 adds main-thread per-slot 8-bit promotion reuse); large one-off worker heaps are then released. This is an explicit ownership/memory tradeoff for the editor's planes, not a claim that all current slider previews clone full scans.
+  _Next step:_ Measure repeated interactive full-resolution workloads on the targets without shared memory (the macOS app first) before changing residency there. Any redesign must retain caller usability, bound resident worker heaps, avoid detached cache buffers and preserve cancellation/export behavior. #229 review R1-097 also records the page-path roll detector's one main-thread 8-bit copy per frame (about 241 MB at 60 MP on the copy path): its decode is shared with foreground adoption, sessions and prefetch, so `owned: true` would detach their base. The original #251 zero-copy target is still unmet on that path; a future transfer requires an adoption/hand-over lease. #252's RAW frame worker keeps detection on its own planes.
 
 
 - **low/a11y** — Focus ring removed on the JPEG quality slider and weakened on selects/number inputs; .recommended-action outline masks the focus ring  
@@ -507,7 +642,7 @@ Remaining performance proposals below are not claims of completed work.
 
 - **low/quality** — Hard high/medium switch changes the applied correction by a third (0.9 vs 0.6 damping) and the verdict is computed from different sample sets in the interactive (250k-pixel preview) and batch (full-res) paths _(verified)_  
   `negative2positive/src/app/autoWhiteBalance.js:229`  
-  The same raw estimate is damped at 0.9 when 'high' and 0.6 when 'medium'; e.g. raw wbB=1.35 -> 1.310 vs 1.197, raw 1.20 -> 1.178 vs 1.116. The verdict flips on hard thresholds (coverageHigh 0.02, magnitudeHigh log 1.35, disagreementHigh 0.035), and main.js runs the estimator on state.previewSourceImageData (a 250k-pixel step-downsample, main.js:4574) for viewed files but on the full-resolution pro…  
+  (Since #248 the interactive estimate reads the viewport-independent 1024 px auto-WB sample instead of the display preview.) The same raw estimate is damped at 0.9 when 'high' and 0.6 when 'medium'; e.g. raw wbB=1.35 -> 1.310 vs 1.197, raw 1.20 -> 1.178 vs 1.116. The verdict flips on hard thresholds (coverageHigh 0.02, magnitudeHigh log 1.35, disagreementHigh 0.035), and main.js runs the estimator on state.previewSourceImageData (a 250k-pixel step-downsample, main.js:4574) for viewed files but on the full-resolution pro…  
   _Suggested fix:_ Make the strength continuous (interpolate 0.6..0.9 from the distance to the 'high' thresholds) and run both paths on the same downsampled source (downsampleImageDataForMaxPixels(processed, 250_000)) before dust removal so viewed and unviewed files agree.
 
 - **low/quality** — Dead CSS: .step2-guide-* (6 selectors), .slider-value-group, .slider-unit, .workflow-guide-note have no markup anywhere  
@@ -527,7 +662,7 @@ Remaining performance proposals below are not claims of completed work.
 
 - **low/quality** — Three hand-rolled worker bridges duplicate lifecycle code with different error semantics  
   `negative2positive/src/workers/workerBridge.js:10`  
-  conversionWorkerClient.js:7-35, sensorDefectsClient.js:14-63 and workerBridge.js:6-76 each own `let worker / requestId / pending Map / getWorker() / onmessage lookup / onerror reject-all + terminate`. Behaviour diverges: workerBridge returns null on any failure (125-128) and logs nothing; conversionWorkerClient rejects and logs; sensorDefectsClient adds a ping/timeout handshake (65-84) that the ot…  
+  conversionWorkerClient.js:7-35, rawPostDecodeClient.js (one disposable worker per RAW decode since #232; it replaced the shared sensorDefectsClient.js) and workerBridge.js:6-76 each own `let worker / requestId / pending Map / getWorker() / onmessage lookup / onerror reject-all + terminate`. Behaviour diverges: workerBridge returns null on any failure (125-128) and logs nothing; conversionWorkerClient rejects and logs; rawPostDecodeClient adds a ping/timeout handshake and stage-wise main-thread recovery that the ot…  
   _Suggested fix:_ Create `workers/createWorkerClient({ url, name, pingTimeoutMs })` returning `{ request(message, transfer, onProgress), terminate() }` with one implementation of the pending map, crash handling and optional ping; rebuild the three clients on top of it.
 
 - **low/security** — Direct-download macOS entitlements opt out of hardened-runtime protections (dyld env vars, unsigned executable memory, JIT) that the app does not need  
@@ -549,6 +684,11 @@ Remaining performance proposals below are not claims of completed work.
   `negative2positive/src/styles/app.css:3722`  
   At <=900px the grid rows are `minmax(220px, 1.08fr) minmax(0, 1fr)` and only the `.app-main:has(> .controls-panel[style*="none"])` rule collapses the second row while the panel is hidden. `:has()` is unsupported in Firefox < 121 (Dec 2023, incl. some Firefox Android builds), Safari/iOS < 15.4 and Chrome < 105; there the empty controls row keeps ~48% of the height and the drop/upload placeholder is…  
   _Suggested fix:_ Toggle a class from JS instead (`appMain.classList.toggle('panel-hidden', controlsPanel.style.display === 'none')` in showImageUI/hide paths) and write the rule as `.app-main.panel-hidden { grid-template-rows: 1fr 0; }`.
+
+- **low/bug** — Every LibRaw file reports its lens model as "[object Object]"
+  `negative2positive/src/app/rawFileLoader.js:extractRawLensMetadata`
+  The breadth-first key search matches libraw-wasm's top-level `lens` object in `metadata(true)` (normalised key `lens`) before it reaches `lens.Lens`, and `String()` of the object is "[object Object]"; `main.js` then pre-fills the lens-correction search with it (`search.lensModel = metadata.lensModel`). Seen on all six RAW fixtures with libraw-wasm 1.6.0 and #264's deterministic build (found by #264 part C, whose native decoder reproduces the same metadata object on purpose, so desktop and web agree).
+  _Suggested fix:_ Read `lens.Lens`, else `lens.makernotes.Lens`, as strings before the generic search, and skip object values in `findMetadataValue`. The lens-correction search and anything that reads `rawMetadata.lensModel` change for RAW files.
 
 ## Test coverage
 
@@ -623,3 +763,12 @@ Remaining performance proposals below are not claims of completed work.
 - **#190 platform acceptance:** run native folder arrival/stop tests on macOS
   and Windows/Linux, plus the MAS App Sandbox lifetime test in mas-release.md.
   The Rust/JS tests alone do not establish platform picker permissions.
+
+
+<!-- #229 review: settle lane -->
+The #229 settle review fixes R1-057/R1-058/R1-090/R1-091/R2-060 and
+R1-043/R1-044/R1-088/R1-028/R1-143 are documented in
+[the realtime preview notes](realtime-preview-2026-09-06.md#229-review-comparison-preparation-and-viewport-settle).
+Comparison preparation and snapshot display rebuilds now stay outside input;
+viewport retries preserve current exact planes. Targeted tests assert these
+contracts and smoke checks inspect the actual displayed frame and source size.

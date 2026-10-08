@@ -1,3 +1,10 @@
+# Bundled ONNX models
+
+The model files live in `negative2positive/src/assets/models/` and are served
+from content-hashed `/assets` URLs (immutable caching; a replaced model gets a
+new URL and a new IndexedDB key). This directory keeps their provenance and
+licences.
+
 # MI-GAN Places2 Pipeline v2
 
 MI-GAN 公式 README が案内する著者配布 ONNX Pipeline を同梱。

@@ -2,13 +2,14 @@
 // AUTOFRAME_RAW_DIR=/path/to/raw npm run test:smoke
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { expectLoadingOverlayIdle } from './loading-overlay-idle.mjs';
 
 export async function runStudioRawAutoFrameSmoke({ send, evaluate, waitFor, fail, port, root, directory }) {
   // `dx` is the DX edge barcode expected from the rebate (Kodak Ultra Max 400
   // prints GC 400 and encodes 95-7); `dx: null` means the strip shows no
   // rebate and the film edge reader must stay silent.
   const examples = [
-    { file: 'DSC_4127.NEF', incomplete: true, dx: null },
+    { file: 'DSC_4127.NEF', incomplete: true, dx: null, bw: true },
     { file: 'DSC_8798.NEF', bounds: [488, 261, 1215, 756], dx: '95-7', frames: /36/ },
     { file: 'DSC_8800.NEF', bounds: [377, 309, 1100, 795], dx: '95-7', frames: /30A–31A/ },
     { file: 'DSC_8806.NEF', bounds: [485, 315, 1214, 811], dx: '95-7', frames: /21/ },
@@ -35,17 +36,23 @@ export async function runStudioRawAutoFrameSmoke({ send, evaluate, waitFor, fail
       const {resizeImageDataToMaxSide} = await import('/src/app/imageDataOps.js');
       const {canAutoApplyImportFrame} = await import('/src/app/autoFrameFormats.js');
       const file = document.getElementById('rawRegressionInput').files[0];
-      const raw = await loadRawFile(await file.arrayBuffer(), file.name, {preview:true});
+      let raw = await loadRawFile(await file.arrayBuffer(), file.name, {preview:true, outputBps:8});
       const start = performance.now();
-      const result = await analyzeFrameInWorker(raw, {settings:{marginRatio:.02, formatPreference:'auto', filmType:'color'}, maxSide:1600});
+      // The import request (#251): this decode is handed to the worker and
+      // back, and only the rotated frame's size is returned. The line-search
+      // gate is on, as in the app.
+      const outcome = await analyzeFrameInWorker.analyzeImport(raw, {owned:true, frame:{settings:{marginRatio:.02, formatPreference:'auto', filmType:'color', neutralLineSearch:true}, maxSide:1600, rotatedOutput:'none'}});
       const ms = performance.now() - start;
+      if (outcome.frameError) throw outcome.frameError;
+      raw = outcome.image;
+      const result = outcome.frame;
       const preview = resizeImageDataToMaxSide(raw, 1600);
       const canvas = document.createElement('canvas'); canvas.width = preview.width; canvas.height = preview.height;
       const ctx = canvas.getContext('2d'); ctx.putImageData(preview,0,0);
       let bounds = null;
       if (result?.cropRegion) {
         const r = result.cropRegion, theta = -result.angle * Math.PI / 180;
-        const rw = result.rotatedImageData.width, rh = result.rotatedImageData.height;
+        const rw = result.rotatedWidth, rh = result.rotatedHeight;
         const points = [[r.left,r.top],[r.left+r.width,r.top],[r.left+r.width,r.top+r.height],[r.left,r.top+r.height]].map(([x,y]) => {
           x -= rw/2; y -= rh/2;
           return [(x*Math.cos(theta)-y*Math.sin(theta)+raw.width/2)*preview.width/raw.width,(x*Math.sin(theta)+y*Math.cos(theta)+raw.height/2)*preview.height/raw.height];
@@ -58,6 +65,8 @@ export async function runStudioRawAutoFrameSmoke({ send, evaluate, waitFor, fail
     })()`);
     writeFileSync(join(output, example.file + '-detected.png'), Buffer.from(row.overlay.split(',')[1], 'base64'));
     delete row.overlay;
+    // The grey-only line search (#251 part 4b) never fires on colour film.
+    if (!example.bw && row.result?.diagnostics?.lineSearch?.channels === 'grey') fail('the line search went grey-only on colour film: ' + JSON.stringify(row.result?.diagnostics));
     if (example.incomplete) {
       if (!row.result?.requiresReview || !row.result.diagnostics?.incomplete || row.result.cropRegion || row.autoApply) fail('不完全な RAW の切り抜きを停止できません: ' + JSON.stringify(row));
     } else {
@@ -74,7 +83,8 @@ export async function runStudioRawAutoFrameSmoke({ send, evaluate, waitFor, fail
     })()`);
     await waitFor('RAW import ' + example.file, `document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy && document.getElementById('studioFilename').textContent === ${JSON.stringify(example.file)}`, 120_000);
     await waitFor('RAW overlay dismissed', `[...document.querySelectorAll('.loading-overlay')].every(element => getComputedStyle(element).display === 'none' || Number(getComputedStyle(element).opacity) === 0)`, 30_000);
-    row.ui = await evaluate(`(() => ({status:document.getElementById('studioFrameNotice').dataset.status, notice:document.getElementById('studioFrameNotice').textContent, size:[document.getElementById('canvas').width,document.getElementById('canvas').height], filmEdge:document.getElementById('filmEdgeStatus').textContent, filmEdgeVisible:document.getElementById('filmEdgeGroup').style.display !== 'none', filmBase:document.getElementById('filmBaseValues').textContent}))()`);
+    await expectLoadingOverlayIdle({ evaluate, waitFor, fail }, 'RAW import ' + example.file);
+    row.ui = await evaluate(`(() => ({status:document.getElementById('studioFrameNotice').dataset.status, notice:document.getElementById('studioFrameNotice').textContent, size:[window.__ncDisplay.frame().width,window.__ncDisplay.frame().height], filmEdge:document.getElementById('filmEdgeStatus').textContent, filmEdgeVisible:document.getElementById('filmEdgeGroup').style.display !== 'none', filmBase:document.getElementById('filmBaseValues').textContent}))()`);
     if (example.dx) {
       if (!row.ui.filmEdgeVisible || !row.ui.filmEdge.includes('DX ' + example.dx) || !/ULTRA MAX 400/i.test(row.ui.filmEdge)) fail('film edge reader did not identify the real strip: ' + JSON.stringify(row.ui));
       if (example.frames && !example.frames.test(row.ui.filmEdge)) fail('film edge reader frame numbers differ from the printed ones: ' + JSON.stringify(row.ui));

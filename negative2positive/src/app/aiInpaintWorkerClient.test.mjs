@@ -10,7 +10,8 @@ function announceReady(worker) {
 }
 let creates = 0, releases = 0, active = 0, peakActive = 0, failNext = false, blockRun = null;
 const messages = [];
-const process = createInpaintWorkerProcessor({ createSession: async (modelBytes, options) => {
+let heap = 16 * 1024 * 1024;
+const process = createInpaintWorkerProcessor({ heapBytes: () => heap, createSession: async (modelBytes, options) => {
   creates++;
   assert.deepEqual(new Uint8Array(modelBytes), new Uint8Array(bytes));
   assert.equal(options.prefer, 'wasm');
@@ -52,6 +53,11 @@ failNext = true;
 await assert.rejects(session.run(image, mask, 1), /inference failed/);
 await session.run(image, mask, 1);
 assert.equal(creates, 1, 'one model session is reused after a failed tile');
+// The worker's WASM heap, from its last reply (#258's ledger).
+assert.equal(session.residentBytes, 16 * 1024 * 1024);
+heap = 700 * 1024 * 1024;
+await session.run(image, mask, 1);
+assert.equal(session.residentBytes, 700 * 1024 * 1024);
 
 const source = new ImageData(new Uint8ClampedArray([51, 127, 204, 255]), 1, 1);
 const repaired = await inpaintWithModel(source, new Uint8Array([255]), session.run, { tile: 1, feather: 0 });
@@ -76,6 +82,7 @@ await cancelledOutcome;
 assert.equal(messages.filter(message => message.type === 'run').length, runMessagesBeforeQueue + 2,
   'stale queued tile never reaches the worker');
 assert.equal(peakActive, 1); assert.equal(releases, 1); assert.equal(worker.terminated, true);
+assert.equal(session.residentBytes, 0, 'nothing resident once released');
 assert.equal(messages.filter(message => message.type === 'initialize').length, 1);
 
 let timedWorker;

@@ -25,14 +25,16 @@ export function tiffIfdToRgb16(ifd) {
   return { rgb16, channels, width, height };
 }
 
-export function decodeTiffBuffer(buffer) {
+// `alloc(length)` makes the RGBA16 plane (#264: shared memory for the
+// editor's scans on a cross-origin isolated page).
+export function decodeTiffBuffer(buffer, { alloc = null } = {}) {
   const ifds = UTIF.decode(buffer);
   const ifd = ifds[0];
   UTIF.decodeImage(buffer, ifd, ifds);
   const wide = tiffIfdToRgb16(ifd);
   if (wide) {
     try {
-      const image16 = packRGBToImage16(wide.width, wide.height, wide.rgb16, wide.channels);
+      const image16 = packRGBToImage16(wide.width, wide.height, wide.rgb16, wide.channels, alloc);
       const imageData = toImageData8(image16);
       imageData.__image16 = image16;
       return imageData;

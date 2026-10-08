@@ -1,6 +1,13 @@
 import { runRollFilmTypeSmoke } from './roll-film-type-smoke.mjs';
 import { runFolderImportSmoke } from './folder-import-smoke.mjs';
 import { runSimplicitySmoke } from './simplicity-smoke.mjs';
+import { runHiddenJobSmoke } from './hidden-job-smoke.mjs';
+import { runMemoryBudgetSmoke } from './memory-budget-smoke.mjs';
+import { runPerfHarnessSmoke } from './perf-harness-smoke.mjs';
+import { runEmbeddedPreviewSmoke } from './embedded-preview-smoke.mjs';
+import { runDisplaySessionSmoke } from './display-session-smoke.mjs';
+import { runInterpretationRoutesSmoke } from './interpretation-routes-smoke.mjs';
+import { expectLoadingOverlayIdle } from './loading-overlay-idle.mjs';
 // End-to-end smoke test: drives the real app in headless Chrome via CDP.
 //
 //   node scripts/smoke-test.mjs
@@ -16,6 +23,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { runPositiveImportSmoke } from './positive-import-smoke.mjs';
+import { runBwRollImportSmoke } from './bw-roll-import-smoke.mjs';
 import { runStudioSmoke } from './studio-smoke.mjs';
 import { runStudioAutoCropSmoke } from './studio-auto-crop-smoke.mjs';
 import { runStudioColorAnalysisSmoke } from './studio-color-analysis-smoke.mjs';
@@ -29,12 +37,38 @@ import { runPerformanceUiSmoke } from './performance-ui-smoke.mjs';
 import { runComparePreviewSmoke } from './compare-preview-smoke.mjs';
 import { runRestartRenderSmoke } from './restart-render-smoke.mjs';
 import { runPhotoSessionSmoke, runPhotoSessionRawSmoke } from './photo-session-smoke.mjs';
+import { runPhotoHeapSmoke } from './photo-heap-smoke.mjs';
+import { runPhotoActivationSmoke } from './photo-activation-smoke.mjs';
+import { runWebglPreviewSmoke } from './webgl-preview-smoke.mjs';
+import { runPreviewTierSmoke } from './preview-tier-smoke.mjs';
+import { runPreviewPathSmoke } from './preview-path-smoke.mjs';
+import { runGpuPreviewSmoke } from './gpu-preview-smoke.mjs';
+import { runDisplayModesSmoke } from './display-modes-smoke.mjs';
+import { runZoomDetailSmoke } from './zoom-detail-smoke.mjs';
 import { runDarkroomSmoke } from './darkroom-smoke.mjs';
 import { runCameraSmoke } from './camera-smoke.mjs';
 import { runRollHomeSmoke } from './roll-home-smoke.mjs';
 import { runTechnicalDepthSmoke } from './technical-depth-smoke.mjs';
-import { runExpiredFilmSmoke } from './expired-film-smoke.mjs';
+import { runExpiredFilmSmoke, runExpiredLiveTypeSmoke } from './expired-film-smoke.mjs';
 import { runNativeFilmFontSmoke } from './native-film-font-smoke.mjs';
+import { runExportGainMapSmoke } from './export-gain-map-smoke.mjs';
+import { runSilverCoreCacheSmoke } from './silvercore-cache-smoke.mjs';
+import { runGeometrySmoke } from './geometry-smoke.mjs';
+import { runPng16BandSmoke } from './png16-band-smoke.mjs';
+import { runRawPostDecodeSmoke, runRawParitySmoke } from './raw-post-decode-smoke.mjs';
+import { runRollFrameSmoke } from './roll-frame-smoke.mjs';
+import { runRawDecodeGateSmoke } from './raw-decode-gate-smoke.mjs';
+import { runExportOwnershipSmoke } from './export-ownership-smoke.mjs';
+import { runRepairReleaseSmoke } from './repair-release-smoke.mjs';
+import { runDustUndoSmoke } from './dust-undo-smoke.mjs';
+import { runBatchPipelineSmoke } from './batch-pipeline-smoke.mjs';
+import { runFirstPhotoSmoke } from './first-photo-smoke.mjs';
+import { runImportParitySmoke } from './import-parity-smoke.mjs';
+import { runStudioSyncSmoke } from './studio-sync-smoke.mjs';
+import { runCropApplySmoke } from './crop-apply-smoke.mjs';
+import { runAutoFrameImportSmoke } from './autoframe-import-smoke.mjs';
+import { runTwoStageImportSmoke } from './two-stage-import-smoke.mjs';
+import { runIsolationSmoke } from './isolation-smoke.mjs';
 
 // UPNG is already a runtime dependency of the app; reuse it to decode screenshots.
 const UPNG = createRequire(import.meta.url)('upng-js');
@@ -83,8 +117,10 @@ process.on('exit', cleanup);
 // 'exit' does not fire on Ctrl-C or kill, which would orphan vite and Chrome.
 for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => process.exit(130));
 
+let viteDiagnostics = '';
 function fail(msg) {
   console.error(`FAIL: ${msg}`);
+  if (viteDiagnostics) console.error(`Vite diagnostics:\n${viteDiagnostics}`);
   process.exit(1);
 }
 
@@ -94,9 +130,12 @@ function fail(msg) {
 const viteBin = join(ROOT, 'node_modules', 'vite', 'bin', 'vite.js');
 const vite = spawn(process.execPath, [viteBin, '--config', 'negative2positive/vite.config.js', '--port', String(PORT), '--strictPort'], {
   cwd: ROOT,
-  stdio: 'ignore',
+  stdio: ['ignore', 'pipe', 'pipe'],
 });
 children.push(vite);
+for (const stream of [vite.stdout, vite.stderr]) stream.on('data', chunk => {
+  viteDiagnostics = (viteDiagnostics + chunk).slice(-8000);
+});
 
 let serverUp = false;
 for (let i = 0; i < 60; i++) {
@@ -111,12 +150,19 @@ if (!serverUp) fail('vite dev server did not start');
 // ---- start chrome ----
 const chrome = spawn(chromeBin, [
   '--headless=new', `--remote-debugging-port=${CDP_PORT}`,
+  // The session itself runs over the DevTools pipe (fd 3 in, fd 4 out).
+  '--remote-debugging-pipe',
   `--user-data-dir=${chromeProfileDir}`,
   '--no-first-run', '--hide-scrollbars', '--window-size=1440,900',
+  // Every step navigates to a fresh page and none restores one from the
+  // back-forward cache. Kept there, each left page held its photos: the
+  // browser grew past 5 GB in ten minutes, and a CI runner's renderer
+  // crashed a quarter of an hour in (about 1 GB without it).
+  '--disable-features=BackForwardCache',
   // A fake camera, granted without a prompt, for the live loupe scenario.
   '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream',
   'about:blank',
-], { stdio: ['ignore', 'ignore', 'pipe'] });
+], { stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe'] });
 // execFile buffers stderr and kills the browser after its default 1 MiB
 // limit; repeated WebGPU model sessions can exceed it. Keep a bounded tail.
 let chromeDiagnostics = '';
@@ -125,31 +171,100 @@ chrome.once('error', error => fail(`Chrome startup failed: ${error.message}`));
 chrome.once('exit', (code, signal) => fail(`Chrome exited before the smoke completed (${code ?? signal}): ${chromeDiagnostics}`));
 children.push(chrome);
 
-async function getWsUrl() {
-  for (let i = 0; i < 60; i++) {
-    try {
-      const res = await fetch(`http://127.0.0.1:${CDP_PORT}/json`);
-      const page = (await res.json()).find((t) => t.type === 'page');
-      if (page) return page.webSocketDebuggerUrl;
-    } catch {}
-    await wait(250);
+// The DevTools pipe carries the session, as NUL-delimited JSON. A websocket
+// to the debugging port is closed whenever macOS goes from full to dark wake
+// (a closed lid, a notification that woke it), which ended runs at random
+// steps with "code 1006; Chrome still running"; the pipe stays open. The port
+// stays open for manual inspection.
+const toChrome = chrome.stdio[3];
+const fromChrome = chrome.stdio[4];
+let receiveCdp = () => {};
+let pipeChunks = [];
+fromChrome.on('data', (chunk) => {
+  let start = 0;
+  for (let end = chunk.indexOf(0); end !== -1; end = chunk.indexOf(0, start)) {
+    pipeChunks.push(chunk.subarray(start, end));
+    const message = JSON.parse(Buffer.concat(pipeChunks).toString('utf8'));
+    pipeChunks = [];
+    start = end + 1;
+    receiveCdp(message);
   }
-  fail('chrome did not expose CDP');
-}
+  if (start < chunk.length) pipeChunks.push(chunk.subarray(start));
+});
+const writeCdp = (message) => toChrome.write(`${JSON.stringify(message)}\0`);
+toChrome.on('error', (error) => fail(`Chrome debugging pipe failed: ${error.message}`));
 
-const ws = new WebSocket(await getWsUrl());
-await new Promise((r, j) => { ws.onopen = r; ws.onerror = j; });
-ws.onclose = () => fail(`Chrome debugging connection closed: ${chromeDiagnostics}`);
+// The page target, attached in flat mode: page commands carry its session id
+// and page messages are handed on without it, as the page's own websocket
+// gave them; worker sessions (Target.setAutoAttach) keep theirs.
+const handshake = new Map();
+let handshakeId = 0;
+receiveCdp = (msg) => {
+  if (msg.id && handshake.has(msg.id)) { handshake.get(msg.id)(msg); handshake.delete(msg.id); }
+};
+const browserCommand = (method, params = {}) => new Promise((resolve) => {
+  const id = ++handshakeId;
+  const timeout = setTimeout(() => fail(`chrome did not answer ${method} on its debugging pipe`), 30_000);
+  handshake.set(id, (m) => { clearTimeout(timeout); resolve(m); });
+  writeCdp({ id, method, params });
+});
+let pageTargetId = null;
+for (let i = 0; i < 60 && !pageTargetId; i++) {
+  const targets = await browserCommand('Target.getTargets');
+  pageTargetId = targets.result?.targetInfos?.find((t) => t.type === 'page')?.targetId || null;
+  if (!pageTargetId) await wait(250);
+}
+if (!pageTargetId) fail('chrome did not expose a page target');
+const attached = await browserCommand('Target.attachToTarget', { targetId: pageTargetId, flatten: true });
+const pageSessionId = attached.result?.sessionId;
+if (!pageSessionId) fail(`could not attach to the page target: ${JSON.stringify(attached.error || attached)}`);
+// Why the session went: Chrome's own detach or crash event, whether the
+// browser still runs, and the last command sent.
+let inspectorEvent = null;
+let lastCommand = null;
+function sessionLost(what) {
+  const running = chrome.exitCode === null && chrome.signalCode === null;
+  fail(`${what} (Chrome ${running ? 'still running' : `gone: ${chrome.exitCode ?? chrome.signalCode}`}; `
+    + `${inspectorEvent || 'no Inspector event'}; last command ${lastCommand || 'none'}): ${chromeDiagnostics}`);
+}
+fromChrome.on('close', () => sessionLost('Chrome debugging pipe closed'));
 
 let msgId = 0;
 const pending = new Map();
 const pageErrors = [];
-ws.onmessage = (e) => {
-  const msg = JSON.parse(e.data);
+// Steps that need raw CDP events (worker targets, Fetch) subscribe here.
+const cdpEventListeners = new Set();
+function onCdpEvent(listener) {
+  cdpEventListeners.add(listener);
+  return () => cdpEventListeners.delete(listener);
+}
+// Requests the cross-origin isolated page (#264) had blocked by COEP, CORP or
+// COOP, over the whole run: the Audits domain reports each as an issue.
+const isolationBlocks = [];
+receiveCdp = (msg) => {
+  if (msg.sessionId === pageSessionId) delete msg.sessionId;
+  else if (!msg.sessionId && !msg.id) {
+    // The browser session's own events: only the page session ending matters.
+    if (msg.method === 'Target.detachedFromTarget' && msg.params?.sessionId === pageSessionId) {
+      sessionLost('Chrome detached the page debugging session');
+    }
+    return;
+  }
   if (msg.id && pending.has(msg.id)) {
     pending.get(msg.id)(msg);
     pending.delete(msg.id);
     return;
+  }
+  if (msg.method === 'Inspector.detached' || msg.method === 'Inspector.targetCrashed') {
+    inspectorEvent = `${msg.method} ${JSON.stringify(msg.params || {})}`;
+    console.error(`page ${inspectorEvent}`);
+  }
+  for (const listener of cdpEventListeners) {
+    try { listener(msg); } catch (error) { console.error('CDP listener failed:', error); }
+  }
+  if (msg.method === 'Audits.issueAdded' && msg.params?.issue?.code === 'BlockedByResponseIssue' && !msg.sessionId) {
+    const details = msg.params.issue.details?.blockedByResponseIssueDetails;
+    isolationBlocks.push(`${details?.reason || 'blocked'}: ${details?.request?.url || '?'}`);
   }
   if (msg.method === 'Runtime.exceptionThrown') {
     pageErrors.push(msg.params?.exceptionDetails?.exception?.description
@@ -161,6 +276,8 @@ ws.onmessage = (e) => {
     if (/\[W:onnxruntime:/.test(message)) return;
     console.error('page console error:', message);
     if (/^Export failed:/.test(message)) pageErrors.push(message);
+    // The shared-plane hash check (#264) must never fire in a smoke run.
+    if (/shared plane changed during a worker job/.test(message)) pageErrors.push(message);
     const frames = msg.params.stackTrace?.callFrames || [];
     if (frames.length) console.error(frames.slice(0, 5).map(frame => `  ${frame.functionName} (${frame.url}:${frame.lineNumber + 1})`).join('\n'));
   }
@@ -172,18 +289,31 @@ ws.onmessage = (e) => {
     if (/OpenCV/i.test(text)) {
       pageErrors.push(`OpenCV load failure dialog: ${text.slice(0, 200)}`);
     }
-    ws.send(JSON.stringify({
+    writeCdp({
       id: ++msgId,
       method: 'Page.handleJavaScriptDialog',
       params: { accept: true },
-    }));
+      sessionId: pageSessionId,
+    });
   }
 };
+// One CDP command's limit. The GPU-preview step forces WebGL2 onto CI's
+// software rasteriser, where a single evaluate (the 62-case self-test, a
+// bordered drag) takes several times as long as on a Mac and crossed 180 s.
+const COMMAND_TIMEOUT_MS = process.env.CI ? 600_000 : 180_000;
 const send = (method, params = {}) => new Promise((resolve) => {
   const id = ++msgId;
-  const timeout = setTimeout(() => fail(`Chrome command timed out: ${method}`), 180_000);
+  lastCommand = method;
+  const timeout = setTimeout(() => fail(`Chrome command timed out: ${method}`), COMMAND_TIMEOUT_MS);
   pending.set(id, (m) => { clearTimeout(timeout); resolve(m); });
-  ws.send(JSON.stringify({ id, method, params }));
+  writeCdp({ id, method, params, sessionId: pageSessionId });
+});
+// A command to an attached target's session (flat mode: a worker, #264).
+const sendTo = (sessionId, method, params = {}) => new Promise((resolve) => {
+  const id = ++msgId;
+  const timeout = setTimeout(() => { pending.delete(id); resolve({ error: { message: `timed out: ${method}` } }); }, 30_000);
+  pending.set(id, (m) => { clearTimeout(timeout); resolve(m); });
+  writeCdp({ id, method, params, sessionId });
 });
 async function evaluate(expression) {
   const res = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
@@ -252,6 +382,16 @@ async function dumpDiagnostics(context) {
       loupeHidden: document.getElementById('loupeOverlay')?.hidden,
       loupePermissionProbe: window.__loupePermissionProbe,
       timeOrigin: performance.timeOrigin,
+      historyRestore: window.__historyCropProbe && {
+        requests: window.__historyCropProbe.historyRequests,
+        held: window.__historyCropProbe.conversionHeld.length,
+        replies: window.__historyCropProbe.conversionReplies,
+        dispatched: window.__historyCropProbe.dispatched,
+        converting: window.__ncAnalysis.converting(),
+        pendingGeometry: window.__ncGeometry.pending(),
+        pendingDetection: window.__ncAnalysis.pendingDetection(),
+        state: window.__ncTwoStage.status(),
+      },
       toast: [...document.querySelectorAll('.toast-message')].map((t) => t.textContent),
     }))()`);
     console.error(`diagnostics [${context}]: ${JSON.stringify(info)}`);
@@ -279,7 +419,12 @@ async function previewLuminance() {
 }
 
 await send('Page.enable');
+// Keep the compile-once OpenCV check observable even after the full run's
+// imports and worker loads have filled the default Resource Timing buffer.
+await send('Page.addScriptToEvaluateOnNewDocument', { source: 'performance.setResourceTimingBufferSize(100000);' });
 await send('Runtime.enable');
+await send('Inspector.enable');
+await send('Audits.enable');
 // The fake-camera flags make headless Chrome reserve part of the window (the
 // viewport came out 1440x757); pin the layout the scenarios were written for.
 await send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
@@ -287,10 +432,63 @@ await send('Page.navigate', { url: `http://127.0.0.1:${PORT}/?lang=en` });
 await waitFor('app boot', `!!document.getElementById('studioImportAutoCrop')`);
 await installDialogAutoAccept();
 await wait(1500); // let main.js finish wiring
+
+// This scenario navigates and imports its own small fixtures. Exit here so
+// --auto-crop-only cannot continue through the unrelated camera/roll suites.
+if (process.argv.includes('--auto-crop-only')) {
+  await runStudioAutoCropSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS'); process.exit(0);
+}
 await evaluate(`document.getElementById('studioImportAutoCrop').click()`);
+
+if (process.argv.includes('--isolation-only')) {
+  await runIsolationSmoke({ send, sendTo, onCdpEvent, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+  if (isolationBlocks.length) fail(`requests blocked by COEP/CORP/COOP:\n${isolationBlocks.join('\n')}`);
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS'); process.exit(0);
+}
 
 if (process.argv.includes('--performance-only')) {
   await runPerformanceUiSmoke({ evaluate, fail });
+  await runRawPostDecodeSmoke({ evaluate, fail });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS'); process.exit(0);
+}
+
+// #252: OpenCV's shared module, the roll-frame worker and the parallel detector.
+if (process.argv.includes('--roll-frame-only')) {
+  await runRollFrameSmoke({ evaluate, fail });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS'); process.exit(0);
+}
+
+// Opt-in: real RAW files, see scripts/raw-post-decode-smoke.mjs.
+if (process.argv.includes('--raw-parity-only')) {
+  // Recording on 1703835 (RAW_PARITY_RECORD=1) only needs loadRawFile there.
+  if (process.env.RAW_PARITY_RECORD !== '1') await runRawPostDecodeSmoke({ evaluate, fail });
+  await runRawParitySmoke({ send, evaluate, waitFor, fail, port: PORT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS'); process.exit(0);
+}
+
+// Opt-in: the RGB16 gate over every decoder configuration (#264), real RAW
+// files, see scripts/raw-decode-gate-smoke.mjs.
+if (process.argv.includes('--raw-decode-gate-only')) {
+  await runRawDecodeGateSmoke({ send, onCdpEvent, evaluate, waitFor, fail, port: PORT, root: ROOT });
+  if (isolationBlocks.length) fail(`requests blocked by COEP/CORP/COOP:\n${isolationBlocks.join('\n')}`);
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS'); process.exit(0);
+}
+
+if (process.argv.includes('--studio-sync-only')) {
+  await runStudioSyncSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS'); process.exit(0);
+}
+
+if (process.argv.includes('--silvercore-cache-only')) {
+  await runSilverCoreCacheSmoke({ evaluate, fail });
   if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
   console.log('SMOKE PASS'); process.exit(0);
 }
@@ -309,6 +507,61 @@ if (process.argv.includes('--restart-only')) {
 
 if (process.argv.includes('--photo-session-only')) {
   await runPhotoSessionSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
+  await runPhotoHeapSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS'); process.exit(0);
+}
+
+if (process.argv.includes('--photo-heap-only')) {
+  await runPhotoHeapSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS'); process.exit(0);
+}
+
+if (process.argv.includes('--display-session-only')) {
+  await runDisplaySessionSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS'); process.exit(0);
+}
+
+if (process.argv.includes('--photo-activation-only')) {
+  await runPhotoActivationSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS'); process.exit(0);
+}
+
+if (process.argv.includes('--webgl-preview-only')) {
+  await runWebglPreviewSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS'); process.exit(0);
+}
+
+if (process.argv.includes('--preview-tier-only')) {
+  await runPreviewTierSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS'); process.exit(0);
+}
+
+if (process.argv.includes('--preview-path-only')) {
+  await runPreviewPathSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS'); process.exit(0);
+}
+
+if (process.argv.includes('--gpu-preview-only')) {
+  await runGpuPreviewSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS'); process.exit(0);
+}
+
+if (process.argv.includes('--display-modes-only')) {
+  await runDisplayModesSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS'); process.exit(0);
+}
+
+if (process.argv.includes('--zoom-detail-only')) {
+  await runZoomDetailSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
   if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
   console.log('SMOKE PASS'); process.exit(0);
 }
@@ -344,6 +597,12 @@ if (process.argv.includes('--positive-only')) {
   console.log('SMOKE PASS');
   process.exit(0);
 }
+if (process.argv.includes('--bw-roll-only')) {
+  await runBwRollImportSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS');
+  process.exit(0);
+}
 if (process.argv.includes('--native-font-only')) {
   await runNativeFilmFontSmoke({ send, evaluate, waitFor, wait, fail, port: PORT, root: ROOT });
   if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
@@ -360,8 +619,119 @@ if (process.argv.includes('--folder-only')) {
   if(pageErrors.filter(e=>!/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
   console.log('SMOKE PASS');process.exit(0);
 }
+if (process.argv.includes('--export-ownership-only')) {
+  await runExportOwnershipSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS');
+  process.exit(0);
+}
+if (process.argv.includes('--repair-release-only')) {
+  await runRepairReleaseSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS');
+  process.exit(0);
+}
+if (process.argv.includes('--dust-undo-only')) {
+  await runDustUndoSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS');
+  process.exit(0);
+}
+if (process.argv.includes('--batch-pipeline-only')) {
+  await runBatchPipelineSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS');
+  process.exit(0);
+}
+if (process.argv.includes('--gain-map-only')) {
+  await runExportGainMapSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS');
+  process.exit(0);
+}
+if (process.argv.includes('--hidden-job-only')) {
+  await runHiddenJobSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS');
+  process.exit(0);
+}
+if (process.argv.includes('--memory-budget-only')) {
+  await runMemoryBudgetSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS');
+  process.exit(0);
+}
+// Opt-in: local RAW files against a baseline recorded from a reference build
+// (see import-parity-smoke.mjs). Never part of the default run.
+if (process.argv.includes('--import-parity-only')) {
+  await runImportParitySmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS');
+  process.exit(0);
+}
+if (process.argv.includes('--first-photo-only')) {
+  await runFirstPhotoSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS');
+  process.exit(0);
+}
+if (process.argv.includes('--png16-only')) {
+  await runPng16BandSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS');
+  process.exit(0);
+}
+if (process.argv.includes('--autoframe-import-only')) {
+  await runAutoFrameImportSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS'); process.exit(0);
+}
+if (process.argv.includes('--geometry-only')) {
+  await runGeometrySmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS'); process.exit(0);
+}
+if (process.argv.includes('--two-stage-only')) {
+  await runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, onCdpEvent, port: PORT, root: ROOT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS (two-stage imports)'); process.exit(0);
+}
+if (process.argv.includes('--perf-harness-only')) {
+  await runPerfHarnessSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS (perf harness)');
+  process.exit(0);
+}
+if (process.argv.includes('--embedded-preview-only')) {
+  await runEmbeddedPreviewSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS (embedded previews)'); process.exit(0);
+}
+if (process.argv.includes('--crop-apply-only')) {
+  await runCropApplySmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS'); process.exit(0);
+}
 if (process.argv.includes('--expired-only')) {
   await runExpiredFilmSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS');
+  process.exit(0);
+}
+if (process.argv.includes('--interpretation-routes-only')) {
+  await runInterpretationRoutesSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS');
+  process.exit(0);
+}
+if (process.argv.includes('--expired-live-type-only')) {
+  await runExpiredLiveTypeSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS');
+  process.exit(0);
+}
+if (process.argv.includes('--workspace-ui-only')) {
+  await runWorkspaceUiSmoke({ send, sendTo, evaluate, waitFor, fail, port: PORT, root: ROOT });
   if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
   console.log('SMOKE PASS');
   process.exit(0);
@@ -395,11 +765,16 @@ await evaluate(`(() => {
   Worker.prototype.postMessage = function (message, ...args) {
     if (message.type === 'analyze-frame') {
       window.__frameInput = structuredClone(message);
-      this.addEventListener('message', event => {
+      // The reply to this request, not the worker's request for the shared
+      // OpenCV module (#252) that may come first.
+      const onReply = event => {
+        if (event.data?.id !== message.id) return;
+        this.removeEventListener('message', onReply);
         window.__frameResult = event.data;
         window.__frameDone = true;
         clearInterval(timer);
-      }, { once: true });
+      };
+      this.addEventListener('message', onReply);
     }
     return original.call(this, message, ...args);
   };
@@ -446,6 +821,7 @@ const fullSize = await evaluate(`({ width: window.__frameResult.result.cropRegio
 await evaluate(`document.getElementById('studioTab-conversion').click(); document.getElementById('studioRetry').click()`);
 await wait(400);
 await waitFor('reconversion overlay closed', `!document.querySelector('.loading-overlay.visible')`,150000);
+await expectLoadingOverlayIdle({ evaluate, waitFor, fail }, 'reconversion');
 const step3Expr = `document.getElementById('statusBadge').classList.contains('step3')`;
 await waitFor('converted status', step3Expr, 150_000);
 console.log('ok: reconversion finished in the current workspace');
@@ -473,7 +849,7 @@ await evaluate(`(() => {
   const workerSources = new WeakMap();
   const postDust = Worker.prototype.postMessage;
   Worker.prototype.postMessage = function (message, ...args) {
-    if (['detect', 'inpaint', 'refine'].includes(message?.type) &&
+    if (['detect', 'inpaint', 'stroke'].includes(message?.type) &&
         typeof message.reuseSource === 'boolean') {
       let record = workerSources.get(this);
       if (!record) {
@@ -525,32 +901,147 @@ if (clearedSource.hash !== dustSource.hash) fail('clear mask re-detected dust on
 await waitForDustSettled('cleared dust repair committed');
 
 // 直接ブラシが変換Workerを呼び直さずに修復することを確認する。
+// #259: the pinned worker already holds both planes and the mask, so a stroke
+// posts only its points; undo/redo patch in place without conversion or detection.
 await evaluate(`(() => {
   window.__brushConversions = 0;
+  window.__brushDetections = 0;
   window.__dustSources = [];
   window.__dustStatusUpdates = 0;
+  window.__dustMessages = [];
+  const size = value => {
+    if (!value || typeof value !== 'object') return 0;
+    if (ArrayBuffer.isView(value)) return value.byteLength;
+    return Object.values(value).reduce((sum, item) => sum + size(item), 0);
+  };
   const post = Worker.prototype.postMessage;
   Worker.prototype.postMessage = function (message, ...args) {
     if (message?.type === 'convert') window.__brushConversions++;
+    if (message?.type === 'detect') window.__brushDetections++;
+    if (['stroke', 'maskDelta', 'plane'].includes(message?.type)) {
+      window.__dustMessages.push({ type: message.type, kind: message.kind, bytes: size(message),
+        baseTag: message.baseTag, tag: message.tag, image16: Boolean(message.image16), mask: Boolean(message.mask) });
+    }
     return post.call(this, message, ...args);
   };
   document.getElementById('dustShowMask').click();
-  const canvas = document.getElementById('canvas');
-  const rect = canvas.getBoundingClientRect();
-  const options = { bubbles: true, clientX: rect.x + rect.width / 2,
-    clientY: rect.y + rect.height / 2, button: 0, altKey: true };
-  canvas.dispatchEvent(new MouseEvent('mousedown', options));
-  document.dispatchEvent(new MouseEvent('mouseup', options));
 })()`);
-await waitFor('dust brush inpaint', `window.__dustSources.some(source => source.type === 'refine')`, 30_000);
+await waitFor('dust worker pinned with its planes', `(async () => {
+  const { dustWorker } = await import('/src/app/dustWorkerClient.js');
+  return dustWorker.pinned && dustWorker.maskTag !== null;
+})()`, 30_000);
+await wait(500);
+const dustCount = text => /No dust/.test(text) ? 0 : Number(/(\d+)/.exec(text)?.[1]);
+const statusBeforeStroke = dustCount(await evaluate(`document.getElementById('dustStatus').textContent`));
+// #254: the brush takes pointer events on the surface on screen (the GL
+// canvas stays on while the mask is shown), draws the stroke on its overlay
+// and writes nothing into #canvas while it paints.
+const brushBefore = await evaluate(`(async () => {
+  window.__dustMessages = [];
+  window.__dustStatusUpdates = 0;
+  window.__ncBrush.resetCounters();
+  const surface = [...document.querySelectorAll('#canvas, #glCanvas')].find(el => getComputedStyle(el).display !== 'none');
+  const rect = surface.getBoundingClientRect();
+  const at = (dx) => ({ bubbles: true, cancelable: true, pointerId: 7, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 1,
+    clientX: rect.x + rect.width / 2 + dx, clientY: rect.y + rect.height / 2, altKey: true });
+  surface.dispatchEvent(new PointerEvent('pointerdown', at(0)));
+  surface.dispatchEvent(new PointerEvent('pointermove', at(3)));
+  surface.dispatchEvent(new PointerEvent('pointermove', at(6)));
+  await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  const during = window.__ncBrush.state();
+  surface.dispatchEvent(new PointerEvent('pointerup', { ...at(6), buttons: 0 }));
+  return { surface: surface.id, during, after: window.__ncBrush.state() };
+})()`);
+if (!brushBefore.during.feedback.drawing || brushBefore.during.feedback.counters.frames < 1 || brushBefore.during.feedback.points < 2) {
+  fail('the dust brush did not draw its stroke on the feedback overlay: ' + JSON.stringify(brushBefore.during.feedback));
+}
+if (brushBefore.during.canvasWrites.put || brushBefore.during.canvasWrites.draw) {
+  fail('the dust brush wrote into #canvas while painting: ' + JSON.stringify(brushBefore.during.canvasWrites));
+}
+if (!brushBefore.during.containerClass) fail('the view did not take touch-action: none for the dust brush');
+if (brushBefore.after.feedback.drawing) fail('pen-up did not end the overlay stroke');
+await waitFor('dust brush stroke', `window.__dustSources.some(source => source.type === 'stroke')`, 30_000);
 await waitForDustSettled('dust brush repair committed', { freshStatus: true });
 if (await evaluate(`window.__brushConversions !== 0`)) fail('dust brush reconverted the full image');
 if (await evaluate(`document.getElementById('dustStatus').textContent.startsWith('Error:')`)) {
   fail('dust brush reported an error');
 }
-console.log(`ok: dust detection ${dustSource.width}x${dustSource.height}, clean-source reset, brush without reconversion`);
+const strokeMessages = await evaluate(`window.__dustMessages.filter(message => message.type === 'stroke')`);
+if (strokeMessages.length !== 1 || strokeMessages[0].bytes > 1024 * 1024 || strokeMessages[0].image16 || strokeMessages[0].mask) {
+  fail('a pinned dust stroke must post only its points: ' + JSON.stringify(strokeMessages));
+}
+const statusAfterStroke = dustCount(await evaluate(`document.getElementById('dustStatus').textContent`));
+// Undo and redo of a stroke apply its bytes in place: no conversion, no new detection.
+await evaluate(`window.__dustMessages = []; window.__brushDetections = 0; document.getElementById('undoBtn').click()`);
+await wait(1500);
+const undoState = await evaluate(`({ conversions: window.__brushConversions, detections: window.__brushDetections,
+  status: document.getElementById('dustStatus').textContent, messages: window.__dustMessages })`);
+if (undoState.conversions !== 0 || undoState.detections !== 0) fail('undoing a dust stroke re-converted or re-detected: ' + JSON.stringify(undoState));
+if (dustCount(undoState.status) !== statusBeforeStroke) fail(`undo did not restore the particle count: ${undoState.status} vs ${statusBeforeStroke}`);
+const followed = undoState.messages.find(message => message.type === 'maskDelta');
+if (!followed || followed.baseTag !== strokeMessages[0].tag || followed.tag !== strokeMessages[0].baseTag) {
+  fail('the worker did not follow the undone mask: ' + JSON.stringify(undoState.messages));
+}
+await evaluate(`window.__dustMessages = []; document.getElementById('redoBtn').click()`);
+await wait(1500);
+const redoState = await evaluate(`({ conversions: window.__brushConversions, detections: window.__brushDetections,
+  status: document.getElementById('dustStatus').textContent, messages: window.__dustMessages })`);
+if (redoState.conversions !== 0 || redoState.detections !== 0 || dustCount(redoState.status) !== statusAfterStroke) {
+  fail('redoing a dust stroke re-converted, re-detected or lost its count: ' + JSON.stringify(redoState));
+}
+// #254: a finger paints a dust-brush stroke: pointer events, captured, with
+// touch-action: none on the view, and the photo does not pan.
+await send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 2 });
+try {
+  const touchAt = await evaluate(`(() => {
+    const surface = [...document.querySelectorAll('#canvas, #glCanvas')].find(el => getComputedStyle(el).display !== 'none');
+    const r = surface.getBoundingClientRect();
+    window.__dustSources = [];
+    window.__dustStatusUpdates = 0;
+    return { x: r.x + r.width * 0.3, y: r.y + r.height * 0.3, transform: document.getElementById('canvasTransformWrapper').style.transform };
+  })()`);
+  await send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: touchAt.x, y: touchAt.y }] });
+  await send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: touchAt.x + 20, y: touchAt.y + 4 }] });
+  const touching = await evaluate(`(async () => {
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    return window.__ncBrush.state();
+  })()`);
+  await send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  if (!touching.feedback.drawing || touching.feedback.points < 2 || !touching.containerClass) {
+    fail('a touch drag did not paint a dust-brush stroke: ' + JSON.stringify(touching.feedback));
+  }
+  await waitFor('touch dust stroke', `window.__dustSources.some(source => source.type === 'stroke')`, 30_000);
+  await waitForDustSettled('touch dust stroke committed', { freshStatus: true });
+  const transformAfter = await evaluate(`document.getElementById('canvasTransformWrapper').style.transform`);
+  if (transformAfter !== touchAt.transform) fail('the touch dust brush panned the photo: ' + JSON.stringify({ before: touchAt.transform, after: transformAfter }));
+} finally {
+  await send('Emulation.setTouchEmulationEnabled', { enabled: false });
+}
+// #242/#253/#254: the dust-mask view of a repaired, full-resolution frame is
+// drawn at display size: the tint, max-pooled at the display frame's size, on
+// the display overlay over the photo, which stays on the GL display (or
+// #canvas without WebGL).
+const dustDisplay = await evaluate(`window.__ncDisplay.frame()`);
+const displaySize = JSON.stringify(dustDisplay.display);
+const dustBrushState = await evaluate(`window.__ncBrush.state()`);
+const dustFrameOk = dustDisplay.surface === 'gl'
+  ? JSON.stringify(dustDisplay.canvases.gl) === displaySize && dustDisplay.canvases.main.join('x') === '1x1'
+  : JSON.stringify(dustDisplay.canvases.main) === displaySize && JSON.stringify(dustDisplay.handle) === displaySize;
+if (!dustFrameOk || JSON.stringify(dustDisplay.canvases.overlay) !== displaySize
+  || JSON.stringify(dustDisplay.canvases.dustTint) !== displaySize || !dustBrushState.tint?.current
+  || dustDisplay.display[0] * dustDisplay.display[1] > 4_000_000) {
+  fail('the dust-mask view is not drawn at display size: ' + JSON.stringify({ dustDisplay, layer: dustBrushState.layer, tint: dustBrushState.tint }));
+}
+if (dustBrushState.webgl !== (dustDisplay.surface === 'gl')) fail('the dust mask turned the GPU display off: ' + JSON.stringify(dustBrushState));
+const overlayPixels = dustBrushState.feedback.width * dustBrushState.feedback.height;
+const containerPixels = await evaluate(`(() => { const c = document.getElementById('canvasContainer'); const d = window.devicePixelRatio || 1; return Math.ceil(c.clientWidth * d) * Math.ceil(c.clientHeight * d); })()`);
+if (overlayPixels > containerPixels) fail(`the brush overlay is larger than the view: ${overlayPixels} > ${containerPixels}`);
+console.log(`ok: dust detection ${dustSource.width}x${dustSource.height}, clean-source reset, pinned regional brush (${strokeMessages[0].bytes} B stroke, pointer events, overlay only while painting), in-place undo/redo, display-size mask view ${displaySize} on ${dustDisplay.surface}`);
 // 後続の色調検証ではマスクの色を重ねない。
 await evaluate(`window.__dustStatusObserver.disconnect(); document.getElementById('dustShowMask').click()`);
+if (await evaluate(`import('/src/app/dustWorkerClient.js').then(({ dustWorker }) => dustWorker.pinned)`)) {
+  fail('hiding the dust mask must release the dust worker pin');
+}
 if (process.argv.includes('--dust-delay-inpaint')) {
   const delayed = await evaluate(`window.__dustDelayedInpaintResponses`);
   if (delayed < 2) fail(`dust delay injection missed detection repairs: ${delayed}`);
@@ -572,8 +1063,19 @@ if (Math.abs(meanAfter - meanBefore) < 8) {
 
 // ---- 5. curve editor: drag the midtones up, preview must brighten/change ----
 // 調色タブの曲線を開く。旧パネルモードには依存しない。
-await evaluate(`document.getElementById('studioTab-edit').click(); document.getElementById('studioCurves').open = true; window.dispatchEvent(new Event('resize'));`);
+// No resize event: the curve's ResizeObserver draws it when the drawer first
+// gives it a size (#261).
+await evaluate(`document.getElementById('studioTab-edit').click(); document.getElementById('studioCurves').open = true;`);
 await wait(300);
+const curveRevealed = await evaluate(`(() => {
+  const curve = document.getElementById('curveCanvas');
+  return { width: curve.width, height: curve.height, cssWidth: curve.offsetWidth, cssHeight: curve.offsetHeight,
+    alpha: curve.width ? curve.getContext('2d').getImageData(curve.width >> 1, curve.height >> 1, 1, 1).data[3] : 0 };
+})()`);
+if (!(curveRevealed.cssWidth > 0 && curveRevealed.width === curveRevealed.cssWidth * 2
+  && curveRevealed.height === curveRevealed.cssHeight * 2 && curveRevealed.alpha === 255)) {
+  fail('curve editor is blank when its drawer is first opened: ' + JSON.stringify(curveRevealed));
+}
 await evaluate(`(() => {
   const content = document.getElementById('additionalSectionContent');
   if (content.classList.contains('collapsed')) {
@@ -758,13 +1260,12 @@ const failureProbeSize = await evaluate(`(async () => {
   const bitmap = await createImageBitmap(await (await fetch('/test-fixtures/negative-sample-2.jpg')).blob());
   const size = [bitmap.width, bitmap.height]; bitmap.close(); return size;
 })()`);
-await waitFor('full-resolution canvas before failed switch', `document.getElementById('canvas').width === ${failureProbeSize[0]} && document.getElementById('canvas').height === ${failureProbeSize[1]}`, 30_000);
+// #canvas holds a display-size frame (none while WebGL presents, #242): the
+// frame and the image it shows come from the app's display probe.
+await waitFor('full-resolution frame before failed switch', `(() => { const f = window.__ncDisplay.frame(); return f.exact && f.width === ${failureProbeSize[0]} && f.height === ${failureProbeSize[1]}; })()`, 30_000);
 const canvasFingerprint = `(() => {
-  const c = document.getElementById('canvas');
-  const data = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
-  let hash = 2166136261;
-  for (const value of data) hash = Math.imul(hash ^ value, 16777619);
-  return [c.width, c.height, hash];
+  const f = window.__ncDisplay.frame();
+  return [f.width, f.height, window.__ncDisplay.imageHash()];
 })()`;
 const beforeFailure = await evaluate(canvasFingerprint);
 // Display order follows file modification time, not append/queue order.
@@ -780,10 +1281,23 @@ console.log('ok: failed decode preserves the previous image and active file');
 }
 
 await runPerformanceUiSmoke({ evaluate, fail });
+await runRawPostDecodeSmoke({ evaluate, fail });
+await runRollFrameSmoke({ evaluate, fail });
 if (!process.argv.some(arg => arg.endsWith('-only'))) {
+  await runSilverCoreCacheSmoke({ evaluate, fail });
   await runComparePreviewSmoke({ send, evaluate, waitFor, wait, fail, port: PORT });
   await runRestartRenderSmoke({ send, evaluate, waitFor, fail, port: PORT });
   await runPhotoSessionSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
+  await runPhotoHeapSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
+  await runDisplaySessionSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
+  await runPhotoActivationSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
+  await runWebglPreviewSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
+  await runPreviewTierSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
+  await runStudioSyncSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
+  await runPreviewPathSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
+  await runGpuPreviewSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
+  await runDisplayModesSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
+  await runZoomDetailSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
 }
 if (!process.argv.includes('--auto-crop-only') && !process.argv.includes('--color-analysis-only') && !process.argv.includes('--film-edge-only') && !process.argv.includes('--darkroom-only') && !process.argv.includes('--camera-only') && !process.argv.includes('--roll-home-only') && !process.argv.includes('--technical-only')) await runStudioSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, fixtures: [FIXTURE, FIXTURE2], root: ROOT });
 if (!process.argv.includes('--color-analysis-only') && !process.argv.includes('--film-edge-only') && !process.argv.includes('--darkroom-only') && !process.argv.includes('--camera-only') && !process.argv.includes('--roll-home-only') && !process.argv.includes('--technical-only')) await runStudioAutoCropSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
@@ -797,18 +1311,38 @@ if (!process.argv.includes('--film-edge-only') && !process.argv.includes('--came
 if (!process.argv.includes('--film-edge-only') && !process.argv.includes('--darkroom-only') && !process.argv.includes('--roll-home-only') && !process.argv.includes('--technical-only')) await runCameraSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
 if (!process.argv.includes('--film-edge-only') && !process.argv.includes('--darkroom-only') && !process.argv.includes('--camera-only') && !process.argv.includes('--technical-only')) await runRollHomeSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
 if (!process.argv.includes('--film-edge-only') && !process.argv.includes('--darkroom-only') && !process.argv.includes('--camera-only') && !process.argv.includes('--roll-home-only')) await runTechnicalDepthSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
-if (!process.argv.includes('--film-edge-only') && !process.argv.includes('--darkroom-only') && !process.argv.includes('--camera-only') && !process.argv.includes('--roll-home-only') && !process.argv.includes('--technical-only')) await runWorkspaceUiSmoke({ send, evaluate, waitFor, fail, port: PORT, root: ROOT });
+if (!process.argv.includes('--film-edge-only') && !process.argv.includes('--darkroom-only') && !process.argv.includes('--camera-only') && !process.argv.includes('--roll-home-only') && !process.argv.includes('--technical-only')) await runWorkspaceUiSmoke({ send, sendTo, evaluate, waitFor, fail, port: PORT, root: ROOT });
 if (process.env.AUTOFRAME_RAW_DIR) await runStudioRawAutoFrameSmoke({ send, evaluate, waitFor, fail, port: PORT, root: ROOT, directory: process.env.AUTOFRAME_RAW_DIR });
 
 if (!process.argv.some(arg => arg.endsWith('-only'))) await runPositiveImportSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
+if (!process.argv.some(arg => arg.endsWith('-only'))) await runBwRollImportSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
 if (!process.argv.some(arg => arg.endsWith('-only'))) await runExpiredFilmSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
 if (!process.argv.some(arg => arg.endsWith('-only'))) await runNativeFilmFontSmoke({ send, evaluate, waitFor, wait, fail, port: PORT, root: ROOT });
+if (!process.argv.some(arg => arg.endsWith('-only'))) await runExportGainMapSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+if (!process.argv.some(arg => arg.endsWith('-only'))) await runPng16BandSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+if (!process.argv.some(arg => arg.endsWith('-only'))) await runExportOwnershipSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+if (!process.argv.some(arg => arg.endsWith('-only'))) await runRepairReleaseSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+if (!process.argv.some(arg => arg.endsWith('-only'))) await runDustUndoSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+if (!process.argv.some(arg => arg.endsWith('-only'))) await runBatchPipelineSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
 
 if (!process.argv.some(arg => arg.endsWith('-only'))) await runSimplicitySmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
 
 if (!process.argv.some(arg => arg.endsWith('-only'))) await runRollFilmTypeSmoke({send,evaluate,waitFor,wait,fail,installDialogAutoAccept,port:PORT});
 if (!process.argv.some(arg => arg.endsWith('-only'))) await runFolderImportSmoke({send,evaluate,waitFor,wait,fail,installDialogAutoAccept,port:PORT,root:ROOT});
 if (!process.argv.some(arg => arg.endsWith('-only'))) await runPhotoSortSmoke({send,evaluate,waitFor,wait,fail,installDialogAutoAccept,port:PORT,root:ROOT});
+if (!process.argv.some(arg => arg.endsWith('-only'))) await runHiddenJobSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+if (!process.argv.some(arg => arg.endsWith('-only'))) await runMemoryBudgetSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+if (!process.argv.some(arg => arg.endsWith('-only'))) await runGeometrySmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+if (!process.argv.some(arg => arg.endsWith('-only'))) await runAutoFrameImportSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
+if (!process.argv.some(arg => arg.endsWith('-only'))) await runPerfHarnessSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+if (!process.argv.some(arg => arg.endsWith('-only'))) await runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, onCdpEvent, port: PORT, root: ROOT });
+if (!process.argv.some(arg => arg.endsWith('-only'))) await runFirstPhotoSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+if (!process.argv.some(arg => arg.endsWith('-only'))) await runEmbeddedPreviewSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
+if (!process.argv.some(arg => arg.endsWith('-only'))) await runCropApplySmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
+if (!process.argv.some(arg => arg.endsWith('-only'))) await runIsolationSmoke({ send, sendTo, onCdpEvent, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+
+// ---- nothing the isolated page loads is blocked (#264) ----
+if (isolationBlocks.length) fail(`requests blocked by COEP/CORP/COOP:\n${isolationBlocks.join('\n')}`);
 
 // ---- no uncaught page errors across both scenarios ----
 const realErrors = pageErrors.filter((e) => !/ResizeObserver loop/.test(e));

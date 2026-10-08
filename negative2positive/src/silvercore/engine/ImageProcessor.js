@@ -9,6 +9,7 @@
 
 import { colorModels } from './Presets.js'
 import { analysisPixelBounds } from '../../app/analysisRegion.js';
+import { LITTLE_ENDIAN, wordAligned } from '../util/image16.js';
 
 const MAX_16 = 65535;
 const HIST_BINS = 256;
@@ -26,25 +27,52 @@ const BIN_TO_16 = 257;
  * @returns {Object[]} per-channel { whitePointOrigin, blackPointOrigin, meanPoint } in [0, 65535]
  */
 export function analyzeImage(imageData, params) {
-  const { data, width, height } = imageData;
+  const { width, height } = imageData;
+  const bounds = analysisBoundsFor(width, height, params);
+  const histograms = createAnalysisHistograms();
+  accumulateAnalysisHistograms(imageData, bounds, params, histograms);
+  return channelLevelsFromHistograms(histograms, params);
+}
+
+/**
+ * The analysis crop of a width × height frame: the analysis region, or the centre
+ * crop that excludes the film border.
+ */
+export function analysisBoundsFor(width, height, params) {
   // `?? 10`, not `|| 10`: Border Buffer 0 means "analyse the whole frame" (the slider
   // and the adapter both allow it) and must not silently fall back to the 10% inset.
   const borderPct = (params.borderBuffer ?? 10) / 100;
+  return analysisPixelBounds(width, height, params.analysisRegion, borderPct);
+}
 
-  // Crop region (center crop excluding film border)
-  const bounds = analysisPixelBounds(width, height, params.analysisRegion, borderPct);
-  const cropX = bounds.left, cropY = bounds.top, cropW = bounds.width, cropH = bounds.height;
+/** Empty per-channel 256-bin histograms and their pixel count. */
+export function createAnalysisHistograms() {
+  return { r: new Uint32Array(HIST_BINS), g: new Uint32Array(HIST_BINS), b: new Uint32Array(HIST_BINS), total: 0 };
+}
 
+/**
+ * Adds the pixels of `imageData` inside `bounds` to `histograms`. `imageData` may be
+ * a row band of the frame: `rowOffset` is the frame row of its first row, and only
+ * the rows of `bounds` that fall in the band are read (#256). Integer counts, so the
+ * bands of a frame add up to the frame's histograms exactly.
+ */
+export function accumulateAnalysisHistograms(imageData, bounds, params, histograms, rowOffset = 0) {
+  const { data, width } = imageData;
+  const rows = imageData.height;
+  const cropX = bounds.left, cropW = bounds.width;
+  const yStart = Math.max(bounds.top, rowOffset);
+  const yEnd = Math.min(bounds.top + bounds.height, rowOffset + rows);
   // Build per-channel 256-bin histograms from cropped region (>>8 indexing keeps cost
   // identical to the 8-bit version while operating on 16-bit pixels).
-  const rHist = new Uint32Array(HIST_BINS);
-  const gHist = new Uint32Array(HIST_BINS);
-  const bHist = new Uint32Array(HIST_BINS);
+  const rHist = histograms.r;
+  const gHist = histograms.g;
+  const bHist = histograms.b;
   let totalPixels = 0;
 
-  for (let y = cropY; y < cropY + cropH; y++) {
+  for (let y = yStart; y < yEnd; y++) {
+    const row = (y - rowOffset) * width;
     for (let x = cropX; x < cropX + cropW; x++) {
-      const i = (y * width + x) * 4;
+      const i = (row + x) * 4;
       // 解析標本の回転外側は黒い被写体ではない。
       if (params.excludeTransparent && data[i + 3] === 0) continue;
       rHist[data[i] >>> 8]++;
@@ -53,7 +81,13 @@ export function analyzeImage(imageData, params) {
       totalPixels++;
     }
   }
+  histograms.total += totalPixels;
+  return histograms;
+}
 
+/** analyzeImage()'s channel levels from its (possibly merged) histograms. */
+export function channelLevelsFromHistograms(histograms, params) {
+  const totalPixels = histograms.total;
   // Thresholds per color model
   const model = colorModels[params.colorModel] || colorModels.basic;
   const blackThreshold = model.blackThreshold ?? 0.002;
@@ -61,10 +95,47 @@ export function analyzeImage(imageData, params) {
 
   const imageType = params.imageType || 'negative';
   return [
-    computeChannelLevels(rHist, totalPixels, blackThreshold, whiteThreshold, 'ToneCurvePV2012Red', imageType),
-    computeChannelLevels(gHist, totalPixels, blackThreshold, whiteThreshold, 'ToneCurvePV2012Green', imageType),
-    computeChannelLevels(bHist, totalPixels, blackThreshold, whiteThreshold, 'ToneCurvePV2012Blue', imageType),
+    computeChannelLevels(histograms.r, totalPixels, blackThreshold, whiteThreshold, 'ToneCurvePV2012Red', imageType),
+    computeChannelLevels(histograms.g, totalPixels, blackThreshold, whiteThreshold, 'ToneCurvePV2012Green', imageType),
+    computeChannelLevels(histograms.b, totalPixels, blackThreshold, whiteThreshold, 'ToneCurvePV2012Blue', imageType),
   ];
+}
+
+/**
+ * analyzeImage() for a grey image held as one value per pixel. R, G and B of the RGBA
+ * grey image are equal, so their three histograms are one: the same crop, the same
+ * transparent-pixel rule, the same levels. `alpha` is the RGBA16 plane whose alpha
+ * belongs to these pixels, or null when every pixel is opaque.
+ *
+ * @param {Uint16Array} grey - width × height grey values
+ * @returns {Object[]} what analyzeImage returns for the RGBA grey image
+ */
+export function analyzeGreyImage(grey, width, height, params, alpha = null) {
+  const borderPct = (params.borderBuffer ?? 10) / 100;
+  const bounds = analysisPixelBounds(width, height, params.analysisRegion, borderPct);
+  const cropX = bounds.left, cropY = bounds.top, cropW = bounds.width, cropH = bounds.height;
+  const hist = new Uint32Array(HIST_BINS);
+  const skipTransparent = Boolean(params.excludeTransparent && alpha);
+  let totalPixels = 0;
+  for (let y = cropY; y < cropY + cropH; y++) {
+    for (let x = cropX; x < cropX + cropW; x++) {
+      const p = y * width + x;
+      if (skipTransparent && alpha[p * 4 + 3] === 0) continue;
+      hist[grey[p] >>> 8]++;
+      totalPixels++;
+    }
+  }
+  return greyChannelLevels(hist, totalPixels, params);
+}
+
+// The three channel levels of a grey image from its single histogram.
+export function greyChannelLevels(hist, totalPixels, params) {
+  const model = colorModels[params.colorModel] || colorModels.basic;
+  const blackThreshold = model.blackThreshold ?? 0.002;
+  const whiteThreshold = model.whiteThreshold ?? 0.002;
+  const imageType = params.imageType || 'negative';
+  return ['Red', 'Green', 'Blue'].map((channel) => computeChannelLevels(
+    hist, totalPixels, blackThreshold, whiteThreshold, `ToneCurvePV2012${channel}`, imageType));
 }
 
 /**
@@ -135,6 +206,10 @@ function computeChannelLevels(hist, totalPixels, blackThreshold, whiteThreshold,
  */
 export function applyLUT(imageData, rLUT, gLUT, bLUT) {
   const { data } = imageData;
+  if (LITTLE_ENDIAN && wordAligned(data)) {
+    applyLUTWords(data, data, rLUT, gLUT, bLUT);
+    return imageData;
+  }
   for (let i = 0; i < data.length; i += 4) {
     data[i] = rLUT[data[i]];
     data[i + 1] = gLUT[data[i + 1]];
@@ -142,6 +217,62 @@ export function applyLUT(imageData, rLUT, gLUT, bLUT) {
     // Alpha unchanged
   }
   return imageData;
+}
+
+/**
+ * applyLUT() from `src` into `dst` (same size), copying alpha: a copy and the LUT
+ * pass in one loop, leaving `src` untouched.
+ */
+export function applyLUTInto(src, dst, rLUT, gLUT, bLUT) {
+  const s = src.data, d = dst.data;
+  if (LITTLE_ENDIAN && wordAligned(s) && wordAligned(d)) {
+    applyLUTWords(s, d, rLUT, gLUT, bLUT);
+    return dst;
+  }
+  for (let i = 0; i < s.length; i += 4) {
+    d[i] = rLUT[s[i]];
+    d[i + 1] = gLUT[s[i + 1]];
+    d[i + 2] = bLUT[s[i + 2]];
+    d[i + 3] = s[i + 3];
+  }
+  return dst;
+}
+
+// The LUT pass on little-endian 32-bit words: each pixel is (R | G << 16, B | A << 16).
+// Two loads and two stores per pixel instead of four each; `s` and `d` may alias.
+function applyLUTWords(s, d, rLUT, gLUT, bLUT) {
+  const s32 = new Uint32Array(s.buffer, s.byteOffset, s.length >>> 1);
+  const d32 = new Uint32Array(d.buffer, d.byteOffset, d.length >>> 1);
+  for (let j = 0; j < s32.length; j += 2) {
+    const rg = s32[j], ba = s32[j + 1];
+    d32[j] = rLUT[rg & 0xFFFF] | (gLUT[rg >>> 16] << 16);
+    d32[j + 1] = bLUT[ba & 0xFFFF] | (ba & 0xFFFF0000);
+  }
+}
+
+/**
+ * The curve pass with a stage folded in for opaque pixels: pixels with alpha ≠ 0 go
+ * through `fold` ([r, g, b] tables), pixels with alpha 0 through the plain LUTs.
+ * `src` and `dst` may be the same image.
+ */
+export function applyFoldedLUT(src, dst, fold, luts) {
+  const s = src.data, d = dst.data;
+  const [fr, fg, fb] = fold;
+  const { r, g, b } = luts;
+  for (let i = 0; i < s.length; i += 4) {
+    const a = s[i + 3];
+    if (a) {
+      d[i] = fr[s[i]];
+      d[i + 1] = fg[s[i + 1]];
+      d[i + 2] = fb[s[i + 2]];
+    } else {
+      d[i] = r[s[i]];
+      d[i + 1] = g[s[i + 1]];
+      d[i + 2] = b[s[i + 2]];
+    }
+    d[i + 3] = a;
+  }
+  return dst;
 }
 
 /**
@@ -260,8 +391,9 @@ export function negateImage(imageData) {
 }
 
 // Pre-computed hue weight lookup tables (Phase 3)
-// 3600 entries for 0.1° resolution in [0,1] hue space
-const HUE_TABLE_SIZE = 3600
+// 3600 entries for 0.1° resolution in [0,1] hue space. The GPU preview (#239) uploads
+// these tables as they are, so its shader reads the same weights.
+export const HUE_TABLE_SIZE = 3600
 const hueWeightTableR = new Float32Array(HUE_TABLE_SIZE) // Red center at 0
 const hueWeightTableG = new Float32Array(HUE_TABLE_SIZE) // Green center at 1/3
 const hueWeightTableB = new Float32Array(HUE_TABLE_SIZE) // Blue center at 2/3
@@ -284,10 +416,80 @@ const hueWeightTableB = new Float32Array(HUE_TABLE_SIZE) // Blue center at 2/3
   }
 })()
 
+// The hue index applyHSLAdjustments computes for one pixel, with the loop's own
+// expressions (operand order included). Used only by the self-check below.
+function loopHueIndex(R, G, B, size) {
+  const invMax = 1 / MAX_16
+  const r = R * invMax, g = G * invMax, b = B * invMax
+  let max, min
+  if (r > g) {
+    max = r > b ? r : b
+    min = g < b ? g : b
+  } else {
+    max = g > b ? g : b
+    min = r < b ? r : b
+  }
+  const d = max - min
+  let h
+  if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) / 6
+  else if (max === g) h = ((b - r) / d + 2) / 6
+  else h = ((r - g) / d + 4) / 6
+  return (h * size) | 0
+}
+
+/**
+ * Whether a pixel whose channel c is the strict maximum can only be moved by band c.
+ *
+ * A strict-max pixel keeps its hue inside that channel's sector (red [0, 1/6) ∪
+ * (5/6, 1), green (1/6, 1/2), blue (1/2, 5/6)), so the other two bands leave it alone
+ * as long as each band's non-zero weights stay strictly inside its own sector. Two-
+ * channel ties compute exactly h = 1/6, 1/2 or 5/6, the sector borders, where every
+ * weight must be 0. applyHSLAdjustments skips pixels whose band is inactive only
+ * while both facts hold, so a later change to the table size, the window width or a
+ * band centre falls back to the unskipped loop instead of changing pixels.
+ */
+export function checkHueBandSupport(tables = [hueWeightTableR, hueWeightTableG, hueWeightTableB], size = HUE_TABLE_SIZE) {
+  const [tR, tG, tB] = tables
+  for (let i = 0; i < size; i++) {
+    // Index i covers hues [i / size, (i + 1) / size): integer bounds, no rounding.
+    const inRed = (i + 1) * 6 <= size || i * 6 > 5 * size
+    const inGreen = i * 6 > size && (i + 1) * 2 <= size
+    const inBlue = i * 2 > size && (i + 1) * 6 <= 5 * size
+    if ((tR[i] !== 0 && !inRed) || (tG[i] !== 0 && !inGreen) || (tB[i] !== 0 && !inBlue)) return false
+  }
+  // R = G > B, G = B > R, R = B > G at a few magnitudes: (x − y) / d is exactly ±1.
+  for (const [hi, lo] of [[MAX_16, 0], [1, 0], [40000, 39999], [65535, 65534]]) {
+    for (const [R, G, B] of [[hi, hi, lo], [lo, hi, hi], [hi, lo, hi]]) {
+      const idx = loopHueIndex(R, G, B, size)
+      if (!(idx >= 0 && idx < size) || tR[idx] !== 0 || tG[idx] !== 0 || tB[idx] !== 0) return false
+    }
+  }
+  return true
+}
+
+export const HUE_BANDS_STRICT = checkHueBandSupport()
+
+// The three band tables (red, green, blue centre), for the GPU preview's texture.
+// Read-only: applyHSLAdjustments uses the same arrays.
+export function hueWeightTables() {
+  return [hueWeightTableR, hueWeightTableG, hueWeightTableB]
+}
+let hueBandSkip = HUE_BANDS_STRICT
+
+// Tests force the unskipped loop to prove the pre-test changes no pixel.
+export function setHueBandSkipForTesting(enabled) {
+  hueBandSkip = Boolean(enabled) && HUE_BANDS_STRICT
+}
+
 /**
  * Apply HSL (Hue/Saturation) adjustments per color region.
  * Mimics Lightroom's HSL panel with Red/Green/Blue channels.
  * Uses pre-computed hue weight lookup tables (Phase 3).
+ *
+ * Pixels whose strict-maximum channel belongs to an inactive band, two-channel ties
+ * and greys are skipped on their integer values before any float work: every weight
+ * that could reach them is 0 (checkHueBandSupport), and a zero shift round-trips the
+ * 16-bit values unchanged. The loop body after the pre-test is the original one.
  * @param {ImageData} imageData - Will be modified in place
  * @param {Object} hsl - { redHue, redSaturation, greenHue, greenSaturation, blueHue, blueSaturation }
  * @returns {ImageData}
@@ -307,8 +509,20 @@ export function applyHSLAdjustments(imageData, hsl) {
   const gSatFactor = greenSaturation / 100
   const bSatFactor = blueSaturation / 100
   const invMax = 1 / MAX_16
+  const rActive = rHueShift !== 0 || rSatFactor !== 0
+  const gActive = gHueShift !== 0 || gSatFactor !== 0
+  const bActive = bHueShift !== 0 || bSatFactor !== 0
+  const skip = hueBandSkip && !(rActive && gActive && bActive)
 
   for (let i = 0; i < data.length; i += 4) {
+    if (skip) {
+      const R = data[i], G = data[i + 1], B = data[i + 2]
+      const active = R > G && R > B ? rActive
+        : G > R && G > B ? gActive
+        : B > R && B > G ? bActive
+        : false // tie or grey: every band weight is 0 at indices 600 / 1800 / 3000
+      if (!active) continue
+    }
     const r = data[i] * invMax
     const g = data[i + 1] * invMax
     const b = data[i + 2] * invMax
@@ -382,6 +596,12 @@ function hue2rgb(p, q, t) {
   return p
 }
 
+// Rec. 601 luma weights of adjustSaturation; the GPU preview's shader is generated
+// from these values.
+export const LUMA_R = 0.299;
+export const LUMA_G = 0.587;
+export const LUMA_B = 0.114;
+
 /**
  * Adjust saturation of image.
  * @param {Image16} imageData - 16-bit RGBA
@@ -393,7 +613,7 @@ export function adjustSaturation(imageData, amount) {
   const { data } = imageData;
   for (let i = 0; i < data.length; i += 4) {
     const r = data[i], g = data[i + 1], b = data[i + 2];
-    const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+    const lum = LUMA_R * r + LUMA_G * g + LUMA_B * b;
     data[i] = Math.max(0, Math.min(MAX_16, lum + factor * (r - lum)));
     data[i + 1] = Math.max(0, Math.min(MAX_16, lum + factor * (g - lum)));
     data[i + 2] = Math.max(0, Math.min(MAX_16, lum + factor * (b - lum)));

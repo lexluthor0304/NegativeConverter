@@ -23,6 +23,15 @@ const lutScratch = createAdjustmentLutScratch();
  * Allocation and adjustment work are both bounded by the thumbnail dimensions.
  */
 export function createAdjustedPhotoPreview(source, adjustmentSettings, { maxSize = 144 } = {}) {
+  return adjustPhotoPreviewSample(samplePhotoPreviewSource(source, { maxSize }), adjustmentSettings);
+}
+
+/**
+ * The sampling half of createAdjustedPhotoPreview: an unadjusted
+ * nearest-neighbour sample of at most `maxSize` px. It holds no reference to
+ * the source, so a deferred adjustment does not pin a full-resolution plane.
+ */
+export function samplePhotoPreviewSource(source, { maxSize = 144 } = {}) {
   if (!Number.isInteger(maxSize) || maxSize < 1) {
     throw new RangeError('Photo preview maxSize must be a positive integer');
   }
@@ -33,11 +42,17 @@ export function createAdjustedPhotoPreview(source, adjustmentSettings, { maxSize
     || source.data.length < source.width * source.height * 4) {
     throw new TypeError('Photo preview requires a valid RGBA presentation source');
   }
+  return createStudioThumbnail(source, maxSize);
+}
 
-  const thumbnail = createStudioThumbnail(source, maxSize);
-  const { width, height } = thumbnail;
+/**
+ * The adjustment half: applies prepared Step-3 settings to a sample from
+ * samplePhotoPreviewSource. Synchronous, as the shared LUT scratch requires.
+ */
+export function adjustPhotoPreviewSample(sample, adjustmentSettings) {
+  const { width, height } = sample;
   const output = { width, height, data: new Uint8ClampedArray(width * height * 4) };
-  applyPreparedAdjustmentsToBuffer(thumbnail, adjustmentSettings, output, {
+  applyPreparedAdjustmentsToBuffer(sample, adjustmentSettings, output, {
     quality: 'preview',
     lutScratch
   });

@@ -9,7 +9,10 @@
 //
 // Requires `globalThis.cv` (see opencvLoader.js). Every Mat is released.
 
-import { resolveExpiredBounds, resolveExpiredSamplePlane } from '../pipeline/expiredRescue.js';
+import {
+  analyzeExpiredFilm, buildExpiredSpatialStage, fitExpiredSpatial, resolveExpiredBounds, resolveExpiredSamplePlane,
+  sanitizeExpiredRescueParams
+} from '../pipeline/expiredRescue.js';
 
 function getCv() {
   const cv = globalThis.cv;
@@ -26,15 +29,21 @@ function odd(value) {
   return n % 2 ? n : n + 1;
 }
 
-// Area-averaged RGBA copy of `bounds` at `width` pixels wide.
-function downsampleBounds(image, plane, bounds, width) {
+// Area-averaged RGBA copy of `bounds` at `width` pixels wide, allocated here
+// and filled row by row (downsampleBoundsRows), so a caller can spread a
+// large plane over several tasks. Every output pixel depends only on its own
+// source block, so any split of the rows gives the same bytes.
+function createBoundsSample(bounds, width) {
   const scale = width / bounds.width;
   const height = Math.max(8, Math.round(bounds.height * scale));
-  const rgba = new Uint8ClampedArray(width * height * 4);
-  const lum = new Float32Array(width * height);
+  return { rgba: new Uint8ClampedArray(width * height * 4), lum: new Float32Array(width * height), width, height };
+}
+
+function downsampleBoundsRows(image, plane, bounds, small, y0, y1) {
+  const { rgba, lum, width, height } = small;
   const { data } = plane;
   const toByte = plane.bits === 16 ? 1 / 257 : 1;
-  for (let y = 0; y < height; y++) {
+  for (let y = y0; y < y1; y++) {
     const sy0 = bounds.top + Math.floor((y / height) * bounds.height);
     const sy1 = Math.max(sy0 + 1, bounds.top + Math.floor(((y + 1) / height) * bounds.height));
     for (let x = 0; x < width; x++) {
@@ -58,7 +67,74 @@ function downsampleBounds(image, plane, bounds, width) {
       lum[y * width + x] = (0.2126 * rgba[o] + 0.7152 * rgba[o + 1] + 0.0722 * rgba[o + 2]) / 255;
     }
   }
-  return { rgba, lum, width, height };
+}
+
+// Everything the sample needs except the pixels: the plane, the bounds, the
+// working and grid sizes and where the region sits in the frame. Null when
+// there is nothing to measure.
+function planSpatialSample(image, options) {
+  const plane = resolveExpiredSamplePlane(image);
+  if (!plane) return null;
+  const bounds = resolveExpiredBounds(image, options);
+  if (bounds.width < 8 || bounds.height < 8) return null;
+  const workingWidth = clamp(Math.round(options.workingWidth || 160), 32, 512);
+  const small = createBoundsSample(bounds, workingWidth);
+  const gridWidth = clamp(Math.round(options.gridWidth || 32), 4, 64);
+  const gridHeight = Math.max(3, Math.round(gridWidth * small.height / small.width));
+  const placement = options.placement && typeof options.placement === 'object' ? options.placement : { left: 0, top: 0, width: 1, height: 1 };
+  const fraction = {
+    left: placement.left + (bounds.left / image.width) * placement.width,
+    top: placement.top + (bounds.top / image.height) * placement.height,
+    width: (bounds.width / image.width) * placement.width,
+    height: (bounds.height / image.height) * placement.height
+  };
+  return { plane, bounds, small, gridWidth, gridHeight, fraction };
+}
+
+function spatialInput({ small, gridWidth, gridHeight, fraction }) {
+  return { rgba: small.rgba, lum: small.lum, width: small.width, height: small.height, gridWidth, gridHeight, fraction };
+}
+
+/**
+ * The page's half of measureExpiredSpatialMaps (#245): the area-averaged
+ * sample of the analysis region (about 0.14 MB whatever the scan's size),
+ * the grid size and the region's placement. The OpenCV half,
+ * measureExpiredSpatialMapsFromSample, runs in the auto-frame worker.
+ * Returns null when there is nothing to measure.
+ */
+export function sampleExpiredSpatialInput(image, options = {}) {
+  const plan = planSpatialSample(image, options);
+  if (!plan) return null;
+  downsampleBoundsRows(image, plan.plane, plan.bounds, plan.small, 0, plan.small.height);
+  return spatialInput(plan);
+}
+
+/**
+ * sampleExpiredSpatialInput spread over several tasks: rows are summed until
+ * `sliceMs` has passed, then `pause()` yields (a 60 MP full-resolution render
+ * takes ~0.2 s in one loop). The same arithmetic per pixel, so the sample
+ * bytes are identical. Resolves null when `isCurrent()` turns false between
+ * slices.
+ */
+export async function sampleExpiredSpatialInputSliced(image, options = {}, {
+  pause, isCurrent = () => true, sliceMs = 12, now = () => performance.now()
+} = {}) {
+  const plan = planSpatialSample(image, options);
+  if (!plan) return null;
+  const { small } = plan;
+  let y = 0;
+  while (y < small.height) {
+    const start = now();
+    do {
+      downsampleBoundsRows(image, plan.plane, plan.bounds, small, y, y + 1);
+      y++;
+    } while (y < small.height && now() - start < sliceMs);
+    if (y < small.height) {
+      await pause();
+      if (!isCurrent()) return null;
+    }
+  }
+  return spatialInput(plan);
 }
 
 /**
@@ -70,22 +146,20 @@ function downsampleBounds(image, plane, bounds, width) {
  * @param {{region?:object, borderBuffer?:number, placement?:object, workingWidth?:number, gridWidth?:number}} [options]
  */
 export function measureExpiredSpatialMaps(image, options = {}) {
+  getCv();
+  const input = sampleExpiredSpatialInput(image, options);
+  return input ? measureExpiredSpatialMapsFromSample(input) : null;
+}
+
+/**
+ * The OpenCV half: erode, blur and resize the sample into the grids.
+ * Requires `globalThis.cv`; runs in the auto-frame worker or, as a fallback,
+ * on the page.
+ */
+export function measureExpiredSpatialMapsFromSample(input) {
   const cv = getCv();
-  const plane = resolveExpiredSamplePlane(image);
-  if (!plane) return null;
-  const bounds = resolveExpiredBounds(image, options);
-  if (bounds.width < 8 || bounds.height < 8) return null;
-  const workingWidth = clamp(Math.round(options.workingWidth || 160), 32, 512);
-  const small = downsampleBounds(image, plane, bounds, workingWidth);
-  const gridWidth = clamp(Math.round(options.gridWidth || 32), 4, 64);
-  const gridHeight = Math.max(3, Math.round(gridWidth * small.height / small.width));
-  const placement = options.placement && typeof options.placement === 'object' ? options.placement : { left: 0, top: 0, width: 1, height: 1 };
-  const fraction = {
-    left: placement.left + (bounds.left / image.width) * placement.width,
-    top: placement.top + (bounds.top / image.height) * placement.height,
-    width: (bounds.width / image.width) * placement.width,
-    height: (bounds.height / image.height) * placement.height
-  };
+  const small = { rgba: input.rgba, lum: input.lum, width: input.width, height: input.height };
+  const { gridWidth, gridHeight, fraction } = input;
 
   const mats = [];
   const track = (mat) => { mats.push(mat); return mat; };
@@ -130,4 +204,24 @@ export function measureExpiredSpatialMaps(image, options = {}) {
       try { mat.delete(); } catch { /* already released */ }
     }
   }
+}
+
+/**
+ * The analysis the maps lead to (no OpenCV): the fitted fog surface, then the
+ * curves measured on the flattened sample. `sample` is what the maps were
+ * measured on ({ image, options, placement }); local contrast does not move
+ * the histogram's floor, so it is left out of that stage. Null when no
+ * surface fits.
+ */
+export function expiredAnalysisFromMaps(maps, sample, settings) {
+  const spatial = maps ? fitExpiredSpatial(maps) : null;
+  if (!spatial) return null;
+  const stage = buildExpiredSpatialStage({
+    ...sanitizeExpiredRescueParams(settings),
+    expiredEnabled: true,
+    expiredLocalContrast: 0,
+    expiredAnalysis: { spatial }
+  });
+  const analysis = analyzeExpiredFilm(sample.image, { ...sample.options, anchors: settings.semanticMap, placement: sample.placement, spatial: stage });
+  return analysis ? { ...analysis, spatial } : null;
 }

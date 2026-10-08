@@ -24,6 +24,32 @@ function updateRowThumbnail(record, thumbnail, index, studio) {
   record.thumbnail = thumbnail;
 }
 
+// The unsaved marker is updated in place, never by rebuilding the row: the
+// open photo's first edit marks its row without a list render (#234), and a
+// later render keeps the row element and its tile.
+function updateRowDirty(record, dirty, unsaved) {
+  if (record.dirty === dirty) return;
+  record.el.classList.toggle('is-dirty', dirty);
+  const badge = record.nameEl.querySelector('.file-list-unsaved-badge');
+  if (dirty && !badge) {
+    const created = document.createElement('span');
+    created.className = 'file-list-unsaved-badge';
+    created.textContent = unsaved;
+    // Where a new row has it: after the name and the settings badge.
+    const anchor = record.nameEl.querySelector('.file-list-settings-badge')
+      || record.nameEl.querySelector('.file-list-filename');
+    record.nameEl.insertBefore(created, anchor ? anchor.nextElementSibling : null);
+  } else if (!dirty && badge) {
+    badge.remove();
+  }
+  record.dirty = dirty;
+}
+
+export function setFileListRowDirty(container, item, unsaved) {
+  const record = listStates.get(container)?.rows.get(item);
+  if (record) updateRowDirty(record, Boolean(item.isDirty), unsaved);
+}
+
 export function renderFileList({
   container,
   countEl,
@@ -58,11 +84,12 @@ export function renderFileList({
     const canReview = Boolean(onMarkReviewed && labels.canReview?.(item));
     const selectLabel = labels.selectFile ? labels.selectFile(item.file.name) : item.file.name;
     const signature = JSON.stringify([studio, item.file.name, Boolean(item.settings),
-      Boolean(item.isDirty), labels.customSettings, labels.unsaved, selectLabel,
+      labels.customSettings, labels.unsaved, selectLabel,
       extraBadges, canReview, labels.markReviewed]);
     let record = list.rows.get(item);
     if (record?.signature === signature) {
       if (record.thumbnail !== item.thumbnail) updateRowThumbnail(record, item.thumbnail, displayIndex, studio);
+      updateRowDirty(record, Boolean(item.isDirty), labels.unsaved);
       record.checkbox.checked = Boolean(item.selected);
       if (record.index !== index) {
         record.checkbox.dataset.index = record.nameEl.dataset.index = String(index);
@@ -187,7 +214,8 @@ export function renderFileList({
       selectionControl.addEventListener('click', event => event.stopPropagation());
     }
     el.append(selectionControl, nameEl, statusEl);
-    record = { signature, thumbnail: item.thumbnail, index, displayIndex, active: index === currentFileIndex, el, checkbox, nameEl, statusEl };
+    record = { signature, thumbnail: item.thumbnail, index, displayIndex, active: index === currentFileIndex,
+      dirty: Boolean(item.isDirty), el, checkbox, nameEl, statusEl };
     list.rows.set(item, record);
     rows.push(el);
   });

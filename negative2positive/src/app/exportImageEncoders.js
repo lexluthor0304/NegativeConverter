@@ -19,11 +19,12 @@ export { selectExportSamples };
 
 /**
  * @param {ImageData & {__image16?: {width:number,height:number,data:Uint16Array}}} imageData
+ * @param {{level?: number, strategy?: number}} [options]
  * @returns {Blob}
  */
-export function encodePng16Blob(imageData) {
+export function encodePng16Blob(imageData, options = {}) {
   const { samples } = selectExportSamples(imageData, 16);
-  return encodePng16Samples(samples, imageData.width, imageData.height, pako.deflate);
+  return encodePng16Samples(samples, imageData.width, imageData.height, pako, options);
 }
 
 /**

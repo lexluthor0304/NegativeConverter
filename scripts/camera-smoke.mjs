@@ -1,11 +1,16 @@
 // Camera-scanning smoke: a blank light-pad frame becomes the roll's flat
 // field and flattens a negative shot on the same pad; a lab scan is matched;
-// several shots of one frame merge into a quieter 16-bit file; the live loupe
-// converts Chrome's fake camera and captures a frame.
+// several shots of one frame merge into a quieter 16-bit file in a disposable
+// worker (a forced out-of-memory failure alerts, Cancel releases at once);
+// the live loupe converts Chrome's fake camera and captures a frame.
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
 
 const UPNG = createRequire(import.meta.url)('upng-js');
+
+// Timing budgets hold on a real Mac; shared CI runners (software GL, noisy
+// CPUs) check the behaviour and log the time, which the benchmark measures.
+const TIMING_BUDGETS = !process.env.CI;
 
 export async function runCameraSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port, root }) {
   const fixtures = ['lightpad-blank.png', 'negative-vignetted.png'].map((name) => join(root, 'negative2positive', 'test-fixtures', name));
@@ -13,6 +18,79 @@ export async function runCameraSmoke({ send, evaluate, waitFor, wait, fail, inst
   await waitFor('camera workspace boot', `!!document.getElementById('studioImportAutoCrop') && (!!document.getElementById('fileInput') && !!document.getElementById('flatFieldUseCurrentBtn'))`);
   await installDialogAutoAccept();
   await wait(300);
+  // Exercise the actual browser module's HEIF fallback. Only the native
+  // unsupported-format boundaries and worker are faked; cancellation must
+  // cross loadStandardImage -> decodeHeifInWorker and dispose the worker.
+  // Like the served worker, the fake announces its module before the loader
+  // transfers the file.
+  const heifCancel = await evaluate(`(async () => {
+    const { loadStandardImage } = await import('/src/app/imageFileLoaders.js');
+    const original = { bitmap: window.createImageBitmap, Image: window.Image, Worker: window.Worker };
+    const controller = new AbortController();
+    let posted = 0, terminated = 0, worker, lateReply, timer;
+    try {
+      window.createImageBitmap = async () => { throw new Error('unsupported test HEIF'); };
+      window.Image = class {
+        set src(value) { if (value) queueMicrotask(() => this.onerror?.()); }
+      };
+      window.Worker = function(url, options) {
+        if (!String(url).includes('codecs/heif-worker.js')) return new original.Worker(url, options);
+        worker = {
+          postMessage() { posted++; lateReply = this.onmessage; queueMicrotask(() => controller.abort()); },
+          terminate() { terminated++; }
+        };
+        queueMicrotask(() => worker.onmessage?.({ data: { ready: true } }));
+        return worker;
+      };
+      const bytes = new Uint8Array(16);
+      bytes.set([102, 116, 121, 112, 104, 101, 105, 99], 4);
+      timer = setTimeout(() => controller.abort(), 3000);
+      let errorName;
+      try { await loadStandardImage(new File([bytes], 'abort.heic', { type: 'image/heic' }), { signal: controller.signal }); }
+      catch (error) { errorName = error.name; }
+      lateReply?.({ data: { width: 1, height: 1, data: new Uint8ClampedArray(4) } });
+      return { errorName, posted, terminated, detached: worker?.onmessage === null };
+    } finally {
+      clearTimeout(timer);
+      window.createImageBitmap = original.bitmap; window.Image = original.Image; window.Worker = original.Worker;
+    }
+  })()`);
+  if (heifCancel.errorName !== 'AbortError' || heifCancel.posted !== 1 || heifCancel.terminated !== 1 || !heifCancel.detached) {
+    fail('standard-image HEIF cancellation did not release its decoder: ' + JSON.stringify(heifCancel));
+  }
+  console.log('ok: cancelling the standard-image HEIF fallback terminates its worker once, ignores late replies, and preserves AbortError');
+  const previewCancel = await evaluate(`(async () => {
+    const { decodeNefPreviewJpeg } = await import('/src/app/nefJpegPreview.js');
+    const { decodeJpegInWorker } = await import('/src/app/scanDecodeClient.js');
+    const controller = new AbortController();
+    let posted = 0, stopped = 0, worker, errorName;
+    const bytes = new Uint8Array([255, 216, 1, 2, 255, 217]);
+    try {
+      await decodeNefPreviewJpeg({ jpegBytes: bytes }, {
+        signal: controller.signal,
+        decodeInWorker: (input, options) => decodeJpegInWorker(input, {
+          ...options,
+          workerFactory: () => {
+            worker = {
+              terminate() { stopped++; },
+              postMessage(message, transfer) {
+                posted++; structuredClone(message, { transfer });
+                controller.abort();
+                this.onerror?.(); // a lost signal must fail promptly
+              }
+            };
+            queueMicrotask(() => worker.onmessage?.({ data: { ready: true, canDecodeImages: true } }));
+            return worker;
+          }
+        })
+      });
+    } catch (error) { errorName = error.name; }
+    return { errorName, posted, stopped, bytes: bytes.byteLength, detached: worker?.onmessage === null };
+  })()`);
+  if (previewCancel.errorName !== 'AbortError' || previewCancel.posted !== 1 || previewCancel.stopped !== 1 || previewCancel.bytes !== 0 || !previewCancel.detached) {
+    fail('embedded RAW preview cancellation lost ownership or fell back: ' + JSON.stringify(previewCancel));
+  }
+  console.log('ok: embedded RAW preview cancellation reaches its JPEG worker after transfer and rejects without a native fallback');
   // Flat-field regression measures negative inversion on known synthetic input.
   // Automatic mixed-film import behavior has its own browser scenario.
   await evaluate(`document.getElementById('importFilmTypeAuto').checked && document.getElementById('importFilmTypeAuto').click()`);
@@ -181,6 +259,9 @@ async function runLabMatchScenario({ send, evaluate, waitFor, wait, fail, instal
   }
   const status = await evaluate(`document.getElementById('labMatchStatus').textContent`);
   console.log('camera lab match:', status);
+  // Alignment and warp ran in the auto-frame worker (#245).
+  const labRealm = await evaluate(`({ cv: typeof window.cv, script: !!document.querySelector('script[data-opencv-loader]'), tasks: { ...window.__ncAnalysis.tasks } })`);
+  if (labRealm.cv !== 'undefined' || labRealm.script || labRealm.tasks.fallback || labRealm.tasks.worker < 1) fail('lab match loaded OpenCV in the page: ' + JSON.stringify(labRealm));
   console.log('camera lab match log:', await evaluate(`JSON.stringify({ cv: typeof window.cv, cvMat: !!(window.cv && window.cv.Mat), log: (window.__labLog || []).slice(-6) })`));
   const inliers = Number((status.match(/aligned \((\d+) inliers\)/) || [])[1]);
   if (!(inliers >= 12)) fail('lab scan was not aligned: ' + status);
@@ -221,6 +302,41 @@ async function runMultiShotScenario({ send, evaluate, waitFor, wait, fail, insta
     new MutationObserver((records) => {
       for (const record of records) for (const node of record.addedNodes) if (node.nodeType === 1) window.__cameraToasts.push(node.textContent);
     }).observe(document.getElementById('toastContainer'), { childList: true });
+  })()`);
+  // #260: the merge runs in its own worker. Record each merge worker and its
+  // termination, the page's OpenCV state when it ends, the stage labels, app
+  // dialogs and unhandled rejections; a test hook injects a fault into the
+  // worker's start message.
+  await evaluate(`(() => {
+    const probe = window.__multiShot = { workers: [], labels: [], dialogs: [], rejections: [], fault: null };
+    const heap = () => { if (!window.cv?.Mat) return null; const m = new cv.Mat(1, 1, cv.CV_8UC1); const bytes = m.data.buffer.byteLength; m.delete(); return bytes; };
+    probe.pageState = () => ({ cv: typeof window.cv, heap: heap(), loader: !!document.querySelector('script[data-opencv-loader]') });
+    const Original = window.Worker;
+    window.Worker = class extends Original {
+      constructor(url, options) {
+        super(url, options);
+        if (!/multiShotWorker/.test(String(url))) return;
+        const record = { terminated: false, before: probe.pageState() };
+        probe.workers.push(record);
+        const terminate = this.terminate.bind(this);
+        this.terminate = () => {
+          record.terminated = true;
+          terminate();
+        };
+        const post = this.postMessage.bind(this);
+        this.postMessage = (message, transfer) => post(message?.type === 'start' && probe.fault ? { ...message, fault: probe.fault } : message, transfer);
+      }
+    };
+    new MutationObserver((records) => {
+      for (const record of records) for (const node of record.addedNodes) probe.labels.push(node.textContent);
+    }).observe(document.getElementById('batchProgressText'), { childList: true });
+    new MutationObserver((records) => {
+      for (const record of records) for (const node of record.addedNodes) {
+        const text = node.nodeType === 1 && node.querySelector('[data-app-dialog-message]');
+        if (text) probe.dialogs.push(text.textContent);
+      }
+    }).observe(document.body, { childList: true });
+    window.addEventListener('unhandledrejection', (event) => probe.rejections.push(String(event.reason?.stack || event.reason)));
   })()`);
   const doc = await send('DOM.getDocument');
   const input = await send('DOM.querySelector', { nodeId: doc.result.root.nodeId, selector: '#fileInput' });
@@ -277,6 +393,14 @@ async function runMultiShotScenario({ send, evaluate, waitFor, wait, fail, insta
   const merged = await grain();
   console.log('camera multi-shot grain:', JSON.stringify({ single, merged }));
   if (!(merged < single * 0.8)) fail(`averaging three shots did not reduce grain: ${single} -> ${merged}`);
+  const averageRun = await evaluate(`JSON.stringify({ workers: window.__multiShot.workers, labels: window.__multiShot.labels, after: window.__multiShot.pageState() })`).then(JSON.parse);
+  console.log('camera multi-shot worker:', JSON.stringify(averageRun.workers), 'labels:', JSON.stringify([...new Set(averageRun.labels)]));
+  if (averageRun.workers.length !== 1 || !averageRun.workers[0].terminated) fail('the average merge should run in one worker, terminated afterwards: ' + JSON.stringify(averageRun.workers));
+  const pageOpenCvUnchanged = (before, after) => before.cv === after.cv && before.heap === after.heap && before.loader === after.loader;
+  if (!pageOpenCvUnchanged(averageRun.workers[0].before, averageRun.after)) fail('the merge changed the page OpenCV state: ' + JSON.stringify(averageRun));
+  for (const label of [/^Decoding \d \/ 3$/, /^Aligning \d \/ 3$/, /^Merging \d+ %$/, /^Encoding…$/]) {
+    if (!averageRun.labels.some((text) => label.test(text))) fail(`progress label ${label} never shown: ${JSON.stringify(averageRun.labels)}`);
+  }
 
   await select([0, 3]);
   if (await evaluate(`document.getElementById('studioMergeHdr').disabled`)) fail('HDR merge should be enabled for the bracket pair');
@@ -284,7 +408,43 @@ async function runMultiShotScenario({ send, evaluate, waitFor, wait, fail, insta
   await waitFor('hdr merge finished', `${ready} && /^merged-hdr-/.test(document.getElementById('studioFilename').textContent)`, 180_000);
   const hdrToast = await evaluate(`(window.__cameraToasts || []).filter((t) => /Merged \\d+ shots/.test(t)).pop() || ''`);
   if (!/^Merged 2 shots into merged-hdr-/.test(hdrToast)) fail('hdr merge toast wrong: ' + hdrToast);
-  console.log('ok: three shifted noisy shots align and average into a quieter 16-bit merge; a bracket pair merges as HDR and opens as the selected file');
+  const hdrRun = await evaluate(`JSON.stringify({ worker: window.__multiShot.workers[1], after: window.__multiShot.pageState() })`).then(JSON.parse);
+  if (!hdrRun.worker?.terminated || !pageOpenCvUnchanged(hdrRun.worker.before, hdrRun.after)) fail('the hdr merge changed page OpenCV or did not terminate: ' + JSON.stringify(hdrRun));
+
+  // A forced OpenCV allocation failure in the warp (the 60 MP failure mode)
+  // shows the memory alert, releases the UI and terminates the worker.
+  const queued = await evaluate(`document.querySelectorAll('.file-list-checkbox').length`);
+  await select([0, 1, 2]);
+  await evaluate(`window.__multiShot.fault = 'warp-memory'; document.getElementById('studioMergeAverage').click()`);
+  await waitFor('memory failure alert', `window.__multiShot.dialogs.some((t) => /too large to merge/.test(t)) && ${ready} && document.getElementById('batchProgressOverlay').style.display === 'none'`, 60_000);
+  const failedRun = await evaluate(`JSON.stringify({ worker: window.__multiShot.workers[2] || null, count: document.querySelectorAll('.file-list-checkbox').length, cancelHidden: document.getElementById('batchProgressCancel').hidden })`).then(JSON.parse);
+  if (!failedRun.worker?.terminated) fail('the failed merge left its worker running');
+  if (failedRun.count !== queued) fail('a failed merge must not add a file');
+  if (!failedRun.cancelHidden) fail('the Cancel button stayed visible after the failure');
+
+  // Cancel: the modal, the busy state and the worker go at once, and nothing
+  // is added later.
+  const dialogsBeforeCancel = await evaluate(`window.__multiShot.dialogs.length`);
+  await evaluate(`window.__multiShot.fault = null; document.getElementById('studioMergeAverage').click()`);
+  await waitFor('merge worker started', `window.__multiShot.workers.length === 4 && !document.getElementById('batchProgressCancel').hidden`, 30_000);
+  const cancelled = await evaluate(`(() => {
+    const started = performance.now();
+    document.getElementById('batchProgressCancel').click();
+    return {
+      ms: performance.now() - started,
+      overlayHidden: document.getElementById('batchProgressOverlay').style.display === 'none',
+      busy: !!document.body.dataset.studioBusy,
+      terminated: window.__multiShot.workers[3].terminated
+    };
+  })()`);
+  console.log('camera multi-shot cancel:', JSON.stringify(cancelled));
+  if ((TIMING_BUDGETS && !(cancelled.ms < 200)) || !cancelled.overlayHidden || cancelled.busy || !cancelled.terminated) fail('Cancel did not release the merge at once: ' + JSON.stringify(cancelled));
+  await wait(3000);
+  const afterCancel = await evaluate(`JSON.stringify({ count: document.querySelectorAll('.file-list-checkbox').length, dialogs: window.__multiShot.dialogs, rejections: window.__multiShot.rejections })`).then(JSON.parse);
+  if (afterCancel.count !== queued) fail('a cancelled merge added a file');
+  if (afterCancel.dialogs.length !== dialogsBeforeCancel) fail('Cancel must not raise an alert: ' + JSON.stringify(afterCancel.dialogs));
+  if (afterCancel.rejections.length) fail('unhandled rejections during the merges: ' + JSON.stringify(afterCancel.rejections));
+  console.log('ok: three shifted noisy shots align and average into a quieter 16-bit merge; a bracket pair merges as HDR and opens as the selected file; both run in a terminated worker without touching the page OpenCV; a forced memory failure alerts and Cancel releases at once');
 }
 
 // Live loupe: Chrome's fake camera (launch flags in smoke-test.mjs) is
@@ -292,7 +452,8 @@ async function runMultiShotScenario({ send, evaluate, waitFor, wait, fail, insta
 // list and opens when the loupe closes.
 async function runLoupeScenario({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port }) {
   const previousDocument = await evaluate('performance.timeOrigin');
-  await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en` });
+  // debugCounters: the loupe's grab/conversion/recipe counts (#261).
+  await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en&debugCounters=1` });
   // The previous multi-shot page exposes the same controls. Do not install the
   // permission probe in that document while navigation is still committing.
   await waitFor('loupe workspace boot', `performance.timeOrigin !== ${previousDocument} && document.readyState === 'complete' && !!document.getElementById('studioImportAutoCrop') && (!!document.getElementById('studioLoupe') && !!document.getElementById('loupeOverlay'))`);
@@ -334,8 +495,61 @@ async function runLoupeScenario({ send, evaluate, waitFor, wait, fail, installDi
   if (cameraError) fail('fake camera acquisition failed: ' + cameraError);
   await evaluate(`document.getElementById('loupeCloseBtn').click(); window.__finishLoupePermission(); window.__restoreLoupeCamera();`);
   await waitFor('late camera stream released after close', `window.__delayedLoupeStream.getTracks().every(track => track.readyState === 'ended') && document.getElementById('loupeVideo').srcObject === null`, 10_000);
+  // The loupe's own conversion workers (created from its conversion path);
+  // each must be gone once the loupe closes.
+  await evaluate(`(() => {
+    const NativeWorker = window.Worker;
+    const probe = window.__loupeWorkers = { workers: [] };
+    window.Worker = class extends NativeWorker {
+      constructor(url, options) {
+        super(url, options);
+        if (/conversionWorker/.test(String(url)) && /convertLoupeFrame/.test(new Error().stack || '')) probe.workers.push(this);
+      }
+      terminate() { this.__terminated = true; return super.terminate(); }
+    };
+    probe.alive = () => probe.workers.filter(worker => !worker.__terminated).length;
+    probe.restore = () => { window.Worker = NativeWorker; };
+  })()`);
   await evaluate(`document.getElementById('studioLoupe').click()`);
   await waitFor('loupe converting frames', `Number(document.getElementById('loupeOverlay').dataset.frames) >= 5`, 30_000);
+  // Paced by the camera, converted in the loupe's worker: no more conversions
+  // than presented camera frames, none of them twice, and the automatic
+  // recipe re-detected at most once a second.
+  const pacing = await evaluate(`new Promise(resolve => {
+    const video = document.getElementById('loupeVideo');
+    const start = window.__ncDebug.counters().loupe, startTime = performance.now();
+    let presented = 0;
+    const count = () => { presented++; if (performance.now() - startTime < 2000) video.requestVideoFrameCallback(count); };
+    if (typeof video.requestVideoFrameCallback === 'function') video.requestVideoFrameCallback(count);
+    setTimeout(() => {
+      const end = window.__ncDebug.counters().loupe;
+      resolve({ pacing: end.pacing, presented, conversions: end.conversions - start.conversions,
+        worker: end.workerConversions - start.workerConversions, main: end.mainConversions - start.mainConversions,
+        defaults: end.defaultSettings - start.defaultSettings, repeated: end.repeatedFrames, workers: window.__loupeWorkers.workers.length });
+    }, 2000);
+  })`);
+  console.log('camera loupe pacing:', JSON.stringify(pacing));
+  if (!(pacing.conversions >= 2 && pacing.worker === pacing.conversions && pacing.main === 0 && pacing.workers === 1))
+    fail('the loupe should convert in its own worker: ' + JSON.stringify(pacing));
+  if (!(pacing.repeated === 0 && pacing.defaults <= 3 && (pacing.pacing !== 'video-frame' || pacing.conversions <= pacing.presented + 1)))
+    fail('the loupe converted more often than the camera presented frames, or rebuilt its automatic recipe per frame: ' + JSON.stringify(pacing));
+  // Show raw: no grab, no conversion, the frame counter stops; back to the
+  // converted view resumes at once.
+  const raw = await evaluate(`(async () => {
+    const overlay = document.getElementById('loupeOverlay'), toggle = document.getElementById('loupeRaw');
+    toggle.checked = true; toggle.dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise(resolve => setTimeout(resolve, 300));
+    const before = { frames: overlay.dataset.frames, ...window.__ncDebug.counters().loupe };
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    const after = { frames: overlay.dataset.frames, ...window.__ncDebug.counters().loupe };
+    toggle.checked = false; toggle.dispatchEvent(new Event('change', { bubbles: true }));
+    const resumedAt = performance.now();
+    while (overlay.dataset.frames === after.frames && performance.now() - resumedAt < 2000) await new Promise(resolve => setTimeout(resolve, 10));
+    return { stopped: before.frames === after.frames && before.grabs === after.grabs && before.conversions === after.conversions,
+      resumedMs: Math.round(performance.now() - resumedAt), resumed: overlay.dataset.frames !== after.frames, view: overlay.dataset.view };
+  })()`);
+  console.log('camera loupe raw view:', JSON.stringify(raw));
+  if (!raw.stopped || !raw.resumed || raw.view !== 'converted') fail('Show raw must stop grabbing and converting, and the converted view must resume: ' + JSON.stringify(raw));
   const status = await evaluate(`document.getElementById('loupeStatus').textContent`);
   console.log('camera loupe:', status);
   if (!/Live · \d+×\d+ · recipe: automatic/.test(status)) fail('loupe status wrong: ' + status);
@@ -364,8 +578,49 @@ async function runLoupeScenario({ send, evaluate, waitFor, wait, fail, installDi
   if (!(compare.width > 0 && compare.correlation < -0.1)) fail('the loupe should show an inverted conversion of the camera frame: ' + JSON.stringify(compare));
   await evaluate(`document.getElementById('loupeCaptureBtn').click()`);
   await waitFor('loupe capture queued', `(window.__cameraToasts || []).some((t) => /^Captured loupe-/.test(t)) && document.querySelectorAll('.file-list-checkbox').length === 1`, 30_000);
-  await evaluate(`document.getElementById('loupeCloseBtn').click()`);
+  const stream = await evaluate(`(() => {
+    window.__loupeStream = document.getElementById('loupeVideo').srcObject;
+    document.getElementById('loupeCloseBtn').click();
+    return { alive: window.__loupeWorkers.alive(), tracks: window.__loupeStream.getTracks().map(track => track.readyState) };
+  })()`);
+  if (stream.alive !== 0 || !stream.tracks.every(state => state === 'ended')) fail('the closed loupe left a worker or a camera track running: ' + JSON.stringify(stream));
   const ready = `document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy`;
   await waitFor('capture opened', `document.getElementById('loupeOverlay').hidden && document.getElementById('loupeVideo').srcObject === null && ${ready} && /^loupe-/.test(document.getElementById('studioFilename').textContent)`, 150_000);
   console.log('ok: the live loupe converts the camera feed through the automatic recipe, keeps converting, captures a frame into the photo list and opens it on close');
+
+  // Over a converted photo the loupe follows the photo's edits: the C console
+  // key and Cmd/Ctrl+Z each rebuild its recipe within two camera frames.
+  await evaluate(`(() => { window.__loupeWorkers.workers = []; document.getElementById('studioLoupe').click(); })()`);
+  await waitFor('loupe over the converted photo', `Number(document.getElementById('loupeOverlay').dataset.frames) >= 3 && /recipe: loupe-/.test(document.getElementById('loupeStatus').textContent)`, 30_000);
+  const photoStart = await evaluate(`window.__ncDebug.counters().loupe`);
+  await evaluate(`window.__ncDebug.pauseLoupeRecipeRefresh(true)`);
+  const edits = [];
+  for (const [label, init] of [['C', { key: 'c' }], ['undo', { key: 'z', ctrlKey: true }]]) {
+    edits.push(await evaluate(`new Promise(resolve => {
+      const overlay = document.getElementById('loupeOverlay');
+      const frames = Number(overlay.dataset.frames), recipes = Number(overlay.dataset.recipes);
+      const watch = new MutationObserver(() => {
+        if (Number(overlay.dataset.recipes) === recipes) return;
+        watch.disconnect(); clearTimeout(timer);
+        resolve({ label: '${label}', framesUntilRebuild: Number(overlay.dataset.frames) - frames });
+      });
+      const timer = setTimeout(() => { watch.disconnect(); resolve({ label: '${label}', framesUntilRebuild: null }); }, 3000);
+      watch.observe(overlay, { attributes: true, attributeFilter: ['data-recipes'] });
+      document.getElementById('loupeCloseBtn').dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, ...${JSON.stringify(init)} }));
+    })`));
+  }
+  console.log('camera loupe edits:', JSON.stringify(edits));
+  if (!edits.every(edit => edit.framesUntilRebuild !== null && edit.framesUntilRebuild <= 2)) fail('the loupe did not follow the photo\'s edits within two frames: ' + JSON.stringify(edits));
+  await evaluate(`window.__ncDebug.pauseLoupeRecipeRefresh(false)`);
+  const photoEnd = await evaluate(`window.__ncDebug.counters().loupe`);
+  if (photoEnd.mainConversions !== 0 || photoEnd.workerConversions <= photoStart.workerConversions) fail('photo loupe must convert in its worker: ' + JSON.stringify({ photoStart, photoEnd }));
+  const closed = await evaluate(`(() => {
+    const tracks = document.getElementById('loupeVideo').srcObject.getTracks();
+    document.getElementById('loupeCloseBtn').click();
+    const result = { alive: window.__loupeWorkers.alive(), workers: window.__loupeWorkers.workers.length, tracks: tracks.map(track => track.readyState) };
+    window.__loupeWorkers.restore();
+    return result;
+  })()`);
+  if (closed.alive !== 0 || closed.workers !== 1 || !closed.tracks.every(state => state === 'ended')) fail('the loupe over a photo left a worker or track running: ' + JSON.stringify(closed));
+  console.log('ok: the loupe converts off the main thread, paced by the camera, idles in the raw view, follows edits and releases its worker and tracks on close');
 }

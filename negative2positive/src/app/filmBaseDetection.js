@@ -1,3 +1,5 @@
+import { selectKth, minFrom } from './orderStatistics.js';
+
 const DEFAULT_FILM_BASE = Object.freeze({ r: 210, g: 140, b: 90 });
 const UINT8_MAX = 255;
 const UINT16_MAX = 65535;
@@ -51,6 +53,19 @@ function percentile(sorted, p) {
   return sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo);
 }
 
+// percentile() over the ascending order of values[0..n) without sorting.
+// Only for finite values (no NaN).
+function percentileUnsorted(values, n, p) {
+  if (n === 0) return 0;
+  const pos = clamp(p, 0, 1) * (n - 1);
+  const lo = Math.floor(pos);
+  const hi = Math.ceil(pos);
+  const loValue = selectKth(values, lo, n);
+  if (lo === hi) return loValue;
+  const hiValue = minFrom(values, lo + 1, n);
+  return loValue + (hiValue - loValue) * (pos - lo);
+}
+
 function trimmedMean(sorted, trim = 0.1) {
   if (sorted.length === 0) return 0;
   const start = Math.min(sorted.length - 1, Math.floor(sorted.length * trim));
@@ -73,6 +88,26 @@ function sortNumeric(values) {
   return values;
 }
 
+// Scratch columns for summarizeRegion, grown on demand. Typed arrays sort
+// numerically without a comparator, which is what the comparator sort over
+// plain arrays did (the samples are finite, non-negative numbers). Channel
+// samples of an 8/16-bit plane are integers and sort fastest as Uint16;
+// anything else, and the luma, stays Float64 so no value is ever rounded.
+// Never use Float32.
+const scratchColumns = new Map();
+function scratchColumn(name, Type, capacity) {
+  let column = scratchColumns.get(name);
+  if (!column || !(column instanceof Type) || column.length < capacity) {
+    column = new Type(Math.max(capacity, column ? column.length * 2 : 0));
+    scratchColumns.set(name, column);
+  }
+  return column;
+}
+
+function isIntegerPlane(data) {
+  return data instanceof Uint16Array || data instanceof Uint8ClampedArray || data instanceof Uint8Array;
+}
+
 function summarizeRegion(source, bounds, options = {}) {
   const maxSamples = Math.max(64, Math.round(finiteNumber(options.maxSamples, 18000)));
   const trim = clamp(finiteNumber(options.trim, 0.1), 0, 0.35);
@@ -82,10 +117,17 @@ function summarizeRegion(source, bounds, options = {}) {
   const regionH = Math.max(1, bounds.endY - bounds.startY + 1);
   const step = Math.max(1, Math.ceil(Math.sqrt((regionW * regionH) / maxSamples)));
 
-  const rVals = [];
-  const gVals = [];
-  const bVals = [];
-  const lumaVals = [];
+  const capacity = Math.ceil(regionW / step) * Math.ceil(regionH / step);
+  // A read past the end of a malformed (e.g. 0×0) plane yields undefined,
+  // which the old arrays carried as NaN arithmetic; Float64 keeps that.
+  const integerSamples = isIntegerPlane(data)
+    && ((bounds.endY * width + bounds.endX) * 4 + 3) < data.length;
+  const ChannelType = integerSamples ? Uint16Array : Float64Array;
+  const rCol = scratchColumn('r', ChannelType, capacity);
+  const gCol = scratchColumn('g', ChannelType, capacity);
+  const bCol = scratchColumn('b', ChannelType, capacity);
+  const lumaCol = scratchColumn('luma', Float64Array, capacity);
+  let count = 0;
 
   for (let y = bounds.startY; y <= bounds.endY; y += step) {
     for (let x = bounds.startX; x <= bounds.endX; x += step) {
@@ -96,14 +138,15 @@ function summarizeRegion(source, bounds, options = {}) {
       const r = data[idx];
       const g = data[idx + 1];
       const b = data[idx + 2];
-      rVals.push(r);
-      gVals.push(g);
-      bVals.push(b);
-      lumaVals.push(0.299 * r + 0.587 * g + 0.114 * b);
+      rCol[count] = r;
+      gCol[count] = g;
+      bCol[count] = b;
+      lumaCol[count] = 0.299 * r + 0.587 * g + 0.114 * b;
+      count++;
     }
   }
 
-  if (rVals.length === 0) {
+  if (count === 0) {
     return makeFilmBaseResult(DEFAULT_FILM_BASE.r, DEFAULT_FILM_BASE.g, DEFAULT_FILM_BASE.b, UINT8_MAX, {
       method: options.method || 'fallback',
       precision: 8,
@@ -112,16 +155,25 @@ function summarizeRegion(source, bounds, options = {}) {
     });
   }
 
-  sortNumeric(rVals);
-  sortNumeric(gVals);
-  sortNumeric(bVals);
-  sortNumeric(lumaVals);
+  const rVals = rCol.subarray(0, count).sort();
+  const gVals = gCol.subarray(0, count).sort();
+  const bVals = bCol.subarray(0, count).sort();
 
   const r = trimmedMean(rVals, trim);
   const g = trimmedMean(gVals, trim);
   const b = trimmedMean(bVals, trim);
-  const l10 = percentile(lumaVals, 0.1);
-  const l90 = percentile(lumaVals, 0.9);
+  // The luma only needs two percentiles: select them instead of sorting.
+  // (Float planes and malformed ones can carry NaN; they keep the full sort.)
+  let l10;
+  let l90;
+  if (integerSamples) {
+    l10 = percentileUnsorted(lumaCol, count, 0.1);
+    l90 = percentileUnsorted(lumaCol, count, 0.9);
+  } else {
+    const lumaVals = lumaCol.subarray(0, count).sort();
+    l10 = percentile(lumaVals, 0.1);
+    l90 = percentile(lumaVals, 0.9);
+  }
   const spread8 = ((l90 - l10) / source.max) * UINT8_MAX;
   const r8 = to8Bit(r, source.max);
   const g8 = to8Bit(g, source.max);
@@ -279,12 +331,18 @@ function combineCandidates(candidates, selected, hadEligible) {
   });
 }
 
+// The border buffer autoDetectFilmBase actually uses for a requested value.
+// Callers that cache its result key on this.
+export function normalizeBorderBufferPct(borderBufferPct = 10) {
+  return clamp(finiteNumber(borderBufferPct, 10), 0, 30);
+}
+
 export function autoDetectFilmBase(imageData, borderBufferPct = 10) {
   const source = getSampleSource(imageData);
   if (!source) return sanitizeFilmBaseForSettings(null);
 
   const minSide = Math.max(1, Math.min(source.width, source.height));
-  const bufferPct = clamp(finiteNumber(borderBufferPct, 10), 0, 30);
+  const bufferPct = normalizeBorderBufferPct(borderBufferPct);
   const hasBorderHint = bufferPct > 0.5;
   const edgeBand = Math.max(4, Math.round(minSide * ((hasBorderHint ? bufferPct : 6) / 100)));
   const radius = clamp(Math.round(edgeBand * 0.42), 3, 72);

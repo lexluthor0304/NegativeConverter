@@ -77,6 +77,7 @@ export async function runPositiveImportSmoke({ send, evaluate, waitFor, wait, fa
   await evaluate(`document.querySelector('.file-list-name[data-index="2"]').click()`);
   await waitFor('mono imported', `${ready} && document.getElementById('studioFilename').textContent === 'mono.png'`,150000);
   if(await evaluate(`document.getElementById('filmTypeDetectionStatus').dataset.confidence`)!=='low') fail('monochrome polarity claimed as certain');
+  if(await evaluate(`document.querySelector('.film-type-btn.active').dataset.type`)!=='bw') fail('rebate-less monochrome not treated as a B&W negative');
   await evaluate(`document.querySelector('.film-type-btn[data-type="bw"]').click()`);
   await wait(1500);
   await evaluate(`document.querySelector('.file-list-name[data-index="0"]').click()`);

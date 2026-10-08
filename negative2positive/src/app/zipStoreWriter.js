@@ -1,3 +1,6 @@
+import { yieldTaskForJob } from './yieldToPaint.js';
+import { updateCrc32 } from '../workers/crc32.js';
+
 const ZIP_MAX_U16 = 0xFFFF;
 const ZIP_MAX_U32 = 0xFFFFFFFF;
 const ZIP_VERSION_NEEDED = 20;
@@ -9,18 +12,6 @@ const ZIP64_EXTRA_ID = 0x0001;
 const ZIP_CHUNK_BYTES = 256 * 1024;
 
 const textEncoder = new TextEncoder();
-
-const crc32Table = (() => {
-  const table = new Uint32Array(256);
-  for (let n = 0; n < 256; n++) {
-    let c = n;
-    for (let k = 0; k < 8; k++) {
-      c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
-    }
-    table[n] = c >>> 0;
-  }
-  return table;
-})();
 
 function ensureZipU16(value, label) {
   if (!Number.isInteger(value) || value < 0 || value > ZIP_MAX_U16) {
@@ -339,14 +330,15 @@ export class ZipStoreWriter {
     let crc = 0xFFFFFFFF;
     let yieldAt = performance.now() + 12;
     for await (const chunk of readBlobChunks(blob)) {
-      for (let i = 0; i < chunk.length; i++) {
-        crc = crc32Table[(crc ^ chunk[i]) & 0xFF] ^ (crc >>> 8);
-      }
+      crc = updateCrc32(crc, chunk);
       await this.writeChunk(chunk);
       // An immediately-ready Blob reader and sink only yield microtasks. Give
       // input/paint/cancel handlers a real task boundary during long exports.
+      // A hidden tab clamps setTimeout to 1 s or more, which would pace the
+      // CRC pass at one 12 ms slice per second (#241): yield through a
+      // MessageChannel task there instead.
       if (performance.now() >= yieldAt) {
-        await new Promise(resolve => setTimeout(resolve, 0));
+        await yieldTaskForJob();
         yieldAt = performance.now() + 12;
       }
     }

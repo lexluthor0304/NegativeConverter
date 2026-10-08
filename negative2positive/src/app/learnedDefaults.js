@@ -51,10 +51,41 @@ export function estimateLearnedDefaults(record, { shrinkage = 3 } = {}) {
   }
   return { n: safe.rolls.length, offsets, choices };
 }
+// Undo applyLearnedDefaults before the key changes (an automatic film-type
+// retype): learned keys return to the automatic recipe they were added to.
+export function withoutLearnedDefaults(settings, automatic) {
+  if (!settings?.learnedDefaults || !automatic) return settings;
+  const next = { ...settings };
+  delete next.learnedDefaults;
+  for (const key of [...LEARNED_NUMERIC_KEYS, ...LEARNED_CATEGORY_KEYS]) {
+    if (Object.hasOwn(automatic, key)) next[key] = automatic[key];
+    else delete next[key];
+  }
+  return next;
+}
 export function applyLearnedDefaults(settings, record) {
   const estimate = estimateLearnedDefaults(record);
   if (!estimate.n || settings.learnedDefaults) return settings;
   const next = { ...settings, ...estimate.choices, learnedDefaults: { key: record.key, n: estimate.n } };
   for (const [key, offset] of Object.entries(estimate.offsets)) if (Number.isFinite(next[key])) next[key] += offset;
+  return next;
+}
+// Learned offsets are fractions of an edit (n / (n + shrinkage)), but a photo
+// that is opened shows its values on sliders, which snap them to their step
+// and range. `normalize(key, value)` is that snap (the value itself for a key
+// without a slider). Applied with the offsets, it gives a photo exported
+// without being opened (never opened, or left inside a two-stage window) the
+// recipe it shows when opened.
+export function snapLearnedDefaults(settings, normalize) {
+  if (!settings?.learnedDefaults) return settings;
+  let next = settings;
+  for (const key of LEARNED_NUMERIC_KEYS) {
+    if (!Number.isFinite(settings[key])) continue;
+    const value = normalize(key, settings[key]);
+    if (Number.isFinite(value) && value !== settings[key]) {
+      if (next === settings) next = { ...settings };
+      next[key] = value;
+    }
+  }
   return next;
 }

@@ -1,3 +1,5 @@
+import { allocPlane16, sharedPlanesAvailable, markDerivedEightBit } from './crossOriginIsolation.js';
+
 export const RAW_LIKE_EXTENSIONS = [
   '.cr2', '.cr3', '.crw', '.nef', '.nrw', '.arw', '.dng', '.raf', '.raw', '.rw2',
   '.pef', '.srw', '.3fr', '.mef', '.orf', '.rwl', '.iiq', '.x3f', '.mrw', '.kdc',
@@ -132,6 +134,11 @@ export async function loadRawImageDataPreview(buffer, fileName, options) {
   return loadRawFile(buffer, fileName, { ...options, preview: true });
 }
 
+function throwIfAborted(signal) {
+  if (signal?.aborted) throw signal.reason?.name === 'AbortError' ? signal.reason
+    : new DOMException('Image decode was aborted', 'AbortError');
+}
+
 /**
  * Decode a PNG buffer.
  *
@@ -140,24 +147,50 @@ export async function loadRawImageDataPreview(buffer, fileName, options) {
  * 1/2/4-bit, interlaced, tRNS — is handed to the browser decoder, which is
  * off-thread, handles every colour type correctly and costs ~1/5 the memory.
  */
-export async function loadPngImageData(buffer) {
+export async function loadPngImageData(buffer, { signal = null, sharedPlanes = false, reserveDecode = null } = {}) {
+  const aborted = () => signal?.reason?.name === 'AbortError' ? signal.reason
+    : new DOMException('PNG decode was aborted', 'AbortError');
+  if (signal?.aborted) throw aborted();
+  let admissionError = null;
+  const admit = async (size) => {
+    throwIfAborted(signal);
+    try { if (reserveDecode) await reserveDecode(size); }
+    catch (error) { admissionError = error; throw error; }
+    throwIfAborted(signal);
+  };
+  const options = { signal, sharedPlanes, ...(reserveDecode ? { reserveDecode: admit } : {}) };
   const header = sniffImageKind(buffer);
   const sixteenBit = header?.kind === 'png' && header.depth === 16;
 
   if (!sixteenBit && typeof createImageBitmap === 'function' && typeof Blob === 'function') {
     try {
-      return await loadStandardImage(new Blob([buffer], { type: 'image/png' }));
+      const image = await loadStandardImage(new Blob([buffer], { type: 'image/png' }), options);
+      if (signal?.aborted) throw aborted();
+      return image;
     } catch (err) {
+      if (signal?.aborted) throw aborted();
+      if (err?.name === 'AbortError' || err === admissionError) throw err;
       if (err?.code === 'IMAGE_TOO_LARGE') throw err;
       // Fall through: UPNG also handles palette/low-bit-depth correctly.
     }
   }
 
   const { decodeScanInWorker } = await import('./scanDecodeClient.js');
-  const decoded = await decodeScanInWorker(buffer, 'png');
+  throwIfAborted(signal);
+  // `sharedPlanes` (#264): a 16-bit PNG's plane in shared memory where the
+  // page is cross-origin isolated (the editor's scans).
+  const decoded = await decodeScanInWorker(buffer, 'png', options);
   if (decoded) return decoded;
+  if (signal?.aborted) throw aborted();
   const { loadPngFile } = await import('./pngFileLoader.js');
-  return loadPngFile(buffer);
+  throwIfAborted(signal);
+  // Worker unavailability and lazy fallback imports yield too.
+  if (reserveDecode) await admit({ kind: 'scan' });
+  throwIfAborted(signal);
+  const alloc = sharedPlanes && sharedPlanesAvailable() ? (length) => allocPlane16(length, { shared: true }) : null;
+  const image = loadPngFile(buffer, { alloc });
+  if (image.__image16) markDerivedEightBit(image);
+  return image;
 }
 
 // No eager __image16 in either path below: an 8-bit source holds no extra
@@ -204,59 +237,98 @@ async function sniffBlobHeader(file) {
   }
 }
 
-export async function loadStandardImage(file) {
+export async function loadStandardImage(file, { signal = null, reserveDecode = null, sharedPlanes = false } = {}) {
+  const admit = async () => {
+    throwIfAborted(signal);
+    if (reserveDecode) await reserveDecode({ kind: 'scan' });
+    throwIfAborted(signal);
+  };
+  throwIfAborted(signal);
   // Route by content, not by name: a 16-bit PNG whose File.type is empty would
   // otherwise be flattened to 8 bits here without any warning.
   const sniffed = await sniffBlobHeader(file);
+  throwIfAborted(signal);
   if (sniffed?.kind === 'png' && sniffed.depth === 16) {
-    return loadPngImageData(await file.arrayBuffer());
+    const buffer = await file.arrayBuffer();
+    throwIfAborted(signal);
+    return loadPngImageData(buffer, { signal, reserveDecode, sharedPlanes });
   }
 
-  // Preferred path: createImageBitmap decodes off the main thread.
+  // Preferred path. Chromium decodes Blob-sourced ImageBitmaps off the main
+  // thread; WebKit (WKWebView, WebKitGTK) decodes them synchronously on the
+  // calling thread, so there this still blocks the page for the decode.
   if (typeof createImageBitmap === 'function') {
+    if (reserveDecode) await admit();
+    throwIfAborted(signal);
     try {
       const bitmap = await createImageBitmap(file);
       try {
+        throwIfAborted(signal);
         return imageSourceToImageData(bitmap, bitmap.width, bitmap.height);
       } finally {
         bitmap.close();
       }
     } catch (err) {
+      throwIfAborted(signal);
+      if (err?.name === 'AbortError') throw err;
       if (err?.code === 'IMAGE_TOO_LARGE') throw err;
       // Fall through to the <img> path (unsupported format edge cases).
     }
   }
 
+  const img = new Image();
+  if (reserveDecode) await admit();
+  throwIfAborted(signal);
   const nativeImage = new Promise((resolve, reject) => {
-    const img = new Image();
     let objectUrl = null;
+    let finished = false;
+    const finish = (error, image) => {
+      if (finished) return;
+      finished = true;
+      signal?.removeEventListener?.('abort', onAbort);
+      img.onload = img.onerror = null;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      img.src = '';
+      if (error) reject(error); else resolve(image);
+    };
+    const onAbort = () => {
+      try { throwIfAborted(signal); } catch (error) { finish(error); }
+      img.src = '';
+    };
 
     img.onload = () => {
       try {
-        resolve(imageSourceToImageData(img, img.width, img.height));
+        throwIfAborted(signal);
+        finish(null, imageSourceToImageData(img, img.width, img.height));
       } catch (err) {
-        reject(err);
-      } finally {
-        if (objectUrl) URL.revokeObjectURL(objectUrl);
+        finish(err);
       }
     };
 
     img.onerror = () => {
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
       // The raw event stringifies to "[object Event]"; reject with something
       // the UI can actually translate.
-      reject(decodeFailureError(file));
+      try { throwIfAborted(signal); } catch (error) { finish(error); return; }
+      finish(decodeFailureError(file));
     };
 
-    objectUrl = URL.createObjectURL(file);
-    img.src = objectUrl;
+    signal?.addEventListener?.('abort', onAbort, { once: true });
+    if (signal?.aborted) { onAbort(); return; }
+    try {
+      objectUrl = URL.createObjectURL(file);
+      img.src = objectUrl;
+    } catch (error) { finish(error); }
   });
   try { return await nativeImage; }
   catch (error) {
+    throwIfAborted(signal);
+    if (error?.name === 'AbortError') throw error;
     if (error?.code === 'IMAGE_TOO_LARGE') throw error;
     if (sniffed?.kind !== 'heif' && !/\.(heic|heif|hif)$/i.test(file?.name || '') && !/hei[cf]/i.test(file?.type || '')) throw error;
     const { decodeHeifInWorker } = await import('./heifLoader.js');
-    const decoded = await decodeHeifInWorker(file);
+    throwIfAborted(signal);
+    const decoded = await decodeHeifInWorker(file, { signal, reserveDecode });
+    throwIfAborted(signal);
     assertCanvasSize(decoded.width, decoded.height);
     return new ImageData(new Uint8ClampedArray(decoded.data), decoded.width, decoded.height);
   }

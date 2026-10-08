@@ -1,0 +1,275 @@
+// The #229 review's repair-export exactness (R1-102, R1-078) in a real
+// browser, on the bundled MI-GAN model and the WASM provider. #236's idle
+// release and #241's hidden-window release drop the model session
+// (releaseAiRepairSession, forced here through the ?debug=1 hook). A
+// dust-brush stroke after the release patches the repair in place (#259);
+// its learned refresh loads the released model again, on its provider and
+// under its revision, and drains (R1-035). The export repairs from
+// scratch: its PNG 8-bit and TIFF 16-bit files equal, byte for byte, those of
+// a session that kept its model and brushed the same stroke. A settled repair
+// is exported after a release as it is: no load, no tile inferred. An armed
+// AI brush after a release shows no busy cursor and takes its first stroke
+// (R1-147).
+import { createHash } from 'node:crypto';
+import { join } from 'node:path';
+
+const ready = `document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy`;
+const exportIdle = `${ready} && !document.getElementById('exportSingleBtn').disabled && !document.querySelector('.loading-overlay.visible')`;
+
+async function installDownloadCapture(evaluate) {
+  await evaluate(`(() => {
+    window.__downloads = [];
+    const pendingUrls = new Set();
+    const origRevoke = URL.revokeObjectURL.bind(URL);
+    URL.revokeObjectURL = (url) => { if (!pendingUrls.has(url)) origRevoke(url); };
+    HTMLAnchorElement.prototype.click = function () {
+      if (this.download && this.href.startsWith('blob:')) {
+        const href = this.href; const name = this.download;
+        pendingUrls.add(href);
+        window.__downloads.push(fetch(href).then((r) => r.blob()).then((blob) => new Promise((resolve) => {
+          const reader = new FileReader();
+          reader.onload = () => { pendingUrls.delete(href); origRevoke(href); resolve({ name, dataUrl: reader.result }); };
+          reader.readAsDataURL(blob);
+        })));
+      }
+    };
+  })()`);
+}
+
+export async function runRepairReleaseSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port, root }) {
+  const fixture = join(root, 'negative2positive', 'test-fixtures', 'negative-sample.jpg');
+  const state = () => evaluate(`window.__ncAiRepair.state()`);
+
+  const exportFile = async (label, format, bitDepth) => {
+    await evaluate(`(() => {
+      document.querySelector('.format-btn[data-format="${format}"]').click();
+      document.querySelector('.bitdepth-btn[data-bitdepth="${bitDepth}"]').click();
+      window.__repairTiles = 0;
+      window.__downloads = [];
+      document.getElementById('exportSingleBtn').click();
+    })()`);
+    await waitFor(`${label}: ${format}${bitDepth} file`, `window.__downloads.length > 0`, 300_000);
+    const entry = await evaluate(`window.__downloads.shift()`);
+    await waitFor(`${label}: ${format}${bitDepth} export finished`, exportIdle, 60_000);
+    const bytes = Buffer.from(entry.dataUrl.split(',')[1], 'base64');
+    return { name: entry.name, bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'),
+      tiles: await evaluate(`window.__repairTiles`) };
+  };
+
+  // The photo, MI-GAN on WASM and dust removal's MI-GAN commit; then
+  // `beforeStroke`, one direct (Alt) dust-brush stroke at the centre, and the
+  // exports.
+  const session = async (label, beforeStroke) => {
+    await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en&debug=1` });
+    await waitFor(`${label}: boot`, `!!document.getElementById('studioImportAutoCrop') && !!window.__ncAiRepair`);
+    await installDialogAutoAccept();
+    await installDownloadCapture(evaluate);
+    await wait(300);
+    const doc = await send('DOM.getDocument');
+    const input = await send('DOM.querySelector', { nodeId: doc.result.root.nodeId, selector: '#fileInput' });
+    await send('DOM.setFileInputFiles', { files: [fixture], nodeId: input.result.nodeId });
+    await waitFor(`${label}: photo`, `${ready} && document.getElementById('studioFilename').textContent === 'negative-sample.jpg'`, 150_000);
+    await evaluate(`window.__ncAiRepair.load('wasm')`);
+    await waitFor(`${label}: MI-GAN on WASM`, `(() => { const s = window.__ncAiRepair.state(); return s.status === 'ready' && s.provider === 'wasm'; })()`, 300_000);
+    await evaluate(`(() => {
+      window.__repairTiles = 0;
+      window.__dustStatusUpdates = 0;
+      window.__strokes = 0;
+      new MutationObserver((records) => {
+        window.__dustStatusUpdates++;
+        for (const record of records) for (const node of record.addedNodes) if (/AI repair: tile/.test(node.textContent)) window.__repairTiles++;
+      }).observe(document.getElementById('dustStatus'), { childList: true });
+      const post = Worker.prototype.postMessage;
+      Worker.prototype.postMessage = function (message, ...args) {
+        if (message?.type === 'stroke') window.__strokes++;
+        return post.call(this, message, ...args);
+      };
+      document.getElementById('studioTab-repair').click();
+      if (!document.getElementById('dustAiEnabled').checked) document.getElementById('dustAiEnabled').click();
+      document.getElementById('dustRemovalEnabled').click();
+    })()`);
+    await waitFor(`${label}: MI-GAN dust commit`, `${ready} && /^Detected [0-9]+ dust particles$/.test(document.getElementById('dustStatus').textContent)
+      && /last run [1-9][0-9]* tile/.test(document.getElementById('dustAiStatus').textContent)`, 300_000);
+    const committed = await state();
+    if (committed.provider !== 'wasm' || !committed.tiles) fail(`${label}: the dust commit did not run MI-GAN on WASM: ` + JSON.stringify(committed));
+    if (beforeStroke) await beforeStroke(committed);
+    await evaluate(`document.getElementById('dustShowMask').click()`);
+    await waitFor(`${label}: dust worker pinned`, `(async () => {
+      const { dustWorker } = await import('/src/app/dustWorkerClient.js');
+      return dustWorker.pinned && dustWorker.maskTag !== null;
+    })()`, 30_000);
+    await wait(500);
+    const stroke = await evaluate(`(() => {
+      window.__dustStatusUpdates = 0;
+      const surface = [...document.querySelectorAll('#canvas, #glCanvas')].find(el => getComputedStyle(el).display !== 'none');
+      const rect = surface.getBoundingClientRect();
+      const at = (dx) => ({ bubbles: true, cancelable: true, pointerId: 11, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 1,
+        clientX: rect.x + rect.width / 2 + dx, clientY: rect.y + rect.height / 2, altKey: true });
+      surface.dispatchEvent(new PointerEvent('pointerdown', at(0)));
+      surface.dispatchEvent(new PointerEvent('pointermove', at(4)));
+      surface.dispatchEvent(new PointerEvent('pointermove', at(8)));
+      surface.dispatchEvent(new PointerEvent('pointerup', { ...at(8), buttons: 0 }));
+      return window.__ncBrush.state().photoRect;
+    })()`);
+    await waitFor(`${label}: stroke committed`, `window.__strokes === 1 && window.__dustStatusUpdates > 0
+      && /^Detected [0-9]+ dust particles$/.test(document.getElementById('dustStatus').textContent)`, 60_000);
+    // The stroke's learned refresh settles first; a released model is loaded
+    // for it.
+    await waitFor(`${label}: refresh drained`, `(() => { const s = window.__ncAiRepair.state(); return s.status === 'ready' && s.queued === 0; })()`, 120_000);
+    await wait(500);
+    await waitFor(`${label}: brush settled`, ready, 60_000);
+    await evaluate(`document.getElementById('dustShowMask').click()`);
+    await waitFor(`${label}: mask hidden`, ready, 30_000);
+    const particles = await evaluate(`document.getElementById('dustStatus').textContent`);
+    const before = await state();
+    const png8 = await exportFile(label, 'png', 8);
+    const afterPng = await state();
+    const tiff16 = await exportFile(label, 'tiff', 16);
+    return { stroke, particles, committed, before, afterPng, png8, tiff16 };
+  };
+
+  // Released before the stroke: the stroke patches with TELEA and no model
+  // runs; the export loads the released model (same provider, same revision)
+  // and repairs from scratch.
+  const released = await session('released', async (committed) => {
+    if (await evaluate(`window.__ncAiRepair.release()`) !== true) fail('the idle release did not run: ' + JSON.stringify(await state()));
+    const after = await state();
+    if (after.status !== 'idle' || !after.released || after.revision !== committed.revision) fail('release state: ' + JSON.stringify(after));
+  });
+  // The reference: the same photo, model and stroke, never released.
+  const kept = await session('kept');
+  console.log('repair release parity:', JSON.stringify({ released, kept }, (key, value) => key === 'committed' ? undefined : value));
+
+  // The refresh brought the released model back for the stroke (R1-035): the
+  // same model on its provider, under its revision, with nothing left queued.
+  if (released.before.status !== 'ready' || released.before.provider !== 'wasm' || released.before.revision !== released.committed.revision
+    || released.before.queued) {
+    fail('the dust-brush stroke did not load the released model for its refresh: ' + JSON.stringify(released.before));
+  }
+  if (released.afterPng.status !== 'ready' || released.afterPng.provider !== 'wasm' || released.afterPng.revision !== released.committed.revision) {
+    fail('the export did not load the released model on its provider under its revision: ' + JSON.stringify(released.afterPng));
+  }
+  if (!released.png8.tiles || !kept.png8.tiles) fail('an export after a stroke must repair from scratch: ' + JSON.stringify({ released: released.png8, kept: kept.png8 }));
+  if (released.tiff16.tiles || kept.tiff16.tiles) fail('the stamped from-scratch repair is exported again without inference: ' + JSON.stringify({ released: released.tiff16, kept: kept.tiff16 }));
+  if (JSON.stringify(released.stroke) !== JSON.stringify(kept.stroke) || released.particles !== kept.particles) {
+    fail('the two sessions brushed different strokes: ' + JSON.stringify({ released: [released.stroke, released.particles], kept: [kept.stroke, kept.particles] }));
+  }
+  if (released.png8.sha256 !== kept.png8.sha256) fail('PNG 8-bit after a release differs from the from-scratch MI-GAN export');
+  if (released.tiff16.sha256 !== kept.tiff16.sha256) fail('TIFF 16-bit after a release differs from the from-scratch MI-GAN export');
+  console.log(`ok: after an idle release, a dust-brush stroke exports the from-scratch MI-GAN repair on WASM (PNG8 ${released.png8.sha256.slice(0, 16)}, TIFF16 ${released.tiff16.sha256.slice(0, 16)}, ${released.png8.tiles} tile(s)), equal to a session that kept its model`);
+
+  // A settled repair after a release (R1-078): exported as it is, with no
+  // load and no inference, byte for byte the same file.
+  if (await evaluate(`window.__ncAiRepair.release()`) !== true) fail('second release did not run: ' + JSON.stringify(await state()));
+  const settled = await exportFile('settled', 'png', 8);
+  const afterSettled = await state();
+  if (afterSettled.status !== 'idle' || settled.tiles) fail('a settled repair after a release was repaired again: ' + JSON.stringify({ settled, afterSettled }));
+  if (settled.sha256 !== kept.png8.sha256) fail('a settled repair after a release exported other pixels');
+  console.log('ok: a settled repair exports after a release with no load and no inference, the same PNG8');
+
+  // An armed AI brush after a release (R1-147): no busy cursor while nothing
+  // loads, and the first stroke is taken (its repair loads the model) instead
+  // of being refused with "still loading".
+  await evaluate(`document.getElementById('aiBrushEnabled').click()`);
+  await waitFor('AI brush armed with its model', `${ready} && window.__ncAiRepair.state().status === 'ready'`, 120_000);
+  // Arming loads the model with a refresh, and dust removal is on: its pass
+  // runs again 300 ms after the load (scheduleDustDetection). The release is
+  // refused while a pass or run uses the session (releaseAiRepairSession), so
+  // it is retried until that pass is done; the refusals record what ran.
+  await evaluate(`window.__armedReleaseRefusals = []`);
+  const armedReleased = await waitFor('the armed brush\'s model released', `${ready} && window.__ncAiRepair.release().then((done) => {
+    if (!done) window.__armedReleaseRefusals.push(document.getElementById('dustStatus').textContent);
+    return done;
+  })`, 60_000, { soft: true });
+  const refusals = await evaluate(`window.__armedReleaseRefusals`);
+  if (!armedReleased) fail('the armed brush\'s model was not released: ' + JSON.stringify({ state: await state(), refusals }));
+  if (refusals.length) console.log('armed brush release waited for:', JSON.stringify(refusals));
+  const armed = await evaluate(`({ cursor: getComputedStyle(document.getElementById('canvasContainer')).cursor,
+    pending: document.getElementById('aiBrushSection').hasAttribute('data-model-pending'),
+    status: document.getElementById('dustAiStatus').textContent })`);
+  if (armed.cursor !== 'crosshair' || armed.pending || /open Retouch/.test(armed.status)) fail('an armed AI brush after a release: ' + JSON.stringify(armed));
+  await evaluate(`(() => {
+    window.__brushToasts = [];
+    new MutationObserver((records) => { for (const r of records) for (const n of r.addedNodes) if (n.nodeType === 1) window.__brushToasts.push(n.textContent); })
+      .observe(document.getElementById('toastContainer'), { childList: true });
+    const surface = [...document.querySelectorAll('#canvas, #glCanvas')].find(el => getComputedStyle(el).display !== 'none');
+    const rect = surface.getBoundingClientRect();
+    const at = (dx) => ({ bubbles: true, cancelable: true, pointerId: 12, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 1,
+      clientX: rect.x + rect.width * 0.3 + dx, clientY: rect.y + rect.height * 0.4 });
+    surface.dispatchEvent(new PointerEvent('pointerdown', at(0)));
+    surface.dispatchEvent(new PointerEvent('pointermove', at(6)));
+    surface.dispatchEvent(new PointerEvent('pointermove', at(12)));
+    surface.dispatchEvent(new PointerEvent('pointerup', { ...at(12), buttons: 0 }));
+  })()`);
+  // The released model loads again on its provider and keeps its revision.
+  const strokeRevision = (await state()).revision;
+  const strokeRepaired = await waitFor('the first stroke after a release is repaired', `${ready} && (() => { const s = window.__ncAiRepair.state();
+    return s.strokes === 1 && s.status === 'ready' && s.revision === ${JSON.stringify(strokeRevision)}; })()
+    && /last run [1-9][0-9]* tile/.test(document.getElementById('dustAiStatus').textContent)`, 180_000, { soft: true });
+  if (!strokeRepaired) {
+    fail('the first stroke after a release was not repaired: ' + JSON.stringify({ expectedRevision: strokeRevision, state: await state(),
+      aiStatus: await evaluate(`document.getElementById('dustAiStatus').textContent`), toasts: await evaluate('window.__brushToasts') }));
+  }
+  const toasts = await evaluate(`window.__brushToasts`);
+  if (toasts.some(text => /still loading/.test(text))) fail('the first AI-brush stroke after a release was refused: ' + JSON.stringify(toasts));
+  console.log('ok: an armed AI brush after a release shows a crosshair, takes its first stroke and repairs it with the model it loads again');
+
+  // R1-102 supplemental: the real Export/Export All controls must never
+  // encode TELEA after a ready WASM model fails inference. Retries keep the
+  // failure, while an explicit AI-off recipe can still export plain repair.
+  await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en&debug=1` });
+  await waitFor('AI failure boot', `!!window.__ncAiRepair && !!document.getElementById('studioImportAutoCrop')`);
+  await installDialogAutoAccept();
+  await installDownloadCapture(evaluate);
+  await evaluate(`(() => {
+    const probe = window.__requiredAiProbe = { fail: false, errors: [], runs: 0 };
+    const NativeWorker = window.Worker;
+    window.Worker = class extends NativeWorker {
+      constructor(url, options) { super(url, options); this.requiredAi = /aiInpaintWorker/.test(String(url)); }
+      postMessage(message, ...args) {
+        if (this.requiredAi && probe.fail && message?.type === 'run') {
+          probe.runs++;
+          queueMicrotask(() => this.onmessage?.({ data: { id: message.id, error: 'required AI fixture inference failure' } }));
+          return;
+        }
+        return super.postMessage(message, ...args);
+      }
+    };
+    const error = console.error.bind(console);
+    console.error = (...args) => {
+      if (/^(Export failed:|Error processing )/.test(String(args[0])) && /required AI fixture inference failure/.test(args[1]?.message || '')) {
+        probe.errors.push(args[1].message);
+        console.warn('Expected required AI export rejection:', args[1].message);
+      } else error(...args);
+    };
+  })()`);
+  const doc = await send('DOM.getDocument');
+  const input = await send('DOM.querySelector', { nodeId: doc.result.root.nodeId, selector: '#fileInput' });
+  await send('DOM.setFileInputFiles', { files: [fixture], nodeId: input.result.nodeId });
+  await waitFor('AI failure photo', `${ready} && document.getElementById('studioFilename').textContent === 'negative-sample.jpg'`, 150_000);
+  await evaluate(`window.__ncAiRepair.load('wasm')`);
+  await evaluate(`document.getElementById('studioTab-repair').click();
+    if (!document.getElementById('dustAiEnabled').checked) document.getElementById('dustAiEnabled').click();
+    document.getElementById('dustRemovalEnabled').click()`);
+  await waitFor('AI failure committed nonempty dust', `${ready} && /^Detected [1-9][0-9]* dust particles$/.test(document.getElementById('dustStatus').textContent)
+    && window.__ncAiRepair.state().provider === 'wasm' && window.__ncAiRepair.state().strokes === 0`, 120_000);
+  // A new model session invalidates the old committed stamp and tile memo.
+  await evaluate(`window.__ncAiRepair.load('wasm')`);
+  await evaluate(`window.__requiredAiProbe.fail = true`);
+  for (const button of ['exportSingleBtn', 'exportAllBtn']) for (const depth of [8, 16]) {
+    const before = await evaluate('window.__requiredAiProbe.errors.length');
+    await evaluate(`document.querySelector('.format-btn[data-format="${depth === 16 ? 'tiff' : 'png'}"]').click();
+      document.querySelector('.bitdepth-btn[data-bitdepth="${depth}"]').click(); window.__downloads = []; document.getElementById('${button}').click()`);
+    await waitFor(`${button}/${depth}: explicit AI failure`, `window.__requiredAiProbe.errors.length > ${before} && ${exportIdle}
+      && window.__ncAiRepair.state().status === 'error'`, 120_000);
+    if (await evaluate('window.__downloads.length')) fail(`${button}/${depth}: AI-selected failure wrote a file`);
+    const message = await evaluate('window.__requiredAiProbe.errors.at(-1)');
+    if (!/AI repair model could not be loaded.*required AI fixture inference failure.*nothing was exported/.test(message)) fail('required AI failure was not clear: ' + message);
+  }
+  if (await evaluate('window.__requiredAiProbe.runs') !== 1) fail('failed-model retries inferred or fetched again');
+  await evaluate(`document.getElementById('dustAiEnabled').click()`);
+  await waitFor('explicit AI-off plain repair', `${ready} && /^Detected [1-9][0-9]* dust particles$/.test(document.getElementById('dustStatus').textContent)`, 120_000);
+  await exportFile('explicit AI-off after failure', 'png', 8);
+  if (await evaluate('window.__requiredAiProbe.runs') !== 1) fail('AI-off export ran the failed model');
+  console.log('ok: ready WASM inference failure rejects actual single/batch PNG8/TIFF16 exports and retries without a file; explicit AI-off TELEA still exports');
+}

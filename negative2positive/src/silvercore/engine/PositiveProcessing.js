@@ -12,18 +12,40 @@ export function identityPositiveChannels() {
 // Positives have no orange mask. Never stretch their channels independently.
 export function analyzePositive(image, params = {}) {
   if (params.positiveMode === 'edit') return { gain: 1, wb: [1, 1, 1] };
-  const { data, width, height } = image;
+  const grid = positiveSampleGrid(image.width, image.height, params);
+  const peaks = [], sample = [];
+  collectPositiveSamples(image, grid, peaks, sample);
+  return finishPositiveAnalysis(peaks, sample);
+}
+
+// The strided sample analyzePositive reads: about 40 000 points of the analysis crop.
+export function positiveSampleGrid(width, height, params = {}) {
   const bounds = analysisPixelBounds(width, height, params.analysisRegion, (params.borderBuffer ?? 10) / 100);
   const stride = Math.max(1, Math.ceil(Math.sqrt(bounds.width * bounds.height / 40000)));
-  const peaks = [], sample = [];
-  for (let y = bounds.top; y < bounds.top + bounds.height; y += stride) {
+  return { bounds, stride };
+}
+
+// Appends the grid points of `image` to `peaks` and `sample`, in frame order.
+// `image` may be a row band whose first row is frame row `rowOffset` (#256): a
+// frame's bands, in order, append exactly the points and the order of the frame.
+export function collectPositiveSamples(image, grid, peaks, sample, rowOffset = 0) {
+  const { data, width } = image;
+  const { bounds, stride } = grid;
+  const rowEnd = rowOffset + image.height;
+  let y = bounds.top;
+  if (y < rowOffset) y += Math.ceil((rowOffset - y) / stride) * stride;
+  for (; y < bounds.top + bounds.height && y < rowEnd; y += stride) {
     for (let x = bounds.left; x < bounds.left + bounds.width; x += stride) {
-      const i = (y * width + x) * 4;
+      const i = ((y - rowOffset) * width + x) * 4;
       if (!data[i + 3]) continue;
       peaks.push(Math.max(data[i], data[i + 1], data[i + 2]) / 65535);
       sample.push(data[i] >>> 8, data[i + 1] >>> 8, data[i + 2] >>> 8, 255);
     }
   }
+}
+
+// The positive gain and white balance from the collected points.
+export function finishPositiveAnalysis(peaks, sample) {
   if (peaks.length < 64) return { gain: 1, wb: [1, 1, 1] };
   peaks.sort((a, b) => a - b);
   const p95 = peaks[Math.floor((peaks.length - 1) * .95)];

@@ -1,0 +1,324 @@
+// HEAD 1703835 geometry, frozen as the parity reference for the #244 core.
+// Test-only: never imported by the app. The canvas path is left out (Node
+// has no 2D canvas); 8-bit sources at arbitrary angles keep running it.
+
+function normalizeAngleDegrees(angle) {
+  let normalized = Number.isFinite(angle) ? angle : 0;
+  while (normalized > 180) normalized -= 360;
+  while (normalized <= -180) normalized += 360;
+  return normalized;
+}
+
+function copyRotatedRgbaBuffer(source, width, height, angle) {
+  const normalized = normalizeAngleDegrees(angle);
+  const rightAngle = Math.round(normalized / 90) * 90;
+  const dstWidth = Math.abs(rightAngle) === 90 ? height : width;
+  const dstHeight = Math.abs(rightAngle) === 90 ? width : height;
+  const output = source instanceof Uint16Array
+    ? new Uint16Array(source.length)
+    : new Uint8ClampedArray(source.length);
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      let dstX;
+      let dstY;
+      if (rightAngle === 90) {
+        dstX = height - 1 - y;
+        dstY = x;
+      } else if (rightAngle === -90) {
+        dstX = y;
+        dstY = width - 1 - x;
+      } else {
+        dstX = width - 1 - x;
+        dstY = height - 1 - y;
+      }
+
+      const srcIdx = (y * width + x) * 4;
+      const dstIdx = (dstY * dstWidth + dstX) * 4;
+      output[dstIdx] = source[srcIdx];
+      output[dstIdx + 1] = source[srcIdx + 1];
+      output[dstIdx + 2] = source[srcIdx + 2];
+      output[dstIdx + 3] = source[srcIdx + 3];
+    }
+  }
+
+  return { width: dstWidth, height: dstHeight, data: output };
+}
+
+function copyMirroredRgbaBuffer(source, width, height) {
+  const output = source instanceof Uint16Array
+    ? new Uint16Array(source.length)
+    : new Uint8ClampedArray(source.length);
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const srcIdx = (y * width + x) * 4;
+      const dstIdx = (y * width + (width - 1 - x)) * 4;
+      output[dstIdx] = source[srcIdx];
+      output[dstIdx + 1] = source[srcIdx + 1];
+      output[dstIdx + 2] = source[srcIdx + 2];
+      output[dstIdx + 3] = source[srcIdx + 3];
+    }
+  }
+
+  return { width, height, data: output };
+}
+
+function attachTransformedImage16(target, sourceImageData, transform) {
+  const source16 = sourceImageData?.__image16;
+  if (!source16 || !(source16.data instanceof Uint16Array)) return target;
+  target.__image16 = transform(source16.data, source16.width, source16.height);
+  return target;
+}
+
+export function headRotateImageDataRightAngle(imageData, angle) {
+  const rotated = copyRotatedRgbaBuffer(imageData.data, imageData.width, imageData.height, angle);
+  const result = new ImageData(rotated.data, rotated.width, rotated.height);
+  return attachTransformedImage16(result, imageData, (data, width, height) => {
+    const image16 = copyRotatedRgbaBuffer(data, width, height, angle);
+    return { width: image16.width, height: image16.height, data: image16.data };
+  });
+}
+
+export function headMirrorImageDataHorizontal(imageData) {
+  const mirrored = copyMirroredRgbaBuffer(imageData.data, imageData.width, imageData.height);
+  const result = new ImageData(mirrored.data, mirrored.width, mirrored.height);
+  return attachTransformedImage16(result, imageData, (data, width, height) => {
+    const image16 = copyMirroredRgbaBuffer(data, width, height);
+    return { width: image16.width, height: image16.height, data: image16.data };
+  });
+}
+
+export function headApplyRotationToImageData(imageData, angle) {
+  if (!imageData) return null;
+  const normalized = normalizeAngleDegrees(Number(angle) || 0);
+  if (Math.abs(normalized) < 0.001) return imageData;
+  const rightAngle = Math.round(normalized / 90) * 90;
+  if (Math.abs(normalized - rightAngle) < 0.001 && Math.abs(rightAngle) % 90 === 0) {
+    return headRotateImageDataRightAngle(imageData, rightAngle);
+  }
+
+  const rad = normalized * Math.PI / 180;
+  const w = imageData.width;
+  const h = imageData.height;
+  const cos = Math.abs(Math.cos(rad));
+  const sin = Math.abs(Math.sin(rad));
+  const newW = Math.max(1, Math.ceil(w * cos + h * sin));
+  const newH = Math.max(1, Math.ceil(w * sin + h * cos));
+
+  // A 2D canvas is 8-bit only, so straightening a RAW or 16-bit scan by a
+  // non-right angle (which is what auto-frame does on nearly every frame)
+  // used to throw the 16-bit plane away. Resample both planes here instead
+  // when the source carries one, and derive the 8-bit view from the 16-bit
+  // result so the two stay exactly consistent.
+  const plane16 = imageData.__image16;
+  if (
+    plane16
+    && plane16.data instanceof Uint16Array
+    && plane16.width === w
+    && plane16.height === h
+    && plane16.data.length === imageData.data.length
+  ) {
+    return rotateImageDataArbitrary16(imageData, plane16, rad, newW, newH);
+  }
+
+  throw new Error('HEAD canvas path is not available in Node');
+}
+
+// Bilinear inverse-map matching the canvas transform used above:
+// translate(newW/2, newH/2) -> rotate(rad) -> drawImage(src, -w/2, -h/2).
+function rotateImageDataArbitrary16(imageData, plane16, rad, newW, newH) {
+  const w = imageData.width;
+  const h = imageData.height;
+  const src = plane16.data;
+  const out16 = new Uint16Array(newW * newH * 4);
+  const out8 = new Uint8ClampedArray(newW * newH * 4);
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+  const halfW = w / 2;
+  const halfH = h / 2;
+
+  for (let y = 0; y < newH; y++) {
+    const v = y + 0.5 - newH / 2;
+    for (let x = 0; x < newW; x++) {
+      const u = x + 0.5 - newW / 2;
+      // Source pixel-centre coordinates, shifted to array indices.
+      const sx = halfW + u * cos + v * sin - 0.5;
+      const sy = halfH - u * sin + v * cos - 0.5;
+      if (sx < -0.5 || sy < -0.5 || sx > w - 0.5 || sy > h - 0.5) {
+        continue; // outside the source: transparent, as the canvas path leaves it
+      }
+
+      const x0 = Math.max(0, Math.min(w - 1, Math.floor(sx)));
+      const y0 = Math.max(0, Math.min(h - 1, Math.floor(sy)));
+      const x1 = Math.min(w - 1, x0 + 1);
+      const y1 = Math.min(h - 1, y0 + 1);
+      const fx = Math.max(0, Math.min(1, sx - x0));
+      const fy = Math.max(0, Math.min(1, sy - y0));
+
+      const i00 = (y0 * w + x0) * 4;
+      const i10 = (y0 * w + x1) * 4;
+      const i01 = (y1 * w + x0) * 4;
+      const i11 = (y1 * w + x1) * 4;
+      const outIdx = (y * newW + x) * 4;
+
+      for (let c = 0; c < 3; c++) {
+        const top = src[i00 + c] + (src[i10 + c] - src[i00 + c]) * fx;
+        const bottom = src[i01 + c] + (src[i11 + c] - src[i01 + c]) * fx;
+        const value = Math.round(top + (bottom - top) * fy);
+        const clamped = value < 0 ? 0 : (value > 65535 ? 65535 : value);
+        out16[outIdx + c] = clamped;
+        out8[outIdx + c] = clamped >>> 8;
+      }
+      out16[outIdx + 3] = 65535;
+      out8[outIdx + 3] = 255;
+    }
+  }
+
+  const result = new ImageData(out8, newW, newH);
+  result.__image16 = { width: newW, height: newH, data: out16 };
+  return result;
+}
+
+// Inverse-map one output pixel of the rotate -> mirror -> crop chain back to
+// the source. `rotatedW/H` are the dimensions the full rotation would have
+// produced; the crop rect is measured on that (mirrored) rotated frame.
+function bilinearSample16(src, w, h, sx, sy, out16, out8, outIdx) {
+  if (sx < -0.5 || sy < -0.5 || sx > w - 0.5 || sy > h - 0.5) return; // outside: transparent
+  const x0 = Math.max(0, Math.min(w - 1, Math.floor(sx)));
+  const y0 = Math.max(0, Math.min(h - 1, Math.floor(sy)));
+  const x1 = Math.min(w - 1, x0 + 1);
+  const y1 = Math.min(h - 1, y0 + 1);
+  const fx = Math.max(0, Math.min(1, sx - x0));
+  const fy = Math.max(0, Math.min(1, sy - y0));
+  const i00 = (y0 * w + x0) * 4;
+  const i10 = (y0 * w + x1) * 4;
+  const i01 = (y1 * w + x0) * 4;
+  const i11 = (y1 * w + x1) * 4;
+  for (let c = 0; c < 3; c++) {
+    const top = src[i00 + c] + (src[i10 + c] - src[i00 + c]) * fx;
+    const bottom = src[i01 + c] + (src[i11 + c] - src[i01 + c]) * fx;
+    const value = Math.round(top + (bottom - top) * fy);
+    const clamped = value < 0 ? 0 : (value > 65535 ? 65535 : value);
+    out16[outIdx + c] = clamped;
+    out8[outIdx + c] = clamped >>> 8;
+  }
+  out16[outIdx + 3] = 65535;
+  out8[outIdx + 3] = 255;
+}
+
+/**
+ * The export geometry chain (base -> rotation -> mirror -> crop) in one pass
+ * that only resamples the pixels inside the crop.
+ *
+ * A batch export used to rotate the whole 24 MP scan on the main thread and
+ * then keep a 5 MP frame of it: ~0.8 s of blocking per file for pixels that
+ * were thrown away. For a 16-bit source with a non-right angle this computes
+ * the same bilinear samples as applyRotationToImageData (bit-identical), but
+ * only for the cropped window. Every other case (no crop, right angles,
+ * 8-bit sources that go through the canvas) falls back to the step-by-step
+ * chain so the result matches the interactive path exactly.
+ *
+ * @param {ImageData} imageData base image (with optional __image16 plane)
+ * @param {{rotationAngle?: number, mirrored?: boolean, cropRegion?: {left:number, top:number, width:number, height:number}|null}} geometry
+ * @param {{rotate: Function, mirror: Function, crop: Function}} steps the
+ *   step-by-step implementations used for the fallback (kept injectable so the
+ *   caller's crop sanitisation applies)
+ */
+export function headApplyGeometryChainToImageData(imageData, geometry, steps) {
+  const angle = normalizeAngleDegrees(Number(geometry?.rotationAngle) || 0);
+  const mirrored = Boolean(geometry?.mirrored);
+  const crop = geometry?.cropRegion || null;
+  const rotates = Math.abs(angle) > 0.001;
+  const rightAngle = Math.round(angle / 90) * 90;
+  const arbitrary = rotates && Math.abs(angle - rightAngle) >= 0.001;
+  const plane16 = imageData?.__image16;
+  const w = imageData?.width | 0;
+  const h = imageData?.height | 0;
+  const exact16 = plane16 && plane16.data instanceof Uint16Array
+    && plane16.width === w && plane16.height === h && plane16.data.length === imageData.data.length;
+
+  if (!arbitrary || !crop || !exact16) {
+    let working = imageData;
+    if (rotates) working = steps.rotate(working, angle);
+    if (mirrored) working = steps.mirror(working);
+    if (crop) working = steps.crop(working, crop);
+    return working;
+  }
+
+  const rad = angle * Math.PI / 180;
+  const cosA = Math.abs(Math.cos(rad));
+  const sinA = Math.abs(Math.sin(rad));
+  const rotatedW = Math.max(1, Math.ceil(w * cosA + h * sinA));
+  const rotatedH = Math.max(1, Math.ceil(w * sinA + h * cosA));
+  const rect = steps.crop(null, crop, { width: rotatedW, height: rotatedH });
+  if (!rect) {
+    // An unusable crop keeps the whole rotated frame, as the step chain would.
+    const rotated = steps.rotate(imageData, angle);
+    return mirrored ? steps.mirror(rotated) : rotated;
+  }
+
+  const { left, top, width, height } = rect;
+  const src = plane16.data;
+  const out16 = new Uint16Array(width * height * 4);
+  const out8 = new Uint8ClampedArray(width * height * 4);
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+  const halfW = w / 2;
+  const halfH = h / 2;
+  for (let y = 0; y < height; y++) {
+    const ry = top + y;
+    const v = ry + 0.5 - rotatedH / 2;
+    for (let x = 0; x < width; x++) {
+      // Mirror flips the rotated frame before the crop is taken.
+      const rx = mirrored ? rotatedW - 1 - (left + x) : left + x;
+      const u = rx + 0.5 - rotatedW / 2;
+      const sx = halfW + u * cos + v * sin - 0.5;
+      const sy = halfH - u * sin + v * cos - 0.5;
+      const outIdx = (y * width + x) * 4;
+      // The 8-bit crop is always opaque (cropImageDataRegion forces alpha);
+      // the 16-bit plane keeps the rotation's transparent corners.
+      out8[outIdx + 3] = 255;
+      bilinearSample16(src, w, h, sx, sy, out16, out8, outIdx);
+    }
+  }
+  const result = new ImageData(out8, width, height);
+  result.__image16 = { width, height, data: out16 };
+  return result;
+}
+
+export function headCropImageDataRegion(imageData, cropRegion) {
+  const { left, top, width, height } = cropRegion;
+  const croppedData = new ImageData(
+    new Uint8ClampedArray(width * height * 4),
+    width,
+    height
+  );
+
+  const srcData = imageData.data;
+  const dstData = croppedData.data;
+  const rowLength = width * 4;
+  for (let y = 0; y < height; y++) {
+    const srcRow = ((top + y) * imageData.width + left) * 4;
+    const dstRow = y * rowLength;
+    dstData.set(srcData.subarray(srcRow, srcRow + rowLength), dstRow);
+    for (let alpha = dstRow + 3; alpha < dstRow + rowLength; alpha += 4) {
+      dstData[alpha] = 255;
+    }
+  }
+
+  const src16 = imageData.__image16;
+  if (src16 && src16.data instanceof Uint16Array) {
+    const dst16 = new Uint16Array(width * height * 4);
+    const srcW = imageData.width;
+    const row16Length = width * 4;
+    for (let y = 0; y < height; y++) {
+      const srcRow = ((top + y) * srcW + left) * 4;
+      const dstRow = y * row16Length;
+      dst16.set(src16.data.subarray(srcRow, srcRow + row16Length), dstRow);
+    }
+    croppedData.__image16 = { width, height, data: dst16 };
+  }
+
+  return croppedData;
+}

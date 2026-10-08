@@ -7,10 +7,16 @@
 // half is stale and risk shipping without the security headers, both files
 // carry them. That only stays safe while they agree, so this checks it.
 //
+//
+// The catch-all rule also carries the cross-origin isolation pair (#264):
+// every response needs it, because dedicated worker scripts under /assets/
+// need COEP on their own responses.
+//
 //   node scripts/check-vercel-config.mjs
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { CROSS_ORIGIN_ISOLATION_HEADERS } from './cross-origin-isolation.mjs';
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 const rootConfigPath = join(repoRoot, 'vercel.json');
@@ -54,6 +60,17 @@ if (rootConfig && appConfig) {
   );
   for (const key of required) {
     if (!declared.has(key)) problems.push(`missing ${key} header rule`);
+  }
+
+  const catchAll = (appConfig.headers || []).find((entry) => entry.source === '/(.*)');
+  if (!catchAll) {
+    problems.push('no "/(.*)" header rule to carry the cross-origin isolation headers');
+  } else {
+    for (const [key, value] of Object.entries(CROSS_ORIGIN_ISOLATION_HEADERS)) {
+      const found = (catchAll.headers || []).find((h) => h.key === key);
+      if (!found) problems.push(`"/(.*)" rule is missing ${key}: ${value}`);
+      else if (found.value !== value) problems.push(`"/(.*)" rule sends ${key}: ${found.value}, expected ${value}`);
+    }
   }
 }
 

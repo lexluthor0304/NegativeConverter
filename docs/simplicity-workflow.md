@@ -37,9 +37,25 @@ The desktop empty workspace, then the batch bar after import, offers “Watch a 
 files too” checkbox (off by default). Choose the directory using the native
 picker. The active entry shows the directory name and Stop. New matching files
 must have unchanged size and modification time for at least a second; hidden,
-temporary, symlink and nested files are excluded. Files are read through a
-session grant in checked 1 MiB chunks, converted and added to the photo strip.
-Quiet batches of at least three new frames enter automatic roll analysis.
+temporary, symlink and nested files are excluded. A file whose name and size
+are already queued is not read again. Files are read through a session grant
+in checked chunks and take the normal import path (#247): arrivals within a
+second of each other are queued in one batch, and nothing is converted on
+arrival. The first arrival opens when no photo is open. The light-table lane
+gives every other one its recipe and final tile from one silent background
+decode, with no blocking overlay. That recipe is the one 1703835's watch made
+(#229 review, R1-124): a full-resolution render of the frame (stopping before
+the adjustments), so its automatic gray point and expired-film measurement
+are the whole frame's, not the tile's, and it is not marked automatic; exports
+use it as it is. A frame imported with the picker keeps the lane's tile recipe.
+A batch (a burst, or “Import existing files too”) starts no roll import of its
+own. Each arrival counts toward a roll once its recipe exists: 2.5 s after the
+last recipe, three or more counted since the previous quiet period (still
+queued, unedited and not taken by a roll analysis) form a roll on top of their
+recipes, with the 900 px samples the lane kept from its decodes; fewer are
+dropped. Full-resolution captures arriving one by one therefore rarely form a
+roll, as before #247. The review toast counts watch-folder frames that have a
+recipe.
 
 Stop or a new session revokes the grant. The watch never persists across app
 launches. There is no web menu entry. Grant/stability/chunk tests run with

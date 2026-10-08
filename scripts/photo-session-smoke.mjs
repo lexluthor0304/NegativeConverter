@@ -6,11 +6,13 @@ import { mkdir, stat, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { basename, dirname, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { expectLoadingOverlayIdle } from './loading-overlay-idle.mjs';
 
 const UPNG = createRequire(import.meta.url)('upng-js');
+const UTIF = createRequire(import.meta.url)('utif');
 const ready = `document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy`;
 
-function installPhotoSessionProbe() {
+export function installPhotoSessionProbe() {
   const original = {
     post: Worker.prototype.postMessage,
     terminate: Worker.prototype.terminate,
@@ -19,12 +21,14 @@ function installPhotoSessionProbe() {
     click: HTMLAnchorElement.prototype.click,
     revoke: URL.revokeObjectURL,
     picker: window.showSaveFilePicker,
-    draw: WebGLRenderingContext.prototype.drawArrays,
   };
+  // WebGL2 (#239) and the WebGL1 fallback have separate prototypes.
+  const glProtos = [WebGLRenderingContext.prototype, window.WebGL2RenderingContext?.prototype].filter(Boolean)
+    .map(proto => ({ proto, draw: proto.drawArrays, allocate: proto.texImage2D }));
   const workers = new Map(), heldUrls = new Set();
   const probe = window.__photoSessionProbe = {
     requests: [], reads: [], bitmaps: [], exports: [], rawImages: [], inFlight: 0,
-    lastActivity: performance.now(), gpuFrames: 0, lastGpu: null,
+    lastActivity: performance.now(), gpuFrames: 0, lastGpu: null, texture: null,
     holdFile: null, heldFile: null, releaseFile: null, holdTimedOut: false, rejectFile: null,
   };
   let holdTimer;
@@ -84,9 +88,17 @@ function installPhotoSessionProbe() {
   };
   // Read a few patches immediately after the real draw, while WebGL's
   // non-preserved drawing buffer still exists. No product debug hook required.
-  WebGLRenderingContext.prototype.drawArrays = function(...args) {
-    const result = original.draw.apply(this, args);
-    if (this.canvas.id === 'glCanvas') {
+  // The preview texture's allocated size; the drawing buffer must follow it.
+  for (const gl of glProtos) gl.proto.texImage2D = function(...args) {
+    // The exact 8-bit frame's texture (the GPU preview's integer ones are not frames).
+    if (this.canvas.id === 'glCanvas' && args[3] > 256 && ArrayBuffer.isView(args[8])
+      && args[6] === this.RGBA && args[7] === this.UNSIGNED_BYTE) probe.texture = [args[3], args[4]];
+    return gl.allocate.apply(this, args);
+  };
+  for (const gl of glProtos) gl.proto.drawArrays = function(...args) {
+    const result = gl.draw.apply(this, args);
+    // The GPU preview's self-test draws into its own framebuffer.
+    if (this.canvas.id === 'glCanvas' && this.getParameter(this.FRAMEBUFFER_BINDING) === null) {
       const width = this.drawingBufferWidth, height = this.drawingBufferHeight;
       const pixels = new Uint8Array(8 * 8 * 4);
       let hash = 2166136261;
@@ -106,7 +118,8 @@ function installPhotoSessionProbe() {
   window.showSaveFilePicker = undefined;
   URL.revokeObjectURL = function(url) { if (!heldUrls.has(url)) original.revoke.call(URL, url); };
   HTMLAnchorElement.prototype.click = function(...args) {
-    if (!this.download?.endsWith('.png') || !this.href.startsWith('blob:')) return original.click.apply(this, args);
+    // PNG and (display-session smoke) TIFF exports.
+    if (!/\.(png|tiff?)$/.test(this.download || '') || !this.href.startsWith('blob:')) return original.click.apply(this, args);
     const href = this.href, capture = { name: this.download };
     heldUrls.add(href); probe.exports.push(capture);
     fetch(href).then(response => response.blob()).then(blob => new Promise((resolve, reject) => {
@@ -131,6 +144,28 @@ function installPhotoSessionProbe() {
     return { src: img.src, width: canvas.width, height: canvas.height,
       means: means.map(value => value / (pixels.length / 4)), chroma: chroma / (pixels.length / 4) };
   };
+  // Zoom is a compositor transform (#233): the steps draw nothing. The base
+  // display image does not follow zoom (#248); only a display preview of a new
+  // size (a layout change) repaints it, and the detail layer covers the zoom.
+  probe.zoomIn = () => {
+    const gl = document.getElementById('glCanvas');
+    const start = { draws: probe.gpuFrames, backing: [gl.width, gl.height] };
+    document.getElementById('zoomInBtn').click(); document.getElementById('zoomInBtn').click();
+    return { ...start, drawsDuringSteps: probe.gpuFrames - start.draws, backingDuringSteps: [gl.width, gl.height] };
+  };
+  probe.zoomSettled = start => {
+    const gl = document.getElementById('glCanvas');
+    const backing = [gl.width, gl.height];
+    const resized = backing[0] !== start.backing[0] || backing[1] !== start.backing[1];
+    const draws = probe.gpuFrames - start.draws;
+    const ok = start.drawsDuringSteps === 0
+      && start.backingDuringSteps[0] === start.backing[0] && start.backingDuringSteps[1] === start.backing[1]
+      && (resized
+        ? draws >= 1 && probe.lastGpu?.width === backing[0] && probe.lastGpu?.height === backing[1]
+          && probe.texture?.[0] === backing[0] && probe.texture?.[1] === backing[1]
+        : draws === 0);
+    return { ok, resized, draws, backing, texture: probe.texture, gpu: probe.lastGpu, start };
+  };
   probe.snapshot = () => ({ requests: probe.requests.length, reads: probe.reads.length,
     bitmaps: probe.bitmaps.length, inFlight: probe.inFlight, gpu: probe.lastGpu, gpuFrames: probe.gpuFrames,
     backing: [document.getElementById('glCanvas').width, document.getElementById('glCanvas').height],
@@ -145,7 +180,7 @@ function installPhotoSessionProbe() {
     probe.releaseFile?.(); clearTimeout(holdTimer);
     Worker.prototype.postMessage = original.post; Worker.prototype.terminate = original.terminate;
     File.prototype.arrayBuffer = original.read; window.createImageBitmap = original.bitmap;
-    WebGLRenderingContext.prototype.drawArrays = original.draw;
+    for (const gl of glProtos) Object.assign(gl.proto, { drawArrays: gl.draw, texImage2D: gl.allocate });
     HTMLAnchorElement.prototype.click = original.click; URL.revokeObjectURL = original.revoke;
     window.showSaveFilePicker = original.picker;
     for (const [worker, record] of workers) worker.removeEventListener('message', record.receive);
@@ -153,12 +188,28 @@ function installPhotoSessionProbe() {
   };
 }
 
-function decodePng(dataUrl) {
+// The samples of an uncompressed TIFF export (the app writes no compression),
+// hashed like decodePng's.
+export function decodeTiff(dataUrl) {
+  const bytes = Buffer.from(dataUrl.split(',')[1], 'base64');
+  const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  const [ifd] = UTIF.decode(buffer);
+  UTIF.decodeImage(buffer, ifd);
+  return { width: ifd.width, height: ifd.height, depth: ifd.t258?.[0] ?? null,
+    sha256: createHash('sha256').update(Buffer.from(ifd.data.buffer, ifd.data.byteOffset, ifd.data.byteLength)).digest('hex') };
+}
+
+export function decodePng(dataUrl) {
   const bytes = Buffer.from(dataUrl.split(',')[1], 'base64');
   const png = UPNG.decode(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
   // UPNG.toRGBA8 intentionally discards the low byte. Compare raw unfiltered
   // 16-bit samples for precision regressions, not only their 8-bit appearance.
-  const pixels = png.depth === 16 ? Buffer.from(png.data) : Buffer.from(UPNG.toRGBA8(png)[0]);
+  // UPNG unfilters in place: the samples are the buffer's first height x row
+  // bytes, followed by one leftover byte per row, which were hashed too and
+  // made the level count below read past the end (and throw) for some sizes.
+  const channels16 = { 0: 1, 2: 3, 4: 2, 6: 4 }[png.ctype] || 4;
+  const pixels = png.depth === 16 ? Buffer.from(png.data.subarray(0, png.height * png.width * channels16 * 2))
+    : Buffer.from(UPNG.toRGBA8(png)[0]);
   const levels = [new Set(), new Set(), new Set()];
   if (png.depth === 16 && [2, 6].includes(png.ctype)) {
     const channels = png.ctype === 6 ? 4 : 3;
@@ -170,9 +221,9 @@ function decodePng(dataUrl) {
     sha256: createHash('sha256').update(pixels).digest('hex'), levels: levels.map(values => values.size) };
 }
 
-async function bootPhotoSession({ send, evaluate, until, installDialogAutoAccept, port }) {
+export async function bootPhotoSession({ send, evaluate, until, installDialogAutoAccept, port, query = '', keepAutoCrop = false }) {
     const origin = await evaluate('performance.timeOrigin');
-    await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en` });
+    await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en${query}` });
     await until('fresh photo-session workspace', `performance.timeOrigin !== ${origin} && document.readyState === 'complete' && !!document.getElementById('applyFilmTypeToRollBtn')`);
     await installDialogAutoAccept();
     await evaluate(`(${installPhotoSessionProbe.toString()})()`);
@@ -193,7 +244,7 @@ async function bootPhotoSession({ send, evaluate, until, installDialogAutoAccept
     })()`);
     await until('confirmed learned-default reset completed', `window.__photoSessionLearnedReset && document.getElementById('learnedDefaultsCount').textContent.trim() === 'Learned defaults: 0 stocks'`);
     await evaluate(`(() => {
-      for (const id of ['studioImportAutoCrop', 'importFilmTypeAuto', 'autoRollOnImport']) {
+      for (const id of ${JSON.stringify(keepAutoCrop ? ['importFilmTypeAuto', 'autoRollOnImport'] : ['studioImportAutoCrop', 'importFilmTypeAuto', 'autoRollOnImport'])}) {
         const input = document.getElementById(id); if (input?.checked) input.click();
       }
       document.querySelector('.film-type-btn[data-type="color"]').click();
@@ -264,6 +315,78 @@ export async function runPhotoSessionSmoke({ send, evaluate, waitFor, fail, inst
     await until('CMY edit updates active thumbnail without switching', `document.querySelector('.file-list-name[data-index="0"]')?.dataset.previewState === 'ready' && document.querySelector('.file-list-name[data-index="0"] img')?.src !== ${JSON.stringify(thumbnailBefore.src)}`);
     const edited8 = await exportPixels(8), edited16 = await exportPixels(16);
     await idle();
+    // #234: a drag re-encodes no tile and renders no list while it moves; the
+    // active tile settles once, about 250 ms after release. A zoom (and the
+    // display-preview refinement it starts) rebuilds nothing. The exports
+    // above saved the photo, so the first input marks it unsaved again: its
+    // row is marked in place, the very element observed here.
+    await evaluate(`window.__tileProbe = (() => {
+      const proto = HTMLCanvasElement.prototype, encode = proto.toDataURL;
+      const probe = { encodes: 0, tiles: [], lists: 0, restore: null };
+      proto.toDataURL = function (...args) { probe.encodes++; return encode.apply(this, args); };
+      const observer = new MutationObserver(records => {
+        for (const record of records) if (record.target.matches?.('img.file-list-thumbnail')) probe.tiles.push(performance.now());
+      });
+      observer.observe(document.querySelector('.file-list-name[data-index="0"]'), { subtree: true, attributes: true, attributeFilter: ['src'] });
+      // Every list render writes the count line.
+      const lists = new MutationObserver(() => { probe.lists++; });
+      lists.observe(document.getElementById('fileListCount'), { subtree: true, childList: true, characterData: true });
+      probe.restore = () => { proto.toDataURL = encode; observer.disconnect(); lists.disconnect(); };
+      return probe;
+    })()`);
+    const drag = await evaluate(`(async () => {
+      const probe = window.__tileProbe, input = document.getElementById('cyan');
+      const row = document.querySelector('.file-list-name[data-index="0"]');
+      const before = row.querySelector('img').getAttribute('src');
+      for (let i = 0; i < 90; i++) {
+        input.value = String(21 + i % 30);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        await new Promise(resolve => setTimeout(resolve, 16));
+      }
+      const during = { encodes: probe.encodes, tiles: probe.tiles.length, lists: probe.lists,
+        unsaved: row.closest('.file-list-item').classList.contains('is-dirty') };
+      const released = performance.now();
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      await new Promise(resolve => setTimeout(resolve, 600));
+      return { during, encodes: probe.encodes, tiles: probe.tiles.map(time => Math.round(time - released)),
+        sameRow: document.querySelector('.file-list-name[data-index="0"]') === row,
+        changed: row.querySelector('img').getAttribute('src') !== before };
+    })()`);
+    expect(drag.during.encodes === 0 && drag.during.tiles === 0 && drag.during.lists === 0,
+      'active tile was re-encoded, or the list rendered, while the slider moved: ' + JSON.stringify(drag));
+    expect(drag.during.unsaved && drag.sameRow, 'the first input did not mark the photo\'s own row unsaved in place: ' + JSON.stringify(drag));
+    expect(drag.encodes === 1 && drag.tiles.length === 1 && drag.tiles[0] <= 500 && drag.changed,
+      'active tile did not settle exactly once within 500 ms of release: ' + JSON.stringify(drag));
+    await evaluate(`(() => {
+      const input = document.getElementById('cyan'); input.value = '20';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    })()`);
+    await idle();
+    const zoomTile = await evaluate(`(() => {
+      const probe = window.__tileProbe;
+      probe.encodes = 0; probe.tiles.length = 0;
+      probe.src = document.querySelector('.file-list-name[data-index="0"] img').getAttribute('src');
+      document.getElementById('zoomInBtn').click();
+      probe.zoomed = performance.now();
+      return probe.src.length > 0;
+    })()`);
+    expect(zoomTile, 'active tile missing before the zoom check');
+    // Settled: any zoom redraw, the refinement conversion (if the display
+    // raster changes size) and the 250 ms tile timer after them are done;
+    // a full-resolution re-render comes seconds later and is not a zoom.
+    await until('zoom and display refinement settled', `performance.now() - window.__tileProbe.zoomed > 600
+      && window.__photoSessionProbe.inFlight === 0 && performance.now() - window.__photoSessionProbe.lastActivity > 450`, 15000);
+    const zoomed = await evaluate(`(() => {
+      const probe = window.__tileProbe;
+      const result = { encodes: probe.encodes, tiles: probe.tiles.length,
+        same: document.querySelector('.file-list-name[data-index="0"] img').getAttribute('src') === probe.src };
+      probe.restore(); delete window.__tileProbe;
+      return result;
+    })()`);
+    expect(zoomed.encodes === 0 && zoomed.tiles === 0 && zoomed.same,
+      'zoom rebuilt the active tile: ' + JSON.stringify(zoomed));
+    await idle();
     const thumbnailEdited = await evaluate('window.__photoSessionProbe.thumbnail(0)');
     expect(before8.sha256 !== edited8.sha256, 'CMY fixture did not change exported pixels');
     expect(thumbnailBefore.means[0] - thumbnailEdited.means[0] > 10
@@ -272,13 +395,10 @@ export async function runPhotoSessionSmoke({ send, evaluate, waitFor, fail, inst
     'GPU light-table thumbnail ignored or misapplied cyan: ' + JSON.stringify({ before: thumbnailBefore.means, after: thumbnailEdited.means }));
     expect(edited16.depth === 16 && edited16.levels.every(count => count > 320),
       'session precision fixture is not genuine 16-bit: ' + JSON.stringify(edited16));
-    const beforeZoomDraws = await evaluate(`(() => {
-      const draws = window.__photoSessionProbe.gpuFrames;
-      document.getElementById('zoomInBtn').click(); document.getElementById('zoomInBtn').click();
-      return draws;
-    })()`);
-    await until('actual GPU repaint after zoom', `window.__photoSessionProbe.gpuFrames > ${beforeZoomDraws}`);
+    const zoomStart = await evaluate('window.__photoSessionProbe.zoomIn()');
     await idle();
+    const zoomSettled = await evaluate(`window.__photoSessionProbe.zoomSettled(${JSON.stringify(zoomStart)})`);
+    expect(zoomSettled.ok, 'zoom redrew during the gesture, or a new display size did not repaint at the texture size: ' + JSON.stringify(zoomSettled));
     // The app also has a 2.5-second idle full-render timer. Its public export
     // barrier drains scheduled/full work; a short quiet window alone cannot.
     const zoomed8 = await exportPixels(8);
@@ -450,7 +570,18 @@ export async function runPhotoSessionSmoke({ send, evaluate, waitFor, fail, inst
     expect(await evaluate(feedbackCleared), 'stale cold completion restored a superseded indicator');
 
     // A successful first open must clear feedback only after the new positive
-    // is ready, not merely after decoding the source container.
+    // is ready, not merely after decoding the source container. Auto-frame is
+    // on, so it detects the frame, in the background tail behind the veil: a
+    // cold switch is quiet and shows no loading overlay itself.
+    expect(await evaluate(`document.getElementById('autoFrameEnabledInput')?.checked !== false`), 'auto-frame must be on for the overlay check');
+    await evaluate(`(() => {
+      window.__overlayShows = [];
+      window.__overlayWatch = new MutationObserver(() => {
+        const overlay = document.querySelector('.loading-overlay.visible');
+        if (overlay) window.__overlayShows.push(overlay.classList.contains('indeterminate'));
+      });
+      window.__overlayWatch.observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ['class'] });
+    })()`);
     await evaluate(`window.__startColdPhoto('session-cold-success.png', 4)`);
     await until('successful cold switch read held', `!!window.__photoSessionProbe.releaseFile`, 10000);
     const successPending = await evaluate(feedbackMeasure);
@@ -461,6 +592,13 @@ export async function runPhotoSessionSmoke({ send, evaluate, waitFor, fail, inst
       && document.getElementById('studioFilename').textContent === 'session-cold-success.png'
       && document.querySelector('.file-list-name[aria-current="true"]')?.dataset.index === '4'`, 120000);
     await idle();
+    // #261: the overlay an earlier show left (an import's conversion, an
+    // export) runs no animation once the switch settles; the check fails if
+    // no overlay was ever shown (R1-113). The indeterminate strip is checked
+    // after Apply Crop, which shows it (crop-apply-smoke).
+    const overlayShows = await evaluate(`(() => { window.__overlayWatch.disconnect(); return window.__overlayShows; })()`);
+    await expectLoadingOverlayIdle({ evaluate, waitFor, fail: message => { throw new Error(message); } }, 'cold switch');
+    console.log('cold switch overlay idle:', JSON.stringify({ shows: overlayShows.length, indeterminate: overlayShows.includes(true) }));
 
     // Exercise the real loadFile error path after visible pending feedback;
     // the deliberate read failure must not leave controls/veil stuck.
@@ -537,7 +675,9 @@ export async function runPhotoSessionRawSmoke({ send, evaluate, waitFor, fail, i
       expect(/\.(dng|nef|arw|cr2|cr3|crw|raf|rw2|pef|orf|raw|iiq)$/i.test(path), 'RAW fixture extension is not supported: ' + basename(path));
       return { name: basename(path), bytes: metadata.size };
     }));
-    await bootPhotoSession({ send, evaluate, until, installDialogAutoAccept, port });
+    // Auto-frame stays on (#249): a confident frame is rotated and cropped at
+    // import, which is what makes a 60 MP session too large to keep whole.
+    await bootPhotoSession({ send, evaluate, until, installDialogAutoAccept, port, keepAutoCrop: true });
     await evaluate(`(() => {
       for (const id of ['dustRemovalEnabled', 'dustAiEnabled']) {
         const input = document.getElementById(id); if (input.checked) input.click();
@@ -550,15 +690,16 @@ export async function runPhotoSessionRawSmoke({ send, evaluate, waitFor, fail, i
     await send('DOM.setFileInputFiles', { files: paths, nodeId: input.result.nodeId });
     await until('first actual RAW imported', `${ready} && document.getElementById('studioFilename').textContent === ${JSON.stringify(files[0].name)}`);
     await settlePreview();
-    const draws = await evaluate(`(() => {
-      const count = window.__photoSessionProbe.gpuFrames;
-      document.getElementById('zoomInBtn').click(); document.getElementById('zoomInBtn').click();
-      return count;
-    })()`);
-    await until('actual RAW zoom repainted', `window.__photoSessionProbe.gpuFrames > ${draws}`);
+    const zoomStart = await evaluate('window.__photoSessionProbe.zoomIn()');
+    // A RAW frame is larger than the viewport. The base display image no
+    // longer follows zoom (#248): the settled zoom shows the detail layer's
+    // native region over it instead of repainting it.
+    await until('actual RAW zoom detail layer after settle', `window.__ncDetailLayer.state().visible && window.__ncDetailLayer.state().current`);
     // Observe normal preview/full-idle activity for longer than its 2.5-second
     // timer, without requesting an export or forcing full-resolution work.
     await settlePreview();
+    const rawZoom = await evaluate(`window.__photoSessionProbe.zoomSettled(${JSON.stringify(zoomStart)})`);
+    expect(rawZoom.ok, 'actual RAW zoom redrew during the gesture or repainted off the texture size: ' + JSON.stringify(rawZoom));
     const saved = await snapshot();
     expect(saved.gpuVisible && saved.gpu && saved.gpu.width === saved.backing[0]
       && saved.gpu.height === saved.backing[1] && saved.transform && saved.zoom !== '100%',
@@ -586,10 +727,41 @@ export async function runPhotoSessionRawSmoke({ send, evaluate, waitFor, fail, i
       conversionInputs: window.__photoSessionProbe.requests.filter(request => request.kind === 'convert').map(({ width, height, preview }) => ({ width, height, preview })),
       rawCalls: window.__photoSessionProbe.requests.filter(request => request.kind === 'raw').map(request => request.fn),
       exports: window.__photoSessionProbe.exports.length })`);
-    expect(evidence.exports === 0, 'actual RAW cache test must not force an export/full-resolution render');
+    expect(evidence.exports === 0, 'the warm checks above ran before any export/full-resolution render');
+    // Export parity across a switch (#249): a 16-bit export of A, then B, then
+    // A again, exports the same bytes. A is kept without its base (Tier A, or
+    // Tier B), as a 60 MP frame is: the tier is forced so a smaller RAW
+    // exercises it too, and A must have been auto-framed (rotated or
+    // cropped), or Tier A would have nothing to drop.
+    const geometry = await evaluate('window.__ncGeometry.inspect()');
+    expect(geometry.cropRegion || geometry.rotationAngle,
+      'actual RAW A was not auto-framed (no crop, no rotation): the export check would not exercise a display session: ' + JSON.stringify(geometry));
+    const exportPixels = async depth => {
+      const index = await evaluate('window.__photoSessionProbe.exports.length');
+      await evaluate(`(() => {
+        document.querySelector('.format-btn[data-format="png"]').click();
+        document.querySelector('.bitdepth-btn[data-bitdepth="${depth}"]').click();
+        document.getElementById('exportSingleBtn').click();
+      })()`);
+      await until(`${depth}-bit actual RAW PNG captured`, `!!window.__photoSessionProbe.exports[${index}]?.data && !document.getElementById('exportBtn').disabled`);
+      return decodePng(await evaluate(`window.__photoSessionProbe.exports[${index}].data`));
+    };
+    const exportBefore = await exportPixels(16);
+    await evaluate(`window.__ncDisplaySessions.force('A')`);
+    await open(1, files[1].name);
+    const leftAs = await evaluate('window.__ncDisplaySessions.tier(0)');
+    expect(leftAs === 'A' || leftAs === 'B', 'actual RAW A was not kept as a display session (Tier A or B): ' + JSON.stringify(leftAs));
+    await open(0, files[0].name);
+    const returned = await evaluate('window.__ncDisplaySessions.live()');
+    expect(!returned.base && returned.baseDescriptor, 'actual RAW A came back with its base: ' + JSON.stringify(returned));
+    const exportAfter = await exportPixels(16);
+    await evaluate(`window.__ncDisplaySessions.force(null)`);
+    expect(exportAfter.sha256 === exportBefore.sha256 && exportAfter.width === exportBefore.width,
+      'actual RAW export after A/B/A differs: ' + JSON.stringify({ leftAs, exportBefore, exportAfter }));
     console.log('actual RAW warm photo sessions:', JSON.stringify({ files, coldBActivationMs,
-      observedWarmActivationMs: [firstWarmActivationMs, ...repeatWarmActivationMs], saved, restored, repeated, ...evidence }));
-    console.log('ok: actual RAW warm A/B/A preserves exact GPU preview and zoom with zero new file reads, RAW decode or conversion; no forced export');
+      observedWarmActivationMs: [firstWarmActivationMs, ...repeatWarmActivationMs], saved, restored, repeated, ...evidence,
+      geometry: { rotationAngle: geometry.rotationAngle, cropRegion: geometry.cropRegion }, leftAs, exportSha256: exportAfter.sha256 }));
+    console.log('ok: actual RAW warm A/B/A preserves exact GPU preview and zoom with zero new file reads, RAW decode or conversion; the 16-bit export is unchanged across a switch');
   } catch (error) {
     failure = error;
     try {
@@ -602,7 +774,7 @@ export async function runPhotoSessionRawSmoke({ send, evaluate, waitFor, fail, i
       })()`)));
     } catch { /* Keep the original failure if Chrome is no longer available. */ }
   } finally {
-    await evaluate('window.__restorePhotoSessionProbe?.()');
+    await evaluate('window.__restorePhotoSessionProbe?.(); window.__ncDisplaySessions?.force(null)');
   }
   if (failure) fail(failure.message);
 }

@@ -1,0 +1,348 @@
+// Process memory for scenario M: phys_footprint of the browser's renderer and
+// GPU processes, sampled at 4 Hz, plus the kernel's lifetime peak.
+//
+// macOS: a long-lived python3 helper calls proc_pid_rusage(RUSAGE_INFO_V4)
+// through ctypes (no npm dependency) and reads ri_phys_footprint and
+// ri_lifetime_max_phys_footprint; `footprint -p` is the slow fallback.
+// Linux: /proc/<pid>/smaps_rollup and VmHWM. Windows: private bytes.
+
+import { execFile, spawn } from 'node:child_process';
+import { readFile } from 'node:fs/promises';
+import { createInterface } from 'node:readline';
+import { promisify } from 'node:util';
+import { registerProcess } from './resources.mjs';
+
+const run = promisify(execFile);
+
+// rusage_info_v4 as uint64 slots after the 16-byte uuid:
+// 0 user_time, 1 system_time, 7 phys_footprint, 28 lifetime_max_phys_footprint.
+export const RUSAGE_HELPER = String.raw`
+import ctypes, json, sys, time
+libc = ctypes.CDLL('/usr/lib/libSystem.B.dylib', use_errno=True)
+class Timebase(ctypes.Structure):
+    _fields_ = [('numer', ctypes.c_uint32), ('denom', ctypes.c_uint32)]
+tb = Timebase()
+libc.mach_timebase_info(ctypes.byref(tb))
+scale = tb.numer / tb.denom if tb.denom else 1.0
+buf = (ctypes.c_uint64 * 64)()
+def read(pid):
+    if libc.proc_pid_rusage(ctypes.c_int(pid), ctypes.c_int(4), ctypes.byref(buf)) != 0:
+        return None
+    return [int(buf[2 + 7]), int(buf[2 + 28]), int(buf[2 + 0] * scale), int(buf[2 + 1] * scale)]
+for line in sys.stdin:
+    pids = [int(p) for p in line.split() if p.isdigit()]
+    sys.stdout.write(json.dumps({'t': time.time() * 1000, 'procs': {str(p): read(p) for p in pids}}) + '\n')
+    sys.stdout.flush()
+`;
+
+/** Parse /proc/<pid>/smaps_rollup into bytes. */
+export function parseSmapsRollup(text) {
+  const kib = name => Number(new RegExp(`^${name}:\\s+(\\d+) kB`, 'm').exec(text || '')?.[1] ?? NaN) * 1024;
+  const privateBytes = kib('Private_Clean') + kib('Private_Dirty');
+  const swap = kib('SwapPss');
+  return {
+    rss: kib('Rss'),
+    footprint: Number.isFinite(privateBytes) ? privateBytes + (Number.isFinite(swap) ? swap : 0) : null
+  };
+}
+
+export function parseVmHwm(statusText) {
+  const match = /^VmHWM:\s+(\d+) kB/m.exec(statusText || '');
+  return match ? Number(match[1]) * 1024 : null;
+}
+
+/** `footprint -p PID` fallback: "phys_footprint: 1234 MB" / "Footprint: 1.2 GB". */
+export function parseFootprintTool(text) {
+  const match = /(?:phys_footprint|Footprint)[^\n\d]*([\d.]+)\s*([KMG]?B)/i.exec(text || '');
+  if (!match) return null;
+  const unit = { B: 1, KB: 1024, MB: 1024 ** 2, GB: 1024 ** 3 }[match[2].toUpperCase()];
+  return Math.round(Number(match[1]) * unit);
+}
+
+/** `ps -axo pid=,rss=,comm=` → [{ pid, rss, command }] */
+export function parsePs(text) {
+  return String(text || '').split('\n').map(line => line.trim()).filter(Boolean).map(line => {
+    const match = /^(\d+)\s+(\d+)\s+(.*)$/.exec(line);
+    return match ? { pid: Number(match[1]), rssKiB: Number(match[2]), command: match[3] } : null;
+  }).filter(Boolean);
+}
+
+export async function listProcesses() {
+  if (process.platform === 'win32') return [];
+  try {
+    const { stdout } = await run('ps', ['-axo', 'pid=,rss=,comm='], { maxBuffer: 8 * 1024 * 1024 });
+    return parsePs(stdout);
+  } catch {
+    return [];
+  }
+}
+
+/** Only WebKit PIDs attributed to this run, never every WKWebView on the Mac. */
+export async function findWebKitProcesses({ pids = [], list = listProcesses } = {}) {
+  const owned = new Set(pids);
+  const all = (await list()).filter(p => owned.has(p.pid));
+  return {
+    webContent: all.filter(p => /com\.apple\.WebKit\.WebContent/.test(p.command)).map(p => p.pid),
+    gpu: all.filter(p => /com\.apple\.WebKit\.GPU/.test(p.command)).map(p => p.pid),
+    networking: all.filter(p => /com\.apple\.WebKit\.Networking/.test(p.command)).map(p => p.pid)
+  };
+}
+
+/** Require origin evidence for WebContent and instance evidence for its GPU.
+ * Process freshness alone proves neither relationship. Existing/shared GPUs
+ * are excluded; an unproven new GPU makes measurement fail closed.
+ */
+export function webkitProcessScope({ before, port, ownership, list = listProcesses, connected = async () => {
+  try {
+    const { stdout } = await run('lsof', ['-t', `-iTCP:${port}`, '-sTCP:ESTABLISHED'], { timeout: 2000 });
+    return stdout.trim().split(/\s+/).map(Number);
+  } catch { return []; }
+}, associatedGpu = async () => [] }) {
+  const existing = new Set(before.map(p => p.pid));
+  let renderer = null, gpu = null;
+  return {
+    async resolve() {
+      const all = await list();
+      if (ownership) {
+        const association = ownership.resolve();
+        if (ownership.failure) throw new Error(ownership.failure);
+        renderer = association?.renderer.identity.pid || null;
+        gpu = association?.gpu.identity.pid || null;
+        if ([renderer, gpu].some(pid => pid && existing.has(pid))) {
+          renderer = gpu = null;
+          throw new Error('pre-existing/shared WebKit endpoint; refusing exclusive ownership');
+        }
+        if (renderer && gpu && ![renderer, gpu].every(pid => all.some(p => p.pid === pid))) {
+          renderer = gpu = null;
+          throw new Error('WebKit endpoint identity vanished during attribution');
+        }
+        return { renderer: renderer ? [renderer] : [], gpu: gpu ? [gpu] : [], other: [] };
+      }
+      const fresh = all.filter(p => !existing.has(p.pid));
+      if (renderer && !all.some(p => p.pid === renderer && /com\.apple\.WebKit\.WebContent/.test(p.command))) renderer = null;
+      if (gpu && !all.some(p => p.pid === gpu && /com\.apple\.WebKit\.GPU/.test(p.command))) gpu = null;
+      if (!renderer) {
+        const links = new Set(await connected());
+        const candidates = fresh.filter(p => /com\.apple\.WebKit\.WebContent/.test(p.command) && links.has(p.pid));
+        if (candidates.length > 1) throw new Error('ambiguous harness WebContent PIDs; refusing unscoped WebKit measurement');
+        renderer = candidates[0]?.pid || null;
+      }
+      if (renderer && !gpu) {
+        const associated = new Set(await associatedGpu(renderer, all));
+        const freshGpu = fresh.filter(p => /com\.apple\.WebKit\.GPU/.test(p.command));
+        const candidates = freshGpu.filter(p => associated.has(p.pid));
+        if (candidates.length > 1) throw new Error('ambiguous harness WebKit GPU PIDs');
+        gpu = candidates[0]?.pid || null;
+        if (!gpu && freshGpu.length) {
+          const error = new Error('could not prove harness WebKit GPU ownership; refusing unscoped measurement');
+          error.ownedRenderer = renderer;
+          throw error;
+        }
+      }
+      const found = await findWebKitProcesses({ pids: [renderer, gpu].filter(Boolean), list: async () => all });
+      return { renderer: found.webContent, gpu: found.gpu, other: [] };
+    },
+    assert() {
+      if (!renderer) throw new Error('could not attribute a WebContent PID to harness navigation');
+      if (!gpu) throw new Error('could not prove exclusive WebKit GPU ownership; renderer-only data is incomplete');
+    },
+    kill(pid, expected) { return ownership?.kill(pid, 9, expected) === true; }
+  };
+}
+
+/**
+ * Reads { pid: { footprint, lifetimeMax, userNs, systemNs } } for a pid list.
+ * start() spawns the helper once; read() is one request/response.
+ */
+export class FootprintReader {
+  constructor({ platform = process.platform } = {}) {
+    this.platform = platform;
+    this.helper = null;
+    this.waiters = [];
+  }
+
+  async start() {
+    if (this.platform !== 'darwin' || this.helper) return;
+    try {
+      const child = spawn('python3', ['-u', '-c', RUSAGE_HELPER], { stdio: ['pipe', 'pipe', 'pipe'] });
+      const unregister = registerProcess(child, { detached: false });
+      child.on('error', () => { this.helper = null; });
+      child.stdin.on('error', () => {});
+      const lines = createInterface({ input: child.stdout });
+      lines.on('line', line => {
+        const waiter = this.waiters.shift();
+        if (!waiter) return;
+        try { waiter.resolve(JSON.parse(line)); } catch (error) { waiter.reject(error); }
+      });
+      child.once('exit', () => {
+        unregister();
+        this.helper = null;
+        for (const waiter of this.waiters.splice(0)) waiter.reject(new Error('footprint helper exited'));
+      });
+      this.helper = child;
+    } catch {
+      this.helper = null;
+    }
+  }
+
+  async read(pids) {
+    const list = [...new Set(pids.filter(pid => Number.isInteger(pid) && pid > 0))];
+    if (!list.length) return {};
+    if (this.platform === 'darwin') return this.#readDarwin(list);
+    if (this.platform === 'linux') return this.#readLinux(list);
+    if (this.platform === 'win32') return this.#readWindows(list);
+    return {};
+  }
+
+  async #readDarwin(pids) {
+    if (!this.helper) await this.start();
+    if (this.helper) {
+      const response = await new Promise((resolve, reject) => {
+        this.waiters.push({ resolve, reject });
+        this.helper.stdin.write(`${pids.join(' ')}\n`);
+      }).catch(() => null);
+      if (response) {
+        const out = {};
+        for (const [pid, value] of Object.entries(response.procs || {})) {
+          if (value) out[pid] = { footprint: value[0], lifetimeMax: value[1], userNs: value[2], systemNs: value[3] };
+        }
+        return out;
+      }
+    }
+    const out = {};
+    await Promise.all(pids.map(async pid => {
+      try {
+        const { stdout } = await run('footprint', ['-p', String(pid)], { timeout: 10_000 });
+        out[pid] = { footprint: parseFootprintTool(stdout), lifetimeMax: null };
+      } catch {}
+    }));
+    return out;
+  }
+
+  async #readLinux(pids) {
+    const out = {};
+    await Promise.all(pids.map(async pid => {
+      try {
+        const [rollup, status] = await Promise.all([
+          readFile(`/proc/${pid}/smaps_rollup`, 'utf8'), readFile(`/proc/${pid}/status`, 'utf8')
+        ]);
+        out[pid] = { footprint: parseSmapsRollup(rollup).footprint, lifetimeMax: parseVmHwm(status) };
+      } catch {}
+    }));
+    return out;
+  }
+
+  async #readWindows(pids) {
+    const out = {};
+    try {
+      const script = `Get-Process -Id ${pids.join(',')} -ErrorAction SilentlyContinue | Select-Object Id,PrivateMemorySize64,PeakWorkingSet64 | ConvertTo-Json`;
+      const { stdout } = await run('powershell', ['-NoProfile', '-Command', script], { timeout: 10_000 });
+      const parsed = JSON.parse(stdout || '[]');
+      for (const entry of Array.isArray(parsed) ? parsed : [parsed]) {
+        out[entry.Id] = { footprint: entry.PrivateMemorySize64, lifetimeMax: entry.PeakWorkingSet64 };
+      }
+    } catch {}
+    return out;
+  }
+
+  stop() {
+    if (this.helper) { try { this.helper.kill(); } catch {} }
+    this.helper = null;
+  }
+}
+
+/**
+ * 4 Hz sampler over a changing set of processes. `resolvePids()` returns
+ * { renderer: [...], gpu: [...], other: [...] }; every sample is passed to
+ * `onSample` so the run guards can abort within one sampling period.
+ */
+export class MemorySampler {
+  constructor({ reader, resolvePids, intervalMs = 250, timeoutMs = 0, validateSample = () => true,
+    onSample = () => {}, onError = () => {} }) {
+    this.reader = reader;
+    this.resolvePids = resolvePids;
+    this.intervalMs = intervalMs;
+    this.onSample = onSample;
+    this.onError = onError;
+    this.validateSample = validateSample;
+    this.timeoutMs = timeoutMs;
+    this.samples = [];
+    this.timer = null;
+    this.busy = false;
+    this.inFlight = null;
+  }
+
+  start() {
+    if (this.timer) return;
+    this.timer = setInterval(() => this.tick(), this.intervalMs);
+    this.tick();
+  }
+
+  tick() {
+    if (this.inFlight) return this.inFlight;
+    this.busy = true;
+    this.inFlight = this.#sample().finally(() => { this.busy = false; this.inFlight = null; });
+    return this.inFlight;
+  }
+
+  async #sample() {
+    const bounded = async task => {
+      if (!this.timeoutMs) return task();
+      let timer;
+      try {
+        return await Promise.race([task(), new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error('process memory sampling timed out')), this.timeoutMs);
+        })]);
+      } finally { clearTimeout(timer); }
+    };
+    try {
+      const groups = await bounded(this.resolvePids);
+      if (!groups) return; // Initial attribution is pending, not a zero-byte observation.
+      const pids = [...(groups.renderer || []), ...(groups.gpu || []), ...(groups.other || [])];
+      const values = await bounded(() => this.reader.read(pids));
+      const pick = list => (list || []).map(pid => ({ pid, ...(values[pid] || {}) })).filter(entry => Number.isFinite(entry.footprint));
+      const sample = { t: Date.now(), renderer: pick(groups.renderer), gpu: pick(groups.gpu), other: pick(groups.other) };
+      sample.rendererBytes = Math.max(0, ...sample.renderer.map(entry => entry.footprint));
+      sample.gpuBytes = sample.gpu.reduce((total, entry) => total + entry.footprint, 0);
+      sample.totalBytes = [...sample.renderer, ...sample.gpu, ...sample.other].reduce((total, entry) => total + entry.footprint, 0);
+      if (!await bounded(() => this.validateSample(sample, groups))) return;
+      this.samples.push(sample);
+      await bounded(() => this.onSample(sample));
+    } catch (error) {
+      // Chrome may ignore a vanished process. An acquired native scope must
+      // explicitly abort on errors, timeouts or missing footprints.
+      await this.onError(error);
+    }
+  }
+
+  stop() {
+    clearInterval(this.timer);
+    this.timer = null;
+  }
+
+  mark() {
+    return this.samples.length;
+  }
+
+  /** Peaks and the final sample over samples[from..]. */
+  summary(from = 0) {
+    const slice = this.samples.slice(from);
+    if (!slice.length) return null;
+    const last = slice[slice.length - 1];
+    const lifetime = entries => Math.max(0, ...entries.map(entry => entry.lifetimeMax || 0));
+    return {
+      samples: slice.length,
+      rendererPeakMB: toMB(Math.max(...slice.map(sample => sample.rendererBytes))),
+      rendererLifetimePeakMB: toMB(lifetime(last.renderer)) || null,
+      rendererAfterMB: toMB(last.rendererBytes),
+      gpuPeakMB: toMB(Math.max(...slice.map(sample => sample.gpuBytes))),
+      gpuLifetimePeakMB: toMB(lifetime(last.gpu)) || null,
+      gpuAfterMB: toMB(last.gpuBytes),
+      browserTotalPeakMB: toMB(Math.max(...slice.map(sample => sample.totalBytes)))
+    };
+  }
+}
+
+export function toMB(bytes) {
+  return Number.isFinite(bytes) ? Math.round(bytes / (1024 * 1024)) : null;
+}

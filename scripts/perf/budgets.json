@@ -1,0 +1,3499 @@
+{
+  "version": 1,
+  "description": "Lightroom-grade budgets and baselines for npm run bench:interactive (#229, #230). Targets come from the #230 Evidence table; baselines at 1703835 from the 2026-09-23 reports posted on #229. Synthetic-fixture baselines are added with --record-baselines. See docs/performance-benchmark.md.",
+  "metrics": {
+    "s2.coreExposure.dpr2.inputToDrawP95Ms": {
+      "unit": "ms",
+      "better": "lower",
+      "target": 16,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "SilverCore slider input→draw p95, DPR 2",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 56,
+          "range": null,
+          "source": "2026-09-23 interactive S2"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 92,
+          "range": null,
+          "source": "2026-09-23 interactive S2"
+        }
+      ]
+    },
+    "s2.coreExposure.dpr1.inputToDrawP95Ms": {
+      "unit": "ms",
+      "better": "lower",
+      "target": 16,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "SilverCore slider input→draw p95, DPR 1 (reported alongside the DPR 2 budget)",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 36,
+          "range": null,
+          "source": "2026-09-23 interactive S2"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 33,
+          "range": null,
+          "source": "2026-09-23 interactive S2"
+        }
+      ]
+    },
+    "s2.coreContrast.dpr2.inputToDrawP95Ms": {
+      "unit": "ms",
+      "better": "lower",
+      "target": 16,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "SilverCore slider input→draw p95, DPR 2",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 64,
+          "range": null,
+          "source": "2026-09-23 interactive S2"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 113,
+          "range": null,
+          "source": "2026-09-23 interactive S2"
+        }
+      ]
+    },
+    "s2.coreContrast.dpr1.inputToDrawP95Ms": {
+      "unit": "ms",
+      "better": "lower",
+      "target": 16,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "SilverCore slider input→draw p95, DPR 1 (reported alongside the DPR 2 budget)",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 41,
+          "range": null,
+          "source": "2026-09-23 interactive S2"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 48,
+          "range": null,
+          "source": "2026-09-23 interactive S2"
+        }
+      ]
+    },
+    "s2.coreTemperature.dpr2.inputToDrawP95Ms": {
+      "unit": "ms",
+      "better": "lower",
+      "target": 16,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "SilverCore slider input→draw p95, DPR 2",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 70,
+          "range": null,
+          "source": "2026-09-23 interactive S2"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 115,
+          "range": null,
+          "source": "2026-09-23 interactive S2"
+        }
+      ]
+    },
+    "s2.coreTemperature.dpr1.inputToDrawP95Ms": {
+      "unit": "ms",
+      "better": "lower",
+      "target": 16,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "SilverCore slider input→draw p95, DPR 1 (reported alongside the DPR 2 budget)",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 40,
+          "range": null,
+          "source": "2026-09-23 interactive S2"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 48,
+          "range": null,
+          "source": "2026-09-23 interactive S2"
+        }
+      ]
+    },
+    "s2.coreExposure.dpr2.updatesPerSecond": {
+      "unit": "1/s",
+      "better": "higher",
+      "target": 55,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "Brightness redraw rate (its value changes every frame)",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 31.3,
+          "range": [
+            29.3,
+            31.3
+          ],
+          "source": "2026-09-23 interactive S2"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 14.3,
+          "range": null,
+          "source": "2026-09-23 interactive S2"
+        }
+      ]
+    },
+    "s2.coreExposure.dpr1.updatesPerSecond": {
+      "unit": "1/s",
+      "better": "higher",
+      "target": 55,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 32.6,
+          "range": [
+            31,
+            32.6
+          ],
+          "source": "2026-09-23 interactive S2"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 29.6,
+          "range": [
+            29.6,
+            31.6
+          ],
+          "source": "2026-09-23 interactive S2"
+        }
+      ]
+    },
+    "s2.coreExposure.dpr2.framesCoveredPct": {
+      "unit": "%",
+      "better": "higher",
+      "target": 95,
+      "tolerance": {
+        "rel": 0,
+        "abs": 3
+      },
+      "budget": "Every slider: value-changing frames that got a new picture",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 52,
+          "range": null,
+          "source": "2026-09-23 interactive S2"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 24,
+          "range": null,
+          "source": "2026-09-23 interactive S2"
+        }
+      ]
+    },
+    "s2.coreContrast.dpr2.framesCoveredPct": {
+      "unit": "%",
+      "better": "higher",
+      "target": 95,
+      "tolerance": {
+        "rel": 0,
+        "abs": 3
+      },
+      "budget": "Every slider: value-changing frames that got a new picture",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 98,
+          "range": null,
+          "source": "2026-09-23 interactive S2"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 51,
+          "range": null,
+          "source": "2026-09-23 interactive S2"
+        }
+      ]
+    },
+    "s2.coreTemperature.dpr2.framesCoveredPct": {
+      "unit": "%",
+      "better": "higher",
+      "target": 95,
+      "tolerance": {
+        "rel": 0,
+        "abs": 3
+      },
+      "budget": "Every slider: value-changing frames that got a new picture",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 92,
+          "range": null,
+          "source": "2026-09-23 interactive S2"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 39,
+          "range": null,
+          "source": "2026-09-23 interactive S2"
+        }
+      ]
+    },
+    "s2.wbR.dpr2.framesCoveredPct": {
+      "unit": "%",
+      "better": "higher",
+      "target": 95,
+      "tolerance": {
+        "rel": 0,
+        "abs": 3
+      },
+      "budget": "Every slider: value-changing frames that got a new picture",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 98,
+          "range": null,
+          "source": "2026-09-23 interactive S2"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 98,
+          "range": null,
+          "source": "2026-09-23 interactive S2"
+        }
+      ]
+    },
+    "s2.cyan.dpr2.framesCoveredPct": {
+      "unit": "%",
+      "better": "higher",
+      "target": 95,
+      "tolerance": {
+        "rel": 0,
+        "abs": 3
+      },
+      "budget": "Every slider: value-changing frames that got a new picture",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 100,
+          "range": null,
+          "source": "2026-09-23 interactive S2"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 100,
+          "range": null,
+          "source": "2026-09-23 interactive S2"
+        }
+      ]
+    },
+    "s2.coreExposure.dpr1.framesCoveredPct": {
+      "unit": "%",
+      "better": "higher",
+      "target": 95,
+      "tolerance": {
+        "rel": 0,
+        "abs": 3
+      },
+      "budget": "Every slider: value-changing frames that got a new picture",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 54,
+          "range": null,
+          "source": "2026-09-23 interactive S2"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 49,
+          "range": null,
+          "source": "2026-09-23 interactive S2"
+        }
+      ]
+    },
+    "s2.coreContrast.dpr1.framesCoveredPct": {
+      "unit": "%",
+      "better": "higher",
+      "target": 95,
+      "tolerance": {
+        "rel": 0,
+        "abs": 3
+      },
+      "budget": "Every slider: value-changing frames that got a new picture",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 99,
+          "range": null,
+          "source": "2026-09-23 interactive S2"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 99,
+          "range": null,
+          "source": "2026-09-23 interactive S2"
+        }
+      ]
+    },
+    "s2.coreTemperature.dpr1.framesCoveredPct": {
+      "unit": "%",
+      "better": "higher",
+      "target": 95,
+      "tolerance": {
+        "rel": 0,
+        "abs": 3
+      },
+      "budget": "Every slider: value-changing frames that got a new picture",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 99,
+          "range": null,
+          "source": "2026-09-23 interactive S2"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 99,
+          "range": null,
+          "source": "2026-09-23 interactive S2"
+        }
+      ]
+    },
+    "s2.wbR.dpr1.framesCoveredPct": {
+      "unit": "%",
+      "better": "higher",
+      "target": 95,
+      "tolerance": {
+        "rel": 0,
+        "abs": 3
+      },
+      "budget": "Every slider: value-changing frames that got a new picture",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 98,
+          "range": null,
+          "source": "2026-09-23 interactive S2"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 98,
+          "range": null,
+          "source": "2026-09-23 interactive S2"
+        }
+      ]
+    },
+    "s2.cyan.dpr1.framesCoveredPct": {
+      "unit": "%",
+      "better": "higher",
+      "target": 95,
+      "tolerance": {
+        "rel": 0,
+        "abs": 3
+      },
+      "budget": "Every slider: value-changing frames that got a new picture",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 100,
+          "range": null,
+          "source": "2026-09-23 interactive S2"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 100,
+          "range": null,
+          "source": "2026-09-23 interactive S2"
+        }
+      ]
+    },
+    "s2.*.*.framesCoveredPct": {
+      "unit": "%",
+      "better": "higher",
+      "target": 95,
+      "tolerance": {
+        "rel": 0,
+        "abs": 3
+      },
+      "budget": "Every slider: frames covered",
+      "baselines": []
+    },
+    "s2.wbR.dpr2.inputToDrawP95Ms": {
+      "unit": "ms",
+      "better": "lower",
+      "target": 16,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "Step-3 sliders (wbR, cyan) p95",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 12,
+          "range": null,
+          "source": "2026-09-23 interactive S2"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 10,
+          "range": null,
+          "source": "2026-09-23 interactive S2",
+          "note": "report gives p95 ≤ 10 for the Step-3 sliders on B"
+        }
+      ]
+    },
+    "s2.cyan.dpr2.inputToDrawP95Ms": {
+      "unit": "ms",
+      "better": "lower",
+      "target": 16,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "Step-3 sliders (wbR, cyan) p95",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 16,
+          "range": null,
+          "source": "2026-09-23 interactive S2"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 10,
+          "range": null,
+          "source": "2026-09-23 interactive S2",
+          "note": "report gives p95 ≤ 10 for the Step-3 sliders on B"
+        }
+      ]
+    },
+    "s2.*.*.inputToDrawP95Ms": {
+      "unit": "ms",
+      "better": "lower",
+      "target": 16,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "Any slider, input→draw p95",
+      "baselines": []
+    },
+    "s2.*.*.updatesPerSecond": {
+      "unit": "1/s",
+      "better": "higher",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "tracked",
+      "baselines": []
+    },
+    "s2.coreExposure.cpu.dpr2.updatesPerSecond": {
+      "unit": "1/s",
+      "better": "higher",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "CPU display path (WebGL off), tracked",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 4.2,
+          "range": null,
+          "source": "2026-09-23 interactive S2 (dev, 60 MP canvas)"
+        }
+      ]
+    },
+    "s2.cyan.cpu.dpr2.updatesPerSecond": {
+      "unit": "1/s",
+      "better": "higher",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "CPU display path (WebGL off), tracked",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 4.7,
+          "range": null,
+          "source": "2026-09-23 interactive S2 (dev, 60 MP canvas)"
+        }
+      ]
+    },
+    "s2.coreExposure.cpu.dpr2.longTaskCount": {
+      "unit": "n",
+      "better": "lower",
+      "target": 0,
+      "tolerance": {
+        "rel": 0,
+        "abs": 1
+      },
+      "budget": "Long tasks > 50 ms in interaction windows",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 11,
+          "range": null,
+          "source": "2026-09-23 interactive S2 (dev, 60 MP canvas)"
+        }
+      ]
+    },
+    "s2.cyan.cpu.dpr2.longTaskCount": {
+      "unit": "n",
+      "better": "lower",
+      "target": 0,
+      "tolerance": {
+        "rel": 0,
+        "abs": 1
+      },
+      "budget": "Long tasks > 50 ms in interaction windows",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 15,
+          "range": null,
+          "source": "2026-09-23 interactive S2 (dev, 60 MP canvas)"
+        }
+      ]
+    },
+    "s2.*.*.longTaskCount": {
+      "unit": "n",
+      "better": "lower",
+      "target": 0,
+      "tolerance": {
+        "rel": 0,
+        "abs": 1
+      },
+      "budget": "Long tasks > 50 ms in interaction windows",
+      "baselines": []
+    },
+    "s2.*.*.*.longTaskCount": {
+      "unit": "n",
+      "better": "lower",
+      "target": 0,
+      "tolerance": {
+        "rel": 0,
+        "abs": 1
+      },
+      "budget": "Long tasks > 50 ms in interaction windows",
+      "baselines": []
+    },
+    "s2.*.*.*.framesCoveredPct": {
+      "unit": "%",
+      "better": "higher",
+      "target": 95,
+      "tolerance": {
+        "rel": 0,
+        "abs": 3
+      },
+      "budget": "Every slider: frames covered",
+      "baselines": []
+    },
+    "s2.*.*.*.inputToDrawP95Ms": {
+      "unit": "ms",
+      "better": "lower",
+      "target": 16,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "Any slider, input→draw p95",
+      "baselines": []
+    },
+    "s3.curve.dpr2.inputToDrawP95Ms": {
+      "unit": "ms",
+      "better": "lower",
+      "target": 16,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "Curve drag p95",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 15,
+          "range": null,
+          "source": "2026-09-23 interactive S3"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 14.2,
+          "range": null,
+          "source": "2026-09-23 interactive S3"
+        }
+      ]
+    },
+    "s3.curve.dpr1.inputToDrawP95Ms": {
+      "unit": "ms",
+      "better": "lower",
+      "target": 16,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "Curve drag p95",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 15.5,
+          "range": null,
+          "source": "2026-09-23 interactive S3",
+          "note": "one standalone repetition"
+        }
+      ]
+    },
+    "s3.*.*.longTaskCount": {
+      "unit": "n",
+      "better": "lower",
+      "target": 0,
+      "tolerance": {
+        "rel": 0,
+        "abs": 1
+      },
+      "budget": "Long tasks > 50 ms in interaction windows",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 0,
+          "range": null,
+          "source": "2026-09-23 interactive S3"
+        }
+      ]
+    },
+    "s3.curve.dpr2.rafFps": {
+      "unit": "fps",
+      "better": "higher",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "tracked",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 60,
+          "range": null,
+          "source": "2026-09-23 interactive S3"
+        }
+      ]
+    },
+    "s4.dpr2.fitTo2x.transformAppliedMs": {
+      "unit": "ms",
+      "better": "lower",
+      "target": 16,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "Zoom step, transform applied",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 11,
+          "range": null,
+          "source": "2026-09-23 interactive S4"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 13,
+          "range": null,
+          "source": "2026-09-23 interactive S4"
+        }
+      ]
+    },
+    "s4.dpr2.to2_5x.transformAppliedMs": {
+      "unit": "ms",
+      "better": "lower",
+      "target": 16,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "Zoom step, transform applied",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 12,
+          "range": null,
+          "source": "2026-09-23 interactive S4"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 12,
+          "range": null,
+          "source": "2026-09-23 interactive S4"
+        }
+      ]
+    },
+    "s4.dpr2.to3_9x.transformAppliedMs": {
+      "unit": "ms",
+      "better": "lower",
+      "target": 16,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "Zoom step, transform applied",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 13,
+          "range": null,
+          "source": "2026-09-23 interactive S4"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 14,
+          "range": null,
+          "source": "2026-09-23 interactive S4"
+        }
+      ]
+    },
+    "s4.dpr2.to7_6x.transformAppliedMs": {
+      "unit": "ms",
+      "better": "lower",
+      "target": 16,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "Zoom step, transform applied",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 14,
+          "range": null,
+          "source": "2026-09-23 interactive S4"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 14,
+          "range": null,
+          "source": "2026-09-23 interactive S4"
+        }
+      ]
+    },
+    "s4.dpr1.fitTo2x.transformAppliedMs": {
+      "unit": "ms",
+      "better": "lower",
+      "target": 16,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "Zoom step, transform applied",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 13,
+          "range": null,
+          "source": "2026-09-23 interactive S4"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 15,
+          "range": null,
+          "source": "2026-09-23 interactive S4"
+        }
+      ]
+    },
+    "s4.dpr1.to2_5x.transformAppliedMs": {
+      "unit": "ms",
+      "better": "lower",
+      "target": 16,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "Zoom step, transform applied",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 13,
+          "range": null,
+          "source": "2026-09-23 interactive S4"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 13,
+          "range": null,
+          "source": "2026-09-23 interactive S4"
+        }
+      ]
+    },
+    "s4.dpr1.to3_9x.transformAppliedMs": {
+      "unit": "ms",
+      "better": "lower",
+      "target": 16,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "Zoom step, transform applied",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 13,
+          "range": null,
+          "source": "2026-09-23 interactive S4"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 12,
+          "range": null,
+          "source": "2026-09-23 interactive S4"
+        }
+      ]
+    },
+    "s4.dpr1.to7_6x.transformAppliedMs": {
+      "unit": "ms",
+      "better": "lower",
+      "target": 16,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "Zoom step, transform applied",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 15,
+          "range": null,
+          "source": "2026-09-23 interactive S4"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 13,
+          "range": null,
+          "source": "2026-09-23 interactive S4"
+        }
+      ]
+    },
+    "s4.*.wheel.transformAppliedMs": {
+      "unit": "ms",
+      "better": "lower",
+      "target": 16,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "Zoom step, transform applied",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 0.4,
+          "range": null,
+          "source": "2026-09-23 interactive S4"
+        }
+      ]
+    },
+    "s4.dpr2.fitTo2x.backingOverNeeded": {
+      "unit": "ratio",
+      "better": "higher",
+      "target": 1,
+      "tolerance": {
+        "rel": 0.05,
+        "abs": 0.02
+      },
+      "budget": "Native detail after a zoom step (backing ÷ needed ≥ 1.0)",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 0.68,
+          "range": null,
+          "source": "2026-09-23 interactive S4"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 0.68,
+          "range": null,
+          "source": "2026-09-23 interactive S4"
+        }
+      ]
+    },
+    "s4.dpr2.fitTo2x.nativeDetailMs": {
+      "unit": "ms",
+      "better": "lower",
+      "target": 200,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 50
+      },
+      "budget": "Native detail within 200 ms of the zoom step",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": null,
+          "range": null,
+          "source": "2026-09-23 interactive S4",
+          "note": "never reached; the harness records the 3000 ms observation window"
+        }
+      ]
+    },
+    "s4.dpr2.to2_5x.backingOverNeeded": {
+      "unit": "ratio",
+      "better": "higher",
+      "target": 1,
+      "tolerance": {
+        "rel": 0.05,
+        "abs": 0.02
+      },
+      "budget": "Native detail after a zoom step (backing ÷ needed ≥ 1.0)",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 0.54,
+          "range": null,
+          "source": "2026-09-23 interactive S4"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 0.67,
+          "range": null,
+          "source": "2026-09-23 interactive S4"
+        }
+      ]
+    },
+    "s4.dpr2.to2_5x.nativeDetailMs": {
+      "unit": "ms",
+      "better": "lower",
+      "target": 200,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 50
+      },
+      "budget": "Native detail within 200 ms of the zoom step",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": null,
+          "range": null,
+          "source": "2026-09-23 interactive S4",
+          "note": "never reached; the harness records the 3000 ms observation window"
+        }
+      ]
+    },
+    "s4.dpr2.to3_9x.backingOverNeeded": {
+      "unit": "ratio",
+      "better": "higher",
+      "target": 1,
+      "tolerance": {
+        "rel": 0.05,
+        "abs": 0.02
+      },
+      "budget": "Native detail after a zoom step (backing ÷ needed ≥ 1.0)",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 0.35,
+          "range": null,
+          "source": "2026-09-23 interactive S4"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 0.67,
+          "range": null,
+          "source": "2026-09-23 interactive S4"
+        }
+      ]
+    },
+    "s4.dpr2.to3_9x.nativeDetailMs": {
+      "unit": "ms",
+      "better": "lower",
+      "target": 200,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 50
+      },
+      "budget": "Native detail within 200 ms of the zoom step",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": null,
+          "range": null,
+          "source": "2026-09-23 interactive S4",
+          "note": "never reached; the harness records the 3000 ms observation window"
+        }
+      ]
+    },
+    "s4.dpr2.to7_6x.backingOverNeeded": {
+      "unit": "ratio",
+      "better": "higher",
+      "target": 1,
+      "tolerance": {
+        "rel": 0.05,
+        "abs": 0.02
+      },
+      "budget": "Native detail after a zoom step (backing ÷ needed ≥ 1.0)",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 0.26,
+          "range": null,
+          "source": "2026-09-23 interactive S4"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 0.67,
+          "range": null,
+          "source": "2026-09-23 interactive S4"
+        }
+      ]
+    },
+    "s4.dpr2.to7_6x.nativeDetailMs": {
+      "unit": "ms",
+      "better": "lower",
+      "target": 200,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 50
+      },
+      "budget": "Native detail within 200 ms of the zoom step",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": null,
+          "range": null,
+          "source": "2026-09-23 interactive S4",
+          "note": "never reached; the harness records the 3000 ms observation window"
+        }
+      ]
+    },
+    "s4.dpr1.fitTo2x.backingOverNeeded": {
+      "unit": "ratio",
+      "better": "higher",
+      "target": 1,
+      "tolerance": {
+        "rel": 0.05,
+        "abs": 0.02
+      },
+      "budget": "Native detail after a zoom step (backing ÷ needed ≥ 1.0)",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 1,
+          "range": null,
+          "source": "2026-09-23 interactive S4"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 1,
+          "range": null,
+          "source": "2026-09-23 interactive S4"
+        }
+      ]
+    },
+    "s4.dpr1.fitTo2x.nativeDetailMs": {
+      "unit": "ms",
+      "better": "lower",
+      "target": 200,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 50
+      },
+      "budget": "Native detail within 200 ms of the zoom step",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": null,
+          "range": null,
+          "source": "2026-09-23 interactive S4",
+          "note": "never reached; the harness records the 3000 ms observation window"
+        }
+      ]
+    },
+    "s4.dpr1.to2_5x.backingOverNeeded": {
+      "unit": "ratio",
+      "better": "higher",
+      "target": 1,
+      "tolerance": {
+        "rel": 0.05,
+        "abs": 0.02
+      },
+      "budget": "Native detail after a zoom step (backing ÷ needed ≥ 1.0)",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 1,
+          "range": null,
+          "source": "2026-09-23 interactive S4"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 1,
+          "range": null,
+          "source": "2026-09-23 interactive S4"
+        }
+      ]
+    },
+    "s4.dpr1.to2_5x.nativeDetailMs": {
+      "unit": "ms",
+      "better": "lower",
+      "target": 200,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 50
+      },
+      "budget": "Native detail within 200 ms of the zoom step",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": null,
+          "range": null,
+          "source": "2026-09-23 interactive S4",
+          "note": "never reached; the harness records the 3000 ms observation window"
+        }
+      ]
+    },
+    "s4.dpr1.to3_9x.backingOverNeeded": {
+      "unit": "ratio",
+      "better": "higher",
+      "target": 1,
+      "tolerance": {
+        "rel": 0.05,
+        "abs": 0.02
+      },
+      "budget": "Native detail after a zoom step (backing ÷ needed ≥ 1.0)",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 0.69,
+          "range": null,
+          "source": "2026-09-23 interactive S4"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 0.7,
+          "range": null,
+          "source": "2026-09-23 interactive S4"
+        }
+      ]
+    },
+    "s4.dpr1.to3_9x.nativeDetailMs": {
+      "unit": "ms",
+      "better": "lower",
+      "target": 200,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 50
+      },
+      "budget": "Native detail within 200 ms of the zoom step",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": null,
+          "range": null,
+          "source": "2026-09-23 interactive S4",
+          "note": "never reached; the harness records the 3000 ms observation window"
+        }
+      ]
+    },
+    "s4.dpr1.to7_6x.backingOverNeeded": {
+      "unit": "ratio",
+      "better": "higher",
+      "target": 1,
+      "tolerance": {
+        "rel": 0.05,
+        "abs": 0.02
+      },
+      "budget": "Native detail after a zoom step (backing ÷ needed ≥ 1.0)",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 0.36,
+          "range": null,
+          "source": "2026-09-23 interactive S4"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 0.67,
+          "range": null,
+          "source": "2026-09-23 interactive S4"
+        }
+      ]
+    },
+    "s4.dpr1.to7_6x.nativeDetailMs": {
+      "unit": "ms",
+      "better": "lower",
+      "target": 200,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 50
+      },
+      "budget": "Native detail within 200 ms of the zoom step",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": null,
+          "range": null,
+          "source": "2026-09-23 interactive S4",
+          "note": "never reached; the harness records the 3000 ms observation window"
+        }
+      ]
+    },
+    "s4.dpr2.fitTo2x.textureRefinedAtMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 50
+      },
+      "budget": "tracked",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 476,
+          "range": null,
+          "source": "2026-09-23 interactive S4",
+          "note": "rep 1"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 545,
+          "range": null,
+          "source": "2026-09-23 interactive S4"
+        }
+      ]
+    },
+    "s4.dpr2.fitTo2x.longTaskDuringRefineMs": {
+      "unit": "ms",
+      "better": "lower",
+      "target": 50,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "Long tasks > 50 ms in interaction windows",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 283,
+          "range": null,
+          "source": "2026-09-23 interactive S4",
+          "note": "rep 1"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 264,
+          "range": null,
+          "source": "2026-09-23 interactive S4",
+          "note": "rep 1"
+        }
+      ]
+    },
+    "s4.dpr2.pan.transformFramesPerSecond": {
+      "unit": "fps",
+      "better": "higher",
+      "target": 58,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "Pan at 2×",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 59.8,
+          "range": null,
+          "source": "2026-09-23 interactive S4"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 59.9,
+          "range": null,
+          "source": "2026-09-23 interactive S4"
+        }
+      ]
+    },
+    "s4.dpr2.pan.moveToFrameP95Ms": {
+      "unit": "ms",
+      "better": "lower",
+      "target": 16,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "Pan at 2×, move→frame p95",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 8.4,
+          "range": null,
+          "source": "2026-09-23 interactive S4"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 14.3,
+          "range": null,
+          "source": "2026-09-23 interactive S4"
+        }
+      ]
+    },
+    "s4.dpr2.pan.longTaskCount": {
+      "unit": "n",
+      "better": "lower",
+      "target": 0,
+      "tolerance": {
+        "rel": 0,
+        "abs": 1
+      },
+      "budget": "Pan at 2×, 0 long tasks",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 0,
+          "range": null,
+          "source": "2026-09-23 interactive S4"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 0,
+          "range": null,
+          "source": "2026-09-23 interactive S4"
+        }
+      ]
+    },
+    "s4.dpr1.pan.transformFramesPerSecond": {
+      "unit": "fps",
+      "better": "higher",
+      "target": 58,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "Pan at 2×",
+      "baselines": []
+    },
+    "s4.dpr1.pan.moveToFrameP95Ms": {
+      "unit": "ms",
+      "better": "lower",
+      "target": 16,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "Pan at 2×, move→frame p95",
+      "baselines": []
+    },
+    "s4.dpr1.pan.longTaskCount": {
+      "unit": "n",
+      "better": "lower",
+      "target": 0,
+      "tolerance": {
+        "rel": 0,
+        "abs": 1
+      },
+      "budget": "Pan at 2×, 0 long tasks",
+      "baselines": []
+    },
+    "s5.rotate90a.maxLongTaskMs": {
+      "unit": "ms",
+      "better": "lower",
+      "target": 50,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 50
+      },
+      "budget": "Long tasks > 50 ms (rotate 90°)",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 2181,
+          "range": null,
+          "source": "2026-09-23 interactive S5"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 411,
+          "range": null,
+          "source": "2026-09-23 interactive S5"
+        }
+      ]
+    },
+    "s5.rotate90a.firstRedrawMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 50
+      },
+      "budget": "tracked",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 2260,
+          "range": null,
+          "source": "2026-09-23 interactive S5"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 514,
+          "range": null,
+          "source": "2026-09-23 interactive S5"
+        }
+      ]
+    },
+    "s5.rotate90b.maxLongTaskMs": {
+      "unit": "ms",
+      "better": "lower",
+      "target": 50,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 50
+      },
+      "budget": "Long tasks > 50 ms (rotate 90°)",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 2197,
+          "range": null,
+          "source": "2026-09-23 interactive S5"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 686,
+          "range": null,
+          "source": "2026-09-23 interactive S5"
+        }
+      ]
+    },
+    "s5.rotate90b.firstRedrawMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 50
+      },
+      "budget": "tracked",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 2238,
+          "range": null,
+          "source": "2026-09-23 interactive S5"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 726,
+          "range": null,
+          "source": "2026-09-23 interactive S5"
+        }
+      ]
+    },
+    "s5.applyCrop.maxLongTaskMs": {
+      "unit": "ms",
+      "better": "lower",
+      "target": 50,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 50
+      },
+      "budget": "Long tasks > 50 ms (apply crop)",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 1990,
+          "range": [
+            1871,
+            2083
+          ],
+          "source": "2026-09-23 interactive S5"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 1310,
+          "range": null,
+          "source": "2026-09-23 interactive S5"
+        }
+      ]
+    },
+    "s5.applyCrop.positiveDrawnMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 50
+      },
+      "budget": "tracked",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 3263,
+          "range": [
+            3194,
+            4001
+          ],
+          "source": "2026-09-23 interactive S5"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 1734,
+          "range": [
+            565,
+            2638
+          ],
+          "source": "2026-09-23 interactive S5"
+        }
+      ]
+    },
+    "s5.enterCrop.firstDrawMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "tracked (crop mode enter)",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 30,
+          "range": null,
+          "source": "2026-09-23 interactive S5"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 13,
+          "range": null,
+          "source": "2026-09-23 interactive S5"
+        }
+      ]
+    },
+    "s5.straighten.releaseToPreviewMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "tracked (straighten)",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 35,
+          "range": [
+            34,
+            44
+          ],
+          "source": "2026-09-23 interactive S5"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 33,
+          "range": null,
+          "source": "2026-09-23 interactive S5"
+        }
+      ]
+    },
+    "s5.edgeDrag.overlayFps": {
+      "unit": "fps",
+      "better": "higher",
+      "target": 58,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "Crop overlay frames",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 59.9,
+          "range": null,
+          "source": "2026-09-23 interactive S5"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 59.9,
+          "range": null,
+          "source": "2026-09-23 interactive S5"
+        }
+      ]
+    },
+    "s5.*.longTaskCount": {
+      "unit": "n",
+      "better": "lower",
+      "target": 0,
+      "tolerance": {
+        "rel": 0,
+        "abs": 1
+      },
+      "budget": "Long tasks > 50 ms in interaction windows",
+      "baselines": []
+    },
+    "s5.*.maxLongTaskMs": {
+      "unit": "ms",
+      "better": "lower",
+      "target": 50,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 50
+      },
+      "budget": "Long tasks > 50 ms in interaction windows",
+      "baselines": []
+    },
+    "s1.firstPositiveVisibleMs": {
+      "unit": "ms",
+      "better": "lower",
+      "target": 2000,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 50
+      },
+      "budget": "First photo (first positive visible after import)",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 13332,
+          "range": [
+            13135,
+            13553
+          ],
+          "source": "2026-09-23 interactive S1"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 5734,
+          "range": [
+            5706,
+            5776
+          ],
+          "source": "2026-09-23 interactive S1"
+        }
+      ]
+    },
+    "s1.firstPixelsDrawnMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 50
+      },
+      "budget": "tracked",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 9074,
+          "range": [
+            9041,
+            9420
+          ],
+          "source": "2026-09-23 interactive S1"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 1664,
+          "range": [
+            1663,
+            1743
+          ],
+          "source": "2026-09-23 interactive S1"
+        }
+      ]
+    },
+    "s1.firstPhotoVisibleMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 50
+      },
+      "budget": "tracked",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 12349,
+          "range": [
+            12319,
+            12749
+          ],
+          "source": "2026-09-23 interactive S1"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 4505,
+          "range": [
+            4484,
+            4576
+          ],
+          "source": "2026-09-23 interactive S1"
+        }
+      ]
+    },
+    "s1.readyMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 50
+      },
+      "budget": "tracked",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 13220,
+          "range": null,
+          "source": "2026-09-23 interactive S1"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 5726,
+          "range": null,
+          "source": "2026-09-23 interactive S1"
+        }
+      ]
+    },
+    "s1.settledMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 50
+      },
+      "budget": "tracked",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 19317,
+          "range": [
+            18433,
+            20394
+          ],
+          "source": "2026-09-23 interactive S1"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 13912,
+          "range": null,
+          "source": "2026-09-23 interactive S1"
+        }
+      ]
+    },
+    "s1.changeToLibrawOpenMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "tracked",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 183,
+          "range": null,
+          "source": "2026-09-23 interactive S1"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 44,
+          "range": null,
+          "source": "2026-09-23 interactive S1"
+        }
+      ]
+    },
+    "s1.longTaskCount": {
+      "unit": "n",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0,
+        "abs": 1
+      },
+      "budget": "tracked (S1 windows are not budgeted)",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 6,
+          "range": null,
+          "source": "2026-09-23 interactive S1"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 6,
+          "range": null,
+          "source": "2026-09-23 interactive S1"
+        }
+      ]
+    },
+    "s1.maxLongTaskMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 50
+      },
+      "budget": "tracked",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 347,
+          "range": null,
+          "source": "2026-09-23 interactive S1"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 483,
+          "range": null,
+          "source": "2026-09-23 interactive S1"
+        }
+      ]
+    },
+    "*.memory.rendererPeakMB": {
+      "unit": "MB",
+      "better": "lower",
+      "target": 6144,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 100
+      },
+      "budget": "Renderer peak phys_footprint, any scenario",
+      "baselines": []
+    },
+    "s1.memory.rendererPeakMB": {
+      "unit": "MB",
+      "better": "lower",
+      "target": 6144,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 100
+      },
+      "budget": "Renderer peak phys_footprint, any scenario",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 2830,
+          "range": [
+            2607,
+            2943
+          ],
+          "source": "2026-09-23 interactive S1"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 1664,
+          "range": null,
+          "source": "2026-09-23 interactive S1"
+        }
+      ]
+    },
+    "s6.memory.rendererPeakMB": {
+      "unit": "MB",
+      "better": "lower",
+      "target": 6144,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 100
+      },
+      "budget": "Renderer peak phys_footprint, any scenario",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617–628.DNG (12 files)",
+          "route": "positive",
+          "value": 5222,
+          "range": [
+            5207,
+            5267
+          ],
+          "source": "2026-09-23 roll S6"
+        }
+      ]
+    },
+    "s7.memory.rendererPeakMB": {
+      "unit": "MB",
+      "better": "lower",
+      "target": 6144,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 100
+      },
+      "budget": "Renderer peak phys_footprint, any scenario",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617–628.DNG (12 files)",
+          "route": "positive",
+          "value": null,
+          "range": [
+            7900,
+            9400
+          ],
+          "source": "2026-09-23 roll S7",
+          "note": "rapid switching; runs r4 and r3"
+        }
+      ]
+    },
+    "s9.memory.rendererPeakMB": {
+      "unit": "MB",
+      "better": "lower",
+      "target": 6144,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 100
+      },
+      "budget": "Renderer peak phys_footprint, any scenario",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617–628.DNG (12 files)",
+          "route": "positive",
+          "value": null,
+          "range": [
+            8282,
+            8798
+          ],
+          "source": "2026-09-23 roll S9",
+          "note": "ZIP export"
+        }
+      ]
+    },
+    "s1.memory.gpuAfterMB": {
+      "unit": "MB",
+      "better": "lower",
+      "target": 512,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 100
+      },
+      "budget": "GPU process after import, no AI tool in use",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 1813,
+          "range": null,
+          "source": "2026-09-23 interactive S1",
+          "note": "peak 2391; 1.66 GB of it is the pre-loaded MI-GAN model"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 1804,
+          "range": null,
+          "source": "2026-09-23 interactive S1"
+        }
+      ]
+    },
+    "s1.memory.rendererAfterMB": {
+      "unit": "MB",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 100
+      },
+      "budget": "tracked",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 1597,
+          "range": null,
+          "source": "2026-09-23 interactive S1"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 1385,
+          "range": null,
+          "source": "2026-09-23 interactive S1"
+        }
+      ]
+    },
+    "s9.memory.retainedAfterExportMB": {
+      "unit": "MB",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 100
+      },
+      "budget": "tracked",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 6300,
+          "range": null,
+          "source": "2026-09-23 roll S9",
+          "note": "against about 2000 before the export"
+        }
+      ]
+    },
+    "s6.firstPositiveVisibleMs": {
+      "unit": "ms",
+      "better": "lower",
+      "target": 2000,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 50
+      },
+      "budget": "First photo (12-file roll)",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617–628.DNG (12 files)",
+          "route": "positive",
+          "value": 13600,
+          "range": [
+            13500,
+            13800
+          ],
+          "source": "2026-09-23 roll S6"
+        }
+      ]
+    },
+    "s6.roll.settingsAllMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1000
+      },
+      "budget": "tracked",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617–628.DNG (12 files)",
+          "route": "positive",
+          "value": 173800,
+          "range": [
+            170800,
+            176700
+          ],
+          "source": "2026-09-23 roll S6"
+        }
+      ]
+    },
+    "s6.roll.thumbnailsAllMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1000
+      },
+      "budget": "tracked",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617–628.DNG (12 files)",
+          "route": "positive",
+          "value": 277000,
+          "range": [
+            273500,
+            282400
+          ],
+          "source": "2026-09-23 roll S6"
+        }
+      ]
+    },
+    "s6.roll.librawDecodes": {
+      "unit": "n",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0,
+        "abs": 1
+      },
+      "budget": "tracked",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617–628.DNG (12 files)",
+          "route": "positive",
+          "value": 24,
+          "range": [
+            23,
+            24
+          ],
+          "source": "2026-09-23 roll S6"
+        }
+      ]
+    },
+    "s6.roll.coresUsed": {
+      "unit": "cores",
+      "better": "higher",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 0.1
+      },
+      "budget": "tracked",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617–628.DNG (12 files)",
+          "route": "positive",
+          "value": 1.04,
+          "range": null,
+          "source": "2026-09-23 roll S6",
+          "note": "profiled run p1"
+        }
+      ]
+    },
+    "s6.dragDuring.coreExposure.updatesPerSecond": {
+      "unit": "1/s",
+      "better": "higher",
+      "target": 55,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "Brightness redraw rate",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617–628.DNG (12 files)",
+          "route": "positive",
+          "value": 25.9,
+          "range": [
+            22.7,
+            30.3
+          ],
+          "source": "2026-09-23 roll S6"
+        }
+      ]
+    },
+    "s6.dragDuring.coreExposure.maxLongTaskMs": {
+      "unit": "ms",
+      "better": "lower",
+      "target": 50,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 50
+      },
+      "budget": "Long tasks > 50 ms in interaction windows",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617–628.DNG (12 files)",
+          "route": "positive",
+          "value": 174,
+          "range": [
+            0,
+            665
+          ],
+          "source": "2026-09-23 roll S6"
+        }
+      ]
+    },
+    "s6.dragAfter.coreExposure.updatesPerSecond": {
+      "unit": "1/s",
+      "better": "higher",
+      "target": 55,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "Brightness redraw rate",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617–628.DNG (12 files)",
+          "route": "positive",
+          "value": 29.9,
+          "range": [
+            29.3,
+            30.6
+          ],
+          "source": "2026-09-23 roll S6"
+        }
+      ]
+    },
+    "s6.dragDuring.cyan.maxLongTaskMs": {
+      "unit": "ms",
+      "better": "lower",
+      "target": 50,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 50
+      },
+      "budget": "Long tasks > 50 ms in interaction windows",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617–628.DNG (12 files)",
+          "route": "positive",
+          "value": 384,
+          "range": [
+            248,
+            507
+          ],
+          "source": "2026-09-23 roll S6"
+        }
+      ]
+    },
+    "s6.*.*.longTaskCount": {
+      "unit": "n",
+      "better": "lower",
+      "target": 0,
+      "tolerance": {
+        "rel": 0,
+        "abs": 1
+      },
+      "budget": "Long tasks > 50 ms in interaction windows",
+      "baselines": []
+    },
+    "s7.warm1Back.firstDisplayPositiveMs": {
+      "unit": "ms",
+      "better": "lower",
+      "target": 100,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "Warm switch (1-back), first display-resolution positive",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617–628.DNG (12 files)",
+          "route": "positive",
+          "value": 77.6,
+          "range": [
+            72.8,
+            349
+          ],
+          "source": "2026-09-23 roll S7"
+        },
+        {
+          "ref": "1703835",
+          "fixture": "L1000617–624.DNG (8 files)",
+          "route": "positive",
+          "value": null,
+          "range": [
+            76,
+            477
+          ],
+          "source": "2026-09-23 interactive S6 session"
+        }
+      ]
+    },
+    "s7.coldAnalysed.firstPixelsMs": {
+      "unit": "ms",
+      "better": "lower",
+      "target": 300,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 50
+      },
+      "budget": "Cold switch, provisional pixels",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617–628.DNG (12 files)",
+          "route": "positive",
+          "value": 9672,
+          "range": [
+            9472,
+            10445
+          ],
+          "source": "2026-09-23 roll S7"
+        }
+      ]
+    },
+    "s7.coldUnanalysed.firstPixelsMs": {
+      "unit": "ms",
+      "better": "lower",
+      "target": 300,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 50
+      },
+      "budget": "Cold switch, provisional pixels",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617–624.DNG (8 files)",
+          "route": "positive",
+          "value": null,
+          "range": [
+            8694,
+            10024
+          ],
+          "source": "2026-09-23 interactive S6 session",
+          "note": "cold switch during analysis"
+        }
+      ]
+    },
+    "s7.coldAnalysed.longTaskCount": {
+      "unit": "n",
+      "better": "lower",
+      "target": 0,
+      "tolerance": {
+        "rel": 0,
+        "abs": 1
+      },
+      "budget": "Long tasks > 50 ms (S7 window: keypress until ready)",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617–628.DNG (12 files)",
+          "route": "positive",
+          "value": 4,
+          "range": null,
+          "source": "2026-09-23 roll S7",
+          "note": "max 416 ms"
+        }
+      ]
+    },
+    "s7.rapid5.firstPixelsMs": {
+      "unit": "ms",
+      "better": "lower",
+      "target": 300,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 50
+      },
+      "budget": "5 presses in 0.8 s, target provisional pixels",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617–628.DNG (12 files)",
+          "route": "positive",
+          "value": 6968,
+          "range": [
+            6600,
+            19416
+          ],
+          "source": "2026-09-23 roll S7"
+        }
+      ]
+    },
+    "s7.rapid5.firstDisplayPositiveMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 50
+      },
+      "budget": "tracked: target positive after 5 presses in 0.8 s",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617–628.DNG (12 files)",
+          "route": "positive",
+          "value": 17376,
+          "range": [
+            12879,
+            26265
+          ],
+          "source": "2026-09-23 roll S7"
+        }
+      ]
+    },
+    "s7.rapid5.librawDecodes": {
+      "unit": "n",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0,
+        "abs": 1
+      },
+      "budget": "tracked",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617–628.DNG (12 files)",
+          "route": "positive",
+          "value": 5,
+          "range": null,
+          "source": "2026-09-23 roll S7"
+        }
+      ]
+    },
+    "s7.twoBack.firstDisplayPositiveMs": {
+      "unit": "ms",
+      "better": "lower",
+      "target": 100,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "Warm switch",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617–628.DNG (12 files)",
+          "route": "positive",
+          "value": 4851,
+          "range": [
+            75,
+            9873
+          ],
+          "source": "2026-09-23 roll S7"
+        }
+      ]
+    },
+    "s7.*.longTaskCount": {
+      "unit": "n",
+      "better": "lower",
+      "target": 0,
+      "tolerance": {
+        "rel": 0,
+        "abs": 1
+      },
+      "budget": "Long tasks > 50 ms (keypress until ready)",
+      "baselines": []
+    },
+    "s8.scrollNormal.fps": {
+      "unit": "fps",
+      "better": "higher",
+      "target": 58,
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "tracked at 60 fps",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617–628.DNG (12 files)",
+          "route": "positive",
+          "value": 59.75,
+          "range": [
+            59.7,
+            59.8
+          ],
+          "source": "2026-09-23 roll S8"
+        }
+      ]
+    },
+    "s8.syncColours.allFinalMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1000
+      },
+      "budget": "tracked",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617–628.DNG (12 files)",
+          "route": "positive",
+          "value": null,
+          "range": [
+            92400,
+            95900
+          ],
+          "source": "2026-09-23 roll S8"
+        }
+      ]
+    },
+    "s8.thumbnailScale": {
+      "unit": "ratio",
+      "better": "higher",
+      "tolerance": {
+        "rel": 0.05,
+        "abs": 0.02
+      },
+      "budget": "tracked",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617–628.DNG (12 files)",
+          "route": "positive",
+          "value": 0.47,
+          "range": null,
+          "source": "2026-09-23 roll S8",
+          "note": "144 px thumbnails drawn at 304 device px (2.1× upscaled)"
+        }
+      ]
+    },
+    "s8.activeTileReencodesPerDrag": {
+      "unit": "n",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0,
+        "abs": 1
+      },
+      "budget": "tracked",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617–628.DNG (12 files)",
+          "route": "positive",
+          "value": 85,
+          "range": [
+            85,
+            93
+          ],
+          "source": "2026-09-23 roll S8"
+        }
+      ]
+    },
+    "s8.*.longTaskCount": {
+      "unit": "n",
+      "better": "lower",
+      "target": 0,
+      "tolerance": {
+        "rel": 0,
+        "abs": 1
+      },
+      "budget": "Long tasks > 50 ms in interaction windows",
+      "baselines": []
+    },
+    "s9.single.tiff16.imported.totalMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 50
+      },
+      "budget": "tracked",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 3000,
+          "range": [
+            2700,
+            4700
+          ],
+          "source": "2026-09-23 roll S9"
+        }
+      ]
+    },
+    "s9.single.tiff16.imported.maxLongTaskMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 50
+      },
+      "budget": "tracked",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 1319,
+          "range": [
+            1277,
+            1936
+          ],
+          "source": "2026-09-23 roll S9"
+        }
+      ]
+    },
+    "s9.single.jpegGain.imported.totalMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 50
+      },
+      "budget": "tracked",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 11500,
+          "range": [
+            10500,
+            11700
+          ],
+          "source": "2026-09-23 roll S9"
+        }
+      ]
+    },
+    "s9.single.jpegGain.imported.maxLongTaskMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 50
+      },
+      "budget": "tracked",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 6957,
+          "range": [
+            6945,
+            7080
+          ],
+          "source": "2026-09-23 roll S9"
+        }
+      ]
+    },
+    "s9.single.jpegNoGain.imported.totalMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 50
+      },
+      "budget": "tracked",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 1400,
+          "range": [
+            1300,
+            1500
+          ],
+          "source": "2026-09-23 roll S9"
+        }
+      ]
+    },
+    "s9.zip.tiff16.msPerFile": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 50
+      },
+      "budget": "tracked",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617–628.DNG (12 files)",
+          "route": "positive",
+          "value": 15500,
+          "range": null,
+          "source": "2026-09-23 roll S9",
+          "note": "3 non-current files, lanes = 1"
+        }
+      ]
+    },
+    "s9.zip.jpegGain.msPerFile": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 50
+      },
+      "budget": "tracked",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617–628.DNG (12 files)",
+          "route": "positive",
+          "value": 21100,
+          "range": null,
+          "source": "2026-09-23 roll S9",
+          "note": "3 non-current files, lanes = 1"
+        }
+      ]
+    },
+    "s9.single.tiff16.imported.bitDepth": {
+      "unit": "bits",
+      "better": "higher",
+      "target": 16,
+      "tolerance": {
+        "rel": 0,
+        "abs": 0
+      },
+      "budget": "TIFF16 must really be 16-bit",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "L1000617.DNG",
+          "route": "positive",
+          "value": 16,
+          "range": null,
+          "source": "2026-09-23 roll S9",
+          "note": "x1 run; r1–r3 exported 8-bit by a harness artefact"
+        }
+      ]
+    },
+    "h.stalls": {
+      "unit": "n",
+      "better": "lower",
+      "target": 0,
+      "tolerance": {
+        "rel": 0,
+        "abs": 1
+      },
+      "budget": "Page stalls (> NC_PERF_HANG_S)",
+      "baselines": [
+        {
+          "ref": "1703835",
+          "fixture": "_DSC3111.NEF",
+          "route": "color",
+          "value": 2,
+          "range": null,
+          "source": "2026-09-23 interactive anomalies",
+          "note": "two >5-min stalls, not reproduced in a 12-drag repro"
+        }
+      ]
+    },
+    "s9.single.png16.*.encodeMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 100
+      },
+      "budget": "#257 imageDataToBlob png/16 on a 60 MP frame at level 6",
+      "target": 5000
+    },
+    "s9.zip.png16.lanes1.encodeMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 100
+      },
+      "budget": "#257 PNG16 per-frame encode, one lane",
+      "target": 5000
+    },
+    "s9.zip.png16.lanes1.msPerFile": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 100
+      },
+      "budget": "#257 one-lane PNG16 batch throughput; record against same-session base",
+      "acceptance": "At least 10000 ms per-frame improvement on the 10-frame 60 MP acceptance roll"
+    },
+    "s9.zip.png16.lanes3.msPerFile": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.05,
+        "abs": 0
+      },
+      "budget": "#257 PNG16 batch at >=3 observed lanes: no more than 5 percent slowdown"
+    },
+    "s9.zip.dng.linearDngBuildMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "#257 linearDngBatch build and Blob construction; actual trace duration per frame",
+      "target": 400
+    },
+    "s9.zip.dng.linearDngTotalMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "#257 linearDngBatch build and Blob construction; actual trace duration per frame",
+      "target": 500
+    },
+    "s9.zip.dng.blobMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "#257 linearDngBatch build and Blob construction; actual trace duration per frame",
+      "target": 50
+    },
+    "s9.single.*.*.desktopWriteMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "#257 Tauri begin_export_write to finish_export_write resolution",
+      "acceptance": "At least 2x faster than same-session base; target head/base <=0.5"
+    },
+    "s9.zip.*.desktopWriteMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "#257 Tauri begin_export_write to finish_export_write resolution",
+      "acceptance": "At least 2x faster than same-session base; target head/base <=0.5"
+    },
+    "s9.zip.png16.*.desktopWriteMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "#257 Tauri begin_export_write to finish_export_write resolution",
+      "acceptance": "At least 2x faster than same-session base; target head/base <=0.5"
+    },
+    "dust-brush.releaseToRepairedP95Ms": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 2
+      },
+      "budget": "#259 60 MP, AI off, Show mask on, 20 strokes: mouseup to painted repair",
+      "target": 150
+    },
+    "dust-brush.maxLongTaskMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#259 per-stroke main-thread long task ceiling",
+      "target": 50
+    },
+    "dust-brush.postMessageMaxBytes": {
+      "unit": "bytes",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0,
+        "abs": 0
+      },
+      "budget": "#259 no per-stroke postMessage of 16 MiB or more; binary lengths plus metadata estimate",
+      "target": 16777215
+    },
+    "dust-brush.stroke0.workerMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#259 local brush worker time",
+      "target": 20
+    },
+    "dust-brush.stroke1.workerMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#259 local brush worker time",
+      "target": 20
+    },
+    "dust-brush.stroke2.workerMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#259 local brush worker time",
+      "target": 20
+    },
+    "dust-brush.stroke3.workerMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#259 local brush worker time",
+      "target": 20
+    },
+    "dust-brush.stroke4.workerMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#259 local brush worker time",
+      "target": 20
+    },
+    "dust-brush.stroke5.workerMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#259 local brush worker time",
+      "target": 20
+    },
+    "dust-brush.stroke6.workerMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#259 local brush worker time",
+      "target": 20
+    },
+    "dust-brush.stroke7.workerMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#259 local brush worker time",
+      "target": 20
+    },
+    "dust-brush.stroke8.workerMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#259 local brush worker time",
+      "target": 20
+    },
+    "dust-brush.stroke9.workerMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#259 local brush worker time",
+      "target": 20
+    },
+    "dust-brush.stroke10.workerMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#259 local brush worker time",
+      "target": 20
+    },
+    "dust-brush.stroke11.workerMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#259 local brush worker time",
+      "target": 20
+    },
+    "dust-brush.stroke12.workerMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#259 local brush worker time",
+      "target": 20
+    },
+    "dust-brush.stroke13.workerMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#259 local brush worker time",
+      "target": 20
+    },
+    "dust-brush.stroke14.workerMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#259 local brush worker time",
+      "target": 20
+    },
+    "dust-brush.stroke15.workerMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#259 local brush worker time",
+      "target": 20
+    },
+    "dust-brush.stroke16.workerMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#259 local brush worker time",
+      "target": 20
+    },
+    "dust-brush.stroke17.workerMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#259 local brush worker time",
+      "target": 20
+    },
+    "dust-brush.stroke18.workerMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#259 local brush worker time",
+      "target": 20
+    },
+    "dust-brush.stroke19.workerMs": {
+      "unit": "ms",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#259 local brush worker time",
+      "target": 20
+    },
+    "s2.*.*.ui.flushes": {
+      "unit": "count",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#261 Studio flushes in measured drag window"
+    },
+    "s2.*.*.ui.lastFlushWrites": {
+      "unit": "count",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#261 DOM writes in last Studio flush"
+    },
+    "s2.*.*.ui.writes": {
+      "unit": "count",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#261 total DOM writes in measured drag window"
+    },
+    "s2.*.*.ui.fileListRenders": {
+      "unit": "count",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0,
+        "abs": 0
+      },
+      "budget": "#261 file-list renders during a slider or curve drag",
+      "target": 0
+    },
+    "s3.*.*.ui.flushes": {
+      "unit": "count",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#261 Studio flushes in measured drag window"
+    },
+    "s3.*.*.ui.lastFlushWrites": {
+      "unit": "count",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#261 DOM writes in last Studio flush"
+    },
+    "s3.*.*.ui.writes": {
+      "unit": "count",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#261 total DOM writes in measured drag window"
+    },
+    "s3.*.*.ui.fileListRenders": {
+      "unit": "count",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0,
+        "abs": 0
+      },
+      "budget": "#261 file-list renders during a slider or curve drag",
+      "target": 0
+    },
+    "overlay-idle.runningAnimations": {
+      "unit": "count",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0,
+        "abs": 0
+      },
+      "budget": "#261 hidden loading overlays have no running animations after export",
+      "target": 0
+    },
+    "loupe.mainBusyPct": {
+      "unit": "%",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#261 live fake-camera loupe main-thread busy time",
+      "target": 10
+    },
+    "s2.*.cpu.*.ui.flushes": {
+      "unit": "count",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#261 Studio flushes in measured drag window"
+    },
+    "s2.*.cpu.*.ui.lastFlushWrites": {
+      "unit": "count",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#261 DOM writes in last Studio flush"
+    },
+    "s2.*.cpu.*.ui.writes": {
+      "unit": "count",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0.1,
+        "abs": 1
+      },
+      "budget": "#261 total DOM writes in measured drag window"
+    },
+    "s2.*.cpu.*.ui.fileListRenders": {
+      "unit": "count",
+      "better": "lower",
+      "tolerance": {
+        "rel": 0,
+        "abs": 0
+      },
+      "budget": "#261 file-list renders during a slider or curve drag",
+      "target": 0
+    }
+  }
+}

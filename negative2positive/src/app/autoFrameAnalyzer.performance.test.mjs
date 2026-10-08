@@ -77,6 +77,9 @@ const sort = Array.prototype.sort;
 Array.prototype.sort = function (...args) { sorts++; return sort.apply(this, args); };
 try {
   assert.equal(lineEvidence(image, { x: 100, y: 35 }, { x: 530, y: 35 }), 0);
-  assert.equal(sorts, 1, 'flat non-border skips the eight base-variation sorts');
+  // #251: the flat line stops once 11 deltas are unsupported, and the medians
+  // sort typed scratch buffers, never an Array.
+  for (let i = 0; i < 50; i++) lineEvidence(image, { x: 110 + i % 21, y: 90 + i % 11 }, { x: 510 + i % 31, y: 90 + i % 11 });
+  assert.equal(sorts, 0, 'no Array.prototype.sort in lineEvidence');
 } finally { Array.prototype.sort = sort; }
 console.log('autoFrame performance: exact cached candidates, bounded reuse, no cross-image reuse and equivalent early rejection passed');

@@ -5,8 +5,19 @@ use serde::Serialize;
 use std::{collections::HashMap, fs, io::{Read, Seek, SeekFrom}, path::{Path, PathBuf}, sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant, UNIX_EPOCH}};
 use tauri::{Emitter, State};
 
+// Must equal IMPORT_CHUNK_BYTES in desktopImportReader.js (its test reads this
+// line): a 90 MB DNG takes 12 reads instead of about 90.
+const IMPORT_CHUNK_LIMIT: u64 = 8 * 1024 * 1024;
+
 #[derive(Default)]
 pub struct ImportWatch { active: Mutex<Option<Active>> }
+impl ImportWatch {
+    /// Ends the active watch, if any. A reloaded page no longer listens for
+    /// its arrivals (#241).
+    pub fn stop(&self) {
+        *self.active.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+}
 struct Active { directory: PathBuf, stop: Arc<AtomicBool>, session: String }
 impl Drop for Active { fn drop(&mut self) { self.stop.store(true, Ordering::Relaxed); } }
 #[derive(Clone, Serialize)]
@@ -79,15 +90,23 @@ pub fn watch_import_folder(app: tauri::AppHandle, state: State<'_, ImportWatch>,
 }
 #[tauri::command]
 pub fn stop_watch_import_folder(state: State<'_, ImportWatch>) -> Result<(), String> {
-    *state.active.lock().map_err(|e| e.to_string())? = None; Ok(())
+    state.stop(); Ok(())
 }
+// Async, and the read runs on the blocking pool: a synchronous command would
+// run on the native main thread and stall the window for every chunk.
 #[tauri::command]
-pub fn read_import_file(state: State<'_, ImportWatch>, path: String, session: String, offset: u64, expected_size: u64, modified: String) -> Result<tauri::ipc::Response, String> {
-    let grant = state.active.lock().map_err(|e| e.to_string())?;
-    let active = grant.as_ref().ok_or("No active import folder")?;
+pub async fn read_import_file(state: State<'_, ImportWatch>, path: String, session: String, offset: u64, expected_size: u64, modified: String) -> Result<tauri::ipc::Response, String> {
+    let directory = {
+        let grant = state.active.lock().map_err(|e| e.to_string())?;
+        let active = grant.as_ref().ok_or("No active import folder")?;
+        if session != active.session { return Err("Import path is outside the active grant".into()); }
+        active.directory.clone()
+    };
     let path = PathBuf::from(path);
-    if session != active.session || !scoped(&active.directory, &path) { return Err("Import path is outside the active grant".into()); }
-    let bytes = read_scoped_chunk(&active.directory, &path, offset, expected_size, &modified)?;
+    let bytes = tauri::async_runtime::spawn_blocking(move || {
+        if !scoped(&directory, &path) { return Err("Import path is outside the active grant".to_string()); }
+        read_scoped_chunk(&directory, &path, offset, expected_size, &modified)
+    }).await.map_err(|e| format!("import read task failed: {e}"))??;
     Ok(tauri::ipc::Response::new(bytes))
 }
 // Check the opened file as well as the pathname, so replacing a file with a
@@ -105,7 +124,7 @@ fn read_scoped_chunk(directory: &Path, path: &Path, offset: u64, expected_size: 
     if !opened.is_file() || opened.len() != expected_size || opened.modified().ok() != before.modified().ok()
         || !scoped(directory, path) || fingerprint(path) != Some(expected.clone()) { return Err("Import file changed while opening".into()); }
     file.seek(SeekFrom::Start(offset)).map_err(|e| e.to_string())?;
-    let length = (expected_size - offset).min(1024 * 1024) as usize;
+    let length = (expected_size - offset).min(IMPORT_CHUNK_LIMIT) as usize;
     let mut bytes = vec![0; length]; file.read_exact(&mut bytes).map_err(|e| e.to_string())?;
     if fingerprint(path) != Some(expected) || file.metadata().map_err(|e| e.to_string())?.modified().ok() != opened.modified().ok() { return Err("Import file changed while reading".into()); }
     Ok(bytes)
@@ -115,13 +134,20 @@ mod tests {
     use super::*;
     #[test] fn ignores_partial_and_hidden() { for p in [".scan.jpg", "scan.jpg.part", "scan.tmp", "~scan.png"] { assert!(!supported(Path::new(p))); } assert!(supported(Path::new("SCAN.HEIC"))); }
     #[test] fn waits_for_stable_size_and_mtime() { let a = (4, "1".into()); assert!(!stable(&a, &a, Duration::from_millis(999))); assert!(stable(&a, &a, Duration::from_secs(1))); assert!(!stable(&a, &(5, "1".into()), Duration::from_secs(2))); assert!(!stable(&a, &(4, "2".into()), Duration::from_secs(2))); }
+    #[test] fn stop_ends_the_active_watch() {
+        let watch = ImportWatch::default(); let stop = Arc::new(AtomicBool::new(false));
+        *watch.active.lock().unwrap() = Some(Active { directory: PathBuf::new(), session: "a".into(), stop: stop.clone() });
+        watch.stop(); assert!(stop.load(Ordering::Relaxed)); assert!(watch.active.lock().unwrap().is_none());
+        watch.stop();
+    }
     #[test] fn dropped_grant_stops_watch() { let stop = Arc::new(AtomicBool::new(false)); { let _active = Active { directory: PathBuf::new(), session: "a".into(), stop: stop.clone() }; } assert!(stop.load(Ordering::Relaxed)); }
     #[test] fn chunks_reject_changed_files_and_symlinks() {
         let dir = std::env::temp_dir().join(format!("nc-import-chunks-{}", std::process::id())); fs::create_dir_all(&dir).unwrap();
         let root = dir.canonicalize().unwrap(); let path = root.join("scan.jpg");
-        fs::write(&path, vec![7; 1024 * 1024 + 17]).unwrap(); let fp = fingerprint(&path).unwrap();
-        assert_eq!(read_scoped_chunk(&root, &path, 0, fp.0, &fp.1).unwrap().len(), 1024 * 1024);
-        assert_eq!(read_scoped_chunk(&root, &path, 1024 * 1024, fp.0, &fp.1).unwrap(), vec![7; 17]);
+        let limit = IMPORT_CHUNK_LIMIT as usize; assert_eq!(limit, 8 * 1024 * 1024);
+        fs::write(&path, vec![7; limit + 17]).unwrap(); let fp = fingerprint(&path).unwrap();
+        assert_eq!(read_scoped_chunk(&root, &path, 0, fp.0, &fp.1).unwrap().len(), limit);
+        assert_eq!(read_scoped_chunk(&root, &path, limit as u64, fp.0, &fp.1).unwrap(), vec![7; 17]);
         assert!(read_scoped_chunk(&root, &path, fp.0 + 1, fp.0, &fp.1).is_err());
         fs::write(&path, [2]).unwrap(); assert!(read_scoped_chunk(&root, &path, 0, fp.0, &fp.1).is_err());
         #[cfg(unix)] { let link = root.join("link.jpg"); std::os::unix::fs::symlink(&path, &link).unwrap(); let fp = fingerprint(&path).unwrap(); assert!(read_scoped_chunk(&root, &link, 0, fp.0, &fp.1).is_err()); }

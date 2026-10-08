@@ -3,9 +3,11 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
-const CHUNK_LIMIT: usize = 1024 * 1024;
+// Must equal EXPORT_CHUNK_BYTES in desktopExportWriter.js (its test reads this
+// line): a larger JS chunk fails every export, a smaller one wastes IPC trips.
+const CHUNK_LIMIT: usize = 8 * 1024 * 1024;
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 pub struct PendingExport {
@@ -49,7 +51,7 @@ impl PendingExport {
         Ok(())
     }
 
-    pub fn finish(mut self) -> Result<PathBuf, String> {
+    fn finish(&mut self) -> Result<PathBuf, String> {
         if self.written != self.expected { return Err("export is incomplete".into()); }
         self.file.take().ok_or("export is closed")?.sync_all()
             .map_err(|err| format!("sync export failed: {err}"))?;
@@ -64,8 +66,27 @@ impl PendingExport {
     }
 }
 
+/// One stream taken out of `ExportStreams` (to finish or abort). Dropping it
+/// without `finish` removes the staging file and keeps the target intact.
+pub struct TakenExport(Arc<Mutex<PendingExport>>);
+
+impl TakenExport {
+    /// Waits for an append still writing to this stream, then syncs and
+    /// renames the staging file over the target.
+    pub fn finish(self) -> Result<PathBuf, String> {
+        self.0.lock().map_err(|_| "export state unavailable")?.finish()
+    }
+}
+
+/// Pending exports by id. The map lock is held only to find a stream; each
+/// stream has its own lock, so one export's disk write never blocks another
+/// export's begin, append, finish or abort.
 #[derive(Default)]
-pub struct ExportStreams(Mutex<HashMap<String, PendingExport>>);
+pub struct ExportStreams(Mutex<HashMap<String, Entry>>);
+
+// The target is kept beside the stream so `begin` can refuse a destination
+// that is being written without waiting on that stream's lock.
+struct Entry { target: PathBuf, stream: Arc<Mutex<PendingExport>> }
 
 impl ExportStreams {
     pub fn begin(&self, target: &Path, expected: u64) -> Result<String, String> {
@@ -75,19 +96,41 @@ impl ExportStreams {
             return Err("export destination is already being written".into());
         }
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed).to_string();
-        streams.insert(id.clone(), PendingExport::create(target.to_path_buf(), expected, &id)?);
+        let pending = PendingExport::create(target.to_path_buf(), expected, &id)?;
+        streams.insert(id.clone(), Entry { target: target.to_path_buf(), stream: Arc::new(Mutex::new(pending)) });
         Ok(id)
     }
 
+    fn stream(&self, id: &str) -> Result<Arc<Mutex<PendingExport>>, String> {
+        self.0.lock().map_err(|_| "export state unavailable")?.get(id).map(|entry| entry.stream.clone()).ok_or("unknown export".into())
+    }
+
     pub fn append(&self, id: &str, bytes: &[u8]) -> Result<(), String> {
-        let mut streams = self.0.lock().map_err(|_| "export state unavailable")?;
-        let result = streams.get_mut(id).ok_or("unknown export")?.append(bytes);
-        if result.is_err() { streams.remove(id); }
+        let stream = self.stream(id)?;
+        let result = stream.lock().map_err(|_| "export state unavailable")?.append(bytes);
+        if result.is_err() {
+            // The staging file goes with the last reference to the stream.
+            if let Ok(mut streams) = self.0.lock() { streams.remove(id); }
+        }
         result
     }
 
-    pub fn take(&self, id: &str) -> Result<PendingExport, String> {
-        self.0.lock().map_err(|_| "export state unavailable")?.remove(id).ok_or("unknown export".into())
+    pub fn take(&self, id: &str) -> Result<TakenExport, String> {
+        self.0.lock().map_err(|_| "export state unavailable")?.remove(id).map(|entry| TakenExport(entry.stream)).ok_or("unknown export".into())
+    }
+
+    /// Drops every pending export and its staging file. A page that reloads
+    /// (a WebContent kill, a crash, a navigation) never finishes the streams
+    /// the previous page began; left alone they would refuse a resumed write
+    /// of the same frame and, four of them, every export (#241).
+    pub fn clear(&self) -> usize {
+        let drained: Vec<Entry> = {
+            let mut streams = self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            streams.drain().map(|(_, entry)| entry).collect()
+        };
+        // Staging files are deleted outside the lock (an append still writing
+        // holds its stream until it returns, then the file goes).
+        drained.len()
     }
 }
 
@@ -145,6 +188,85 @@ mod tests {
         assert!(streams.begin(&dir.join("0.png"), 0).is_err());
         drop(streams);
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn clear_drops_orphaned_streams_and_their_staging_files() {
+        let dir = directory();
+        let streams = ExportStreams::default();
+        for round in 0..5 {
+            // A page that dies mid-write leaves four streams behind...
+            for i in 0..4 { streams.begin(&dir.join(format!("{i}.tiff")), 8).unwrap(); }
+            let ids: Vec<String> = streams.0.lock().unwrap().keys().cloned().collect();
+            for id in ids { streams.append(&id, b"half").unwrap(); }
+            assert!(streams.begin(&dir.join("extra.tiff"), 1).is_err(), "round {round}: four orphans refuse every export");
+            assert!(std::fs::read_dir(&dir).unwrap().count() == 4);
+            // ...and the reloaded page starts clean: no staging file, no refusal.
+            assert_eq!(streams.clear(), 4);
+            assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+            let id = streams.begin(&dir.join("0.tiff"), 3).unwrap();
+            streams.append(&id, b"new").unwrap();
+            streams.take(&id).unwrap().finish().unwrap();
+            assert_eq!(std::fs::read(dir.join("0.tiff")).unwrap(), b"new");
+            std::fs::remove_file(dir.join("0.tiff")).unwrap();
+        }
+        assert_eq!(streams.clear(), 0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn chunk_limit_is_eight_mib_and_full_chunks_round_trip() {
+        assert_eq!(CHUNK_LIMIT, 8 * 1024 * 1024);
+        let dir = directory();
+        let streams = ExportStreams::default();
+        let path = dir.join("full.tiff");
+        std::fs::write(&path, b"previous").unwrap();
+        let bytes: Vec<u8> = (0..CHUNK_LIMIT * 3 + 5).map(|i| (i % 253) as u8).collect();
+        let id = streams.begin(&path, bytes.len() as u64).unwrap();
+        // Exactly the limit is accepted; one byte more is not and ends the stream.
+        for chunk in bytes.chunks(CHUNK_LIMIT).take(2) { streams.append(&id, chunk).unwrap(); }
+        assert_eq!(std::fs::read(&path).unwrap(), b"previous", "the target is untouched until finish");
+        let rest = &bytes[CHUNK_LIMIT * 2..];
+        assert!(streams.append(&id, &rest[..CHUNK_LIMIT + 1]).is_err());
+        assert!(streams.take(&id).is_err(), "an oversized chunk drops the stream");
+        assert_eq!(std::fs::read(&path).unwrap(), b"previous");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "no staging file is left behind");
+        // A fresh stream at the limit: incomplete is refused, complete commits.
+        let id = streams.begin(&path, bytes.len() as u64).unwrap();
+        for chunk in bytes.chunks(CHUNK_LIMIT).take(3) { streams.append(&id, chunk).unwrap(); }
+        assert!(streams.take(&id).unwrap().finish().is_err(), "5 bytes short");
+        assert_eq!(std::fs::read(&path).unwrap(), b"previous");
+        let id = streams.begin(&path, bytes.len() as u64).unwrap();
+        for chunk in bytes.chunks(CHUNK_LIMIT) { streams.append(&id, chunk).unwrap(); }
+        streams.take(&id).unwrap().finish().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_write_in_progress_blocks_only_its_own_stream() {
+        let dir = directory();
+        let streams = Arc::new(ExportStreams::default());
+        let path = dir.join("ordered.png");
+        let id = streams.begin(&path, 6).unwrap();
+        streams.append(&id, b"abc").unwrap();
+        let stream = streams.stream(&id).unwrap();
+        let mut writing = stream.lock().unwrap(); // an append holding its stream
+        // The map is free meanwhile: another export can begin and abort.
+        let other = streams.begin(&dir.join("other.png"), 1).unwrap();
+        drop(streams.take(&other).unwrap());
+        let finisher = { let streams = streams.clone(); let id = id.clone();
+            std::thread::spawn(move || streams.take(&id).unwrap().finish()) };
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(!finisher.is_finished(), "finish waits for the write in progress");
+        writing.append(b"def").unwrap();
+        drop(writing);
+        drop(stream);
+        finisher.join().unwrap().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"abcdef");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

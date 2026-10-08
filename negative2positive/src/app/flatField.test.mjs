@@ -141,4 +141,68 @@ const blank = makeImage((x, y) => {
   assert.equal(sanitizeFlatFieldMap({ width: 2, height: 2, gains: [1, 1, 1, NaN, 9, 0, 1, 1, 1, 1, 1, 1] }).gains[3], 1);
 }
 
+// #248: applyFlatFieldToImage16 gained a window for the detail layer. Without
+// one it must equal the implementation before it (b8f4cc2, kept here), and a
+// windowed region must equal the same region of the whole frame.
+{
+  const { workingPointToBase } = await import('./localExposure.js');
+  function headApplyFlatFieldToImage16(image16, map, geometry) {
+    if (!image16 || !map || !geometry) return image16;
+    const { width, height, data } = image16;
+    if (geometry.width !== width || geometry.height !== height) return image16;
+    const max = 65535;
+    const steps = 4096;
+    const toLinear = new Float32Array(steps + 1);
+    for (let i = 0; i <= steps; i++) toLinear[i] = Math.pow(i / steps, 2.2);
+    const encode = (linear) => Math.pow(Math.min(1, Math.max(0, linear)), 1 / 2.2);
+    for (let y = 0; y < height; y++) {
+      const start = workingPointToBase({ x: 0.5, y: y + 0.5 }, geometry);
+      const end = workingPointToBase({ x: width - 0.5, y: y + 0.5 }, geometry);
+      const du = width > 1 ? (end.x - start.x) / (width - 1) : 0;
+      const dv = width > 1 ? (end.y - start.y) / (width - 1) : 0;
+      let u = start.x; let v = start.y;
+      for (let x = 0; x < width; x++, u += du, v += dv) {
+        const o = (y * width + x) * 4;
+        for (let ch = 0; ch < 3; ch++) {
+          const gain = sampleFlatFieldGain(map, u, v, ch);
+          if (gain === 1) continue;
+          const idx = (data[o + ch] / max) * steps;
+          const i0 = Math.floor(idx); const f = idx - i0;
+          const linear = toLinear[i0] * (1 - f) + toLinear[Math.min(steps, i0 + 1)] * f;
+          data[o + ch] = Math.round(encode(linear * gain) * max);
+        }
+      }
+    }
+    return image16;
+  }
+  const gains = new Float32Array(6 * 5 * 3);
+  for (let i = 0; i < gains.length; i++) gains[i] = 0.75 + ((i * 29) % 13) / 20;
+  const map = { id: 'pad', width: 6, height: 5, gains };
+  const image = (width, height) => {
+    const data = new Uint16Array(width * height * 4);
+    for (let i = 0; i < data.length; i++) data[i] = (i * 7919) % 65536;
+    return { width, height, data };
+  };
+  for (const geometry of [
+    { baseWidth: 90, baseHeight: 60, rotationAngle: 0, mirrored: false, rotatedWidth: 90, rotatedHeight: 60, cropRegion: null, width: 90, height: 60 },
+    { baseWidth: 90, baseHeight: 60, rotationAngle: -4, mirrored: true, rotatedWidth: 94, rotatedHeight: 66, cropRegion: { left: 4, top: 3, width: 80, height: 55 }, width: 80, height: 55 },
+  ]) {
+    const current = applyFlatFieldToImage16(image(geometry.width, geometry.height), map, geometry);
+    const before = headApplyFlatFieldToImage16(image(geometry.width, geometry.height), map, geometry);
+    assert.deepEqual(current.data, before.data, 'no window: identical to the implementation before #248');
+    for (const window of [{ x: 11, y: 7, width: 25, height: 14 }, { x: geometry.width - 10, y: geometry.height - 6, width: 10, height: 6 }]) {
+      const frame = image(geometry.width, geometry.height);
+      const region = { width: window.width, height: window.height, data: new Uint16Array(window.width * window.height * 4) };
+      for (let y = 0; y < window.height; y++) {
+        region.data.set(frame.data.subarray(((window.y + y) * geometry.width + window.x) * 4, ((window.y + y) * geometry.width + window.x + window.width) * 4), y * window.width * 4);
+      }
+      applyFlatFieldToImage16(region, map, { ...geometry, window: { x: window.x, y: window.y } });
+      for (let y = 0; y < window.height; y++) for (let x = 0; x < window.width; x++) for (let c = 0; c < 4; c++) {
+        assert.equal(region.data[(y * window.width + x) * 4 + c], current.data[((window.y + y) * geometry.width + window.x + x) * 4 + c],
+          'a window gets the frame\'s own gains');
+      }
+    }
+  }
+}
+
 console.log('flatField.test.mjs passed');

@@ -42,13 +42,22 @@ export async function runNativeFilmFontSmoke({ send, evaluate, waitFor, wait, fa
     if (!document.getElementById('sprocketTextEnabledInput').checked) document.getElementById('sprocketTextEnabledInput').click();
   })()`);
   await waitFor('native font request', `typeof window.__releaseNativeFont === 'function'`);
-  await evaluate(`window.__pendingNativePreview = document.getElementById('canvas').toDataURL()`);
+  // The border preview is drawn on whichever canvas shows the photo (a GL
+  // underlay since #253): compare the frame on screen, read back.
+  const shownHash = `(() => { const f = window.__ncDisplay.shownFrame(); let h = 2166136261;
+    for (let i = 0; i < f.data.length; i += 3) h = Math.imul(h ^ f.data[i], 16777619); return [f.width, f.height, h >>> 0].join(':'); })()`;
+  await evaluate(`window.__pendingNativePreview = ${shownHash}`);
   await evaluate(`document.getElementById('exportSprocketBtn').click(); document.getElementById('exportSingleBtn').click()`);
   await wait(200);
   if (await evaluate(`window.__nativeDownloads.length !== 0`)) fail('CJK export completed before its native font loaded');
+  const borderComposes = await evaluate('window.__ncDisplay.counters().glBorderComposes');
+  const glDisplay = await evaluate('window.__ncDisplay.frame().surface === "gl"');
   await evaluate(`window.__restoreNativeLoad(); window.__releaseNativeFont()`);
+  // Observe an app draw before any readback: shownFrame repaints the GL frame.
+  if (glDisplay) await waitFor('native font triggers its own border repaint',
+    `window.__ncDisplay.counters().glBorderComposes > ${borderComposes}`);
   await waitFor('native CJK PNG', `window.__nativeDownloads.length === 1 && !document.body.dataset.studioBusy`, 120000);
-  await waitFor('native preview repainted', `document.getElementById('canvas').toDataURL() !== window.__pendingNativePreview`);
+  await waitFor('native preview repainted', `${shownHash} !== window.__pendingNativePreview`);
   // Independently read from the bundled font's 100-unit outlines at 12px.
   const expected = ['000001000000','000001000000','111111111110','100001000010','100001000010','100001000010','111111111110','000001000000','000001000000','000001000000','000001000000','000000000000'];
   const glyph = await evaluate(`window.__nativeGlyph`);

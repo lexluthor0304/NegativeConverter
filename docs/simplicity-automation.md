@@ -22,9 +22,25 @@ require a full date.
 ## Semantic colour
 
 The bundled Apache-2.0 EfficientViT B1 ADE20K model runs on a maximum 512-pixel
-preview in a disposable worker, after statistical conversion has rendered.
-WebGPU is preferred; initialization, warm-up or inference failure rebuilds on
-WASM. Failure keeps statistical colour. The result is a sanitised 64 × 64 label
+preview in a disposable worker, after statistical conversion has rendered:
+of the viewport-independent auto-WB sample (#248) when the map anchors the
+white balance, of the frame on screen under expired-film rescue, whose
+measurement of that frame the map weights (as at 1703835).
+It only runs where the map can be used: colour film, or any film under
+expired-film rescue, and not for the frames of a scheduled automatic roll
+analysis, which assigns their recipes meanwhile. A photo left or edited
+mid-inference terminates the worker at once: the analyzer polls only what
+stays false once false (the load, the photo, the edit revision, the user's own
+white balance or grey point, a reference lock, a saved recipe, the film type,
+positive mode and rescue the pass started with: an automatic retype, #231,
+changes the film type without an edit). Passing states
+(crop mode, Auto Frame, a roll import) count before and after the inference
+only, so crop mode opened and cancelled meanwhile keeps the map. A two-stage
+import schedules the pass after its swap, for the edit revision its stand-in
+pass ended with: an edit or an export click in the window cancels it, as one
+after an import always did. WebGPU is preferred and probed with a warm-up
+run (a WASM session makes just the real run); initialization, warm-up or
+inference failure rebuilds on WASM. Failure keeps statistical colour. The result is a sanitised 64 × 64 label
 map stored with the photo recipe. Manual WB, a sampled grey point, manual base,
 saved settings, reference locks and positive Edit only take precedence.
 
@@ -34,6 +50,11 @@ water cannot vote as neutrals; road/wall/building pixels receive more weight.
 Expired-film analysis accepts the same class weights. Source revision, model
 hash, tensor contract and reproduction instructions are in
 `negative2positive/public/models/README.md` and `scripts/export-semantic-model.py`.
+The ONNX file itself lives in `negative2positive/src/assets/models/`, so its URL
+carries a content hash. The page loads it at most once per session
+(`createSemanticAnalyzer`, IndexedDB copy on the web through `modelCache.js`)
+and posts the Blob to each short-lived semantic worker, which still ends with
+its photo; a worker fetches the model itself only when the page has no copy.
 
 ## Learned defaults
 
@@ -54,7 +75,20 @@ baseline, so repeated exports do not compound the learned offset.
 PNG, JPEG and TIFF always embed the bundled sRGB ICC profile, including when
 no analogue metadata was entered. PNG removes conflicting sRGB/gAMA/cHRM
 chunks. JPEG includes an optional, default-on gain map with Adobe gain-map XMP,
-a secondary JPEG and MPF offsets. The SDR scan bytes are retained.
+a secondary JPEG and MPF offsets. The SDR scan bytes are retained. PNG8 and
+JPEG are encoded in the export worker through `OffscreenCanvas` (#250), and
+the map travels in the JPEG's own `encodeImage` request: once the SDR blob is
+done, the worker runs the 16-bit adjustment pass on the unadjusted plane,
+`workers/gainMap.js`, and a second encode for the map. Where the worker cannot
+encode (no `OffscreenCanvas.convertToBlob`, a non-opaque frame), the main
+thread encodes with a canvas and the map runs beside it in the worker
+(`gainMap16`). That map ends with the export: Cancel stops it, and when a
+single export's canvas encode fails, disposing of the export's worker cancels
+it without a fallback pass. The sRGB
+EOTF comes from exact Float64 tables over the 256 and 65536 integer codes,
+summed in the original order, so the map bytes and `GainMapMax` are the ones
+the per-sample `** 2.4` produced. A sprocket-frame export computes no map,
+since the framed image never carried one.
 
 **Current dynamic-range limit:** the conversion pipeline's 16-bit plane is
 bounded sRGB, not scene-linear HDR above reference white. The map records the

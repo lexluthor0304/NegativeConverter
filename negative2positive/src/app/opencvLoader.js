@@ -106,7 +106,9 @@ function waitForOpenCvRuntime(timeoutMs = 15000) {
   });
 }
 
-export function createOpenCvLoader(sources, { scriptTimeoutMs = 20000, runtimeTimeoutMs = 15000 } = {}) {
+// `beforeScript(src)` runs before a script tag is added: the page installs
+// the hook its glue instantiates the shared OpenCV module through (#252).
+export function createOpenCvLoader(sources, { scriptTimeoutMs = 20000, runtimeTimeoutMs = 15000, beforeScript = null } = {}) {
   let readyPromise = null;
   let activeSource = null;
 
@@ -123,6 +125,7 @@ export function createOpenCvLoader(sources, { scriptTimeoutMs = 20000, runtimeTi
     }
 
     if (!script) {
+      if (typeof beforeScript === 'function') beforeScript(src);
       script = document.createElement('script');
       script.src = src;
       script.async = true;

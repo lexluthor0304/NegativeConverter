@@ -1,0 +1,223 @@
+# Dust removal: TELEA per cluster and regional brush strokes
+
+Dust removal detects specks and scratches with a dual top-hat (see
+`DustRemoval.js`), repairs them with OpenCV's TELEA or, when AI repair is on,
+with MI-GAN (`technical-depth.md`). This page covers how the TELEA repair and
+the dust brush stay proportional to the dust, not to the frame (#259).
+
+## TELEA per cluster (`inpaintMasked`)
+
+TELEA is local. A masked pixel takes its value from known pixels within the
+inpaint radius, weighted by distances the fast-marching pass computes one or
+two pixels further out, so mask pixels more than `2 × (radius + 2)` apart never
+influence each other.
+
+- The mask is scanned once (empty 32-bit words are skipped) and looked at
+  through a grid of cells `2 × pad` wide (`pad = radius + 2`), aligned to the
+  frame origin. 8-connected occupied cells form one cluster
+  (`dustMaskClusters`). The grid may merge clusters that did not need it but
+  never separates two that interact.
+- Each cluster is repaired in its own crop (its pixel box grown by `pad`), with
+  a crop mask that holds only its pixels. Only masked pixels are written back:
+  RGB8 from the crop, 16-bit = 8-bit × 257. Alpha and every other pixel keep
+  their source values.
+- The result is bit-identical to one full-frame `cv.inpaint` wherever that
+  fits (`DustRemoval.partition.test.mjs`). It also fits the 1 GiB heap compiled
+  into OpenCV.js at any frame size: the full-frame call needs about 19 B per
+  pixel and failed above about 50 MP, where HEAD ran a JS stand-in that left
+  every speck of a dilated mask in place.
+- Only a single cluster too big for the heap (a stroke or a dense chain across
+  most of a 50 MP+ frame) is split into windows with a `4 × pad` halo, with one
+  console warning. That is the one inexact case; a full-frame call already
+  failed there.
+- There is no JS fallback. An OpenCV error reaches the caller: the dust status
+  line, the export error, or the batch file's error.
+
+The detect-time commit, single export, batch export and the main-thread
+fallbacks all call `inpaintMasked`, so all of them get this.
+
+`scripts/bench-dust-inpaint-60mp.mjs` is the 60 MP acceptance run (an `inpaint`
+request through the worker processor in a fresh OpenCV instance: every speck
+repaired, heap < 512 MB, ≤ 400 ms in V8). It is too heavy for `npm test`; run it
+alone, one heavy job at a time.
+
+## Pinned dust worker (`dustWorkerClient.js`)
+
+While dust removal and Show mask are on for the current photo (the brush can
+paint only then), `main.js` pins the shared dust worker (`syncDustWorkerPin`):
+
+- no idle release while pinned; unpinned on photo switch, dust or Show mask
+  off, and in `clearDustState`, after which the 30 s idle release applies again;
+- `dustWorker.pinned` is the reservation a memory ledger (#258) can see;
+- at pin start, and at every detection while pinned, the worker gets the clean
+  source's 16-bit plane (and the 8-bit plane or the mask when it lacks them) in
+  slices of at most 32 MB, one per task, so no copy blocks the page for long;
+- a lost worker (crash or trim) is re-seeded once, in slices, by the next
+  stroke, which then also carries the mask.
+
+The worker keeps the current mask under a tag the page chose
+(`state.dustRemoval.maskTag`) and that mask's full-frame particle count, taken
+right after detection while pinned.
+
+## Regional stroke protocol (`DustBrush.js`)
+
+A stroke posts `{ type: 'stroke', baseTag, tag, points, brushRadius, mode }`, a
+few hundred bytes. In the worker (`applyDustStroke`):
+
+1. The brush is rasterised into its own bounding box with the full-frame rule
+   it replaced, then cut to the tight bounds of its pixels.
+2. The mask is refined in place inside that box: `intelligent` runs the same
+   Scharr, blur and contour steps on the same tight crop; `direct` and `remove`
+   apply OR / AND-NOT.
+3. The affected rect R starts at the box grown by `pad` and is closed over
+   every cluster of the old or new mask it reaches, until none crosses R.
+4. R is repaired from the clean source (`inpaintMaskedRect`): the clean source
+   everywhere, TELEA on new-mask pixels. Clusters the stroke did not touch come
+   out byte-identical, so the patch needs no write mask.
+5. The particle count moves by the external contours of the old and the new
+   mask inside R. That is exact unless R lies in a hole of a component
+   outside it (`findContours` skips what sits in a hole; holes are
+   4-connected background, and the frame edge is open). R's border ring is
+   background, so the frame is recounted unless the background around R is
+   shown to reach the frame edge (`mayBeEnclosed`): by a straight run from
+   R's corners, or, when dust blocks all four, by a search of that background
+   (`searchBackgroundToEdge`) that expands, in turn, the reached pixel
+   nearest each frame edge, so it crosses open background in straight lines
+   and climbs out of pockets. A search that finds the background closed, or
+   passes 8 × (width + height) expansions, means a recount.
+
+The reply carries R's 8-bit and 16-bit bytes, the stroke box's mask bytes and
+the count, all transferred. `DustBrush.test.mjs` checks 200+ random strokes
+(all modes, edges, corners, points off the frame) against the full-frame path:
+`createBrushMask` + `refineMask*`, full-frame TELEA and full-frame
+`findContours`, and that each stroke box is the tight bounds of its brush.
+`DustBrush.enclosure.test.mjs` checks the enclosure test: built cases
+(blocked runs, a pocket facing away from the nearest edge, diagonal joints,
+one-pixel gaps, a U closed only by the frame edge, closed rings), the search
+against a full background flood on random masks, and a 12 MP run at the #229
+review's dust densities with hairs: no random stroke recounts the frame (the
+four runs alone recount 9 % and 34 % of them), strokes inside closed loops do,
+and every count equals a full recount.
+
+## Page side (`main.js`, `dustStrokeHistory.js`)
+
+- **Private buffer.** Patches go into `state.dustRemoval.inpaintedImageData` in
+  place; `cleanSource` is never patched. When there is no repaired image yet,
+  the clean source is cloned once, at pin time. Undo and redo are not blocked
+  while an export runs, so a single export marks the repaired image and every
+  image a stroke entry patches (`markInPlaceEditedPlanes`) before it hands the
+  planes to its worker: the bridge copies a marked plane in one task, never
+  in 32 MiB slices an undo could land between.
+- **Revision.** `state.dustRemoval.revision` changes on every patch, undo, redo,
+  detection and clear. Export and the learned-repair refresh compare it
+  instead of mask identity; the tint follows the mask's tag. Export reads a
+  copy of the mask.
+  A committed repair's export recipe (#246, `repairReuse.js`) records the
+  revision too, and a patch, undo or redo forgets the stamp of the image it
+  writes and the content hash of the mask it writes, so an export after a
+  stroke always runs the from-scratch pass.
+- **History.** A stroke's undo entry (`pushUndoDelta`) holds R's bytes before
+  and after, the mask box's bytes and the counts, not another full image and
+  mask. Undo and redo write them into the objects the stroke patched and make
+  those current again, strictly LIFO, and post the mask change to the worker.
+  They start no conversion and no detection and keep earlier refinements.
+  `dustStrokeHistory.test.mjs` interleaves strokes with slider, strength, crop,
+  AI-export and photo-switch steps. A stroke entry cannot go cold under the
+  history budget (#244, `docs/geometry-chain.md`): when history is still over
+  budget once every other entry that holds pixels of its own is cold, the
+  oldest stroke entry is dropped with everything older on its stack. A photo
+  session cached without its planes keeps no stroke entries.
+- **Undo across a conversion.** Undoing or redoing any other step (a core
+  slider, the strength, a crop, an AI-brush stroke) puts back that step's dust
+  state by reference, mask, repaired image and particle count, and converts
+  the frame again. Its landing used to detect dust from scratch and drop every
+  brush refinement. A snapshot records whether its dust state was a finished
+  repair of its clean source (`refs.dustSettled`: no detection, brush repair
+  or learned refresh owed, a known inpainter). The restore hands a settled
+  state to the conversion (`restoredDust`); `resetDustForCleanSource` passes
+  it on when the conversion lands, if only strokes and their undo changed it
+  since, on the same clean source with the same dust inputs; and the
+  detection that follows (`keepRestoredDust`) keeps it as it was once the new
+  frame proves to have the restored clean source's pixels (8 and 16 bits,
+  compared in 32 MB slices: `sameFramePixels`) and the inpainter is the one
+  recorded. The clean source stays the restored object, which the stroke
+  entries name, and the repair's stamp carries over as on a session restore,
+  so the export equals the one made before that step. Anything in doubt
+  detects from scratch, as before: a frame with other pixels (a snapshot taken
+  while its frame lagged its settings, an input outside history), a state its
+  snapshot had not settled (that mark travels with the restored state),
+  other dust inputs or another inpainter. `dustUndoKeep.test.mjs` runs
+  main.js's history, conversion landing, detection and export repair step on
+  real OpenCV detection, TELEA and strokes; in the browser,
+  `dust-undo-smoke.mjs` (full run; alone `--dust-undo-only`) undoes an
+  Exposure drag after a stroke and compares the PNG 8-bit and TIFF 16-bit
+  exports with those made before the drag.
+- **Display.** Only the preview pixels whose bilinear taps fall in R are
+  recomputed (`updateDisplayPreviewRect`, exact), the WebGL source texture gets
+  a `texSubImage2D` of that rect, the tint cells over the mask box are put on
+  the display overlay, and the histogram source is rebuilt on idle.
+- **Repaired preview (#237 phase 2).** The stroke hands its mask box to
+  `rememberRepairMasks(source, patch.maskRect)`, which pools only that box into
+  the kept display-size pool (`repoolRepairMaskRect`: equal to pooling the
+  whole mask again). The fill itself is made again once input pauses for
+  300 ms, from the display negative the preview repair worker kept, so the
+  stroke scans no whole mask, asks the preview worker for nothing and posts
+  nothing; the fill after it posts the display-size mask only (#229 review
+  R1-104, `repairedPreviewStroke.test.mjs`). An undo or redo of a stroke
+  leaves the fill as it was, as before; the next stroke's fill pools the whole
+  mask again, since `revision` moved by more than that stroke.
+- **Tint and brush feedback (#253, #254).** The mask is shown on
+  `#displayOverlay`, a canvas in the transform wrapper at the display frame's
+  size (at most the display-preview cap), so zoom and pan only move it and the
+  view stays on the GPU. A tint cell is set when any mask pixel inside it is
+  set (max-pooling, `dustTint.js`), so one-pixel specks show at fit. The dust
+  worker pools it: `detect` (while the mask is shown) and `stroke` requests
+  carry the overlay's size, and the replies carry the whole tint or the cells
+  over the stroke's mask box; the page only puts them. A mask that changes
+  without such a reply (a restored session, a new display size, the page
+  fallback) is pooled on the page in row bands of about 8 ms; an undo or redo
+  pools the stroke's box alone. The
+  stroke being painted is drawn on `#brushFeedback` (`brushFeedback.js`):
+  pointer events (touch and pen paint too, `touch-action: none` on the view
+  while a brush is active), coalesced samples at least a device pixel apart,
+  one draw per animation frame of the new segments only, round-capped lines of
+  the brush's width. `#canvas` is not written while a stroke is painted.
+- **AI repair on, or repair strokes present.** The TELEA patch also overwrote
+  MI-GAN pixels inside R. After a 200 ms debounce only the tiles over queued
+  rects are inferred again, on a window of the repaired image, and only the
+  rects are written back. The refresh lands only if the dust revision did not
+  change; it then amends the newest stroke's history entry, otherwise its
+  rects stay queued. Each refresh is a model run for #236's idle release.
+  This is preview only: export still runs the from-scratch MI-GAN pass over
+  the whole mask.
+- **A released model (#236, #241).** With AI repair on, or repair strokes
+  present, a model that the idle rule or the hidden window released is still
+  the repair's inpainter, never a reason to take TELEA as the repair: a stroke
+  queues its rect, and the refresh keeps it queued, loads the model again (on
+  its provider, under its revision) and runs once it is back. A failed load
+  leaves the model failed, and no stroke loads it again on its own: the next
+  refresh drains the queue, with TELEA for the dust and the repair strokes in
+  the rects as the stroke left them (the repaired image has no stamp, so export
+  repairs from scratch). A refresh run that fails marks the model failed the
+  same way. So the queue always drains, the photo settles and a photo switch
+  keeps its view and history. An export after a stroke loads the model too,
+  with the load on its overlay, and repairs from scratch; when the model cannot
+  be loaded (offline without a cached copy) the export fails with a message
+  instead of shipping TELEA in its place. Repeated exports after that failure
+  also fail until the model is explicitly reloaded; a previous model error
+  does not authorize a different repair algorithm. A settled repair keeps its stamp
+  across the release and is exported without a load.
+- **The refresh's memory.** The refresh keeps the repair strokes' frame-sized
+  mask with the clean source it was built for, and drops both with that source
+  (a new conversion, `clearDustState`) and with the photo
+  (`invalidatePhotoActivation`: every switch, New session, a parked photo).
+
+## Known limits
+
+- Batch export still re-detects dust per file and ignores brush edits
+  (`audit-backlog.md`).
+- A history entry the memory budget made cold (#244: after a later edit, an
+  Undo or a Redo, or under memory pressure, typically from about 30 MP, where
+  history holds the only copies of the step's clean source and repaired image)
+  keeps no dust state: its undo rebuilds the planes from the base and detects
+  dust again.

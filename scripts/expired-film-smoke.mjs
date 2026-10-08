@@ -16,7 +16,8 @@ export async function runExpiredFilmSmoke({ send, evaluate, waitFor, wait, fail,
     mkdirSync(join(root, 'output', 'playwright'), { recursive: true });
     writeFileSync(join(root, 'output', 'playwright', name), Buffer.from(shot.result.data, 'base64'));
   };
-  await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en` });
+  // The normal preview tier, so the GL frame is the display source's size (#253).
+  await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en&previewTier=normal&gpuPreview=force` });
   await waitFor('expired boot', `!!document.getElementById('studioImportAutoCrop') && !!document.getElementById('uploadExpiredBtn')`);
   await installDialogAutoAccept();
   await wait(500);
@@ -101,6 +102,9 @@ export async function runExpiredFilmSmoke({ send, evaluate, waitFor, wait, fail,
   await waitFor('aged positive imported', `${ready} && document.querySelectorAll('.file-list-item').length === 2`, 150000);
   // The global measurement shows at once; OpenCV's fog map follows once it has loaded.
   await waitFor('OpenCV fog map', `[...document.querySelectorAll('#expiredDiagnosis li')].some(li => /^Uneven fog:/.test(li.textContent))`, 120000);
+  // #253: once the mode programs passed their self-test, the rescued preview
+  // is drawn by the preview shader on #glCanvas.
+  await waitFor('rescued preview on the GPU', `window.__ncDisplay.modes().ready && window.__ncDisplay.glActive() && document.getElementById('glCanvas').style.display === 'block'`, 60000);
   await wait(1500);
 
   const document_disabled = state => state.spatialDisabled;
@@ -113,7 +117,7 @@ export async function runExpiredFilmSmoke({ send, evaluate, waitFor, wait, fail,
     lines: [...document.querySelectorAll('#expiredDiagnosis li')].map(li => li.textContent),
     type: document.querySelector('.film-type-btn.active').dataset.type,
     sliders: Object.fromEntries(['expiredLevels', 'expiredNeutralize', 'expiredCrossover', 'expiredBrightness', 'expiredContrast'].map(id => [id, document.getElementById(id).value])),
-    canvasShown: document.getElementById('canvas').style.display !== 'none',
+    glShown: document.getElementById('glCanvas').style.display === 'block',
     controlsHidden: document.getElementById('expiredControls').hidden
   }))()`;
   const first = await evaluate(panel);
@@ -125,7 +129,7 @@ export async function runExpiredFilmSmoke({ send, evaluate, waitFor, wait, fail,
   const unevenMatch = unevenLine.match(/differs by (\d+)%/);
   if (!unevenMatch || Number(unevenMatch[1]) < 4) fail(`OpenCV did not read the left-edge fog: ${JSON.stringify(first.lines)}`);
   if (document_disabled(first)) fail('spatial sliders should be live once OpenCV measured');
-  if (!first.canvasShown) fail('the rescued preview must render on the CPU canvas');
+  if (!first.glShown) fail('the rescued preview must render on #glCanvas: ' + JSON.stringify(await evaluate('window.__ncDisplay.modes()')));
   await capture('expired-positive.png');
   console.log(`ok: expired entry, tab and diagnosis (${first.lines.join(' | ')})`);
 
@@ -178,7 +182,7 @@ export async function runExpiredFilmSmoke({ send, evaluate, waitFor, wait, fail,
     return { errShown: errShown / n, errAged: errAged / n, mean: sum / n, cast: cast.map(v => Math.round(v / (n / 3) * 10) / 10), tilt, tiltAged, canvas: rect.id, width: shown.width, height: shown.height };
   };
   const rescued = await measure();
-  if (rescued.canvas !== 'canvas') fail(`the rescued preview must render on the CPU canvas (${rescued.canvas})`);
+  if (rescued.canvas !== 'glCanvas') fail(`the rescued preview must render on #glCanvas (${rescued.canvas})`);
   if (!(rescued.errShown < rescued.errAged * 0.6)) fail(`rescue did not bring the aged positive back: ${JSON.stringify(rescued)}`);
   if (!(rescued.tiltAged > 8) || !(Math.abs(rescued.tilt) < rescued.tiltAged * 0.5)) fail(`OpenCV fog surface did not flatten the left-edge fog: ${JSON.stringify({ tilt: rescued.tilt, tiltAged: rescued.tiltAged })}`);
   console.log(`ok: aged positive error ${rescued.errAged.toFixed(1)} -> ${rescued.errShown.toFixed(1)} levels; left-right tilt ${rescued.tiltAged.toFixed(1)} -> ${rescued.tilt.toFixed(1)}`);
@@ -190,6 +194,69 @@ export async function runExpiredFilmSmoke({ send, evaluate, waitFor, wait, fail,
   await evaluate(`(() => { const s = document.getElementById('expiredUnevenFog'); s.value = '100'; s.dispatchEvent(new Event('input', { bubbles: true })); s.dispatchEvent(new Event('change', { bubbles: true })); })()`);
   await wait(800);
   console.log('ok: uneven-fog strength drives the OpenCV surface');
+
+  // #253: the GL frame against pixelAdjustments.js ('full') on the same display
+  // source (mean <= 1 level, p99.9 <= 3), with the fog surface, with local
+  // contrast 30, and held to compare; drags of the rescue strengths and C/M/Y
+  // stay on the GPU with no main-thread Step-3 pass beyond the histogram sample.
+  const glParity = async (label) => {
+    const result = await evaluate('window.__ncDisplay.glParity()');
+    if (result.error || !(result.mean <= 1 && result.p999 <= 3)) fail(`GL rescue parity (${label}): ${JSON.stringify(result)}`);
+    return result;
+  };
+  const touched = ['expiredLevels', 'expiredCrossover', 'expiredUnevenFog', 'expiredLocalContrast', 'cyan'];
+  const original = await evaluate(`Object.fromEntries(${JSON.stringify(touched)}.map(id => [id, document.getElementById(id).value]))`);
+  const withFog = await glParity('offsets + fog');
+  if (withFog.program !== 'modes' || !withFog.stages?.rescue || !withFog.stages.fog) fail('the rescue did not draw with the mode program and the fog surface: ' + JSON.stringify(withFog));
+  await evaluate(`(() => { const s = document.getElementById('expiredLocalContrast'); s.value = '30'; s.dispatchEvent(new Event('input', { bubbles: true })); s.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+  await wait(800);
+  const withLocal = await glParity('local contrast 30');
+  if (!(withLocal.stages?.local > 0)) fail('local contrast did not reach the shader: ' + JSON.stringify(withLocal));
+  const dragged = await evaluate(`(async () => {
+    window.__ncDisplay.resetCounters();
+    const protos = [WebGLRenderingContext.prototype, window.WebGL2RenderingContext?.prototype].filter(Boolean);
+    let draws = 0;
+    const originals = protos.map(proto => ({ proto, draw: proto.drawArrays }));
+    for (const { proto, draw } of originals) proto.drawArrays = function (...args) { if (this.canvas?.id === 'glCanvas') draws++; return draw.apply(this, args); };
+    const out = {};
+    try {
+      for (const [id, values] of [['expiredLevels', [90, 80, 70, 60, 70, 80]], ['expiredCrossover', [80, 60, 40, 60, 80, 100]],
+        ['expiredUnevenFog', [80, 60, 40, 60, 80, 100]], ['cyan', [4, 8, 12, 8, 4, 0]]]) {
+        const el = document.getElementById(id), start = draws, histogramBefore = window.__ncDisplay.counters().mainAdjustments;
+        for (const value of values) {
+          el.value = String(value);
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 4)));
+        }
+        out[id] = { draws: draws - start, glShown: document.getElementById('glCanvas').style.display === 'block',
+          mainPasses: window.__ncDisplay.counters().mainAdjustments - histogramBefore };
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    } finally {
+      for (const { proto, draw } of originals) proto.drawArrays = draw;
+    }
+    return { out, counters: window.__ncDisplay.counters() };
+  })()`);
+  for (const [id, entry] of Object.entries(dragged.out)) {
+    if (!entry.glShown || entry.draws < 6) fail(`${id} drag did not draw every value change on the GPU: ${JSON.stringify(dragged)}`);
+  }
+  if (dragged.counters.mainAdjustMaxPixels > 24_576) fail('a rescue drag ran a Step-3 pass beyond the histogram sample on the main thread: ' + JSON.stringify(dragged));
+  await wait(800);
+  await evaluate(`document.getElementById('expiredCompareBtn').dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 1 }))`);
+  await wait(700);
+  const heldParity = await glParity('hold to compare');
+  await evaluate(`document.getElementById('expiredCompareBtn').dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 1 }))`);
+  await wait(700);
+  if (heldParity.stages?.rescue) fail('hold-to-compare kept the rescue on screen: ' + JSON.stringify(heldParity));
+  // The rest of the scenario compares against the measured strengths.
+  await evaluate(`(() => {
+    for (const [id, value] of Object.entries(${JSON.stringify(original)})) {
+      const s = document.getElementById(id); s.value = value;
+      s.dispatchEvent(new Event('input', { bubbles: true })); s.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  })()`);
+  await wait(800);
+  console.log('ok: the rescue draws on the GPU within the parity budget ' + JSON.stringify({ fog: [withFog.mean, withFog.p999], local: [withLocal.mean, withLocal.p999], held: [heldParity.mean, heldParity.p999], drags: dragged.out }));
 
   // Hold to see before: the screen shows the unrescued positive while held.
   await evaluate(`document.getElementById('expiredCompareBtn').dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 1 }))`);
@@ -286,7 +353,7 @@ export async function runExpiredFilmSmoke({ send, evaluate, waitFor, wait, fail,
   if (!second.enabled || second.state !== 'analysed' || !/^Source: Color, converted/.test(second.lines[0])) fail(`negative diagnosis: ${JSON.stringify(second)}`);
   await capture('expired-negative.png');
   const negativeShown = await measure();
-  if (negativeShown.canvas !== 'canvas' || !(Math.max(...negativeShown.cast) - Math.min(...negativeShown.cast) < 14)) fail(`rescued negative preview carries a cast: ${JSON.stringify(negativeShown)}`);
+  if (negativeShown.canvas !== 'glCanvas' || !(Math.max(...negativeShown.cast) - Math.min(...negativeShown.cast) < 14)) fail(`rescued negative preview carries a cast: ${JSON.stringify(negativeShown)}`);
   console.log(`ok: expired negative converted then rescued (channel spread ${(Math.max(...negativeShown.cast) - Math.min(...negativeShown.cast)).toFixed(1)})`);
 
   // The menu entry leaves the flow: the tab goes away and the photo is no longer rescued.
@@ -344,4 +411,203 @@ export async function runExpiredFilmSmoke({ send, evaluate, waitFor, wait, fail,
   const back = await evaluate(`(() => ({ flow: document.body.classList.contains('studio-expired'), enabled: document.getElementById('expiredEnabled').checked, active: document.querySelector('.studio-tabs [aria-selected="true"]').id, state: document.getElementById('expiredDiagnosis').dataset.state }))()`);
   if (!back.flow || !back.enabled || back.active !== 'studioTab-expired' || back.state !== 'analysed') fail(`re-entering the flow: ${JSON.stringify(back)}`);
   console.log('ok: menu entry leaves and re-enters the expired flow');
+
+  // The fog surface (interactive, one-click correction and the batch export
+  // of a never-opened frame) was measured in the auto-frame worker: the page
+  // never booted its own OpenCV (#245).
+  const realm = await evaluate(`({ cv: typeof window.cv, script: !!document.querySelector('script[data-opencv-loader]'), tasks: { ...window.__ncAnalysis.tasks } })`);
+  if (realm.cv !== 'undefined' || realm.script || realm.tasks.fallback || realm.tasks.worker < 2) fail('the expired rescue loaded OpenCV in the page: ' + JSON.stringify(realm));
+  console.log(`ok: fog surfaces measured in the worker (${realm.tasks.worker} requests), no OpenCV in the page`);
+
+  await runExpiredRollRetypeSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port });
+}
+
+// Complete a valid semantic answer through the production analyzer, then use
+// the actual type/mode controls. Model fetch/inference leaves are deterministic;
+// import, rescue measurement, user strengths and Undo/Redo are the real flow.
+// Run as --expired-live-type-only in a fresh browser, without prior model heaps.
+export async function runExpiredLiveTypeSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port }) {
+  const ready = `document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy`;
+  const settings = `window.__ncTwoStage.status().settings`;
+  const map = { width: 2, height: 1, labels: [0, 4], confidence: .95, model: 'efficientvit-b1-ade20k-v1' };
+  const previous = await evaluate('performance.timeOrigin');
+  await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en&debug=1` });
+  await waitFor('live-type boot', `performance.timeOrigin !== ${previous} && document.readyState === 'complete'
+    && !!document.getElementById('uploadExpiredBtn') && !!window.__ncTwoStage`);
+  await installDialogAutoAccept();
+  await wait(500);
+  await evaluate(`(() => {
+    const probe = window.__liveSemantic = { modelLoads: 0, created: 0, posted: 0, delivered: 0, terminated: 0 };
+    const fetch = window.fetch.bind(window);
+    window.fetch = (input, options) => {
+      if (/efficientvit-b1-ade20k.*\.onnx/.test(String(input?.url || input))) {
+        probe.modelLoads++;
+        return Promise.resolve(new Response(new Uint8Array([1]), { headers: { 'content-type': 'application/octet-stream', 'content-length': '1' } }));
+      }
+      return fetch(input, options);
+    };
+    const NativeWorker = window.Worker;
+    window.Worker = class extends NativeWorker {
+      constructor(url, options) {
+        if (/semanticWorker/.test(String(url))) {
+          probe.created++;
+          return { onmessage: null, terminate() { probe.terminated++; }, postMessage() {
+            probe.posted++; queueMicrotask(() => { if (this.onmessage) { probe.delivered++; this.onmessage({ data: ${JSON.stringify(map)} }); } });
+          } };
+        }
+        super(url, options);
+      }
+    };
+    for (const id of ['studioImportAutoCrop', 'importFilmTypeAuto', 'autoRollOnImport']) {
+      const el = document.getElementById(id); if (el.checked) el.click();
+    }
+    document.querySelector('.film-type-btn[data-type="positive"]').click();
+    const label = document.getElementById('uploadExpiredBtn');
+    label.addEventListener('click', event => event.preventDefault(), { once: true }); label.click();
+  })()`);
+  await evaluate(`(async () => {
+    const canvas = document.createElement('canvas'); canvas.width = 160; canvas.height = 120;
+    const ctx = canvas.getContext('2d'), image = ctx.createImageData(160, 120);
+    for (let y = 0; y < 120; y++) for (let x = 0; x < 160; x++) {
+      const v = 48 + (x * 3 + y * 7) % 130, tint = x < 80 ? [1.25, 1, .8] : [.7, 1.15, .85];
+      image.data.set([...tint.map(t => Math.round(v * t)), 255], (y * 160 + x) * 4);
+    }
+    ctx.putImageData(image, 0, 0);
+    const dt = new DataTransfer(); dt.items.add(new File([await new Promise(r => canvas.toBlob(r, 'image/png'))], 'live-type-positive.png', { type: 'image/png' }));
+    const input = document.getElementById('fileInput'); input.files = dt.files; input.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+  await waitFor('live-type imported photo', `${ready} && document.getElementById('studioFilename').textContent === 'live-type-positive.png'`, 120_000);
+  console.log('live-type import:', JSON.stringify(await evaluate(`({ probe: window.__liveSemantic, type: ${settings}.filmType,
+    mode: ${settings}.positiveMode, rescued: ${settings}.expiredEnabled, manualWb: ${settings}.wbUserOverride,
+    map: ${settings}.semanticMap, semanticPending: window.__ncTwoStage.status().semanticPending })`)));
+  await waitFor('live-type completed semantic rescue', `${ready} && ${settings}?.semanticMap && ${settings}.expiredAnalysis?.spatial
+    && !window.__ncTwoStage.status().semanticPending`, 120_000);
+  await evaluate(`(() => {
+    for (const [id, value] of [['expiredBrightness', 17], ['expiredContrast', 23], ['expiredNeutralize', 61], ['coreExposure', 19]]) {
+      const el = document.getElementById(id); el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+      el.value = String(value); el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  })()`);
+  await evaluate('window.__ncAnalysis.settle()');
+  await wait(700);
+  const before = await evaluate(settings);
+  if (JSON.stringify(before.semanticMap) !== JSON.stringify(map)) fail('the semantic leaf did not complete through the real caller');
+  const leaf = await evaluate('window.__liveSemantic');
+  if (Object.values(leaf).some(value => value !== 1)) fail('semantic leaf must fetch one byte and deliver/terminate exactly once: ' + JSON.stringify(leaf));
+  const strengths = s => [s.expiredBrightness, s.expiredContrast, s.expiredNeutralize, s.coreExposure];
+  const check = async (label, type, mode) => {
+    await waitFor(label, `${ready} && ${settings}.filmType === '${type}' && ${settings}.positiveMode === '${mode}'
+      && !${settings}.semanticMap && ${settings}.expiredAnalysis?.spatial`, 120_000);
+    const s = await evaluate(settings);
+    if (JSON.stringify(strengths(s)) !== JSON.stringify(strengths(before))) fail(label + ': user strengths/settings changed');
+  };
+  await evaluate(`document.querySelector('.film-type-btn[data-type="bw"]').click()`);
+  await check('live positive to B&W measured again', 'bw', before.positiveMode);
+  await evaluate(`document.getElementById('undoBtn').click()`);
+  await waitFor('live-type undo retains old anchors', `${ready} && ${settings}.filmType === 'positive' && !!${settings}.semanticMap`, 120_000);
+  const undone = await evaluate(settings);
+  if (JSON.stringify(undone.semanticMap) !== JSON.stringify(map) || JSON.stringify(strengths(undone)) !== JSON.stringify(strengths(before))) fail('live-type undo did not restore the old interpretation/settings');
+  const mode = before.positiveMode === 'correct' ? 'edit' : 'correct';
+  await evaluate(`(() => { const el = document.getElementById('positiveModeSelect'); el.value = '${mode}'; el.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+  await check('live positive-mode crossing measured again', 'positive', mode);
+  await evaluate(`document.getElementById('undoBtn').click()`);
+  await waitFor('mode undo retains old anchors', `${ready} && ${settings}.positiveMode === '${before.positiveMode}' && !!${settings}.semanticMap`, 120_000);
+  await evaluate(`document.getElementById('redoBtn').click()`);
+  await check('mode redo retains new interpretation', 'positive', mode);
+  console.log('ok: completed semantic anchors clear at actual film-type/positive-mode crossings; rescue remeasures, user strengths persist, Undo/Redo retain interpretation intent');
+}
+
+// #229 review R1-017: an expired-roll session imports a B&W roll without
+// rebates (as bw-roll-import-smoke.mjs). The leader shows a holder edge and no
+// film evidence of its own (noMask): it opens as a positive and is measured as
+// one, then the roll's decision (#231) flips it to B&W. Its stored rescue
+// measurement, and the strengths it sets, must be of the B&W frame. The scans
+// are dense (mostly dark), so the B&W reading is bright where the positive
+// reading is dark: the leveled midtones sit high and the rescue darkens
+// (brightness <= 0), where the positive's measurement lifts. "These are
+// positives" then brings the positive reading and its measurement back.
+export async function runExpiredRollRetypeSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port }) {
+  const count = 5;
+  const ready = `document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy`;
+  await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en&gpuPreview=force` });
+  await waitFor('expired roll boot', `!!document.getElementById('autoRollOnImport') && !!document.getElementById('uploadExpiredBtn')`);
+  await installDialogAutoAccept();
+  await wait(1000);
+  // The roll decision needs automatic roll import (see bw-roll-import-smoke.mjs).
+  const autoRollBefore = await evaluate(`(() => { const key = 'nc_auto_roll_import_v1', before = localStorage.getItem(key); localStorage.setItem(key, 'on'); document.getElementById('autoRollOnImport').checked = true; return before; })()`);
+  await evaluate(`(() => {
+    const crop = document.getElementById('studioImportAutoCrop'); if (crop.checked) crop.click();
+    const auto = document.getElementById('importFilmTypeAuto'); if (!auto.checked) auto.click();
+    const projects = window.__expiredRollProjects = [];
+    const actions = window.__expiredRollActions = [];
+    new MutationObserver(records => { for (const record of records) for (const node of record.addedNodes) {
+      const action = node.querySelector?.('.toast-action');
+      if (action?.dataset.toastAction === 'rollPositives') actions.push(action);
+    } }).observe(document.getElementById('toastContainer'), { childList: true });
+    const revoke = URL.revokeObjectURL.bind(URL), pending = new Set();
+    URL.revokeObjectURL = url => { if (!pending.has(url)) revoke(url); };
+    HTMLAnchorElement.prototype.click = function () {
+      if (!this.download.endsWith('.ncroll.json')) return;
+      const url = this.href; pending.add(url);
+      projects.push(fetch(url).then(r => r.json()).finally(() => { pending.delete(url); revoke(url); }));
+    };
+    const label = document.getElementById('uploadExpiredBtn');
+    label.addEventListener('click', event => event.preventDefault(), { once: true });
+    label.click();
+  })()`);
+  if (!await evaluate(`document.body.classList.contains('studio-expired')`)) fail('the expired-roll entry did not switch the session');
+  await evaluate(`(async () => {
+    const dt = new DataTransfer();
+    for (let n = 1; n <= ${count}; n++) {
+      const canvas = document.createElement('canvas'); canvas.width = 200; canvas.height = 150;
+      const ctx = canvas.getContext('2d'), image = ctx.createImageData(200, 150);
+      for (let y = 0; y < 150; y++) for (let x = 0; x < 200; x++) {
+        const t = ((x + y * 2 + n * 17) % 170) / 169, v = 18 + Math.round(150 * t * t);
+        image.data.set(n === 1 && x < 32 ? [34, 44, 70, 255] : [v, v, v, 255], (y * 200 + x) * 4);
+      }
+      ctx.putImageData(image, 0, 0);
+      const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+      dt.items.add(new File([blob], 'expired-roll-' + n + '.png', { type: 'image/png', lastModified: n }));
+    }
+    const input = document.getElementById('folderInput'); input.files = dt.files; input.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+  await waitFor('expired roll analysed', `${ready} && document.getElementById('rollAnalysisStatus').textContent.includes('${count}/${count}')`, 180000);
+  await waitFor('expired roll leader flipped to B&W', `${ready} && document.querySelector('.film-type-btn.active')?.dataset.type === 'bw'`, 30000);
+  await waitFor('expired roll leader measured', `${ready} && document.getElementById('expiredDiagnosis').dataset.state === 'analysed'
+    && [...document.querySelectorAll('#expiredDiagnosis li')].some(li => /^Uneven fog:/.test(li.textContent))`, 120000);
+  await wait(1500);
+  const leaderMeasurement = async label => {
+    await waitFor('expired roll settled', ready, 60000);
+    await evaluate(`document.getElementById('studioSaveProject').click()`);
+    await waitFor('expired roll project', `window.__expiredRollProjects.length > 0`);
+    const project = await evaluate(`window.__expiredRollProjects.shift()`);
+    const leader = project.files.find(file => file.name === 'expired-roll-1.png')?.settings;
+    const measured = leader?.expiredAnalysis ? {
+      filmType: leader.filmType, reason: leader.filmTypeReason, enabled: leader.expiredEnabled,
+      leveledMedian: leader.expiredAnalysis.leveledMedian, lumMedian: leader.expiredAnalysis.lumMedian, spatial: Boolean(leader.expiredAnalysis.spatial),
+      brightness: leader.expiredBrightness, contrast: leader.expiredContrast
+    } : { filmType: leader?.filmType, enabled: leader?.expiredEnabled, analysis: null };
+    console.log(`expired roll leader ${label}:`, JSON.stringify(measured));
+    return measured;
+  };
+  try {
+    const flipped = await leaderMeasurement('after the flip');
+    if (flipped.filmType !== 'bw' || !flipped.enabled || !flipped.spatial) fail('the expired roll leader was not rescued as B&W: ' + JSON.stringify(flipped));
+    if (!(flipped.leveledMedian > 0.55) || !(flipped.brightness <= 0)) fail('the leader kept the measurement of its positive reading after the flip: ' + JSON.stringify(flipped));
+    console.log('ok: an expired roll\'s leader flipped to B&W is measured as B&W, with the strengths that measurement sets');
+    // "These are positives" converts the open leader again (no processNegative):
+    // the positive reading is measured once its frame has settled.
+    if (!await evaluate(`window.__expiredRollActions.length > 0`)) fail('no "These are positives" action was offered');
+    await evaluate(`window.__expiredRollActions[0].click()`);
+    await waitFor('expired roll corrected to positive', `${ready} && document.querySelector('.film-type-btn.active')?.dataset.type === 'positive'
+      && document.getElementById('expiredDiagnosis').dataset.state === 'analysed'
+      && [...document.querySelectorAll('#expiredDiagnosis li')].some(li => /^Uneven fog:/.test(li.textContent))`, 120000);
+    await wait(1500);
+    const corrected = await leaderMeasurement('after These are positives');
+    if (corrected.filmType !== 'positive' || !corrected.enabled || !corrected.spatial) fail('the corrected leader was not rescued as a positive: ' + JSON.stringify(corrected));
+    if (!(corrected.leveledMedian < 0.45) || !(corrected.brightness > 0)) fail('the leader kept the B&W measurement after These are positives: ' + JSON.stringify(corrected));
+    console.log('ok: These are positives measures the leader\'s positive reading again, with its strengths');
+  } finally {
+    await evaluate(`(() => { const key = 'nc_auto_roll_import_v1', before = ${JSON.stringify(autoRollBefore ?? null)}; if (before === null) localStorage.removeItem(key); else localStorage.setItem(key, before); })()`);
+  }
 }

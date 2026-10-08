@@ -1,12 +1,24 @@
 // Standalone Node test for batchExportScheduler.js - run with:
 // node negative2positive/src/app/batchExportScheduler.test.mjs
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   BATCH_MAX_PARALLEL,
   BATCH_PIXEL_BUDGET,
+  LANE_BYTES_PER_PIXEL,
+  LEGACY_LANE_BUDGET_BYTES,
+  LEGACY_LOW_MEMORY_LANE_BUDGET_BYTES,
+  BACKGROUND_SHARE,
+  planLaneBudgetBytes,
   planBatchParallelism,
-  runBatchPipeline
+  runBatchPipeline,
+  planGeometryBandsInFlight,
+  planPng16BandWorkers,
+  GEOMETRY_BAND_BUDGET_BYTES,
+  GEOMETRY_BYTES_PER_BAND_PIXEL
 } from './batchExportScheduler.js';
+
+import { createMemoryBudget, budgetFor, GIB } from './memoryBudget.js';
 
 const tick = () => new Promise(resolve => setTimeout(resolve, 0));
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
@@ -37,6 +49,80 @@ assert.equal(planBatchParallelism({ hardwareConcurrency: 8, deviceMemory: 8, pix
 // Missing everything still yields a sane value.
 assert.ok(planBatchParallelism() >= 1 && planBatchParallelism() <= BATCH_MAX_PARALLEL);
 assert.equal(planBatchParallelism({ hardwareConcurrency: 8, pixelsPerFile: BATCH_PIXEL_BUDGET + 1, fileCount: 5 }), 1);
+
+// ---- planBatchParallelism in bytes (#258) -------------------------------------
+
+// The planner before #258 (1703835), kept here as the reference: a fixed 80 MP
+// pixel budget, 28 MP when deviceMemory reports 4 GB or less.
+function planBatchParallelismHead({ hardwareConcurrency, deviceMemory, pixelsPerFile, fileCount = Infinity, maxParallel = 4 } = {}) {
+  const cores = Number.isFinite(hardwareConcurrency) && hardwareConcurrency > 0 ? Math.floor(hardwareConcurrency) : 4;
+  const byCores = Math.max(1, Math.min(maxParallel, cores - 2));
+  const lowMemory = Number.isFinite(deviceMemory) && deviceMemory > 0 && deviceMemory <= 4;
+  const budget = lowMemory ? 28_000_000 : 80_000_000;
+  const pixels = Number.isFinite(pixelsPerFile) && pixelsPerFile > 0 ? pixelsPerFile : budget;
+  const byMemory = Math.max(1, Math.floor(budget / pixels));
+  const byFiles = Number.isFinite(fileCount) && fileCount > 0 ? Math.floor(fileCount) : maxParallel;
+  return Math.max(1, Math.min(byCores, byMemory, byFiles, maxParallel));
+}
+
+assert.equal(LANE_BYTES_PER_PIXEL, 50);
+assert.equal(LEGACY_LANE_BUDGET_BYTES, 4.0e9, "today's 80 MP");
+assert.equal(LEGACY_LOW_MEMORY_LANE_BUDGET_BYTES, 1.4e9, "today's 28 MP");
+assert.equal(BACKGROUND_SHARE, 0.5);
+const M11 = 9536 * 6336; // 60.4 MP
+// 16 GiB with 60.4 MP frames: one lane; 32 GiB: two.
+assert.equal(planBatchParallelism({ hardwareConcurrency: 10, ramBytes: 16 * GIB, pixelsPerFile: M11, fileCount: 12 }), 1);
+assert.equal(planBatchParallelism({ hardwareConcurrency: 10, ramBytes: 32 * GIB, pixelsPerFile: M11, fileCount: 12 }), 2);
+assert.equal(planBatchParallelism({ hardwareConcurrency: 10, ramBytes: 64 * GIB, pixelsPerFile: M11, fileCount: 12 }), 2);
+assert.equal(planLaneBudgetBytes({ ramBytes: 32 * GIB }), 7 * GIB, 'half of the 14 GiB budget');
+// Cores, files and the ceiling still cap a large machine.
+assert.equal(planBatchParallelism({ hardwareConcurrency: 3, ramBytes: 64 * GIB, pixelsPerFile: M11, fileCount: 12 }), 1);
+assert.equal(planBatchParallelism({ hardwareConcurrency: 10, ramBytes: 64 * GIB, pixelsPerFile: M11, fileCount: 12, maxParallel: 1 }), 1);
+// 24 MP and 18.5 MP rolls keep 3 and 4 lanes on a 16 GiB machine.
+assert.equal(planBatchParallelism({ hardwareConcurrency: 10, ramBytes: 16 * GIB, pixelsPerFile: 24_000_000, fileCount: 36 }), 3);
+assert.equal(planBatchParallelism({ hardwareConcurrency: 10, ramBytes: 16 * GIB, pixelsPerFile: 18_500_000, fileCount: 36 }), 4);
+// budgetFor: 3.6 / 6 / 14 / 14 GiB, and 3.6 GiB for unknown web memory.
+const inGib = bytes => Math.round(bytes / GIB * 100) / 100;
+assert.deepEqual([8, 16, 32, 64].map(gib => inGib(budgetFor({ ramBytes: gib * GIB }))), [3.6, 6, 14, 14]);
+assert.equal(inGib(budgetFor({ ramBytes: null })), 3.6);
+
+// Sweep: unknown RAM, and any RAM above 4 GiB up to 16 GiB, plans exactly as
+// before; RAM of 4 GiB or less gives the deviceMemory <= 4 plan, also when
+// deviceMemory is undefined (WKWebView).
+{
+  const ramSweep = [null, 4.5 * GIB, 6 * GIB, 8 * GIB, 12 * GIB, 15.9 * GIB, 16 * GIB];
+  const lowRam = [1 * GIB, 2 * GIB, 3.5 * GIB, 4 * GIB];
+  let cases = 0;
+  for (let mp = 1; mp <= 150; mp += 0.5) {
+    const pixelsPerFile = Math.round(mp * 1e6);
+    for (let cores = 1; cores <= 16; cores++) {
+      for (const deviceMemory of [undefined, 2, 4, 8, 16]) {
+        for (const fileCount of [1, 3, 36]) {
+          const head = planBatchParallelismHead({ hardwareConcurrency: cores, deviceMemory, pixelsPerFile, fileCount });
+          for (const ramBytes of ramSweep) {
+            assert.equal(planBatchParallelism({ hardwareConcurrency: cores, deviceMemory, ramBytes, pixelsPerFile, fileCount }), head,
+              `mp=${mp} cores=${cores} deviceMemory=${deviceMemory} ram=${ramBytes}`);
+            cases++;
+          }
+          const lowHead = planBatchParallelismHead({ hardwareConcurrency: cores, deviceMemory: 4, pixelsPerFile, fileCount });
+          for (const ramBytes of lowRam) {
+            assert.equal(planBatchParallelism({ hardwareConcurrency: cores, deviceMemory: undefined, ramBytes, pixelsPerFile, fileCount }), lowHead,
+              `low RAM mp=${mp} cores=${cores} ram=${ramBytes}`);
+            cases++;
+          }
+        }
+      }
+    }
+  }
+  assert.ok(cases > 100_000);
+  // Larger machines only ever gain lanes.
+  for (let mp = 1; mp <= 150; mp += 1) {
+    for (const gib of [17, 24, 32, 64, 128]) {
+      const plan = planBatchParallelism({ hardwareConcurrency: 16, ramBytes: gib * GIB, pixelsPerFile: mp * 1e6, fileCount: 36 });
+      assert.ok(plan >= planBatchParallelismHead({ hardwareConcurrency: 16, pixelsPerFile: mp * 1e6, fileCount: 36 }));
+    }
+  }
+}
 
 // ---- runBatchPipeline ---------------------------------------------------------
 
@@ -205,6 +291,283 @@ for (const stalledStage of ['process', 'sink']) {
   const result = await runBatchPipeline([], { process: async () => {}, sink: async () => {} });
   assert.deepEqual(result, { successCount: 0, failCount: 0, cancelled: false, results: [] });
 }
+
+// ---- beforeStart with memory reservations (#258): no deadlock ---------------
+// Three lanes, a budget that fits 1.5 items and a slow first sink: a lane
+// waiting for memory holds no index, so every job completes, in order.
+{
+  const budget = createMemoryBudget({ budgetBytes: 15, setTimer: (fn, ms) => setTimeout(fn, ms), clearTimer: id => clearTimeout(id) });
+  const jobs = Array.from({ length: 7 }, (_, i) => ({ id: i }));
+  const sunk = [];
+  let inFlight = 0;
+  let peak = 0;
+  let maxReserved = 0;
+  const result = await runBatchPipeline(jobs, {
+    maxParallel: 3,
+    beforeStart: async ({ signal }) => {
+      const handle = await budget.reserve(10, { priority: 'user', signal, label: 'lane' });
+      maxReserved = Math.max(maxReserved, budget.snapshot().user);
+      return () => handle.release();
+    },
+    process: async (job) => {
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      await sleep(job.id === 1 ? 2 : 1);
+      inFlight -= 1;
+      return job.id;
+    },
+    sink: async (_job, payload, index) => {
+      if (index === 0) await sleep(25);
+      sunk.push(payload);
+    }
+  });
+  assert.equal(result.successCount, jobs.length);
+  assert.deepEqual(sunk, jobs.map(job => job.id), 'written in job order');
+  assert.equal(peak, 1, 'only one 10-byte item fits a 15-byte budget at a time');
+  assert.equal(maxReserved, 10);
+  assert.equal(budget.idle, true, 'every reservation was released after its sink');
+  budget.dispose();
+}
+
+// The same with a foreground reservation arriving mid-batch: the lanes wait
+// for it, then finish.
+{
+  const budget = createMemoryBudget({ budgetBytes: 100, setTimer: (fn, ms) => setTimeout(fn, ms), clearTimer: id => clearTimeout(id) });
+  const jobs = Array.from({ length: 6 }, (_, i) => ({ id: i }));
+  let foreground = null;
+  const grantsDuringForeground = [];
+  const result = await runBatchPipeline(jobs, {
+    maxParallel: 3,
+    beforeStart: async ({ signal }) => {
+      const handle = await budget.reserve(30, { priority: 'user', signal });
+      if (foreground && !foreground.released) grantsDuringForeground.push(handle);
+      return () => handle.release();
+    },
+    process: async (job) => {
+      if (job.id === 1 && !foreground) {
+        foreground = await budget.reserve(500, { priority: 'foreground', label: 'open photo' });
+        setTimeout(() => foreground.release(), 15);
+      }
+      await sleep(2);
+      return job.id;
+    },
+    sink: async () => {}
+  });
+  assert.equal(result.successCount, jobs.length);
+  assert.equal(grantsDuringForeground.length, 0, 'no lane is admitted while the foreground reservation is out');
+  assert.equal(budget.idle, true);
+  budget.dispose();
+}
+
+// ---- beforeStart admission (hidden-job gate, #241) ---------------------------
+{
+  const { createHiddenJobGate } = await import('./hiddenJobGate.js');
+
+  // Deadlock guard: 3 lanes behind a gate that admits one item at a time, a
+  // slow first sink. Admission happens before an index is claimed, so every
+  // job completes, in order, and never more than one is in flight.
+  let hidden = true;
+  const gate = createHiddenJobGate({ isHidden: () => hidden, limitsApply: () => true, setTimer: () => 0, clearTimer: () => {} });
+  const sunk = [];
+  const started = [];
+  const admissions = [];
+  let inFlight = 0;
+  let peak = 0;
+  const result = await runBatchPipeline([0, 1, 2, 3, 4, 5], {
+    maxParallel: 3,
+    beforeStart: ({ signal, index }) => {
+      admissions.push([index, started.length]);
+      return gate.admit({ bytes: 1, signal });
+    },
+    process: async (job) => {
+      inFlight += 1; peak = Math.max(peak, inFlight);
+      started.push(job);
+      await sleep(job === 0 ? 1 : 4);
+      inFlight -= 1;
+      return job;
+    },
+    sink: async (job) => { if (job === 0) await sleep(25); sunk.push(job); }
+  });
+  assert.deepEqual(sunk, [0, 1, 2, 3, 4, 5]);
+  assert.deepEqual(started, [0, 1, 2, 3, 4, 5]);
+  assert.equal(result.successCount, 6);
+  assert.equal(peak, 1, 'one item in flight while the gate holds the others');
+  // A lane asks before it claims: the next unclaimed index is always the
+  // next one to start, never one a waiting lane already holds.
+  assert.ok(admissions.length >= 6 && admissions.every(([index, count]) => index === count), JSON.stringify(admissions));
+  assert.equal(gate.inFlight, 0, 'every admission is released after its sink');
+  assert.equal(gate.waiting, 0);
+
+  // A reservation lasts until the job's payload has been sunk, not just processed.
+  const events = [];
+  const releases = [];
+  await runBatchPipeline(['a', 'b'], {
+    maxParallel: 2,
+    beforeStart: async ({ index }) => { events.push(`admit@${index}`); return () => { events.push('release'); releases.push(1); }; },
+    process: async (job) => { events.push(`process:${job}`); return job; },
+    sink: async (job) => { await sleep(3); events.push(`sink:${job}`); }
+  });
+  assert.equal(releases.length, 2);
+  assert.ok(events.indexOf('sink:a') < events.indexOf('release'), 'released only after the sink');
+  assert.ok(events.indexOf('admit@0') < events.indexOf('process:a'), 'admitted before the job starts');
+
+  // Showing the window lets the waiting lanes start together again.
+  hidden = true;
+  const gate2 = createHiddenJobGate({ isHidden: () => hidden, limitsApply: () => true, setTimer: () => 0, clearTimer: () => {} });
+  let inFlight2 = 0; let peak2 = 0;
+  const run = runBatchPipeline([0, 1, 2, 3], {
+    maxParallel: 3,
+    beforeStart: ({ signal }) => gate2.admit({ signal }),
+    process: async (job) => {
+      inFlight2 += 1; peak2 = Math.max(peak2, inFlight2);
+      if (job === 0) { hidden = false; gate2.visibilityChanged(); }
+      await sleep(5);
+      inFlight2 -= 1;
+      return job;
+    },
+    sink: async () => {}
+  });
+  assert.equal((await run).successCount, 4);
+  assert.ok(peak2 >= 2, 'the lane plan is restored once visible');
+
+  // Cancelling while lanes wait at the gate stops them without claiming an index.
+  hidden = true;
+  const gate3 = createHiddenJobGate({ isHidden: () => hidden, limitsApply: () => true, setTimer: () => 0, clearTimer: () => {} });
+  const cancel = new AbortController();
+  const processed = [];
+  const cancelled = await runBatchPipeline([0, 1, 2, 3], {
+    maxParallel: 3,
+    signal: cancel.signal,
+    beforeStart: ({ signal }) => gate3.admit({ signal }),
+    process: async (job) => { processed.push(job); if (job === 0) cancel.abort(); await sleep(3); return job; },
+    sink: async () => {}
+  });
+  assert.equal(cancelled.cancelled, true);
+  assert.deepEqual(processed, [0], 'waiting lanes never claimed an index');
+  assert.equal(cancelled.successCount, 1, 'the running job still finishes and is written');
+  assert.equal(gate3.inFlight, 0);
+  assert.equal(gate3.waiting, 0);
+
+  // A non-abort admission failure is a programming error and surfaces.
+  await assert.rejects(runBatchPipeline([1], {
+    beforeStart: async () => { throw new Error('boom'); },
+    process: async () => 1, sink: async () => {}
+  }), /boom/);
+}
+
+// ---- Admission before the claim, against a gate that admits out of order -------
+// A budget gate may let a later request through first (a smaller item, or
+// one that waited less). Here one item is admitted at a time and the newest
+// waiter goes first. Admitting before claiming, the lane admitted first
+// claims the next index, so frames still start, and are written, in order.
+// A lane that claimed its index before admission would hold index 1 while
+// the gate admits the lane holding index 2, whose sink waits for index 1:
+// a deadlock. `checkAdmissionBeforeClaim` also fails when any beforeStart
+// call sees an index that is claimed but not started.
+function createLifoGate() {
+  let inFlight = 0;
+  const waiters = [];
+  const grant = () => {
+    inFlight += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      inFlight -= 1;
+      const next = waiters.pop();
+      if (next) next(grant());
+    };
+  };
+  return {
+    admit: () => (inFlight === 0 && !waiters.length ? Promise.resolve(grant()) : new Promise(resolve => waiters.push(resolve))),
+    get inFlight() { return inFlight; },
+    get waiting() { return waiters.length; }
+  };
+}
+
+async function checkAdmissionBeforeClaim(run) {
+  const gate = createLifoGate();
+  const started = [];
+  const sunk = [];
+  const admissions = [];
+  let inFlight = 0;
+  let peak = 0;
+  let timer;
+  const deadlock = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`deadlock: started ${started}, sunk ${sunk}`)), 2000);
+  });
+  try {
+    const result = await Promise.race([deadlock, run([0, 1, 2, 3, 4, 5], {
+      maxParallel: 3,
+      beforeStart: async ({ index }) => {
+        admissions.push([index, started.length]);
+        assert.equal(index, started.length, 'no index is claimed while its lane waits for admission');
+        return gate.admit();
+      },
+      process: async (job) => {
+        inFlight += 1; peak = Math.max(peak, inFlight);
+        await sleep(job % 2 ? 1 : 3);
+        inFlight -= 1;
+        return job;
+      },
+      sink: async (job) => { if (job === 0) await sleep(10); sunk.push(job); },
+      onEvent: (event) => { if (event.type === 'start') started.push(event.index); }
+    })]);
+    assert.equal(result.successCount, 6);
+    assert.deepEqual(started, [0, 1, 2, 3, 4, 5], 'frames start in order whatever the admission order');
+    assert.deepEqual(sunk, [0, 1, 2, 3, 4, 5]);
+    assert.equal(peak, 1);
+    assert.equal(gate.inFlight, 0);
+    assert.equal(gate.waiting, 0);
+    assert.ok(admissions.length >= 6);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+await checkAdmissionBeforeClaim(runBatchPipeline);
+
+// The check fails on a scheduler that claims before it admits: the worker
+// loop of batchExportScheduler.js, mutated, imported as a module of its own.
+{
+  const here = new URL('./', import.meta.url).href;
+  const original = readFileSync(new URL('./batchExportScheduler.js', import.meta.url), 'utf8');
+  const claimFirst = original.replace(
+    /let release = null;\n\s*if \(beforeStart\) \{[\s\S]*?\n\s*const index = nextToStart;\n\s*nextToStart \+= 1;/,
+    'const index = nextToStart;\n      nextToStart += 1;\n      let release = null;\n      if (beforeStart) release = await beforeStart({ signal, index });'
+  );
+  assert.notEqual(claimFirst, original, 'the mutation finds the worker loop');
+  const mutated = await import('data:text/javascript;base64,' + Buffer.from(claimFirst.replaceAll("from './", `from '${here}`)).toString('base64'));
+  await assert.rejects(checkAdmissionBeforeClaim(mutated.runBatchPipeline),
+    (error) => /no index is claimed|deadlock/.test(error.message), 'claiming before admission is caught');
+}
+
+// ---- planGeometryBandsInFlight (#244) ------------------------------------------
+
+// One 60 MP lane may keep every band in flight; the lanes share the budget.
+const bandBytes60 = 60_000_000 / 6 * GEOMETRY_BYTES_PER_BAND_PIXEL;
+assert.equal(planGeometryBandsInFlight({ lanes: 1, pixelsPerFile: 60_000_000, poolSize: 6 }), Math.min(6, Math.floor(GEOMETRY_BAND_BUDGET_BYTES / bandBytes60)));
+assert.ok(planGeometryBandsInFlight({ lanes: 3, pixelsPerFile: 60_000_000, poolSize: 6 }) <= planGeometryBandsInFlight({ lanes: 1, pixelsPerFile: 60_000_000, poolSize: 6 }));
+for (const lanes of [1, 2, 3, 4]) {
+  const perLane = planGeometryBandsInFlight({ lanes, pixelsPerFile: 60_000_000, poolSize: 6 });
+  assert.ok(perLane >= 1 && (perLane === 1 || perLane * lanes * bandBytes60 <= GEOMETRY_BAND_BUDGET_BYTES), `lanes ${lanes}`);
+}
+// Small frames are bounded by the pool; low-memory devices get fewer bands.
+assert.equal(planGeometryBandsInFlight({ lanes: 4, pixelsPerFile: 6_000_000, poolSize: 6 }), 6);
+assert.ok(planGeometryBandsInFlight({ lanes: 1, pixelsPerFile: 60_000_000, poolSize: 6, deviceMemory: 4 })
+  < planGeometryBandsInFlight({ lanes: 1, pixelsPerFile: 60_000_000, poolSize: 6 }));
+assert.equal(planGeometryBandsInFlight({ lanes: 8, pixelsPerFile: 200_000_000, poolSize: 2 }), 1, 'never below one band');
+
+// ---- planPng16BandWorkers ---------------------------------------------------
+// A single export and one lane: every core but two. Two lanes: two each.
+// Three or more: no pool (the lane's export worker encodes its bands).
+assert.equal(planPng16BandWorkers({ lanes: 1, hardwareConcurrency: 8 }), 6);
+assert.equal(planPng16BandWorkers({ hardwareConcurrency: 10 }), 8);
+assert.equal(planPng16BandWorkers({ lanes: 1, hardwareConcurrency: 2 }), 1);
+assert.equal(planPng16BandWorkers({ lanes: 1 }), 2, 'unknown core count: assume 4');
+assert.equal(planPng16BandWorkers({ lanes: 2, hardwareConcurrency: 8 }), 4);
+assert.equal(planPng16BandWorkers({ lanes: 3, hardwareConcurrency: 8 }), 0);
+assert.equal(planPng16BandWorkers({ lanes: 4, hardwareConcurrency: 16 }), 0);
 
 // Missing callbacks are a programming error, reported up front.
 await assert.rejects(() => runBatchPipeline([1], { process: async () => {} }), TypeError);

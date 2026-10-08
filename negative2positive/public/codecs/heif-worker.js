@@ -1,10 +1,42 @@
 /* libheif 1.19.8 is a separate, replaceable LGPL library; see README.md. */
+// Answers the page's isolation probe (#264) before the decode handler sees it;
+// the classic-worker twin of src/workers/isolationProbe.js.
+self.addEventListener('message', event => {
+  if (event.data?.type !== 'nc-isolation-probe') return;
+  event.stopImmediatePropagation();
+  self.postMessage({ type: 'nc-isolation-probe', id: event.data.id, crossOriginIsolated: self.crossOriginIsolated === true,
+    sharedArrayBuffer: typeof SharedArrayBuffer === 'function', secureContext: self.isSecureContext === true });
+});
 importScripts('./libheif.js');
-self.onmessage = async ({ data: { file } }) => {
+// libheif-js returns its module, not a promise; in a worker it compiles the
+// WASM synchronously. The runtime's start is the ready signal: the page
+// transfers the file only after it.
+let initializedHeif = null;
+let startFailed = false;
+const announce = heif => {
+  if (initializedHeif || startFailed) return;
+  initializedHeif = heif;
+  self.postMessage({ ready: true });
+};
+const failStart = reason => {
+  if (initializedHeif || startFailed) return;
+  startFailed = true;
+  self.postMessage({ error: reason?.message || String(reason || 'HEIF decoder could not start') });
+};
+try {
+  const heif = libheif({
+    locateFile: name => new URL(name, self.location.href).href,
+    onRuntimeInitialized() { announce(this); },
+    onAbort: failStart
+  });
+  if (heif?.calledRun) announce(heif);
+} catch (error) { failStart(error); }
+self.onmessage = async ({ data: { buffer } }) => {
   try {
-    const heif = await libheif({ locateFile: name => new URL(name, self.location.href).href });
+    const heif = initializedHeif;
+    if (!heif) throw new Error('HEIF decoder is not ready');
     const decoder = new heif.HeifDecoder();
-    const images = decoder.decode(new Uint8Array(await file.arrayBuffer()));
+    const images = decoder.decode(new Uint8Array(buffer));
     const primary = images.find(image => heif.heif_image_handle_is_primary_image(image.handle));
     if (!primary) throw new Error('No primary HEIF image');
     // libheif applies irot/imir by default during decode; handle dimensions

@@ -88,7 +88,11 @@ const FOG_SURFACE_LIMIT = 0.15;
 // Local contrast at 100 %: deviations from the local mean grow by this much.
 const LOCAL_CONTRAST_MAX = 0.6;
 const IDENTITY_PLACEMENT = Object.freeze({ left: 0, top: 0, width: 1, height: 1 });
-const OFFSET_BINS = 64;
+// Luminance bins of the colour offset table. Exported with the Rec. 709 luma
+// weights the pixel stages use, so the preview shader (render/previewShader.js,
+// #253) is generated from the same numbers instead of a copy of them.
+export const OFFSET_BINS = 64;
+export const RESCUE_LUMA = Object.freeze([0.2126, 0.7152, 0.0722]);
 
 function clamp(value, min, max) {
   return value < min ? min : value > max ? max : value;

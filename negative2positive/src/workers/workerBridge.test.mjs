@@ -24,9 +24,12 @@ class FakeWorker {
   postMessage(message, transfers = []) {
     lastPost = { message, transfers };
     this.posts.push(message);
-    structuredClone(message, { transfer: transfers });
     const plan = script(message, this) || { kind: 'blob' };
+    // A failed postMessage transfers nothing.
     if (plan.kind === 'throw') throw plan.error || new Error('postMessage failed');
+    // What the worker would receive: transferred buffers move, the caller's
+    // copies detach, exactly as with a real Worker.
+    const received = structuredClone(message, { transfer: transfers });
     if (plan.kind === 'hang') return;
     queueMicrotask(() => {
       if (this.terminated) return;
@@ -43,6 +46,12 @@ class FakeWorker {
       }
       if (plan.kind === 'error') {
         this.onmessage({ data: { type: 'error', id: message.id, message: 'worker said no' } });
+        return;
+      }
+      if (plan.kind === 'respond') {
+        // `respond(received)` returns the worker's reply and what it transfers.
+        const { data, transfer = [] } = plan.respond(received);
+        this.onmessage({ data: { id: message.id, ...structuredClone(data, { transfer }) } });
         return;
       }
       if (plan.kind === 'result') {
@@ -63,8 +72,16 @@ class FakeWorker {
 }
 
 globalThis.Worker = FakeWorker;
+// Blink and WebKit reject a buffer whose length is not 4 * width * height
+// (IndexSizeError) and anything but a Uint8ClampedArray (TypeError). A stub
+// that accepts any length hid #240: the 16-bit result never became an
+// ImageData in a browser.
 globalThis.ImageData = class ImageData {
   constructor(data, width, height) {
+    if (!(data instanceof Uint8ClampedArray)) throw new TypeError('ImageData needs a Uint8ClampedArray');
+    if (data.length !== 4 * width * height) {
+      throw new DOMException('The input data length is not equal to (4 * width * height).', 'IndexSizeError');
+    }
     this.data = data;
     this.width = width;
     this.height = height;
@@ -74,13 +91,19 @@ globalThis.ImageData = class ImageData {
 const {
   cancelWorkerRequests,
   computeWorkerTimeoutMs,
+  copyTypedArrayInSlices,
   isAbortError,
+  isExportInputLostError,
   isWorkerTimeoutError,
+  resetWorkerFallbackWarnings,
   terminateWorker,
   workerApplyAdjustments,
+  workerApplyAdjustments16,
+  workerGainMap16,
   workerEncodePng16,
   workerEncodeTiff
 } = await import('./workerBridge.js');
+const { markOwnedPlanes, setLiveReferenceProbe } = await import('../app/planeRelease.js');
 
 function reset(nextScript = () => ({ kind: 'blob' })) {
   terminateWorker();
@@ -324,6 +347,306 @@ assert.ok(computeWorkerTimeoutMs(Number.MAX_SAFE_INTEGER) <= 600_000);
   assert.equal(await promise, null);
 }
 
+// ------------------------------------------------ 16-bit adjustment results
+
+/** Counts console.warn calls whose text mentions `needle` while `fn` runs. */
+async function countWarnings(needle, fn) {
+  const original = console.warn;
+  let count = 0;
+  console.warn = (...args) => {
+    if (args.some((arg) => String(arg && arg.message ? arg.message : arg).includes(needle))) count++;
+  };
+  try {
+    await fn();
+  } finally {
+    console.warn = original;
+  }
+  return count;
+}
+
+const W16 = 3;
+const H16 = 2;
+// Deliberately not multiples of 257, so a byte/sample mix-up cannot pass.
+const POSTED16 = Uint16Array.from({ length: W16 * H16 * 4 }, (_, i) => (i % 4 === 3 ? 65535 : (0x1234 + i * 0x0a3b) & 0xffff));
+
+function create16BitImage() {
+  const image = new ImageData(new Uint8ClampedArray(W16 * H16 * 4).fill(9), W16, H16);
+  image.__image16 = {
+    width: W16,
+    height: H16,
+    data: Uint16Array.from({ length: W16 * H16 * 4 }, (_, i) => (i * 1031) & 0xffff)
+  };
+  return image;
+}
+
+/** The worker's applyAdjustments16 reply: the known plane plus (optionally) its mirror. */
+function reply16({ mirror = true, samples = POSTED16, bits = 16 } = {}) {
+  return {
+    kind: 'respond',
+    respond: (received) => {
+      const out = new Uint16Array(samples);
+      const data = { type: 'result', data: out.buffer, width: received.width, height: received.height, bits };
+      const transfer = [out.buffer];
+      if (mirror) {
+        const data8 = Uint8ClampedArray.from(out, (v) => v >>> 8);
+        data.data8 = data8.buffer;
+        transfer.push(data8.buffer);
+      }
+      return { data, transfer };
+    }
+  };
+}
+
+function assertAdjusted16(out, label) {
+  assert.ok(out, `${label}: the worker's 16-bit result must be used, not dropped`);
+  assert.ok(out instanceof ImageData, `${label}: an ImageData`);
+  assert.equal(out.width, W16);
+  assert.equal(out.height, H16);
+  assert.ok(out.__image16.data instanceof Uint16Array, `${label}: the plane is viewed as 16-bit samples`);
+  assert.equal(out.__image16.data.length, 4 * W16 * H16);
+  assert.deepEqual(Array.from(out.__image16.data), Array.from(POSTED16), `${label}: posted samples, not bytes`);
+  assert.equal(out.data.length, 4 * W16 * H16);
+  for (let i = 0; i < POSTED16.length; i++) assert.equal(out.data[i], POSTED16[i] >>> 8, `${label}: mirror sample ${i}`);
+}
+
+{
+  // The regression: a 16-bit buffer read as bytes and "converted" doubles the
+  // length, which a real ImageData rejects.
+  const bytes = new Uint8ClampedArray(new Uint16Array([0x1234, 0xabcd]).buffer);
+  assert.deepEqual(Array.from(new Uint16Array(bytes)), [0x34, 0x12, 0xcd, 0xab], 'a converting copy yields byte values');
+  assert.deepEqual(Array.from(new Uint16Array(bytes.buffer)), [0x1234, 0xabcd], 'a view yields the samples');
+  assert.throws(() => new ImageData(new Uint8ClampedArray(2 * 4 * W16 * H16), W16, H16), { name: 'IndexSizeError' });
+}
+
+{
+  reset(() => reply16());
+  const image = create16BitImage();
+  const planeBefore = Array.from(image.__image16.data);
+  const out = await workerApplyAdjustments16(image, identitySettings(), 'full');
+  assertAdjusted16(out, 'bits: 16 with mirror');
+  assert.equal(lastPost.message.type, 'applyAdjustments16');
+  assert.equal(lastPost.message.planeOnly, false);
+  assert.equal(lastPost.message.inputBuffer.byteLength, 0, 'the plane copy is transferred, not cloned');
+  assert.deepEqual(Array.from(image.__image16.data), planeBefore, "the caller's plane is intact");
+  assert.ok(out.__image16.data.buffer !== image.__image16.data.buffer);
+}
+
+{
+  // A reply without the mirror: the bridge builds it with downconvertPlane16.
+  reset(() => reply16({ mirror: false }));
+  assertAdjusted16(await workerApplyAdjustments16(create16BitImage(), identitySettings(), 'full'), 'bits: 16 without mirror');
+}
+
+{
+  reset(() => reply16({ mirror: false }));
+  const out = await workerApplyAdjustments16(create16BitImage(), identitySettings(), 'full', { planeOnly: true });
+  assert.equal(lastPost.message.planeOnly, true, 'the worker is told to skip the mirror');
+  assert.ok(out && !('data' in out), 'planeOnly returns no 8-bit mirror');
+  assert.equal(out.width, W16);
+  assert.equal(out.height, H16);
+  assert.deepEqual(Array.from(out.__image16.data), Array.from(POSTED16));
+}
+
+{
+  // Wrong-length results (bytes posted as if they were samples, or a plane of
+  // another size) fall back and warn once per session.
+  resetWorkerFallbackWarnings();
+  const warnings = await countWarnings('applyAdjustments16', async () => {
+    reset(() => reply16({ bits: 8, mirror: false }));
+    assert.equal(await workerApplyAdjustments16(create16BitImage(), identitySettings(), 'full'), null, 'a byte result is rejected');
+    reset(() => reply16({ samples: new Uint16Array(4 * W16 * H16 * 2) }));
+    assert.equal(await workerApplyAdjustments16(create16BitImage(), identitySettings(), 'full'), null, 'a doubled plane is rejected');
+  });
+  assert.equal(warnings, 1, 'two failures log exactly one warning');
+}
+
+{
+  // A plane of another size never reaches the worker: the main-thread path
+  // runs the 8-bit stage for it.
+  reset(() => reply16());
+  const image = create16BitImage();
+  image.__image16 = { width: 2, height: 2, data: new Uint16Array(16) };
+  assert.equal(await workerApplyAdjustments16(image, identitySettings(), 'full'), null);
+  assert.equal(lastPost, null, 'nothing was posted');
+  image.__image16 = null;
+  assert.equal(await workerApplyAdjustments16(image, identitySettings(), 'full'), null);
+}
+
+{
+  // A malformed buffer must fail the request rather than strand it.
+  reset(() => ({
+    kind: 'respond',
+    respond: (received) => {
+      const odd = new ArrayBuffer(4 * W16 * H16 * 2 + 1);
+      return { data: { type: 'result', data: odd, width: received.width, height: received.height, bits: 16 }, transfer: [odd] };
+    }
+  }));
+  assert.equal(await workerApplyAdjustments16(create16BitImage(), identitySettings(), 'full'), null);
+}
+
+// ------------------------------------------------------------- sliced copies
+
+{
+  const backing = Uint8Array.from({ length: 103 }, (_, i) => (i * 37) & 0xff);
+  const view = new Uint16Array(backing.buffer, 2, 50); // offset view, 100 bytes
+  let done = false;
+  const copying = copyTypedArrayInSlices(view, { sliceBytes: 7 }).then((buffer) => { done = true; return buffer; });
+  for (let i = 0; i < 20; i++) await Promise.resolve();
+  assert.equal(done, false, 'the copy yields to other tasks between slices');
+  const copy = await copying;
+  assert.ok(copy instanceof ArrayBuffer);
+  assert.equal(copy.byteLength, 100);
+  assert.deepEqual(new Uint8Array(copy), backing.subarray(2, 102), 'the sliced copy equals the source bytes');
+  const small = await copyTypedArrayInSlices(view);
+  assert.deepEqual(new Uint8Array(small), backing.subarray(2, 102), 'a copy below one slice is a single set');
+
+  const controller = new AbortController();
+  const pending = copyTypedArrayInSlices(view, { sliceBytes: 10, signal: controller.signal });
+  controller.abort();
+  await assert.rejects(pending, (err) => isAbortError(err), 'the abort signal is honoured between slices');
+}
+
+// ---------------------------------------------------------- gain-map requests
+
+// Stamped export-owned (#250): only such planes may be transferred.
+function createGainMapInputs() {
+  const source = markOwnedPlanes(create16BitImage());
+  const sdr = new ImageData(Uint8ClampedArray.from({ length: W16 * H16 * 4 }, (_, i) => (i * 11) & 0xff), W16, H16);
+  return { source, sdr, plane: source.__image16 };
+}
+
+const MAP_BYTES = [10, 10, 10, 255];
+const replyGainMap = () => ({
+  kind: 'respond',
+  respond: () => {
+    const map = new Uint8ClampedArray(MAP_BYTES);
+    return { data: { type: 'gainMapResult', data: map.buffer, width: 1, height: 1, gainMax: 0.25, gainMin: 0 }, transfer: [map.buffer] };
+  }
+});
+const replyEcho = () => ({
+  kind: 'respond',
+  respond: (received) => ({
+    data: { type: 'error', message: 'adjustment failed', returned: { plane: received.inputBuffer, sdr: received.sdrBuffer } },
+    transfer: [received.inputBuffer, received.sdrBuffer]
+  })
+});
+
+{
+  // Copy mode: the caller's plane and SDR frame stay intact.
+  reset(replyGainMap);
+  const { source, sdr, plane } = createGainMapInputs();
+  const buffer = plane.data.buffer;
+  const samples = Array.from(plane.data);
+  const map = await workerGainMap16(source, sdr, identitySettings());
+  assert.deepEqual(Array.from(map.data), MAP_BYTES);
+  assert.equal(map.gainMax, 0.25);
+  assert.equal(map.width, 1);
+  assert.equal(lastPost.message.type, 'gainMap16');
+  assert.equal(lastPost.transfers.length, 2);
+  assert.ok(lastPost.transfers[0] !== buffer, 'copy mode sends a copy');
+  assert.equal(plane.data.buffer, buffer);
+  assert.deepEqual(Array.from(plane.data), samples, 'copy mode leaves the source intact');
+  assert.equal(sdr.data.length, W16 * H16 * 4, 'the SDR frame is always copied');
+  assert.ok(lastPost.message.settings.curves.r instanceof Uint8Array);
+}
+
+{
+  // Transfer mode: the plane itself goes to the worker and stays there.
+  reset(replyGainMap);
+  const { source, sdr, plane } = createGainMapInputs();
+  const buffer = plane.data.buffer;
+  const map = await workerGainMap16(source, sdr, identitySettings(), { transferPlane: true });
+  assert.ok(map);
+  assert.equal(lastPost.transfers[0], buffer, 'transfer mode hands over the plane without a copy');
+  assert.equal(plane.data.byteLength, 0, 'transfer mode detaches the source');
+  assert.equal(sdr.data.length, W16 * H16 * 4, 'the SDR frame is never transferred');
+}
+
+{
+  // A plane that is a view into a larger buffer is copied even in transfer mode.
+  reset(replyGainMap);
+  const { source, sdr, plane } = createGainMapInputs();
+  const larger = new Uint16Array(plane.data.length + 8);
+  larger.set(plane.data, 4);
+  plane.data = larger.subarray(4, 4 + W16 * H16 * 4);
+  assert.ok(await workerGainMap16(source, sdr, identitySettings(), { transferPlane: true }));
+  assert.equal(larger.byteLength, (W16 * H16 * 4 + 8) * 2, 'a shared buffer is not detached');
+}
+
+{
+  // Error echo: the worker hands the buffers back; the plane is re-attached.
+  resetWorkerFallbackWarnings();
+  let result;
+  const { source, sdr, plane } = createGainMapInputs();
+  const samples = Array.from(plane.data);
+  const warnings = await countWarnings('gainMap16', async () => {
+    reset(replyEcho);
+    result = await workerGainMap16(source, sdr, identitySettings(), { transferPlane: true });
+  });
+  assert.equal(result, null, 'an error resolves null for the main-thread fallback');
+  assert.equal(source.__image16, plane, 'the same plane object');
+  assert.deepEqual(Array.from(plane.data), samples, 'the returned buffer is re-attached to the plane');
+  assert.equal(warnings, 1);
+}
+
+{
+  // A crash after a transfer loses the plane: that must not look like "no map".
+  reset(() => ({ kind: 'crash' }));
+  const { source, sdr } = createGainMapInputs();
+  await assert.rejects(
+    workerGainMap16(source, sdr, identitySettings(), { transferPlane: true }),
+    (err) => {
+      assert.ok(isExportInputLostError(err), `expected ExportInputLostError, got ${err.name}`);
+      return true;
+    }
+  );
+  // The same crash in copy mode is an ordinary fallback.
+  reset(() => ({ kind: 'crash' }));
+  const copy = createGainMapInputs();
+  const samples = Array.from(copy.plane.data);
+  assert.equal(await workerGainMap16(copy.source, copy.sdr, identitySettings()), null);
+  assert.deepEqual(Array.from(copy.plane.data), samples);
+  // A timeout after a transfer is lost input too.
+  reset(() => ({ kind: 'hang' }));
+  const timed = createGainMapInputs();
+  await withEventLoopAlive(() => assert.rejects(
+    workerGainMap16(timed.source, timed.sdr, identitySettings(), { transferPlane: true, timeoutMs: 20 }),
+    (err) => isExportInputLostError(err)
+  ));
+}
+
+{
+  // A worker that cannot be posted to never detaches the plane.
+  reset(() => ({ kind: 'throw', error: new Error('DataCloneError') }));
+  const { source, sdr, plane } = createGainMapInputs();
+  assert.equal(await workerGainMap16(source, sdr, identitySettings(), { transferPlane: true }), null);
+  assert.equal(plane.data.length, W16 * H16 * 4);
+}
+
+{
+  // Cancellation rejects instead of falling back.
+  reset(() => ({ kind: 'hang' }));
+  const controller = new AbortController();
+  const { source, sdr } = createGainMapInputs();
+  const promise = workerGainMap16(source, sdr, identitySettings(), { signal: controller.signal });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  controller.abort();
+  await assert.rejects(promise, (err) => isAbortError(err));
+}
+
+{
+  // Inputs that produce no map never reach the worker.
+  reset(replyGainMap);
+  const { source, sdr } = createGainMapInputs();
+  assert.equal(await workerGainMap16(source, new ImageData(new Uint8ClampedArray(16), 2, 2), identitySettings()), null);
+  const unmatched = createGainMapInputs();
+  unmatched.source.__image16 = { width: 2, height: 2, data: new Uint16Array(16) };
+  assert.equal(await workerGainMap16(unmatched.source, unmatched.sdr, identitySettings()), null);
+  assert.equal(await workerGainMap16({ width: W16, height: H16, data: sdr.data }, sdr, identitySettings()), null);
+  assert.equal(lastPost, null);
+  assert.ok(source);
+}
+
 terminateWorker();
 
 console.log('workerBridge.test.mjs passed');
@@ -340,7 +663,10 @@ console.log('workerBridge.test.mjs passed');
   assert.equal(b.pendingCount, 0);
   const pb = b.workerEncodePng16(createImageData(), { timeoutMs: 0 });
   assert.equal(workers.length, 2, 'the second bridge gets a second worker');
+  assert.equal(a.workerAlive, true, 'workerAlive reports the lazily started worker');
   a.terminateWorker();
+  assert.equal(a.workerAlive, false, 'and never spawns one itself');
+  assert.equal(workers.length, 2);
   assert.equal(await pa, null, 'terminating one bridge fails only its own request');
   assert.equal(b.pendingCount, 1, 'the other bridge is untouched');
   assert.ok(workers[0].terminated && !workers[1].terminated);
@@ -350,6 +676,7 @@ console.log('workerBridge.test.mjs passed');
   reset(() => ({ kind: 'hang' }));
   const pool = createExportWorkerPool({ size: 2 });
   assert.equal(pool.size, 2);
+  assert.equal(typeof pool.workerGainMap16, 'function', 'the pool exposes the gain-map request');
   const r1 = pool.workerEncodeTiff(createImageData(), 8, { timeoutMs: 0 });
   const r2 = pool.workerEncodeTiff(createImageData(), 8, { timeoutMs: 0 });
   const r3 = pool.workerEncodeTiff(createImageData(), 8, { timeoutMs: 0 });
@@ -358,7 +685,15 @@ console.log('workerBridge.test.mjs passed');
   assert.equal(workers[1].posts.length, 1);
   assert.equal(pool.pendingCount, 3);
   pool.dispose();
-  assert.deepEqual(await Promise.all([r1, r2, r3]), [null, null, null]);
+  // The batch is over (#229 R1-093): its requests are cancelled, not failed
+  // (a null result is the cue to redo the work on the main thread), and no
+  // lane starts a worker again.
+  const settled = await Promise.allSettled([r1, r2, r3]);
+  assert.ok(settled.every((s) => s.status === 'rejected' && isAbortError(s.reason)), 'dispose cancels the requests in flight');
   assert.ok(workers.every(w => w.terminated), 'dispose terminates every lane');
+  assert.equal(pool.disposed, true);
+  await assert.rejects(pool.workerEncodeTiff(createImageData(), 8), (err) => isAbortError(err), 'a request after dispose is cancelled');
+  assert.equal(pool.isWorkerAvailable(), false);
+  assert.equal(workers.length, 2, 'a disposed pool starts no worker');
   console.log('workerBridge: independent bridges and pool dispatch verified');
 }

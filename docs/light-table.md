@@ -14,12 +14,41 @@ detected stocks and roll outliers are visible at a glance.
   150 px (120 px on phones), and the tiles show a larger thumbnail, the file
   name and the badges from the film edge reader (`film-stock`) and the roll
   analysis (`roll-outlier`). `renderFileList` is unchanged; only CSS differs.
-- **Thumbnails for every file.** RAW files used to show a numbered placeholder
-  until opened; `loadStudioThumbnails` now decodes them through the fast
-  embedded-preview path (`loadRawImageDataPreview`) one at a time in the
-  background. After **Analyse roll** every analysed frame gets a converted
-  thumbnail rendered from the 900 px sample already in memory, so the light
-  table shows the roll as it will convert instead of orange negatives.
+- **Thumbnails for every file.** At import every TIFF-container RAW (DNG,
+  NEF, CR2, ARW, RW2, ...) gets an `embedded` tile: the scan-decode worker
+  locates the smallest preview with a long side of at least 288 px through
+  Blob slices (720 × 480 on the M11, ~50-140 KB read), inverts it and returns a
+  ~320 px JPEG data URL. Two workers keep up to four jobs in flight, the first
+  photo first, then rows on screen (`IntersectionObserver`), then the rest; the
+  jobs are not gated on roll import, and tile DOM updates are batched once per
+  frame. These tiles are provisional camera renderings: they stay
+  `data-preview-state="pending"`. During automatic roll import each measured
+  frame then gets a converted `analysis` tile from its sample, rendered with
+  the roll's own tile recipe (the commit's renderer, with the frame's tile
+  working image, analysis reference and automatic gray point) in a conversion
+  worker without delaying the next decode, so the commit's tile of the same
+  recipe has the same pixels. Final tiles come
+  from data already in memory (#247): the roll commit renders each analysed
+  frame's `processed` tile from its sample, frames no roll group took get
+  theirs from their samples before the import ends, and recipe changes over
+  unchanged geometry re-render from retained tile sources
+  (`docs/photo-sessions.md`). Half-size RAW tile requests keep the units of
+  an earlier full decode: unshrunk output clears false full-size tags, and
+  proven half output carries the remembered full size even without metadata.
+  Supplied shared/session bases follow the same rule before rendering and
+  storing a tile source; ambiguous shrinkage takes a full decode.
+  `halfSizeTile.test.mjs` checks page/held callers, every 16-bit crop sample,
+  shared bases, full recovery and reopened retained tiles at 240×160 or less.
+  The canonical lane (the background photo lanes,
+  #243) decodes only what is left: unanalysed frames, lens-corrected frames,
+  changed geometry, evicted sources. A tile never moves back from `processed`
+  or `analysis` to `embedded` (`data-thumbnail-kind` on each tile), except
+  that undoing a roll commit or a whole-roll film type puts back each frame's
+  earlier tile with its rank and settings key. A reopened
+  roll project restores the tiles it saved. CR3, RAF and other non-TIFF containers
+  keep their numbered tile until a converted preview exists. Where workers
+  cannot decode images (macOS 10.15 WebKit, older WebKitGTK) tiles decode on the
+  main thread, one per animation frame.
 - **Keyboard.** With a tile focused, Left/Right move by one tile, Up/Down by
   one row (the number of tiles sharing the first tile's top edge), Home/End to
   the ends. Selection (checkboxes, shift-range) and the existing "apply to

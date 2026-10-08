@@ -101,21 +101,26 @@ export async function runStudioSmoke({ send, evaluate, waitFor, wait, fail, inst
   };
   await clickVisible('studioTab-border');
   await clickVisible('sprocketPreviewBtn');
-  await waitFor('film border preview', `document.getElementById('sprocketPreviewBtn').getAttribute('aria-pressed') === 'true' && getComputedStyle(document.getElementById('canvas')).display !== 'none'`);
+  // #253: the border is drawn around the photo on whichever canvas shows it
+  // (the GL display draws it as an underlay).
+  await waitFor('film border preview', `document.getElementById('sprocketPreviewBtn').getAttribute('aria-pressed') === 'true' && !!window.__ncDisplay.shownFrame().photo`);
   await clickVisible('sprocketTextEnabledInput');
   await clickVisible('sprocketFrameNumberEnabledInput');
   await clickVisible('sprocketDxEnabledInput');
   await wait(1000);
+  // The frame on screen holds the display-size photo in its border (#242,
+  // #253): the band is what the frame adds around the displayed photo.
   const borderPreview = await evaluate(`(() => {
-    const canvas = document.getElementById('canvas');
-    const data = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
+    const frame = window.__ncDisplay.shownFrame();
+    const data = frame.data;
     let holes = 0, markings = 0;
-    const band = Math.floor((canvas.height - window.__studioSourceSize[1]) / 2);
-    for (let i = 0; i < canvas.width * band * 4; i += 4) {
+    const shown = window.__ncDisplay.frame().display;
+    const band = Math.floor((frame.height - shown[1]) / 2);
+    for (let i = 0; i < frame.width * band * 4; i += 4) {
       if (data[i] > 240 && data[i + 1] > 240 && data[i + 2] > 240) holes++;
       if (data[i] > 100 && data[i] > data[i + 1] * 1.2 && data[i + 1] > data[i + 2] * 1.5) markings++;
     }
-    return { width: canvas.width, height: canvas.height, source: window.__studioSourceSize, holes, markings };
+    return { surface: frame.surface, width: frame.width, height: frame.height, source: shown, holes, markings };
   })()`);
   if (borderPreview.height <= borderPreview.source[1] || borderPreview.width < borderPreview.source[0] || borderPreview.holes < 100 || borderPreview.markings < 50) fail('film border was not composited: ' + JSON.stringify(borderPreview));
   await assertPreviewVisible();
@@ -164,29 +169,32 @@ export async function runStudioSmoke({ send, evaluate, waitFor, wait, fail, inst
   console.log('ok: all five tool tabs expose professional controls; curves redraw and panels collapse without losing the preview');
 
   // 調色の非同期更新直後に切り抜きを開始しても、編集中の画布を奪わない。
+  // Crop mode draws on its own canvas (#245); the develop canvases stay hidden.
   await evaluate(`(() => {
-    const image = document.getElementById('canvas');
     // 読み込み直後の表示は低解像度でも、切り抜きは元の寸法で評価する。
     window.__cropUncroppedSize = window.__studioSourceSize;
     const slider = document.getElementById('coreTemperature');
     slider.value = '12'; slider.dispatchEvent(new Event('input', { bubbles: true }));
     slider.dispatchEvent(new Event('change', { bubbles: true }));
     document.getElementById('cropBtn').click();
-    const canvas = document.getElementById('canvas');
+    const canvas = document.getElementById('cropCanvas');
     window.__cropDraftSize = [canvas.width, canvas.height];
   })()`);
   await wait(3500);
   const stableCrop = await evaluate(`(() => {
-    const canvas = document.getElementById('canvas');
+    const canvas = document.getElementById('cropCanvas');
     return { active: document.getElementById('canvasContainer').classList.contains('crop-mode'),
       canvasVisible: getComputedStyle(canvas).display !== 'none',
       glHidden: getComputedStyle(document.getElementById('glCanvas')).display === 'none',
+      mainHidden: getComputedStyle(document.getElementById('canvas')).display === 'none',
       sizeStable: JSON.stringify([canvas.width, canvas.height]) === JSON.stringify(window.__cropDraftSize) };
   })()`);
-  if (!stableCrop.active || !stableCrop.canvasVisible || !stableCrop.glHidden || !stableCrop.sizeStable) fail(`crop draft overwritten by background render: ${JSON.stringify(stableCrop)}`);
+  if (!stableCrop.active || !stableCrop.canvasVisible || !stableCrop.glHidden || !stableCrop.mainHidden || !stableCrop.sizeStable) fail(`crop draft overwritten by background render: ${JSON.stringify(stableCrop)}`);
   await evaluate(`document.getElementById('cancelCropBtn').click()`);
   await wait(500);
-  if (!await evaluate(`JSON.stringify([document.getElementById('canvas').width, document.getElementById('canvas').height]) === JSON.stringify(window.__cropUncroppedSize)`)) fail('crop cancel did not restore the image dimensions: ' + JSON.stringify(await evaluate(`({ actual: [document.getElementById('canvas').width, document.getElementById('canvas').height], expected: window.__cropUncroppedSize })`)));
+  // The frame's full-resolution size: #canvas holds a display-size frame (#242).
+  const frameSize = `(() => { const f = window.__ncDisplay.frame(); return [f.width, f.height]; })()`;
+  if (!await evaluate(`JSON.stringify(${frameSize}) === JSON.stringify(window.__cropUncroppedSize)`)) fail('crop cancel did not restore the image dimensions: ' + JSON.stringify(await evaluate(`({ actual: ${frameSize}, expected: window.__cropUncroppedSize })`)));
 
   await evaluate(`document.getElementById('cropBtn').click()`);
   const corner = await evaluate(`(() => {
@@ -205,18 +213,18 @@ export async function runStudioSmoke({ send, evaluate, waitFor, wait, fail, inst
   await evaluate(`document.getElementById('applyCropBtn').click()`);
   await waitFor('crop applied and converted', `document.body.classList.contains('studio-ready') && !document.getElementById('canvasContainer').classList.contains('crop-mode')`, 120_000);
   // 通常の原寸化は 2500ms のアイドル後。固定 1500ms では高速なプレビューを誤判定する。
-  await waitFor('crop full-resolution dimensions', `[document.getElementById('canvas').width, document.getElementById('canvas').height].every((size, index) => Math.abs(size - ${JSON.stringify(expectedCrop)}[index]) <= 2)`, 120_000);
-  const appliedCrop = await evaluate(`[document.getElementById('canvas').width, document.getElementById('canvas').height]`);
+  await waitFor('crop full-resolution dimensions', `window.__ncDisplay.frame().exact && ${frameSize}.every((size, index) => Math.abs(size - ${JSON.stringify(expectedCrop)}[index]) <= 2)`, 120_000);
+  const appliedCrop = await evaluate(frameSize);
   if (appliedCrop.some((size, index) => Math.abs(size - expectedCrop[index]) > 2)) fail(`crop dimensions differ from dragged region: ${appliedCrop} vs ${expectedCrop}`);
   await assertPreviewVisible();
   await evaluate(`document.getElementById('undoBtn').click()`);
-  await waitFor('undo crop original dimensions', `JSON.stringify([document.getElementById('canvas').width, document.getElementById('canvas').height]) === JSON.stringify(window.__cropUncroppedSize)`, 120_000);
+  await waitFor('undo crop original dimensions', `JSON.stringify(${frameSize}) === JSON.stringify(window.__cropUncroppedSize)`, 120_000);
   await evaluate(`document.getElementById('redoBtn').click()`);
-  await waitFor('redo crop full-resolution dimensions', `JSON.stringify([document.getElementById('canvas').width, document.getElementById('canvas').height]) === ${JSON.stringify(JSON.stringify(appliedCrop))}`, 120_000);
-  const redoneCrop = await evaluate(`[document.getElementById('canvas').width, document.getElementById('canvas').height]`);
+  await waitFor('redo crop full-resolution dimensions', `JSON.stringify(${frameSize}) === ${JSON.stringify(JSON.stringify(appliedCrop))}`, 120_000);
+  const redoneCrop = await evaluate(frameSize);
   if (JSON.stringify(redoneCrop) !== JSON.stringify(appliedCrop)) fail('redo crop did not restore the crop');
   await evaluate(`document.getElementById('undoBtn').click()`);
-  await waitFor('restore uncropped dimensions', `JSON.stringify([document.getElementById('canvas').width, document.getElementById('canvas').height]) === JSON.stringify(window.__cropUncroppedSize)`, 120_000);
+  await waitFor('restore uncropped dimensions', `JSON.stringify(${frameSize}) === JSON.stringify(window.__cropUncroppedSize)`, 120_000);
   console.log('ok: crop survives background render; real pointer drag, apply, cancel, undo and redo preserve geometry');
 
   await evaluate(`(() => {

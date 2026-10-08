@@ -29,6 +29,7 @@ export class LoadingOverlay {
     this._progressText = null;
     this._phaseText = null;
     this._cancelBtn = null;
+    this._status = null;
   }
 
   _createDOM() {
@@ -36,12 +37,19 @@ export class LoadingOverlay {
 
     this._overlay = document.createElement('div');
     this._overlay.className = 'loading-overlay';
-    // Announced as a busy status region rather than a dialog: it takes no
-    // input beyond the optional Cancel button, so trapping focus in it would
-    // strand the user when it hides itself.
-    this._overlay.setAttribute('role', 'status');
-    this._overlay.setAttribute('aria-live', 'polite');
+    // Not a dialog: it takes no input beyond the optional Cancel button, so
+    // trapping focus in it would strand the user when it hides itself.
     this._overlay.setAttribute('aria-busy', 'true');
+
+    // The phase is announced from a visually hidden status region outside the
+    // overlay. The hidden overlay is visibility: hidden (studio.css), which
+    // takes it out of the accessibility tree, and a live region that appears
+    // together with its text is not reliably announced.
+    this._status = document.createElement('div');
+    this._status.className = 'sr-only loading-status';
+    this._status.setAttribute('role', 'status');
+    this._status.setAttribute('aria-live', 'polite');
+    document.body.appendChild(this._status);
 
     const reelWrap = document.createElement('div');
     reelWrap.className = 'loading-reel-wrap';
@@ -91,11 +99,16 @@ export class LoadingOverlay {
    * @param {boolean} [options.cancelable] - Whether to show cancel button
    * @param {function} [options.onCancel] - Cancel callback
    * @param {string} [options.cancelText] - Cancel button label
+   * @param {boolean} [options.immediate] - Skip the fade-in: the first frame
+   *   painted after this call shows the overlay fully opaque. For work that
+   *   blocks the main thread right after the paint, where a fade (Studio's
+   *   steps() timing, which WebKit cannot run off the main thread) would
+   *   still be at opacity 0. Cleared by hide(), so the fade-out still runs.
    */
   async show(options = {}) {
     this._createDOM();
 
-    const { title = '', cancelable = false, onCancel = null, cancelText = 'Cancel' } = options;
+    const { title = '', cancelable = false, onCancel = null, cancelText = 'Cancel', immediate = false } = options;
 
     this._percent = 0;
     this._progressText.textContent = '0%';
@@ -110,16 +123,41 @@ export class LoadingOverlay {
     this._cancelBtn.style.display = cancelable ? 'inline-block' : 'none';
 
     this._visible = true;
+    if (immediate) this._overlay.classList.add('loading-overlay-immediate');
     this._overlay.classList.add('visible');
     this._overlay.classList.remove('indeterminate');
+    this._announce(title);
     if (options.indeterminate) this.updateIndeterminate(title);
   }
 
-  /** Hide the loading overlay. */
+  /**
+   * Show or hide the Cancel button while the overlay is up (an export
+   * becomes cancellable once its encode or write starts).
+   * @param {boolean} cancelable
+   * @param {{onCancel?: function, cancelText?: string}} [options]
+   */
+  setCancelable(cancelable, { onCancel = null, cancelText } = {}) {
+    this._createDOM();
+    this._cancelCallback = cancelable ? onCancel : null;
+    if (cancelText !== undefined) this._cancelBtn.textContent = cancelText;
+    this._cancelBtn.style.display = cancelable ? 'inline-block' : 'none';
+  }
+
+  /**
+   * Hide the loading overlay. Its animations pause and it leaves rendering
+   * once the fade ends (studio.css); apart from the immediate class, the
+   * classes stay as they are so the fade itself does not jump.
+   */
   hide() {
     this._visible = false;
     this._overlay?.setAttribute('aria-busy', 'false');
-    this._overlay?.classList.remove('visible');
+    this._overlay?.classList.remove('visible', 'loading-overlay-immediate');
+    this._announce('');
+  }
+
+  _announce(text) {
+    const value = text || '';
+    if (this._status && this._status.textContent !== value) this._status.textContent = value;
   }
 
   /**
@@ -136,6 +174,7 @@ export class LoadingOverlay {
     if (phaseText !== undefined) {
       this._phaseText.textContent = phaseText;
       if (this._strip) this._strip.setAttribute('aria-label', phaseText || 'Processing');
+      this._announce(phaseText);
     }
   }
 
@@ -147,6 +186,7 @@ export class LoadingOverlay {
     this._progressText.textContent = '';
     this._phaseText.textContent = phaseText || '';
     this._fill.style.width = '35%';
+    if (this._visible) this._announce(phaseText);
   }
 
   /** Remove the overlay from the DOM. */
@@ -159,6 +199,8 @@ export class LoadingOverlay {
     if (this._overlay && this._overlay.parentNode) {
       this._overlay.parentNode.removeChild(this._overlay);
     }
+    this._status?.remove();
+    this._status = null;
     this._overlay = null;
     this._strip = null;
     this._fill = null;

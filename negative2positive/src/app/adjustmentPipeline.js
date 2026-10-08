@@ -65,27 +65,47 @@ function syncImage16(imageData, output, identity) {
  * controls say. Falls back to the 8-bit stage when there is no plane.
  */
 export function applyPreparedAdjustmentsToBuffer16(imageData, adjustmentSettings, output, options = {}) {
-  const plane = imageData && imageData.__image16;
-  if (!plane || !(plane.data instanceof Uint16Array) || plane.width !== imageData.width || plane.height !== imageData.height) {
+  const plane16 = applyPreparedAdjustmentsToPlane16(imageData, adjustmentSettings, options);
+  if (!plane16) {
     applyPreparedAdjustmentsToBuffer(imageData, adjustmentSettings, output, options);
     return;
+  }
+  downconvertPlane16(plane16.data, output.data);
+  output.__image16 = plane16;
+}
+
+/**
+ * The plane-only sibling for callers that read only the adjusted plane (the
+ * JPEG gain map): no 8-bit output and no downconvert. Returns the adjusted
+ * `{ width, height, data }` plane, or null when `imageData` carries no plane
+ * of its own size (where the buffer variant runs the 8-bit stage instead).
+ */
+export function applyPreparedAdjustmentsToPlane16(imageData, adjustmentSettings, options = {}) {
+  const plane = imageData && imageData.__image16;
+  if (!plane || !(plane.data instanceof Uint16Array) || plane.width !== imageData.width || plane.height !== imageData.height) {
+    return null;
   }
   const { quality = 'full', onProgress = null, chunkSize = 500000, lutScratch16 = null } = options;
   const params = computeAdjustmentParams(adjustmentSettings, { width: plane.width, height: plane.height });
   const out16 = new Uint16Array(plane.data.length);
   applyAdjustmentsToPixels16(plane.data, out16, plane.width * plane.height, params, quality, onProgress, chunkSize, lutScratch16);
-  downconvertPlane16(out16, output.data);
-  output.__image16 = { width: plane.width, height: plane.height, data: out16 };
+  return { width: plane.width, height: plane.height, data: out16 };
 }
 
+// `options.region` ({ x, y, frameWidth, frameHeight }): `imageData` is that
+// rectangle of a frame of frameWidth x frameHeight (#254's live dodge
+// rectangles), so position-dependent stages see each pixel at its place.
 export function applyPreparedAdjustmentsToBuffer(imageData, adjustmentSettings, output, options = {}) {
   const {
     quality = 'full',
     lutScratch = null,
     onProgress = null,
-    chunkSize = 500000
+    chunkSize = 500000,
+    region = null
   } = options;
-  const params = computeAdjustmentParams(adjustmentSettings, { width: imageData.width, height: imageData.height });
+  const params = computeAdjustmentParams(adjustmentSettings, region
+    ? { width: region.frameWidth, height: region.frameHeight, region: { x: region.x, y: region.y, width: imageData.width } }
+    : { width: imageData.width, height: imageData.height });
 
   applyAdjustmentsToPixels(
     imageData.data,

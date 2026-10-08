@@ -1,0 +1,299 @@
+# Renderer memory budget
+
+Issue: [#258](https://github.com/lexluthor0304/NegativeConverter/issues/258)
+(part of the #229 performance program).
+
+With a 60 MP roll open the renderer used to reach 8–9 GB on a 16 GB Mac:
+every cache had its own cap, batch and roll lanes planned against a fixed
+80 MP pixel budget, and background decodes started whatever the foreground,
+the caches and the other lanes held. The desktop app did not even know its
+RAM (WKWebView has no `navigator.deviceMemory`). Now one budget decides how
+much may be in use at once. It changes when work starts and what is kept,
+never how a frame is processed: exported pixels are unchanged.
+
+## Sizing
+
+`budgetFor({ ramBytes })` in `app/memoryBudget.js`:
+
+```
+budget = min(0.45 × RAM, (RAM > 16 GiB ? 16 GiB : 8 GiB) − 2 GiB)
+```
+
+The second term is WebKit's kill limit for an active WebContent process with
+one page (`thresholdForMemoryKillOfActiveProcess`: 7 + 1 GiB, or 15 + 1 GiB
+above 16 GiB of RAM) minus a 2 GiB margin for what the estimates miss (GC lag,
+WASM heaps, code and image caches). Chromium (Chrome, WebView2) has no such
+limit, but the same cap keeps a 16 GB machine out of swap, so one formula
+applies everywhere.
+
+| RAM | budget |
+|---|---|
+| unknown (web) → 8 GiB | 3.6 GiB |
+| 8 GiB | 3.6 GiB |
+| 16 GiB | 6 GiB |
+| 32 GiB | 14 GiB |
+| 64 GiB | 14 GiB |
+
+Where the RAM figure comes from (`resolveMemoryRam`):
+
+1. `localStorage nc_memory_ram_gib_v1` (GiB, support and benchmarks: the
+   forced 2-lane parity run uses `32`);
+2. the desktop command `get_memory_info` (`src-tauri/src/memory_info.rs`):
+   `{ totalBytes, availableBytes, engine }` from `hw.memsize` on macOS (allowed
+   in the App Store sandbox), `GlobalMemoryStatusEx` on Windows and
+   `/proc/meminfo` on Linux, with `engine` `wkwebview`, `webview2` or
+   `webkitgtk`;
+3. `navigator.deviceMemory × 2^30` (Chrome 147+ reports up to 32 on desktop);
+4. unknown: 8 GiB.
+
+The page starts with 3 and 1, and re-sizes once the desktop command answers.
+Roll-analysis planning (#252, `planRollAnalysis`) waits for that answer and
+plans with the same figure.
+While the window is hidden on the hosts `hiddenJobGate.js` limits (macOS
+WebKit), the ceiling drops to that gate's `HIDDEN_BUDGET_BYTES` (3.3 GB, under
+WebKit's 4 GiB inactive limit); nothing granted is revoked. The RAW decoder's
+low-memory refusal (`checkRawDecodeBudget`) reads the same RAM when it is known
+and keeps its ≤ 4 GiB rule.
+
+## Reservations
+
+`createMemoryBudget` keeps the reservations; `reserve(bytes, { priority,
+signal, label })` resolves with a handle that its owner releases once the
+memory is really gone.
+
+- **Foreground** (the photo being opened) is granted at once, recorded
+  synchronously, even over budget, and evicts nothing: one decode that ends in
+  seconds.
+- **User** (jobs the user started and waits for) and **background** (work the
+  app starts on its own) requests wait in one queue, every user request ahead
+  of every background one, FIFO within a priority, and only the head is
+  granted, so a small request never overtakes a large one. The head is granted
+  when no foreground reservation is out and `reserved + retained + bytes ≤
+  budget`; if it does not fit, `onPressure(shortfall)` evicts first and the
+  check runs again.
+- **Progress rule.** A head that still does not fit is granted when no other
+  user or background reservation is out: the worst case is one item at a time,
+  never a stall.
+- A waiting request's `signal` rejects it with an `AbortError`. A granted
+  handle is not released by its signal: a LibRaw decode still running must
+  stay counted until its owner's `finally`.
+- Waiters are re-evaluated on every release, `setBudget` and `poke`, and every
+  second while anything waits.
+
+| site | priority | bytes | held |
+|---|---|---|---|
+| `loadFile` and the cold path of `switchToFile` | foreground | the decode's peak (`estimateRawDecodeBytes` with LibRaw's size, taken at the loader gate after `metadata()`); 12 B/px from the header for PNG/JPEG/TIFF | until the photo has settled (no switch, conversion or geometry build, not provisional, two polls 250 ms apart) or a newer activation supersedes it |
+| stage 2 of a two-stage RAW import (the full decode behind the stand-in, #255) | foreground | same | until the decode returns |
+| Export All lanes (`runBatchExport`) | user | 50 B/px (`LANE_BYTES_PER_PIXEL`) × the batch's largest frame; the payload's bytes once the lane goes on before its write (#256 Part 2: `admitJobItem`'s `early`, never waiting, the frame being gone) | from `beforeStart` (after the hidden-job gate, before the lane claims an index) until that index's sink ran |
+| Export All decode-ahead (#256, the next frame decoded before a lane claims it) | user | an optimistic offer uses `planDecodeAhead`; the actual loader gate rechecks after idle/read/metadata waits, waits only for foreground ownership and takes a synchronous `tryReserve` handle. Only unused bytes in its own full lane reservations are credited; payloads and other jobs remain counted. A changed ceiling refuses dispatch and the lane decodes instead, without a prepare queued behind its consumer | until the base enters the ledger (jobs); that retained base stays until take/disposal |
+| background lanes: roll analysis (pass 1) | background | 50 B/px of the frame; in the automatic roll import (#252, frames measured in roll-frame workers) that plan's footprint instead: 14 B/px plus one OpenCV realm (`rollAnalysisFootprint`, about 1.0 GB at 60.4 MP), plus the decode's peak from the loader gate until the frame's planes are packed (`claim.settle`) | from before the decode until the job ends |
+| background lanes: tiles, including Sync colour re-renders, and the prefetch | background | decode peak + 12 B/px; nothing when the base is a retained session or the prefetch slot. A watch-folder arrival's full-resolution recipe render (#229 review, R1-124) runs under the same claim: a RAW's decode peak is past by then and about covers its working and converted planes; a PNG/JPEG/TIFF scan's exceed it (`docs/audit-backlog.md`) | until the tile is written or the base handed over |
+| Multi-shot merge | user | `estimateMultiShotWorkerBytes` for the entire selection (planes, output, warp heap) | reserved before decoding, held through worker disposal; loader claims are covered by this reservation; selections larger than budget minus retained bytes are refused |
+| Auto Frame Selected, blank-frame search, manual Analyze Roll, contact sheet | user | decode peak + 12 B/px | one frame at a time, until it is dropped |
+| automatic roll-analysis decodes and sample fallbacks | background | same | same |
+
+**One chokepoint.** `loadRawFile` awaits `options.reserveDecode(size)` before
+every branch decodes: with LibRaw's `width`, `height` and `estimatedBytes`
+after `metadata()`, and without a size before a UTIF, embedded-preview or
+browser decode. A native desktop decode (`docs/native-raw-decode.md`)
+reserves the same estimate at the same point, before the shell unpacks;
+its LibRaw heap lives in the app process, so the reservation over-counts
+WebContent on that path. `loadFileToImageData(file, { claim })` passes the caller's
+claim (`createMemoryClaim`): a claim reserved up front from the header is
+corrected there to the real size (never waiting), an Export All lane's is
+`fixed`, and a decode without a claim takes its own. Nothing decodes
+unreserved and nothing is counted twice. Background decodes reserve through
+the shared decode (`sharedDecodes.open(file, { context: { claim } })`), and a
+roll pass's own decode (#252's roll-frame worker, or its page fallback) runs
+inside the same lane claim. That claim drops the decode's peak once the
+frame's planes are packed: the roll-frame worker reports it (`packed`) before
+its detection and film-edge read, a page decode when its post-decode pass
+returns. A
+header without dimensions borrows those of a decoded file with the same
+extension in the queue (`imagePixelsWithSiblings`); the progress rule covers
+the rest.
+
+Dispatch rechecks use that same claim after scan-worker or threaded readiness,
+RAW decode-slot acquisition, browser header reads, lazy codec imports and
+worker/browser retries. PNG/TIFF and ordinary scans retain `{ kind: 'scan' }`,
+RAW retains its metadata-sized arguments, and embedded JPEG retains its
+extracted dimensions. A failed admission rejects and releases the idle worker;
+it cannot signal successful decode or request an unaccounted fallback. Every
+prepare exit withdraws late waiting gates before releasing its current handle.
+
+**No deadlock.** Foreground never waits. A lane reserves before it claims an
+index. Every job holds at most one reservation while it waits for the next
+(Auto Frame Selected and the roll analysis release per frame; the blank-frame
+search keeps its best candidate as retained, in the ledger, not as a
+reservation; an Export All lane that went on before a write keeps only that
+payload's bytes, which its in-order sink releases without waiting on any
+admission), and every handle is released in `finally`. The hidden-job gate
+is always passed before the budget, never after. `batchExportScheduler.test.mjs`
+runs three lanes against a budget that fits 1.5 items with a slow first sink,
+and against a gate that admits the newest waiter first, where a lane that
+claimed its index before admission deadlocks (the test runs a scheduler
+mutated that way and requires the failure).
+
+## The ledger
+
+`createRetainedLedger` counts every `ArrayBuffer` once, attributed to the first
+consumer that holds it:
+
+1. **editor**: `loadedBaseImageData`, the `SNAPSHOT_REF_KEYS` planes,
+   `displayImageData`, the dust planes and the CPU display buffers (each with
+   its `__image16`), a parked photo's base, and a two-stage import's full
+   decode from its return until the swap installs it (#255; no plane holds it
+   in between, and its own reservation ends with the decode);
+2. **sessions**, then **previews** (`photoSessionCache.js`);
+3. **history**: only what nothing above holds (#244's exclusive count);
+   hidden parking keeps dust history as a committed IndexedDB record, with
+   no full target, clean-source, mask or patch buffers in the live entries.
+   Storage failure keeps the real buffers and their ledger charge;
+4. **stores**: the prefetch slot, tile sources, watch-folder roll samples and
+   the roll-analysis sample stores in use;
+5. **jobs**: frames a job keeps between its items, and an Export All frame
+   decoded ahead until a lane takes it (#256);
+6. **workers**: long-lived worker residents: the default export bridge (the
+   planes of its last request until it is terminated), the auto-frame
+   worker's OpenCV heap (`cv.HEAPU8`, reported with each reply) and a warmed
+   MI-GAN session (its worker's `WebAssembly.Memory` bytes, which
+   `workers/wasmHeap.js` tracks from before ONNX Runtime loads and each reply
+   carries; an estimate of 0.7 GB on WASM or 0.25 GB on WebGPU until the
+   first reply, or for a main-thread session). The dust worker's private
+   clean-source planes and mask count too, plus a 150 MiB OpenCV estimate;
+   a shared 16-bit view is already counted with its page owner. Unpinning
+   keeps those bytes until the worker terminates or the idle check disposes
+   it. Residency follows the client's `alive` lifetime independently of
+   `maskTag`: a tagless detect on a new source, or a cleared reuse tag, still
+   retains planes and the estimated heap after the reply, pinned or unpinned.
+   A queued smaller detect/inpaint source must not reduce the count before
+   the old source is replaced. Private plane estimates keep a conservative
+   maximum for the worker's lifetime, with shared 16-bit views excluded;
+   actual termination ends residency and idle disposal clears the estimate.
+   Pinned or pending dust work is never evicted. `workerResidentsLedger.test.mjs`
+   covers seeded → tagless request → reply → unpin → termination on small
+   copied and shared planes; shared 16-bit views remain counted with their page owner.
+   `dustWorkerMemoryResize.test.mjs` pauses the real processor before source
+   replacement, queues 6×4 detect/inpaint behind pinned 24×16 planes, and
+   checks the estimate through reply, unpin, disposal and a fresh small worker.
+   Roll-frame and page-path analyzer pools register their idle realms
+   between frames and during import retries, and remove the registration at
+   `finish()`. Acquired workers are covered by the frame's lane claim.
+   Roll-frame idle realms use at least 150 MiB each, or their reported
+   `cv.HEAPU8` size if larger. Idle roll analyzers use the same 150 MiB floor
+   or their reported size if larger: some OpenCV builds keep the heap private,
+   so a zero report cannot mean that a live realm occupies no memory.
+
+It is computed on demand, at an admission and at an idle check, never per
+frame.
+
+An OpenCV realm keeps its first load rejection: an ES-module glue import
+cannot restart the cached factory. A failed roll-frame warm-up terminates
+that worker; the next request can start a fresh realm. Warm-up, process,
+sample and release replies have a 120 s deadline that terminates a silent
+worker and rejects its pending requests. Roll analysis then uses its existing
+worker-failure/page fallback and releases the frame's claim instead of
+keeping it for the rest of the session. `workerResidentsLedger.test.mjs`
+exercises the real registrations, pinned dust and pool clients on small planes.
+
+A 16-bit plane in shared memory (#264, `docs/cross-origin-isolation.md`) is a
+`SharedArrayBuffer` the ledger counts like an `ArrayBuffer`: once, for the
+first consumer that holds it. The workers that read it hold views, not
+copies, and report nothing for it; no worker posts a shared plane back to the
+page, so the page never holds two objects for one allocation.
+
+**Eviction under pressure** (`relieveMemoryPressure`), in order, stopping once
+the shortfall is freed, then `poke()`:
+
+1. `photoPreviews`;
+2. `photoSessions`: a background lane's base-only entries first (#243's
+   hand-overs, `putIfRoom(..., { background: true })`), then the others least
+   recently used first, never the session the user just left
+   (`lastStoredKey`, which only the editor's own puts set, never a lane's
+   hand-over; #229 review R2-038): the warm 1-back switch is never traded for
+   other work. The idle check below trims in the same order. A trimmed session
+   reaches the cache's `onEvict` like one a put pushed out, so it is demoted
+   to its display form (#249's Tier B, or the spill) rather than dropped;
+3. the open photo's full-resolution `processedImageData`, demoted to the
+   preview plane by #250's `demoteFullResolutionPlane`, only for a large frame
+   (above `LARGE_IMAGE_PIXELS`, where no idle render brings it back) and only
+   while no export, repair or full-resolution render needs it; the next export
+   converts it again;
+4. history: the oldest snapshots lose their pixel references (their steps
+   stay; a cold step restores its scalars and rebuilds from the base).
+
+## Lane planning
+
+`planBatchParallelism` plans in bytes: 50 B/px per lane against
+`max(legacy, 0.5 × budget)` when RAM is known, else the legacy 4.0 GB (the old
+80 MP) or 1.4 GB (28 MP) for devices with 4 GiB or less. Unknown RAM and any
+RAM up to 16 GiB plan exactly as before; 32 GiB and more plan two 60 MP lanes.
+The planned count is a ceiling: the reservations admit fewer lanes where the
+plan is optimistic. `#256`, `#251` and `#232` lower the per-lane constant once
+their footprints are measured.
+
+## WebKit: the 30 s purge and the idle check
+
+WebKit on macOS 26.x and 27.0 (WebContent-side monitor) and WebKitGTK measure
+the WebContent process every 30 s. From half of `min(3 GiB, RAM)`, 1.5 GiB on
+any Mac, the policy is Strict, and every tick then releases critical memory:
+decoded image data (film-strip thumbnails), font caches, the page's JIT code
+and every worker's (`deleteAllCode`), the SilverCore preview worker included.
+WebKit main moved the monitor to the UI process (321179@main) and runs no
+periodic purge there; the kill limits stay. Windows (WebView2) has neither.
+
+On WebKit engines (`wkwebview`, `webkitgtk`, or the WebKit UA test on the
+web), the **idle check** runs 10 s after the last reservation release and the
+last pointer, key, wheel or slider input, once no job, conversion or repair
+is running:
+
+1. release idle workers: the default export bridge when it is still alive with
+   nothing pending (#250 releases it itself 4 s after a large request), the
+   auto-frame/OpenCV worker unless a roll analysis holds it warm (#252's
+   `holdIdle`), and MI-GAN only under #236's idle-release rule;
+   semantic analysis already ends with each photo. Each comes back lazily.
+2. trim while the ledger exceeds `IDLE_RETAINED_TARGET_BYTES` (1 GiB, to be
+   calibrated against the logged footprint): previews, then sessions, demoted
+   to their display form (#249) where they have one; the one just left is
+   demoted too when it has one and otherwise stays; then the large open
+   photo's full-resolution plane.
+3. never the open photo's other planes, history or anything a job holds.
+
+With #236 (no eager MI-GAN) one idle 60 MP photo should sit at about
+0.9–1.1 GB of WebContent (estimate), below Strict, and the idle check keeps it
+there after exports and roll analysis.
+
+**Linux.** WebKitGTK accepts memory-pressure settings (`memory-limit`, which
+moves Strict) only as the construct-only `memory-pressure-settings` property
+of a `WebKitWebContext`, and wry 0.55 builds that context without it; the one
+static setter, `webkit_website_data_manager_set_memory_pressure_settings`,
+covers the network process. Until wry exposes the property, WebKitGTK keeps
+its defaults and the app logs one startup line with the limit it would set
+(half of `MemTotal`):
+`[memory] WebKitGTK memory pressure: WebKit defaults (Strict from 1.5 GiB); planned memory-limit … MB …`.
+
+## Instrumentation and measurement
+
+With `?debug=1` or the benchmark's `?perf=1`, `window.__ncMemory` exposes
+`snapshot()` (budget, retained, reserved per priority, outstanding and waiting
+reservations, the ledger breakdown, the RAM and its source, the engine), and
+`log()`, every grant (with the rule it was granted under: `foreground`,
+`fits`, `pressure` or `progress`), wait, release, abort, resize, eviction and
+idle check with its label. The benchmark records both next to each scenario's
+footprint (`result.memoryBudget`). `scripts/memory-budget-smoke.mjs` replays
+the log in Chrome.
+
+Measuring on a Mac:
+
+- Chrome: the #230 harness samples the renderer's `phys_footprint`
+  (`npm run bench:interactive`, `docs/performance-benchmark.md`).
+- WKWebView (the direct build): `footprint <WebContent pid>`, and WebKit's own
+  log:
+  `/usr/bin/log stream --predicate 'subsystem == "com.apple.WebKit" AND category == "MemoryPressure"'`.
+  Each 30 s tick logs `Current memory footprint: N MB` (MiB), and a policy
+  change `Memory usage policy changed: … -> Strict`. On macOS 27.0 the
+  WebContent process forwards these lines to its host app, so they appear
+  under the app's own process as `WebContent[<pid>] Current memory footprint:
+  N MB`, not under `com.apple.WebKit.WebContent`.
+
+Re-check the WebKit constants and the log format on each macOS release.

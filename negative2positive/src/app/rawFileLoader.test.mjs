@@ -168,6 +168,16 @@ assert.throws(
 
   // Half-size preview of the same 60 MP frame fits again.
   assert.equal(checkRawDecodeBudget(mp60.w / 2, mp60.h / 2, 4).ok, true);
+
+  // #258: the real RAM, when the host knows it (the desktop app's query;
+  // WKWebView reports no deviceMemory), is read first. The <= 4 GiB rule stays.
+  const GIB = 1024 ** 3;
+  assert.equal(checkRawDecodeBudget(mp60.w, mp60.h, undefined, { ramBytes: 4 * GIB }).ok, false);
+  assert.equal(checkRawDecodeBudget(mp24.w, mp24.h, undefined, { ramBytes: 4 * GIB }).ok, true);
+  assert.equal(checkRawDecodeBudget(mp60.w, mp60.h, undefined, { ramBytes: 16 * GIB }).ok, true);
+  assert.equal(checkRawDecodeBudget(mp60.w, mp60.h, 4, { ramBytes: 16 * GIB }).ok, true, 'known RAM wins over deviceMemory');
+  assert.equal(checkRawDecodeBudget(mp60.w, mp60.h, 4, { ramBytes: null }).ok, false, 'unknown RAM keeps deviceMemory');
+  assert.equal(checkRawDecodeBudget(mp60.w, mp60.h, 4, { ramBytes: 4 * GIB }).budgetBytes, checkRawDecodeBudget(mp60.w, mp60.h, 4).budgetBytes);
 }
 
 console.log('rawFileLoader.test.mjs passed');

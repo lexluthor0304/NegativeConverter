@@ -362,6 +362,9 @@ jobs:
             ```
             Or: right-click the app → **Open** → click **Open** in the dialog.
 
+            ### Third-party notices
+            Negative Converter decodes RAW files with LibRaw 0.22.1, used unmodified under the CDDL-1.0. The macOS and Linux apps link it statically, with musl's math functions (MIT) and, on macOS, the LLVM OpenMP runtime (Apache-2.0 WITH LLVM-exception). LibRaw's source code is at https://github.com/LibRaw/LibRaw (tag 0.22.1) and, as compiled into the app, in this repository under `src-tauri/vendor/libraw`. Every package carries the notices and licence texts as `licenses/raw-decoder-notices.txt` (macOS: in the app's Contents/Resources; Windows: in the installation folder; Linux: under /usr/lib), also at https://negative-converter.tokugai.com/licenses/raw-decoder-notices.txt and behind "Third-party notices" in the app's menu.
+
       - name: Ensure AWS CLI
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}

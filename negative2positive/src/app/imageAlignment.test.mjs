@@ -12,7 +12,8 @@ globalThis.ImageData = class ImageData {
     this.height = height;
   }
 };
-const { estimateAlignment, applyHomography, warpImageData } = await import('./imageAlignment.js');
+const { estimateAlignment, applyHomography, warpImageData, warpPlane16, sampleAlignmentGray, matchAlignment, alignmentSide } = await import('./imageAlignment.js');
+const head = await import('./multiShot.reference.mjs');
 
 // A textured synthetic photo: soft blobs plus a fine grid, enough ORB corners.
 const W = 480; const H = 320;
@@ -113,6 +114,59 @@ const moving = make((x, y) => {
   const noise = make((x, y) => { const v = ((x * 1103515245 + y * 12345) >>> 8) & 255; return [v, v, v, 255]; });
   const result = estimateAlignment(reference, noise, { maxSide: 480 });
   assert.ok(result === null || result.inliers < 40, 'noise does not align confidently');
+}
+
+// ---- #260: split sampling, planeOnly warp, parity with 1703835 ----
+const sameArray = (a, b, label) => {
+  assert.equal(a.length, b.length, `${label}: length`);
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) assert.fail(`${label}: element ${i} is ${a[i]}, expected ${b[i]}`);
+};
+{
+  // Sampling on the page and matching elsewhere gives the very homography
+  // estimateAlignment (and the 1703835 implementation) returns.
+  for (const [ref, mov, maxSide] of [[reference, moving, 480], [reference, moving, 300], [moving, reference, 1200]]) {
+    const side = alignmentSide(ref, mov, maxSide);
+    const split = matchAlignment(sampleAlignmentGray(ref, side), sampleAlignmentGray(mov, side));
+    const whole = estimateAlignment(ref, mov, { maxSide });
+    const before = head.estimateAlignment(ref, mov, { maxSide });
+    assert.ok(split && whole && before, `aligned at side ${side}`);
+    assert.deepEqual(split, whole, `split == estimateAlignment at side ${side}`);
+    assert.deepEqual(whole, before, `estimateAlignment == 1703835 at side ${side}`);
+  }
+  const sample = sampleAlignmentGray(moving, 240);
+  assert.equal(sample.width, 240); assert.equal(sample.height, 160); assert.equal(sample.scale, 0.5);
+  assert.ok(sample.gray instanceof Uint8Array && sample.gray.length === 240 * 160);
+
+  // A 16-bit source with detail below the 8-bit samples, and a perspective
+  // homography, so the plane warp is not a copy of the widened 8-bit warp.
+  const detailed = make((x, y) => { const v = texture(x, y); return [v, v * 0.9, v * 0.8, 255]; });
+  for (let i = 0; i < detailed.__image16.data.length; i++) if (i % 4 !== 3) detailed.__image16.data[i] += (i * 7919) % 257;
+  const perspective = [0.98, 0.04, 9.5, -0.03, 1.01, -6.25, 2e-5, -1.5e-5, 1];
+  const full = warpImageData(detailed, perspective, W, H);
+  const expected = head.warpImageData(detailed, perspective, W, H);
+  sameArray(full.data, expected.data, 'default warp 8-bit == 1703835');
+  sameArray(full.__image16.data, expected.__image16.data, 'default warp 16-bit == 1703835');
+  const planeOnly = warpImageData(detailed, perspective, W, H, { planeOnly: true });
+  assert.equal(planeOnly.data, undefined, 'planeOnly returns no 8-bit samples');
+  assert.equal(planeOnly.__image16.width, W);
+  sameArray(planeOnly.__image16.data, full.__image16.data, 'planeOnly == warpImageData().__image16');
+  const consumed = { width: W, height: H, data: detailed.__image16.data.slice() };
+  const direct = warpPlane16(consumed, perspective, W, H, { consume: true });
+  assert.equal(consumed.data, null, 'consume drops the source samples');
+  sameArray(direct.data, full.__image16.data, 'warpPlane16 == warpImageData().__image16');
+
+  // With matFromImageData unusable the plane warp still succeeds: it never
+  // creates the 8-bit Mats. An 8-bit-only source keeps the 8-bit warp.
+  const original = cv.matFromImageData;
+  cv.matFromImageData = () => { throw new Error('8-bit Mat created'); };
+  try {
+    const guarded = warpImageData(detailed, perspective, W, H, { planeOnly: true });
+    sameArray(guarded.__image16.data, full.__image16.data, 'planeOnly without 8-bit Mats');
+    const eight = new ImageData(detailed.data.slice(), W, H);
+    assert.throws(() => warpImageData(eight, perspective, W, H, { planeOnly: true }), /8-bit Mat created/, '8-bit sources keep the 8-bit warp');
+  } finally { cv.matFromImageData = original; }
+  const eight = new ImageData(detailed.data.slice(), W, H);
+  sameArray(warpImageData(eight, perspective, W, H, { planeOnly: true }).data, head.warpImageData(eight, perspective, W, H).data, '8-bit source, planeOnly == 1703835');
 }
 
 console.log('imageAlignment.test.mjs passed');

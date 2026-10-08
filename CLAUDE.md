@@ -28,7 +28,8 @@ Build web assets:
 npm run build:web
 ```
 
-Run tests (standalone Node assert scripts, colocated as `*.test.mjs`, plus
+Run tests (standalone Node assert scripts, colocated as `*.test.mjs` under
+`negative2positive/` and `scripts/perf/`, plus
 repo-wide consistency checks: SEO heads and FAQ structured data over the static
 pages, pinned dependency versions, and the two Vercel header configs):
 ```bash
@@ -41,7 +42,7 @@ npm run test:rust
 ```
 
 実際の Chrome / CDP で唯一の Studio 画面に画像を読み込み、自動変換・除塵・曲線・
-履歴・一括書き出し・裁切時の色解析・ピクセル字体を検証する。
+履歴・一括書き出し・裁切時の色解析・ピクセル字体・クロスオリジン分離を検証する。
 `main.js`、パイプライン、画面構成を変更したら実行する:
 ```bash
 npm run test:smoke
@@ -50,6 +51,15 @@ npm run test:smoke
 CI (`.github/workflows/desktop-ci.yml`) runs all three on every pull request
 before the four-platform Tauri build.
 
+Interactive performance benchmark against the Lightroom-grade budgets of #229
+(production build in its own worktree, trusted input, `scripts/perf/budgets.json`;
+local or nightly on a real Mac, one heavy run at a time — see
+`docs/performance-benchmark.md`). Child PRs of #229 attach its compare table:
+```bash
+npm run bench:interactive -- --quick
+npm run bench:interactive -- --compare <baseRef> HEAD --scenarios s2,s4
+```
+
 When several agents or worktrees edit `negative2positive/` at once, the smoke
 test cannot be trusted: the Vite dev server hot-reloads mid-run and it fails on
 someone else's half-written file. Run it from an isolated `git worktree` with
@@ -57,6 +67,13 @@ its own `PORT`/`CDP_PORT` instead.
 
 Known issues that were reviewed but not fixed are queued in
 `docs/audit-backlog.md`; delete an entry when it is done.
+
+The app is cross-origin isolated (COOP `same-origin` + COEP `require-corp` from
+the Vite servers, both `vercel.json` files and the desktop app; one source,
+`scripts/cross-origin-isolation.mjs`), so 16-bit planes can be shared with
+workers without copies. A new cross-origin load must be a CORS request or come
+with `Cross-Origin-Resource-Policy: cross-origin`, and a shared plane is never
+written after it is published; see `docs/cross-origin-isolation.md`.
 
 Batch export and the post-import roll analysis run several files at once
 through `batchExportScheduler.js` (lane planning by cores/memory/file size,
@@ -83,17 +100,24 @@ negative2positive/
 │   ├── ui/                     # UI components (loading overlay)
 │   └── workers/                # Export worker + full-res conversion worker + bridges
 scripts/                        # run-tests.mjs, sync-web-dist.mjs, LUT derivation
+scripts/perf/                   # bench:interactive harness, probe, budgets.json, fixtures
 src-tauri/                      # Tauri desktop packaging
 ```
 
 ### Key Technologies
 - **HTML5 Canvas / WebGL** for image rendering and manipulation
-- **libraw-wasm** (npm) for RAW file decoding (CR2, NEF, ARW, DNG, RW2)
+- **libraw-wasm** (npm) for RAW file decoding (CR2, NEF, ARW, DNG, RW2). The desktop build also
+  links the same LibRaw natively (`src-tauri/vendor/libraw`, built by `src-tauri/native/build_libraw.rs`,
+  so `npm run test:rust` compiles it); `nativeRawDecoder.js` uses it only where its output is verified
+  identical to the page's libraw-wasm (`docs/native-raw-decode.md`). Which decoder runs where (native,
+  libraw-wasm's threaded build on pages with shared memory, `new LibRaw()`) and the RGB16 gates that hold
+  them to the same pixels: `docs/raw-decoding.md`. `libraw-wasm` is pinned exactly; the native gate names
+  that release
 - **Web Workers** for non-blocking RAW processing and export encoding
 - **UPNG.js** (npm: `upng-js`) for 16-bit PNG support
 - **UTIF.js** (npm: `utif`) for TIFF/DNG parsing (iPhone ProRaw)
 - **OpenCV.js** (npm: `@techstark/opencv-js`) for automatic border detection / auto crop / auto rotation
-- **Fonts**: Fusion Pixel 12px proportional を `public/fonts/fusion-pixel/` にライセンスとともに同梱。英字・CJK 対応、CDN 不要、Tauri オフライン対応。
+- **Fonts**: Fusion Pixel 12px proportional の WOFF2 を `src/assets/fonts/fusion-pixel/`（ハッシュ付き `/assets` で配信）、ライセンスを `public/fonts/fusion-pixel/` に同梱。UI は `scripts/build-ui-fonts.mjs`（Vite プラグイン、`subset-font`）が dev/build 開始時に生成する言語別サブセット（git 管理外の `src/assets/fonts/ui/`）で表示し、原字体はその後ろのフォールバック。英字・CJK 対応、CDN 不要、Tauri オフライン対応。
 
 ### UI Theme
 Studio が唯一の画面。旧 `workspace=classic` パラメーターも同じ画面を開く。

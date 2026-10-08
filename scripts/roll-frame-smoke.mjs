@@ -1,0 +1,194 @@
+// #252 in a real browser (always on, synthetic, about a second):
+//
+// 1. OpenCV compiled once (part 5): the app's auto-frame worker instantiated
+//    the page's compiled WebAssembly.Module; a fresh worker realm reports its
+//    time to cv.Mat from its script's first statement; the page fetched the
+//    split wasm exactly once and never the 13 MB package script itself.
+// 2. The roll-frame worker (part 2) against the lane sequence it replaces,
+//    on a synthetic LibRaw result: the #232 post-decode steps on the page,
+//    then one #251 import request on a copy of the 8-bit plane in an
+//    auto-frame worker (both previews come from a worker's OffscreenCanvas),
+//    then the roll sample from the base. Statistics, detection, film edge and
+//    the sample's planes must be identical, and the LibRaw buffer is moved.
+// 3. The parallel foreground detector (part 4): the app's shared worker with
+//    its two helpers against a plain worker without them, on a window frame
+//    and on one that takes the fallback: identical results, with the helpers
+//    having run units or passes.
+// 4. The frame's display proxy fill (#249, R2-003) in the app's geometry
+//    workers: the level of its recipe from the planes the roll-frame worker
+//    hands back (plain: their 16-bit rows are copied, at most 1.5x the rows
+//    the window reads) and from the same planes in shared memory (views:
+//    nothing copied on the page) equals the level of the whole output.
+export async function runRollFrameSmoke({ evaluate, fail }) {
+  // Reproduce the late-full-smoke resource history without a full smoke or
+  // large inputs: the document-start buffer must retain > the default 250.
+  if (process.env.NC_ROLL_RESOURCE_PREFILL === '1') {
+    const count = await evaluate(`(async () => {
+      for (let n = 0; n < 300; n++) {
+        await (await fetch('/test-fixtures/autoFramePreviewGolden.mjs?nc-roll-prefill=' + n)).arrayBuffer();
+      }
+      return performance.getEntriesByType('resource').filter(entry => entry.name.includes('nc-roll-prefill=')).length;
+    })()`);
+    if (count !== 300) fail('the document-start resource buffer lost the prefilled history: ' + count);
+    console.log('ok: resource timing retains 300 prefilled entries before the roll-frame checks');
+  }
+  const result = await evaluate(`(async () => {
+    const { createAutoFrameWorkerClient, analyzeFrameInWorker, warmUpAutoFrameWorker } = await import('/src/app/autoFrameWorkerClient.js');
+    const { createRollFramePool, imageFromRollPlanes } = await import('/src/app/rollFrameWorkerClient.js');
+    const { runRawPostDecode } = await import('/src/app/rawPostDecode.js');
+    const { buildRollSample, rollSampleSettings } = await import('/src/app/rollSample.js');
+    const hex = async view => [...new Uint8Array(await crypto.subtle.digest('SHA-256', new Uint8Array(view.buffer, view.byteOffset, view.byteLength)))].map(b => b.toString(16).padStart(2, '0')).join('');
+    const strip = detection => { if (!detection) return detection; const { stageMs, rotatedImageData, ...rest } = detection; return JSON.stringify(rest); };
+    const out = {};
+
+    // 1. OpenCV realms.
+    const fresh = createAutoFrameWorkerClient();
+    const warmed = await fresh({ width: 1, height: 1, data: new Uint8ClampedArray(4) }, {}, 'warm-up');
+    fresh.dispose();
+    const shared = await analyzeFrameInWorker({ width: 1, height: 1, data: new Uint8ClampedArray(4) }, {}, 'warm-up');
+    const resources = performance.getEntriesByType('resource').map(entry => entry.name);
+    out.opencv = {
+      fresh: warmed.opencv, shared: shared.opencv,
+      wasmFetches: resources.filter(name => /\\/@opencv-assets\\/opencv-[0-9a-f]+\\.wasm/.test(name)).length,
+      // The app's own requests: the smoke's comparison realm loads the package via /@fs/.
+      packageScript: resources.filter(name => /opencv\\.js(\\?|$)/.test(name) && !name.includes('/@fs/')).length
+    };
+
+    // 2. A synthetic LibRaw result: a tilted dark 3:2 frame on an orange base.
+    const width = 1500, height = 1000, degrees = 2.5, rad = degrees * Math.PI / 180;
+    const data = new Uint16Array(width * height * 3);
+    let s = 11;
+    const rnd = () => { s ^= s << 13; s >>>= 0; s ^= s >>> 17; s ^= s << 5; s >>>= 0; return s / 4294967296; };
+    for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+      const dx = x - width / 2, dy = y - height / 2;
+      const u = dx * Math.cos(rad) + dy * Math.sin(rad), v = -dx * Math.sin(rad) + dy * Math.cos(rad);
+      const rgb = Math.abs(u) < width * 0.3 && Math.abs(v) < width * 0.2 ? [95, 55, 30] : [238, 160, 100];
+      for (let c = 0; c < 3; c++) data[(y * width + x) * 3 + c] = Math.min(65535, rgb[c] * 257 + Math.floor(rnd() * 400));
+    }
+    const result = { width, height, bits: 16, colors: 3, data };
+    const frameOptions = { settings: { highConfidence: 0.72, minConfidence: 0.55, marginRatio: 0.02, filmType: 'color', formatPreference: 'auto' }, maxSide: 1600, rotatedOutput: 'none' };
+    const postOptions = { suppressSensorDefects: true, filmStats: { borderBufferPct: 10 } };
+    const choice = { automatic: true };
+
+    const outcome = runRawPostDecode({ ...result, data: data.slice() }, postOptions);
+    const base = imageFromRollPlanes({ width, height, rgba8: outcome.rgba8, rgba16: outcome.rgba16, filmStats: outcome.filmStats });
+    const lane = createAutoFrameWorkerClient();
+    const frameFilmType = outcome.filmStats.filmType.filmType;
+    const analysed = await lane.analyzeImport(base, { frame: { ...frameOptions, frameFilmType }, filmEdge: {}, owned: false });
+    lane.dispose();
+    const recipe = detection => detection?.cropRegion ? { rotationAngle: detection.angle, mirrored: false, cropRegion: detection.cropRegion,
+      autoFrameMeta: { imageArea: [{ x: 0.2, y: 0.2 }, { x: 0.8, y: 0.2 }, { x: 0.8, y: 0.8 }, { x: 0.2, y: 0.8 }] } } : { mirrored: true };
+    const settings = recipe(analysed.frame);
+    const headSample = buildRollSample(base, settings, { tileMax: 288 });
+
+    const pool = createRollFramePool({ size: 1 });
+    pool.warm(1);
+    const adapter = pool.frame({ options: { frame: frameOptions, filmTypeChoice: choice, filmEdge: true } });
+    const input = { ...result, data: data.slice() };
+    const started = performance.now();
+    const held = await adapter.run(input, postOptions);
+    const workerMs = Math.round(performance.now() - started);
+    const moved = input.data.buffer.byteLength === 0;
+    // The planes come back with the sample, as for a frame whose proxy is to be filled (step 4).
+    const { sample, base: handedBack } = await adapter.held.sample(rollSampleSettings(settings), { tileMax: 288, returnPlanes: true });
+    pool.dispose();
+    const planes = async value => [await hex(value.data), value.__image16 ? await hex(value.__image16.data) : null];
+    out.roll = {
+      held: held.held === true, moved, workerMs, found: Boolean(analysed.frame?.cropRegion), angle: analysed.frame?.angle ?? null,
+      filmStats: JSON.stringify(adapter.analysis.filmStats) === JSON.stringify(outcome.filmStats),
+      detection: strip(adapter.analysis.detection) === strip(analysed.frame),
+      edge: JSON.stringify(adapter.analysis.edge) === JSON.stringify(analysed.filmEdge),
+      sample: JSON.stringify(await planes(sample)) === JSON.stringify(await planes(headSample)),
+      tile: JSON.stringify(await planes(sample.__tileWorking)) === JSON.stringify(await planes(headSample.__tileWorking)),
+      reference: (sample.__analysisReference && await hex(sample.__analysisReference.data)) === (headSample.__analysisReference && await hex(headSample.__analysisReference.data))
+    };
+
+    // 3. The parallel detector: the shared worker with helpers vs a plain one.
+    const plain = createAutoFrameWorkerClient();
+    const frames = {
+      window: base,
+      outline: (() => {
+        const w = 1200, h = 820, image = new ImageData(w, h);
+        const r = 2 * Math.PI / 180, fw = w * 0.55, fh = fw / 1.5;
+        for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+          const dx = x - w / 2, dy = y - h / 2, u = dx * Math.cos(r) + dy * Math.sin(r), v = -dx * Math.sin(r) + dy * Math.cos(r);
+          const edge = Math.min(fw / 2 - Math.abs(u), fh / 2 - Math.abs(v));
+          const rgb = Math.abs(edge) < 2.5 ? [60, 40, 30] : [238, 160, 100];
+          image.data.set([...rgb, 255], (y * w + x) * 4);
+        }
+        return image;
+      })()
+    };
+    out.parallel = {};
+    await warmUpAutoFrameWorker({ helpers: true });
+    for (const [name, image] of Object.entries(frames)) {
+      analyzeFrameInWorker.warmHelpers();
+      // A 400 px preview makes the outline miss the window search and take
+      // the fallback over several angles, as in autoFrameParallel.test.
+      const options = { ...frameOptions, rotatedOutput: 'full', ...(name === 'outline' ? { maxSide: 400 } : {}) };
+      const withHelpers = await analyzeFrameInWorker(image, options, 'analyze-frame');
+      const serial = await plain(image, options, 'analyze-frame');
+      const stage = withHelpers?.stageMs || {};
+      out.parallel[name] = {
+        equal: strip(withHelpers) === strip(serial), helpers: stage.helpers === true,
+        remote: Object.values(stage.units || {}).filter(unit => unit.where !== 'a').length + (stage.passes || []).filter(pass => pass.where !== 'a').length,
+        method: serial?.diagnostics?.method || null, angleCount: stage.angleCount || 0, units: stage.units, passes: (stage.passes || []).length
+      };
+    }
+    plain.dispose();
+    out.parallel.helpersAlive = analyzeFrameInWorker.helpersAlive;
+
+    // 4. The display proxy fill's level, from the handed-back planes and
+    // from a shared copy of them.
+    {
+      const { createGeometryPool } = await import('/src/app/geometryPool.js');
+      const { planGeometry, renderGeometry, geometrySourceRect } = await import('/src/app/imageGeometry.js');
+      const { buildDisplayLevel } = await import('/src/app/displayPreview.js');
+      const plan = planGeometry(handedBack, { rotationAngle: settings.rotationAngle || 0, mirrored: Boolean(settings.mirrored), cropRegion: settings.cropRegion || null });
+      const k = 2;
+      const read = geometrySourceRect(plan, 0, Math.floor(plan.outHeight / k) * k);
+      const geometryPool = createGeometryPool();
+      const fromRows = await geometryPool.renderDisplayLevel(handedBack, plan, { k });
+      const rowsCopied = geometryPool.counters.copiedBytes;
+      let views = null;
+      if (typeof SharedArrayBuffer === 'function') {
+        const shared16 = new Uint16Array(new SharedArrayBuffer(handedBack.__image16.data.byteLength));
+        shared16.set(handedBack.__image16.data);
+        const shared = new ImageData(handedBack.data, width, height);
+        shared.__image16 = { width, height, data: shared16 };
+        views = await hex((await geometryPool.renderDisplayLevel(shared, plan, { k })).__image16.data);
+      }
+      out.fill = {
+        kind: plan.kind, plain: handedBack.__image16.data.buffer instanceof ArrayBuffer,
+        expected: await hex(buildDisplayLevel(renderGeometry(handedBack, plan), k).__image16.data),
+        rows: await hex(fromRows.__image16.data), views, rowsCopied, viewsCopied: geometryPool.counters.copiedBytes - rowsCopied,
+        read: read.width * read.height * 8, workerBands: geometryPool.counters.workerBands, syncBands: geometryPool.counters.syncBands
+      };
+      geometryPool.dispose();
+    }
+    return out;
+  })()`);
+  console.log('roll frame / OpenCV:', JSON.stringify(result));
+  const { opencv, roll, parallel } = result;
+  if (!opencv.shared?.sharedModule || !opencv.fresh?.sharedModule) fail('an OpenCV worker compiled the wasm itself instead of instantiating the page\'s module: ' + JSON.stringify(opencv));
+  if (opencv.wasmFetches !== 1) fail('expected exactly one page OpenCV wasm fetch: ' + JSON.stringify(opencv));
+  if (opencv.packageScript !== 0) fail('the app requested the 13 MB opencv.js: ' + JSON.stringify(opencv));
+  if (!roll.found) fail('the roll-frame smoke frame has no window: ' + JSON.stringify(roll));
+  if (!(roll.held && roll.moved && roll.filmStats && roll.detection && roll.edge && roll.sample && roll.tile && roll.reference)) {
+    fail('roll-frame worker differs from the lane sequence: ' + JSON.stringify(roll));
+  }
+  for (const name of ['window', 'outline']) {
+    const row = parallel[name];
+    if (!row?.equal || !row.helpers) fail(`parallel detection differs from the serial one (${name}): ` + JSON.stringify(row));
+  }
+  if (parallel.outline.angleCount >= 2 && !parallel.outline.remote) fail('the helpers took no work on the fallback frame: ' + JSON.stringify(parallel.outline));
+  if (parallel.outline.angleCount < 2) console.log('note: the outline frame did not take the multi-angle fallback in this browser: ' + JSON.stringify(parallel.outline));
+  const { fill } = result;
+  if (!fill.plain) fail('the roll-frame worker handed back shared planes; the fill check expects plain ones: ' + JSON.stringify(fill));
+  if (fill.rows !== fill.expected) fail('a fill level from copied rows differs from the whole output\'s level: ' + JSON.stringify(fill));
+  if (!(fill.rowsCopied > 0 && fill.rowsCopied <= 1.5 * fill.read)) fail('a fill copied more than 1.5x the rows its window reads: ' + JSON.stringify(fill));
+  if (fill.views === null) fail('no SharedArrayBuffer on the smoke page: ' + JSON.stringify(fill));
+  if (fill.views !== fill.expected || fill.viewsCopied !== 0) fail('a fill of a shared base copied rows or differs: ' + JSON.stringify(fill));
+  if (fill.syncBands || !fill.workerBands) fail('the fill bands did not run in geometry workers: ' + JSON.stringify(fill));
+  console.log('ok: OpenCV shared module, roll-frame worker equals the lane sequence, parallel detection equals serial, fill levels from copied rows and shared views');
+}

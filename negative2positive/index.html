@@ -237,6 +237,10 @@
         <div class="canvas-transform-wrapper" id="canvasTransformWrapper">
           <canvas id="canvas" style="display: none;"></canvas>
           <canvas id="glCanvas" style="display: none;"></canvas>
+          <canvas id="glDetailCanvas" aria-hidden="true"></canvas>
+          <canvas id="displayOverlay" class="display-overlay" width="1" height="1" aria-hidden="true"></canvas>
+          <canvas id="cropCanvas" style="display: none;"></canvas>
+          <canvas id="beforeAfterCanvas" class="before-after-canvas" width="1" height="1" aria-hidden="true" style="display: none;"></canvas>
           <div class="crop-overlay" id="cropOverlay">
             <div class="crop-grid"></div>
             <span class="crop-handle crop-handle-nw"></span>
@@ -250,6 +254,7 @@
           </div>
           <div class="straighten-guide-line" id="straightenGuideLine"></div>
         </div>
+        <canvas id="brushFeedback" class="brush-feedback" width="1" height="1" aria-hidden="true"></canvas>
         <div class="crop-mode-hint" id="cropModeHint" role="status" aria-live="polite">
           <div class="crop-mode-hint-title" id="cropModeHintTitle"></div>
           <div class="crop-mode-hint-body" id="cropModeHintBody"></div>
@@ -262,7 +267,7 @@
         <div class="zoom-controls" id="zoomControls" style="display: none;">
           <button class="zoom-ctrl-btn" id="zoomInBtn" type="button" title="Zoom In" data-i18n-title="zoomIn" aria-label="Zoom In" data-i18n-aria-label="zoomIn">+</button>
           <button class="zoom-ctrl-btn" id="zoomOutBtn" type="button" title="Zoom Out" data-i18n-title="zoomOut" aria-label="Zoom Out" data-i18n-aria-label="zoomOut">−</button>
-          <button class="zoom-ctrl-btn" id="zoomResetBtn" type="button" title="Reset Zoom" data-i18n-title="zoomReset" aria-label="Reset Zoom" data-i18n-aria-label="zoomReset" style="font-size: 12px;">1:1</button>
+          <button class="zoom-ctrl-btn" id="zoomResetBtn" type="button" title="Actual pixels (1:1) / Fit" data-i18n-title="zoomReset" aria-label="Actual pixels (1:1) / Fit" data-i18n-aria-label="zoomReset" style="font-size: 12px;">1:1</button>
         </div>
       </div>
 
@@ -1679,6 +1684,7 @@
       </div>
       <div class="batch-progress-text" id="batchProgressText" role="status">0 / 0</div>
       <div class="batch-progress-current" id="batchProgressCurrent"></div>
+      <button type="button" class="batch-progress-cancel" id="batchProgressCancel" data-i18n="loadingCancel" hidden>Cancel</button>
     </div>
   </div>
 

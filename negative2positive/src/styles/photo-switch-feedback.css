@@ -12,6 +12,36 @@
   cursor: progress;
 }
 #studioPhotoSwitchFeedback[hidden], .file-list-switch-state[hidden] { display: none; }
+/* The target's own pixels sit on the opaque background, so letterbox areas
+   never show the outgoing photo. Photos are scaled smoothly, never pixelated. */
+.studio-photo-switch-image {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  image-rendering: auto;
+  pointer-events: none;
+}
+.studio-photo-switch-image[hidden] { display: none; }
+.studio-photo-switch-provisional:empty { display: none; }
+/* While a provisional image is shown, the centred card becomes a corner chip. */
+#studioPhotoSwitchFeedback[data-provisional] { place-items: end start; padding: 12px; }
+#studioPhotoSwitchFeedback[data-provisional] .studio-photo-switch-card {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: calc(100% - 8px);
+  padding: 6px 10px;
+  text-align: left;
+  background: var(--bg-primary, #191919);
+  box-shadow: 3px 3px 0 #0e0e0e;
+}
+#studioPhotoSwitchFeedback[data-provisional] .studio-photo-switch-indicator { flex: none; width: 8px; height: 8px; margin: 0; }
+#studioPhotoSwitchFeedback[data-provisional] #studioPhotoSwitchMessage,
+#studioPhotoSwitchFeedback[data-provisional] .studio-photo-switch-provisional { display: inline; font-size: 12px; line-height: 1.6; color: var(--accent); }
+#studioPhotoSwitchFeedback[data-provisional] #studioPhotoSwitchHint { display: none; }
 .studio-photo-switch-card { max-width: 36rem; text-align: center; min-width: 0; }
 #studioPhotoSwitchMessage { display: block; overflow-wrap: anywhere; color: var(--accent); font-size: 16px; line-height: 1.6; }
 #studioPhotoSwitchHint { margin: 12px 0 0; color: var(--text-secondary); font-size: 12px; line-height: 1.8; }
@@ -38,3 +68,9 @@
 }
 @keyframes studio-photo-opening { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .studio-photo-switch-indicator { animation: none; } }
+/* A RAW import opens through this veil before its first decode. The empty
+   state would remove the viewer from the layout, so show the viewer and the
+   filmstrip (whose tiles fill from embedded previews) instead. */
+body.studio.studio-opening:not(.studio-loaded) #uploadPlaceholder { display: none !important; }
+body.studio.studio-opening:not(.studio-loaded) .app-main { grid-template-rows: minmax(0, 1fr) max-content; }
+body.studio.studio-opening:not(.studio-loaded) .studio-filmstrip { display: block; grid-row: 2; grid-column: 1; }

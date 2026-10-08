@@ -15,6 +15,23 @@ The App Store package is built with `--no-default-features`, which drops the
 (`docs/desktop-updater.md`) is not allowed in App Store apps, and `build.rs`
 leaves the `updater` capability out of the ACL for that build.
 
+## Third-party notices (LibRaw, CDDL-1.0)
+
+The App Store package contains LibRaw (CDDL-1.0), musl's math functions and
+the LLVM OpenMP runtime, statically linked, because `build_libraw.rs` is not
+a cargo feature (`docs/native-raw-decode.md`, "Licences"). Their notices ship
+inside the app as `Contents/Resources/licenses/raw-decoder-notices.txt`
+(`bundle.resources`, which `tauri.appstore.conf.json` must not override;
+`scripts/check-tauri-config.mjs` checks both), and the Studio menu's
+Third-party notices entry opens them. The App Store distributes the app under
+Apple's licence agreement, so CDDL §3.5 also asks that any terms differing
+from the CDDL be made clear as NEO ANALOG LABO K.K.'s alone, not LibRaw's
+developers': the notices file says so. The App Store description is edited
+in App Store Connect, not by this pipeline (fastlane uploads only "What's
+New" and the screenshots); it should name LibRaw and the CDDL-1.0, say where
+LibRaw's source is (https://github.com/LibRaw/LibRaw) and carry the same
+§3.5 statement.
+
 ## Required GitHub secrets
 
 | Secret | Content |

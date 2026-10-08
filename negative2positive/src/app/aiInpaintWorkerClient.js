@@ -17,6 +17,8 @@ export async function createInpaintWorkerSession(modelBytes, options = {}, {
   catch (cause) { throw unavailable('AI repair worker is unavailable', cause); }
   let sequence = 0, closing = false, releasePromise = null, runQueue = Promise.resolve();
   let ready = false, resolveStartup, rejectStartup;
+  // The worker's WASM heap from its last reply (#258's ledger).
+  let heapBytes = 0;
   const startup = new Promise((resolve, reject) => { resolveStartup = resolve; rejectStartup = reject; });
   const startupTimer = setTimeout(() => stop(unavailable('AI repair worker startup timed out')), startupTimeoutMs);
   const pending = new Map();
@@ -38,6 +40,7 @@ export async function createInpaintWorkerSession(modelBytes, options = {}, {
   worker.onmessageerror = () => stop(ready ? new Error('Invalid AI repair worker message')
     : unavailable('Invalid AI repair worker startup message'));
   worker.onmessage = ({ data }) => {
+    if (Number.isFinite(data?.heapBytes)) heapBytes = data.heapBytes;
     if (!ready && data?.ready === true) {
       ready = true;
       clearTimeout(startupTimer);
@@ -72,7 +75,7 @@ export async function createInpaintWorkerSession(modelBytes, options = {}, {
     // session retries. Tile and result buffers use transfers below.
     metadata = await request('initialize', { modelBytes, options });
   } catch (error) { stop(error); throw error; }
-  const run = (image, mask, size, { transferInputs = false, signal = null, shouldContinue = null } = {}) => {
+  const run = (image, mask, size, { transferInputs = false, signal = null, shouldContinue = null, insert = true } = {}) => {
     if (closing) return Promise.reject(new Error('AI repair session was released'));
     const task = runQueue.then(async () => {
       if (signal?.aborted || (shouldContinue && !shouldContinue())) {
@@ -81,7 +84,7 @@ export async function createInpaintWorkerSession(modelBytes, options = {}, {
       const transferable = (data) => transferInputs && data.byteOffset === 0 && data.byteLength === data.buffer.byteLength
         ? data : data.slice();
       const rgb = transferable(image), repair = transferable(mask);
-      const response = await request('run', { image: rgb, mask: repair, size }, [rgb.buffer, repair.buffer]);
+      const response = await request('run', { image: rgb, mask: repair, size, insert }, [rgb.buffer, repair.buffer]);
       return response.output;
     });
     runQueue = task.catch(() => {});
@@ -98,8 +101,15 @@ export async function createInpaintWorkerSession(modelBytes, options = {}, {
     })();
     return releasePromise;
   };
-  return { provider: metadata.provider, inputNames: metadata.inputNames,
-    outputNames: metadata.outputNames, run, release };
+  // The tile memo lives with the model in the worker. `trim(bytes)` shrinks it
+  // to at most `bytes` right after the tile in flight and resolves to its size
+  // and hit counts; `trim(Infinity)` only reports them.
+  const trim = (bytes) => closing ? Promise.reject(new Error('AI repair session was released'))
+    : request('trim', { bytes }).then(response => response.memo);
+  return { provider: metadata.provider, threads: metadata.threads || 1, inputNames: metadata.inputNames,
+    outputNames: metadata.outputNames, run, release, trim,
+    /** WASM heap bytes while the worker lives (0 once released). */
+    get residentBytes() { return worker ? heapBytes : 0; } };
 }
 
 export async function createInpaintSessionInWorker(modelBytes, options = {}, {

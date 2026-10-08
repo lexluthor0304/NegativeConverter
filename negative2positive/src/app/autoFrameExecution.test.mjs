@@ -24,4 +24,16 @@ assert.equal(await detectFrameWithFallback(image, options, {
   workerSupported: false, ensureOpenCvReady: async () => false,
   analyzeOnMainThread: () => assert.fail('OpenCV 不在時に処理しない')
 }), null);
+{
+  const calls = [];
+  const aborted = detectFrameWithFallback(image, options, {
+    workerSupported: true,
+    analyzeInWorker: async () => { throw new DOMException('superseded', 'AbortError'); },
+    ensureOpenCvReady: async () => { calls.push('load-main-cv'); return true; },
+    analyzeOnMainThread: async () => { calls.push('main'); return result; },
+    onWorkerError: () => calls.push('error'),
+  });
+  await assert.rejects(aborted, { name: 'AbortError' });
+  assert.deepEqual(calls, [], 'an aborted request never falls back to the main thread');
+}
 console.log('autoFrameExecution: OpenCV 二重初期化の防止・候補なし・Worker 失敗・非対応時の復帰を検証');

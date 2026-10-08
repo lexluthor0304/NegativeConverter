@@ -12,6 +12,52 @@
 - 回退経路（輪郭・Hough 境界・濃度テンプレート）にも同じ原則を適用する。傾き候補は minAreaRect の角度を ±45° に正規化した直しの角度だけで、±90° / 180° の回転候補は作らない（横位置のコマは縦長の裁切で扱い、直角回転はしない）。裁切枠が画像の 2 辺以上に接する候補は窓ではなく撮影範囲そのものなので採用せず、1 辺に接する枠や画面の 93 % を超える枠は「高」信頼にしない（提案はできるが自動適用しない）。縁のない Leica DNG 翻拍で 90° 回転 + 全面裁切が「高」信頼で自動適用されていた退行を防ぐ。`countCropEdgeContacts` / `buildRotationCandidates` に単体テストがある。
 - 写真の色データ、エンジン、原ファイルを変更しない。検出した領域は既存の色解析 ROI と共有し、片辺を出力に残す設定も維持する。
 
+## 検出の周辺処理（#251）
+
+- 取り込み時のワーカー要求はフレームごとに 1 回（`analyze-import`）。枠検出とフィルム縁の読み取りを同じバッファで行い、両方の結果（それぞれのエラーを含む）を返す。main.js（`runImportDetections`、`autoFrameExecution.js` の `runImportAnalyses`）は従来どおり「枠 → 縁 → 学習済み既定値」の順で設定に統合する。
+- 表示中の写真とロールのレーンの共有基画像は `owned: false`。共有メモリーを使えない経路では主スレッドで 8 bit プレーンを 1 回複製する（60 MP で約 241 MB）。レーンの基画像は表示側、セッション、先読みへ引き渡せるため転送しない。#251 の「背景 5 コマで主スレッドの複製 0 回」はこの経路では未達（#229 review R1-097、所有者の承認が必要）。自分だけでデコードした `processFileWithSettings` と「選択を自動取景」は `owned: true` で転送し、戻ったバッファで ImageData を作り直す（16 bit プレーン・付加プロパティ・`carryFilmStats` を引き継ぐ）。#252 の RAW ロールワーカーでは処理・検出・サンプルを同じワーカーのプレーン上で行う。
+- 16 bit プレーンは送らず、結果は回転後の寸法（`rotatedWidth` / `rotatedHeight`、`rotatedOutput: 'none'`）だけで、回転した画素は返さない。全解像度の画素を読む唯一の経路（プレビューで通った枠が拡大後の検証で落ちた場合の再検出）が 0 以外の角度で必要になると、ワーカーは `needsFullResolution` を返し、両プレーンで 1 回だけ再試行する。ワーカーが転送済みのフレームを持ったまま失敗した場合は、再デコードしてから主スレッドで検出する（切り離されたバッファは読まない）。
+- 「自動取景」ボタンだけは両プレーンを送り、回転済みプレーンを受け取って作業画像にする（角度 0 では基画像そのもの）。寸法の規則は `imageGeometry.js` の `rotatedDimensions` の 1 か所（#244）。
+- 「選択を自動取景」で設定のない写真は、要求前に `createDefaultSettings(decoded, item)` を計算し、ロール判定を適用する前の写真自身の `frameFilmType` を渡す。自動ロール判定で B&W になった既存設定も、保存済み設定・手動選択・編集がなければ、その写真の記録済み判定（記録がなければデコードの判定）を検出に使う。検出後の描画設定にはロール判定を維持する。保存済み設定・明示的な選択・編集した写真は受け入れたタイプを使う。取り込み・RAW ロールワーカーと同じゲートを使い、戻った画像の既定値は引き継いだ統計から同じ値になる。`autoFrameSelectedFilmType.test.mjs` は色かぶりのある B&W と、自身は positive/noMask だが B&W ロールに分類された写真の裁切・8/16 bit 書き出しサンプル・PNG16 を比較し、保存・手動・編集設定を保持する。
+- 表示中の「自動取景」と取り込みスナップショットも `autoFrameDetectionFilmType` で同じ自身の判定を渡す。Studio ボタンは Undo が写真を編集済みにする前にゲートを記録し、その操作で新しく付いた編集ロックが判定を変えない。操作前から存在する保存・手動選択・編集ロックは保持する。`autoFrameSelectedFilmType.test.mjs` は実際の Current/Selected と Studio ラッパー、取り込み・RAW ワーカー・スナップショットのゲート、裁切、8/16 bit サンプルと PNG16 を比較する。
+- `--autoframe-import-only` は Chrome の「選択を自動取景」と表示中の「自動取景」も実行する。4 枚の小さな PNG を取り込み、positive/noMask の写真の検出ゲートと裁切が取り込み時と一致し、既存設定と未設定の両方で描画用の B&W ロール判定を保持することを確認する。表示中の写真でも Studio の Undo 境界を越えて自身の positive ゲートと B&W のスコア設定を保持する。
+- `NC_ROLL_RESOURCE_PREFILL=1` を指定した `--roll-frame-only` は 300 件の小さなリソースを読み込んでから OpenCV の取得数を検証する。全スモーク後半と同様に標準の Resource Timing バッファ上限を超えた状態で、ドキュメント開始時の大きいバッファと「WASM 取得はちょうど 1 回」の検査を確認できる。
+- `--autoframe-import-only` は 16 bit PNG を含む 4 コマを複製経路で取り込み、最初の要求で `image16Omitted === true && !image16`、実際のワーカー返信で `result.frame.rotatedImageData` がないことを確認する。
+- 線分探索の厳密な高速化: 中央値は型付き配列のソート、`lineEvidence` は支持なし差分 11 個または低差分 16 個で打ち切り、`walkLineSegments` は歩ごとの配列を作らず、`boundaryEvidence` は最初に失敗した辺で打ち切り、線分の四辺形は傾き判定を先に行う。同じバイト列の平面（R = G = B のグレースケール）は 1 回だけ探索する。HEAD の凍結コピー `imageWindowSearch.reference.mjs` との一致を `imageWindowSearch.parity.test.mjs` が検証する。
+- フラグ付きの変更（#229 で許容済み）:
+  - グレー平面だけの線分探索（part 4b、既定で有効）: フレーム自身のフィルム種別が白黒、またはプレビューの 4×4 ブロック平均の彩度（最大 − 最小）の p95 が 10 未満のとき。判定は線分探索を行うときだけ下し、`diagnostics.lineSearch` に記録する（輪郭で窓が見つかった場合は `not-run`）。橙色マスクのネガは p95 ≈ 126–142 で発火しない。キルスイッチ: `localStorage.nc_autoframe_neutral_lines_v1 = 'off'`（`state.autoFrame.neutralLineSearch`）。
+  - 決定的プレビュー（part 2、既定で無効）: 整数演算の面積平均による縮小と、固定小数点の 8 bit 双線形回転（`autoFramePreview.js`）。V8 と JavaScriptCore で同じバイト列になる（`test-fixtures/autoFramePreviewGolden.mjs` の SHA-256 を Node とスモークの Chrome で照合）。有効化: `localStorage.nc_autoframe_js_preview_v1 = 'on'`。既定にする前に、2026-09-23 の M11 ロール 20 コマ以上と macOS ビルドでの承認が必要（自動適用と要確認の入れ替わりなし、裁切の移動が辺の 1 % 以内）。Node での速度は 60 MP 換算で約 135–145 ms（Chrome のキャンバス 77–88 ms の約 1.6 倍）。
+
+### 段階別プロファイル（`stageMs`）
+
+Node（M1 Pro、1 プロセス、5 回の中央値）、sips の 1600 px プレビューを 2 倍に拡大し 16 bit プレーンを付けた 6.8 MP の入力、`rotateImageData` は 16 bit コア。HEAD → #251（ms、window 段と検出全体）:
+
+| 入力 | 経路 | window | 合計 |
+| --- | --- | --- | --- |
+| DSC_4127 | 不完全（要確認） | 1375 → 992 | 1439 → 1056 |
+| DSC_8798 | 線分 | 1005 → 478 | 1274 → 543 |
+| DSC_8800 | 線分 | 1279 → 766 | 1523 → 830 |
+| DSC_8806 | 線分 | 1044 → 626 | 1297 → 691 |
+| _DSC3111 | 輪郭 | 42 → 42 | 106 → 105 |
+| 合成ストリップ σ3、0°（線分経路を強制） | 線分 | 677 → 374（55 %） | 741 → 437 |
+| 合成ストリップ σ8、1.3°（同） | 線分 | 2464 → 2137 | 2639 → 2204 |
+| 合成 B&W ストリップ σ4（R = G = B、同） | 線分 | 1332 → 294 | 1493 → 360 |
+| 合成ストリップ σ4、1.3°（輪郭） | 輪郭 | 30 → 30 | 206 → 97 |
+
+合計の差は、線分経路では window 段の短縮、傾いたフレームでは rotateFull（この大きさで 100–180 ms、60 MP では 1.5–2.4 s）の削除による。遅くなった入力はない。
+
+検出結果（角度・裁切・信頼度・方式・要確認・診断）はすべて HEAD と同一。rotateFull は 60 MP では 1.5–2.4 s → 約 0 ms。M11 の 60 MP フレームでの計測は未実施（この環境では 60 MP のデコードを行えない）。手順: `DEBUG_UI` で M11 DNG を 5 枚以上取り込み、`autoFrameStages` の中央値を記録し、`AUTOFRAME_RAW_DIR` のスモークと合わせてこの表に追記する。
+
+## 3 ワーカーでの前景検出と OpenCV の共有（#252）
+
+- 検出器は平の段階関数に分割した: `beginFrameDetection`（プレビュー）、`contourWindowCandidates`（輪郭 3 種）、`lineChannelUnit`（1 平面の Blur・Canny・限定 Hough 2 回・線分走査）、`lineQuadsFromUnits` / `windowFromCandidates`（窓探索の後段）、`settleFromWindow`、`fallbackPreviewStage`（プレビュー候補と線の角度）、`anglePassStage`（角度ごとの裁切）、`finishFromFallback`（角度順の統合と全解像度の仕上げ）。直列の `detectFrameAndRotation` はこれを従来の順に並べたもので、統合 HEAD の検出器と合成画像 264 件で deep-equal を確認済み（一回限りの比較、ノート参照）。同じバイト列の平面を飛ばす判定（`duplicateLinePlanes`）は「以前のいずれかの平面と一致」で、同値関係なので従来の「探索済み平面と一致」と同じ結果になる。
+- 共有の自動取景ワーカー（A）は、ページが渡す MessagePort で 2 つのヘルパー（B、C）とつながる（入れ子ワーカーは使わない）。A がプレビューを 1 回作ってバイト列を送り（別のコンテキストでのキャンバス縮小は一致しない可能性がある）、C は回退経路を投機的に始め（プレビュー段、偶数番目の角度）、B は G・B 平面の線分ユニット、A は輪郭と灰・R 平面を担当する。統合は直列と同一: ユニットはチャンネル順に連結してから安定ソートの `select()`、線分経路は輪郭窓がないときだけ、角度は角度順で 0.001 の同点処理。窓で確定したらヘルパーを取り消して結果を捨てる。ヘルパーが返さない段（失敗・無応答 20 秒・終了）は A が同じ関数で計算するので、結果はヘルパーに依存しない。
+- `stageMs.helpers` が true のとき、`stageMs.units`（チャンネルごとの実行場所 `a`/`b` と ms）、`stageMs.passes`（角度番号・場所・ms）、`stageMs.fallbackMs` を記録する。前景検出の段階別時間はこれで見る。
+- ヘルパーは初回取り込み、自動取景結果のないコマのコールド切り替え、「自動取景」ボタンで起動し、A の最後の要求から 30 秒、A の終了、メモリ圧迫（`shedHiddenJobMemory`）、いずれかの失敗で解放する（A は直列に戻る）。ロール解析のレーンは使わない。キルスイッチ: `localStorage.nc_autoframe_helpers_v1 = 'off'`。4 コア未満では使わない。
+- 検証: `workers/autoFrameParallel.test.mjs`（実 OpenCV、実 MessageChannel。輪郭窓・線分窓・不完全・曖昧・窓なし・複数角度の回退・全解像度の仕上げ、ヘルパーの起動失敗・段の失敗・無応答）と、スモークの `--roll-frame-only`（Chrome で共有ワーカー + ヘルパー対ヘルパーなし）。
+- OpenCV はビルド時にパッケージを分割する（`scripts/opencv-assets.mjs`）: 埋め込みの 12 MB wasm を `opencv-<hash>.wasm` に、約 128 KB のグルーを `opencv-glue-<hash>.js` に。ページが 1 回だけコンパイルした `WebAssembly.Module` を各 OpenCV ワーカー（自動取景、ヘルパー、ロールフレーム、除塵、多重露光）が要求してインスタンス化する。モジュールを受け取れないワーカーは自分でコンパイルする。バイト列はパッケージと同一（`opencvAssets.test.mjs` が SHA-256 と計算結果を照合）なので、Hough・輪郭・OCR・除塵マスク・TELEA の結果は変わらない。
+- ロール解析の各フレームは専用のロールフレームワーカー（`workers/rollFrameWorker.js`）で検出する。両プレーンを持つので、全解像度の再検出はそのワーカーの画素でその場で行い、`needsFullResolution` の再試行は起きない。ロールのレーンの検出はヘルパーを使わない直列のまま。
+
 ## 通常の回帰
 
 ```sh

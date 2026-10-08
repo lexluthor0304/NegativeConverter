@@ -20,6 +20,22 @@ body.studio {
   background: var(--bg-primary);
 }
 .loading-overlay.indeterminate .loading-film-fill { animation: studio-progress 1.4s ease-in-out infinite alternate; }
+/* The one hidden-state rule. The image is uncovered within one short fade
+   (#236), and the hidden overlay, which stays in the DOM, leaves rendering
+   once the fade ends (the visibility delay is the fade's duration, so both
+   come from one value) and pauses its infinite animations: WebKit keeps
+   waking the main thread for steps() animations whatever their visibility.
+   `paused` rather than `none`, so nothing snaps mid-fade. These rules must
+   follow the indeterminate shorthand above, which resets animation-play-state. */
+.loading-overlay:not(.visible) {
+  --loading-overlay-hide: 90ms;
+  visibility: hidden;
+  transition-property: opacity, visibility;
+  transition-duration: var(--loading-overlay-hide, .3s), 0s;
+  transition-delay: 0s, var(--loading-overlay-hide, .3s);
+}
+.loading-overlay:not(.visible) .loading-reel,
+.loading-overlay:not(.visible) .loading-film-fill { animation-play-state: paused; }
 @keyframes studio-progress { from { transform: translateX(-80%); } to { transform: translateX(260%); } }
 @media (prefers-reduced-motion: reduce) { .loading-overlay.indeterminate .loading-film-fill { animation: none; width: 100% !important; opacity: .6; } }
 .studio [hidden] { display: none !important; }
@@ -73,6 +89,10 @@ body.studio {
 #studioMenu { position: relative; }
 #studioMenu > summary { cursor: pointer; font-size: 12px; color: var(--text-secondary); padding: 10px 4px; }
 .studio-menu-content { position: absolute; right: 0; top: calc(100% + 12px); width: 260px; max-height: 75dvh; overflow: auto; padding: 20px; background: var(--bg-secondary); border: 1px solid var(--border-light); border-radius: 8px; box-shadow: 0 12px 36px #0005; }
+/* Closed, the menu lays nothing out: a forced layout inside a closed
+   <details> would otherwise shape the language buttons' own scripts and fetch
+   the other locale's UI font subset on a cold load (#262). */
+#studioMenu:not([open]) > .studio-menu-content { display: none; }
 #studioLinks { display: flex; flex-direction: column; gap: 8px; margin: 16px 0; align-items: flex-start; }
 .studio-menu-content .header-site-links { display: flex; }
 .studio .app-main { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); gap: 0; padding: 0; }
@@ -120,7 +140,14 @@ body.studio {
 .studio-drawer-hint { margin: 0 10px 14px; color: var(--text-secondary); font-size: 12px; line-height: 1.8; }
 .studio .control-section { border: 0; background: transparent; box-shadow: none; margin-bottom: 8px; }
 .studio .section-header { background: transparent; }
-.studio:has(#aiBrushEnabled:checked):has(#studioTab-repair[aria-selected="true"]) #canvasContainer { cursor: crosshair; touch-action: none; }
+.studio:has(#aiBrushEnabled:checked):has(#studioTab-repair[aria-selected="true"]) #canvasContainer { cursor: crosshair; }
+/* The brush waits while its model loads; the status line shows the load. */
+.studio:has(#aiBrushSection[data-model-pending]):has(#studioTab-repair[aria-selected="true"]) #canvasContainer { cursor: progress; }
+/* After a failed load it cannot paint; the status line says why. */
+.studio:has(#aiBrushSection[data-model-error]):has(#studioTab-repair[aria-selected="true"]) #canvasContainer { cursor: not-allowed; }
+.studio #aiBrushSection:is([data-model-pending], [data-model-error]) #aiBrushSize { opacity: .5; }
+.studio #aiBrushSection[data-model-pending] #dustAiStatus { color: var(--accent); }
+.studio #aiBrushSection[data-model-error] #dustAiStatus { color: var(--danger); }
 .studio #aiBrushSection { padding: 16px; }
 .studio #aiBrushSection .control-group { margin: 0; }
 .studio #aiBrushSection details { margin-top: 12px; }
@@ -133,6 +160,11 @@ body.studio {
 .studio .preview-toolbar { padding: 10px 0 0; background: transparent; border: 0; box-shadow: none; border-radius: 0; justify-content: center; gap: 7px; flex-wrap: wrap; }
 .studio .toolbar-btn { border: 0; background: transparent; color: var(--text-secondary); font-size: 12px; padding: 7px 9px; box-shadow: none; }
 .studio .toolbar-btn.active { color: var(--accent); background: var(--bg-hover); }
+/* No taller than the buttons (a 16 px icon, 7 px padding): at its own 32 px,
+   crop mode's ratio control made the toolbar taller, so the picture shrank
+   and moved when crop mode opened (#245). Narrow layouts keep app.css's
+   min-height, which is no taller than their buttons. */
+.studio .toolbar-select { height: 30px; padding-block: 0; }
 .studio-filmstrip { display: none; min-width: 0; border-top: 1px solid var(--border); background: #202020; padding: 6px 12px; }
 .studio-loaded .studio-filmstrip { display: block; grid-row: 2; grid-column: 1; }
 .studio-strip-header { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; min-width: 0; font-size: 12px; }

@@ -53,8 +53,14 @@ function verifyInpaint() {
   assert.deepEqual(inpaintMasked(source, new Uint8Array(mask.length)).__image16.data, before16);
 }
 
-// OpenCVなしのフォールバックと入力検証。
-verifyInpaint();
+// OpenCVなしでは修復せずエラーにする（空マスクは複製だけ返す）。入力検証も行う。
+{
+  const { source, mask } = fixture();
+  assert.throws(() => inpaintMasked(source, mask), /OpenCV\.js inpaint is not available/);
+  const untouched = inpaintMasked(source, new Uint8Array(mask.length));
+  assert.deepEqual(untouched.data, source.data);
+  assert.deepEqual(untouched.__image16.data, source.__image16.data);
+}
 {
   const { source, mask } = fixture();
   const short = mask.subarray(1);
@@ -76,18 +82,21 @@ const cv = typeof module.then === 'function' ? await module : module;
 globalThis.cv = cv;
 verifyInpaint();
 
-// 色変換段階で例外が出ても確保済みMatを解放してフォールバックする。
+// 修復段階で例外が出たら確保済みMatを解放し、代替処理をせず呼び出し元へ伝える。
 const allocated = [];
 globalThis.cv = new Proxy(cv, {
   get(target, key) {
-    if (key === 'cvtColor') return (src, dst) => {
-      allocated.push(src, dst);
-      throw new Error('意図した色変換エラー');
+    if (key === 'inpaint') return (src, mask, dst) => {
+      allocated.push(src, mask, dst);
+      throw new Error('意図した修復エラー');
     };
     return target[key];
   },
 });
-verifyInpaint();
+{
+  const { source, mask } = fixture();
+  assert.throws(() => inpaintMasked(source, mask), /意図した修復エラー/);
+}
 assert.ok(allocated.length > 0);
 assert.ok(allocated.every(mat => mat.isDeleted()));
 globalThis.cv = cv;

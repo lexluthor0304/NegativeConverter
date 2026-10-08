@@ -3,12 +3,18 @@
 // lands under the keys tauri-plugin-updater looks up, unsigned ones are left
 // out, URLs are absolute and percent-encoded, and latest.json keeps offering
 // installers only.
+//
+// Then the endpoints the clients use: the feedback POST reaches the function
+// without a redirect, and every URL the desktop app or download.html reads a
+// manifest from is one the release workflows publish it at.
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { resolveCorsOrigin } from '../negative2positive/api/_lib/feedback-core.mjs';
+import { releaseManifestBases, releaseManifestUrl } from '../negative2positive/src/app/downloadCandidates.js';
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 const script = join(repoRoot, '.github', 'scripts', 'r2_sync_release.py');
@@ -96,3 +102,93 @@ try {
 } finally {
   rmSync(root, { recursive: true, force: true });
 }
+
+// Site endpoints (#229 review R2-047). The desktop app posts its feedback to
+// the site by full URL. The POST carries JSON, so the webview preflights it,
+// and a preflight that gets a redirect fails: the path must be the spelling
+// the site serves as is. Vercel answers the other one with a 308
+// (`trailingSlash` in vercel.json), with no CORS headers.
+const read = (...parts) => readFileSync(join(repoRoot, ...parts), 'utf8');
+const mainJs = read('negative2positive', 'src', 'app', 'main.js');
+const SITE_ORIGIN = 'https://negative-converter.tokugai.com';
+
+const feedback = mainJs.match(/const FEEDBACK_ENDPOINT = isTauriDesktop\(\)\s*\?\s*'([^']*)'\s*:\s*'([^']*)';/);
+assert.ok(feedback, "main.js: `const FEEDBACK_ENDPOINT = isTauriDesktop() ? '<desktop>' : '<web>';` not found");
+const [, desktopFeedback, webFeedback] = feedback;
+assert.ok(existsSync(join(repoRoot, 'negative2positive', 'api', 'feedback.mjs')), 'the feedback function is no longer /api/feedback');
+for (const config of ['vercel.json', join('negative2positive', 'vercel.json')]) {
+  const trailingSlash = JSON.parse(read(config)).trailingSlash === true;
+  const path = trailingSlash ? '/api/feedback/' : '/api/feedback';
+  const why = `${config} has trailingSlash: ${trailingSlash}`;
+  assert.equal(webFeedback, path, `main.js: the web feedback endpoint must be ${path} (${why})`);
+  assert.equal(desktopFeedback, `${SITE_ORIGIN}${path}`, `main.js: the desktop feedback endpoint must be ${SITE_ORIGIN}${path} (${why})`);
+}
+// The function answers both desktop webview origins in production, and the
+// desktop's CSP lets the webview connect to the site.
+for (const origin of ['tauri://localhost', 'http://tauri.localhost']) {
+  assert.equal(resolveCorsOrigin(origin, { allowLocalOrigins: false }), origin, `the feedback function does not answer ${origin}`);
+}
+const tauriConf = JSON.parse(read('src-tauri', 'tauri.conf.json'));
+const connectSrc = String(tauriConf?.app?.security?.csp || '').split(';')
+  .map((directive) => directive.trim().split(/\s+/))
+  .find(([name]) => name === 'connect-src')?.slice(1) || [];
+assert.ok(connectSrc.includes(SITE_ORIGIN), `tauri.conf.json: connect-src must allow ${SITE_ORIGIN}`);
+console.log(`feedback endpoint: ok (desktop ${desktopFeedback}, web ${webFeedback})`);
+
+// Release manifests (#229 review R2-048). The release workflows upload
+// latest.json and updater.json to <public base>/<prefix>/ of the release
+// bucket and nowhere else, so that is the only place a client may read them
+// from: a fallback elsewhere can only fail (the site's copy never existed,
+// and its 404 carries no CORS header either).
+function publishedManifestDirs() {
+  const dirs = new Set();
+  for (const workflow of ['desktop-release.yml', 'r2-sync.yml']) {
+    const calls = read('.github', 'workflows', workflow).split('.github/scripts/r2_sync_release.py').slice(1);
+    assert.ok(calls.length, `${workflow}: no r2_sync_release.py call`);
+    for (const call of calls) {
+      // The call's own lines, up to the first one that does not continue.
+      const lines = [];
+      for (const line of call.split('\n')) {
+        lines.push(line);
+        if (!line.trimEnd().endsWith('\\')) break;
+      }
+      const args = lines.join(' ');
+      const prefix = args.match(/--prefix\s+"([^"]+)"/)?.[1];
+      const base = args.match(/--public-base-url\s+"([^"]+)"/)?.[1];
+      assert.ok(prefix && base, `${workflow}: r2_sync_release.py is called without an explicit --prefix and --public-base-url`);
+      dirs.add(`${base.replace(/\/+$/, '')}/${prefix.replace(/^\/+|\/+$/g, '')}`);
+    }
+  }
+  return [...dirs];
+}
+const manifestDirs = publishedManifestDirs();
+const publishedAt = (name) => manifestDirs.map((dir) => `${dir}/${name}`);
+function assertPublished(urls, name, where) {
+  assert.ok(urls.length, `${where}: no ${name} URL`);
+  for (const url of urls) {
+    assert.ok(publishedAt(name).includes(url),
+      `${where}: ${url} does not serve ${name}; the release workflows publish it at ${publishedAt(name).join(', ')}`);
+  }
+}
+
+const desktopList = mainJs.match(/const DESKTOP_UPDATE_MANIFEST_URLS = \[([^\]]*)\];/)?.[1];
+assert.ok(desktopList !== undefined, 'main.js: `const DESKTOP_UPDATE_MANIFEST_URLS = [...];` not found');
+assert.equal(desktopList.replace(/'[^']*'/g, '').replace(/\/\/[^\n]*/g, '').replace(/[\s,]/g, ''), '',
+  'main.js: DESKTOP_UPDATE_MANIFEST_URLS must list plain string URLs');
+const desktopManifestUrls = [...desktopList.matchAll(/'([^']*)'/g)].map((m) => m[1]);
+assertPublished(desktopManifestUrls, 'latest.json', 'main.js DESKTOP_UPDATE_MANIFEST_URLS');
+for (const url of desktopManifestUrls) {
+  const { origin } = new URL(url);
+  assert.ok(connectSrc.includes(origin), `tauri.conf.json: connect-src must allow ${origin}`);
+}
+assertPublished(tauriConf?.plugins?.updater?.endpoints || [], 'updater.json', 'tauri.conf.json plugins.updater.endpoints');
+// download.html on the site, with or without a crafted ?r2_base= (R2-050:
+// only loopback and preview hosts honour it; src/app/downloadCandidates.test.mjs).
+for (const page of [
+  `${SITE_ORIGIN}/download.html?lang=en`,
+  `${SITE_ORIGIN}/download.html?r2_base=${encodeURIComponent('https://attacker.example')}`,
+  `${SITE_ORIGIN}/download.html?r2Base=${encodeURIComponent('https://attacker.example')}`,
+]) {
+  assertPublished(releaseManifestBases(page).map(releaseManifestUrl), 'latest.json', `download.html at ${page}`);
+}
+console.log(`release manifests: ok (${publishedAt('latest.json').join(', ')})`);
