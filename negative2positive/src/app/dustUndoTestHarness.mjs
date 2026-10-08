@@ -170,6 +170,8 @@ export function fixture({ width = 160, height = 120, specks = 24, ai = false, bu
   };
   const target = {
     coreReprocessSettledListeners: new Set(),
+    // processNegative records which lens a source and its display level carry (#278).
+    lensCorrectedSources: new WeakMap(), displayLevelLenses: new WeakMap(),
     state, console: { warn() {}, error(...args) { target.errors.push(args.map(String).join(' ')); }, info() {} },
     errors: [], document: { body: { dataset: {} } }, structuredClone, Uint8Array, DOMException,
     setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout,
