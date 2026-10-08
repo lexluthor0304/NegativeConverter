@@ -120,7 +120,10 @@ never hides the first. `?liveDodge=0` turns the live effect off. The stored
 strokes (orange = burn, blue = dodge) are drawn on `#displayOverlay` in the
 transform wrapper at display size while the brush is active (#253), each at the
 width its raster paints, redrawn only when the strokes, the geometry or the
-size change. The tool keeps the GPU display; the detail layer (#248) stays off
+size change. The overlay takes the photo canvas's box, framed like it with the
+border preview (#279), so the compositor puts the strokes on the photo's pixel
+grid: within 1 CSS px of their image points at 100 % and about 400 % zoom, as
+is the stroke being painted. The tool keeps the GPU display; the detail layer (#248) stays off
 while it is active, since the live rectangles go into the base frame's
 texture. Escape cancels the stroke being painted.
 

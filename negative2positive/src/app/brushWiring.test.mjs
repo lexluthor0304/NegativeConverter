@@ -86,18 +86,18 @@ async function drain() { for (let i = 0; i < 20; i++) await settle(); }
     state, displayOverlay, Math, JSON, Boolean, console,
     ImageData: class { constructor(data, width, height) { Object.assign(this, { data, width, height }); } },
     dustTint: { mask: null, tag: null, width: 0, height: 0, image: null, building: null },
-    displayOverlayState: { key: null, placed: '', plan: null, tint: null, counters: { tintRects: 0, bandedBuilds: 0, workerTints: 0 } },
+    displayOverlayState: { key: null, plan: null, tint: null, counters: { tintRects: 0, bandedBuilds: 0, workerTints: 0 } },
     displayDebugCounters: { overlayPaints: 0 },
     displaySourceImageData: () => state.previewSourceImageData || state.processedImageData,
     getDisplayPreviewSize: () => ({ width: 100, height: 75 }),
     gpuObjectId: (object) => { if (!object) return 0; if (!ids.has(object)) ids.set(object, nextId++); return ids.get(object); },
     localExposureGeometryFor: () => geometry, dodgeBurnGeometry: () => ({ ...geometry, width: W, height: H }),
-    getSprocketFrameLayout: () => null, getSprocketFrameComposeOptions: () => ({}), photoRectPercent: () => ({}),
+    getSprocketFrameLayout: () => null, getSprocketFrameComposeOptions: () => ({}),
     strokeBrush, basePointToWorking,
     buildDustTintRect, buildDustTintInBands: async () => assert.fail('the worker tint is used'), yieldTaskForJob: async () => {},
   });
   vm.runInContext(['displayOverlaySize', 'dustTintWanted', 'dodgeStrokesWanted', 'dustTintCurrent', 'adoptDustTint', 'patchDustTint',
-    'ensureDustTint', 'displayOverlayPlan', 'displayOverlayKey', 'paintDisplayOverlay', 'syncDisplayOverlay', 'releaseDisplayOverlay',
+    'ensureDustTint', 'displayOverlayPlan', 'displayOverlayKey', 'drawDisplayOverlay', 'paintDisplayOverlay', 'syncDisplayOverlay', 'releaseDisplayOverlay',
     'renderDodgeBurnOverlay'].map(functionSource).join('\n'), context);
   const puts = () => calls.filter(([key]) => key === 'putImageData');
   const strokes = () => calls.filter(([key]) => key === 'stroke');

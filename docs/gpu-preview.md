@@ -210,15 +210,34 @@ surface at 2.2–4 MP, in Node). They now stay on the GPU.
   fallback draws the same underlay.
 - **Overlays.** The dust tint and the saved dodge strokes are drawn on
   `#displayOverlay`, a transparent canvas in the transform wrapper above the photo,
-  backed at the display photo's size and placed over the photo's rectangle with the
-  border. It is repainted only when the tint, the strokes, the geometry or the size
-  change; the photo is never redrawn for an overlay, and both display paths use it.
-  The stroke being painted, by any brush, is on `#brushFeedback` outside the wrapper
-  (#254, `brushFeedback.js`), and the brushes map through the photo rectangle inside
-  the border on both canvases. With the border the overlay's box is fractional, and the
-  compositor places the layer on its own pixel grid: at 381 % zoom the smoke measures
-  the drawn stroke 1.3 screen px off its point (a third of a layout pixel), with the
-  overlay's own pixels exact.
+  backed at the display photo's size (framed with the border, see below). It is
+  repainted only when the tint, the
+  strokes, the geometry or the size change; the photo is never redrawn for an
+  overlay, and both display paths use it. The stroke being painted, by any brush, is
+  on `#brushFeedback` outside the wrapper (#254, `brushFeedback.js`), and the brushes
+  map through the photo rectangle inside the border on both canvases.
+- **One pixel grid (#279).** The compositor gives each canvas layer its box rounded
+  to whole CSS pixels in the wrapper's space, and the zoom scales the rounding. The
+  overlay used to have a box of its own over the photo's rectangle with the border:
+  fractional, rounded apart from the photo, and at 381 % the smoke measured a drawn
+  stroke 1.3 screen px off its point while the overlay's pixels were exact. The
+  overlay now always takes the photo canvas's box. With the border its backing is
+  the framed display size, as `#glCanvas` and `#canvas` are, and the tint and the
+  strokes go into the photo's rectangle at its integer offset (the strokes clipped
+  to it): the same pixels a backing of the photo's size held. Both layers then sit
+  on one grid: a standalone Chrome measurement over WebGL and 2D canvases, DPR 1
+  and 2 and zoom 1 and 3.81 found 0.000 px between them, where a box of its own was
+  up to 1.88 px off. `adjustCanvasDisplay` also fits the canvases' box to whole
+  CSS pixels, the size the compositor showed anyway: a box 746.5 px wide was shown
+  747 px wide, which put a point 60 % across the photo 1.1 screen px from its
+  client rect at 381 %. With a whole-pixel box the client rect is where the photo
+  is drawn, up to the wrapper's own sub-pixel position (at most 0.5 CSS px at any
+  zoom), so the brush mappings and `#brushFeedback`, which work from that rect,
+  stay on the photo. The fit scale behind "100 %", the zoom and the detail layer
+  stays the exact one. In the display-modes smoke at 381 % (DPR 1), measured with
+  whole-pixel clips, a saved stroke on `#glCanvas` was 1.28 px off its point with
+  the border and 0.70 px without it before; on either canvas it is now within
+  0.2 px, and the tint and the live dab within 0.1 px.
 - **Histogram.** Unchanged: the GL path's sample (≤ 24,576 px) goes through the same
   look, rescue and hold-to-compare rules, every 260 ms and at each settle, including
   above 16 MP where `updateFull` does not run.
@@ -253,9 +272,20 @@ fallback keeps one worker; #256 splits export conversions).
 - #253: `render/displayModes.test.mjs` (the fp32 model of the mode stages against
   `pixelAdjustments.js` on every parity recipe, the orientation fixture, the stage
   cache), `--display-modes-only` (offscreen mode parity, a look in the app, the border
-  underlay against `composeSprocketFrame`, overlay alignment at 100 % and about 400 %,
-  GL vs CPU pointer mapping, the failed self-test) and `--expired-only` (the rescue on
-  `#glCanvas` within the budget, drags, hold-to-compare).
+  underlay against `composeSprocketFrame`, overlay alignment, GL vs CPU pointer
+  mapping, the failed self-test) and `--expired-only` (the rescue on `#glCanvas`
+  within the budget, drags, hold-to-compare).
+- #279: `--display-modes-only` checks the overlay in the photo canvas's box with its
+  backing (the framed display size with the border) and the same photo pixels as a
+  photo-size backing (`__ncDisplay.overlayParity`), then a dodge stroke (on
+  `#glCanvas` and `#canvas`), the tint of a direct dust stroke and the live dab on
+  `#brushFeedback` on screen within 1 CSS px of their image points, at 100 % and
+  about 400 % zoom, with and without the border. Its screenshots clip whole device
+  pixels: Chrome rounds a fractional clip's origin and truncates its size, which had
+  added up to half a pixel to each measurement. `displayModesWiring.test.mjs`
+  checks the plan, the offsets of the tint, its patches and the strokes, and that
+  the overlay sets no box of its own; `zoomActualPixels.test.mjs` the whole-pixel
+  box.
 - Frame rates, latency, heap growth and WebKit behaviour need the #230 harness.
 
 ## Native detail at zoom (#248 review)

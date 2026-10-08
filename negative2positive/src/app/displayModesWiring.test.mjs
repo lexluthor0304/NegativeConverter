@@ -2,15 +2,16 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { getSprocketFrameLayout } from './sprocketFrame.js';
-import { photoRectPercent, step3FrameReference } from './displayCanvas.js';
+import { step3FrameReference } from './displayCanvas.js';
 import { photoViewport } from '../render/borderUnderlay.js';
 import { displayModesSupported } from '../render/previewTables.js';
 
 // #253 in main.js (extracted with vm): the GL gate keeps only cropping, WebGL
 // off, a missing or failed context and a look or rescue before the mode
 // programs are ready; the border is a GL underlay composed once per key; the
-// overlay layer is display-sized, placed over the photo and repainted only
-// when what it shows changed.
+// overlay layer is display-sized, keeps the photo canvas's box (framed with the
+// border, the photo at its offset: #279) and is repainted only when what it
+// shows changed.
 const source = readFileSync(new URL('./main.js', import.meta.url), 'utf8');
 function functionSource(name) {
   const match = new RegExp(`^    (?:async )?function ${name}\\(`, 'm').exec(source);
@@ -167,7 +168,11 @@ class TestImageData {
   const { strokeBrush, basePointToWorking } = await import('./localExposure.js');
   const shown = new TestImageData(1200, 800);
   const style = {};
-  const overlay = { width: 1, height: 1, style, getContext: () => ({ clearRect() {}, putImageData() {}, save() {}, restore() {}, beginPath() {}, moveTo() {}, lineTo() {}, stroke() {} }) };
+  const calls = [];
+  const record = name => (...args) => calls.push([name, ...args]);
+  const overlayContext = Object.fromEntries(['clearRect', 'putImageData', 'save', 'restore', 'beginPath', 'rect', 'clip', 'translate',
+    'moveTo', 'lineTo', 'stroke'].map(name => [name, record(name)]));
+  const overlay = { width: 1, height: 1, style, getContext: () => overlayContext };
   const mask = new Uint8Array(4800 * 3200);
   mask[1000 * 4800 + 2000] = 255;
   const state = {
@@ -179,23 +184,27 @@ class TestImageData {
   const geometry = { baseWidth: 4800, baseHeight: 3200, rotatedWidth: 4800, rotatedHeight: 3200, rotationAngle: 0, mirrored: false, cropRegion: null };
   const context = vm.createContext({
     state, JSON, Math, Boolean, console, ImageData: TestImageData, displayOverlay: overlay,
-    displayOverlayState: { key: null, placed: '', plan: null, tint: null, counters: { tintRects: 0, bandedBuilds: 0, workerTints: 0 } },
+    displayOverlayState: { key: null, plan: null, tint: null, counters: { tintRects: 0, bandedBuilds: 0, workerTints: 0 } },
     dustTint: { mask: null, tag: null, width: 0, height: 0, image: null, building: null },
     displayDebugCounters: { overlayPaints: 0 }, displaySourceImageData: () => shown, getDisplayPreviewSize: () => ({ width: 1200, height: 800 }),
-    getSprocketFrameLayout, getSprocketFrameComposeOptions: () => ({ edgeMarkings: {} }), photoRectPercent,
+    getSprocketFrameLayout, getSprocketFrameComposeOptions: () => ({ edgeMarkings: {} }),
     gpuObjectId: object => { if (!ids.has(object)) ids.set(object, next++); return ids.get(object); },
     dodgeBurnGeometry: () => ({ ...geometry, width: 4800, height: 3200 }), localExposureGeometryFor: () => geometry,
     strokeBrush, basePointToWorking, buildDustTintRect, buildDustTintInBands, yieldTaskForJob: async () => {},
   });
   vm.runInContext(['displayOverlaySize', 'dustTintWanted', 'dodgeStrokesWanted', 'dustTintCurrent', 'adoptDustTint', 'patchDustTint',
-    'ensureDustTint', 'displayOverlayPlan', 'displayOverlayKey', 'paintDisplayOverlay', 'syncDisplayOverlay', 'releaseDisplayOverlay',
-    'renderDodgeBurnOverlay'].map(functionSource).join('\n'), context);
+    'ensureDustTint', 'displayOverlayPlan', 'displayOverlayKey', 'drawDisplayOverlay', 'paintDisplayOverlay', 'syncDisplayOverlay',
+    'releaseDisplayOverlay', 'renderDodgeBurnOverlay'].map(functionSource).join('\n'), context);
+  // #279: the overlay never sets a box of its own; the stylesheet's is the
+  // photo canvas's (the wrapper's), so both layers share one pixel grid.
+  const noInlineBox = () => assert.deepEqual([style.left, style.top, style.width, style.height], [undefined, undefined, undefined, undefined]);
   context.adoptDustTint(mask, 1, { width: 1200, height: 800, rgba: buildDustTint(mask, 4800, 3200, 1200, 800) });
   context.syncDisplayOverlay();
   assert.deepEqual([overlay.width, overlay.height], [1200, 800], 'the backing is the display photo, never the image');
   assert.deepEqual([context.dustTint.width, context.dustTint.height], [1200, 800], 'and so is the tint');
   assert.equal(style.display, 'block');
-  assert.deepEqual([style.left, style.top, style.width, style.height], ['0px', '0px', '100%', '100%']);
+  noInlineBox();
+  assert.deepEqual(calls.filter(call => call[0] === 'putImageData').map(call => call.slice(2)), [[0, 0]]);
   const paints = context.displayDebugCounters.overlayPaints;
   for (let i = 0; i < 5; i++) context.syncDisplayOverlay();
   assert.equal(context.displayDebugCounters.overlayPaints, paints, 'an unchanged overlay is not repainted on every photo frame');
@@ -209,11 +218,49 @@ class TestImageData {
   const settled = context.displayDebugCounters.overlayPaints;
   context.syncDisplayOverlay();
   assert.equal(context.displayDebugCounters.overlayPaints, settled);
-  // The border: over the photo's rectangle.
+  // The border: the backing is the framed display size, as the photo
+  // canvas's is, and the tint goes into the photo's rectangle at its offset.
+  const layout = getSprocketFrameLayout(1200, 800, { edgeMarkings: {} });
   state.sprocketPreviewEnabled = true;
+  calls.length = 0;
   context.syncDisplayOverlay();
-  const box = photoRectPercent(getSprocketFrameLayout(1200, 800, { edgeMarkings: {} }));
-  assert.deepEqual([style.left, style.top, style.width, style.height], [box.left, box.top, box.width, box.height]);
+  assert.deepEqual([overlay.width, overlay.height], [layout.frameWidth, layout.frameHeight], 'the framed display size');
+  assert.deepEqual({ ...context.displayOverlayState.plan.photo }, { x: layout.x, y: layout.y, width: 1200, height: 800 });
+  assert.deepEqual(calls.map(call => call[0]), ['clearRect', 'putImageData']);
+  assert.deepEqual(calls[0].slice(1), [0, 0, layout.frameWidth, layout.frameHeight]);
+  assert.equal(calls[1][1], context.dustTint.image);
+  assert.deepEqual(calls[1].slice(2), [layout.x, layout.y], 'the tint at the photo\'s offset, unscaled');
+  noInlineBox();
+  // A stroke's tint patch is put at the same offset (its cells, unscaled).
+  for (let y = 500; y < 520; y++) for (let x = 3000; x < 3040; x++) mask[y * 4800 + x] = 255;
+  state.dustRemoval.maskTag = 3;
+  calls.length = 0;
+  context.patchDustTint(mask, 2, 3, { x: 3000, y: 500, width: 40, height: 20 }, null);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].slice(2), [layout.x, layout.y, 750, 125, 10, 5], 'the dirty cells at the photo\'s offset');
+  context.syncDisplayOverlay();
+  assert.equal(calls.length, 1, 'the patched overlay is current');
+  // Saved dodge strokes: clipped to the photo's rectangle and drawn in its
+  // pixels, the same path as without the border.
+  state.dodgeBurn.active = true;
+  state.localExposure = { strokes: [{ stops: 1, size: 0.1, feather: 0.5, points: [{ x: 0.02, y: 0.4, p: 1 }, { x: 0.5, y: 0.45, p: 1 }] }] };
+  calls.length = 0;
+  context.syncDisplayOverlay();
+  const framedCalls = calls.map(call => call[0]);
+  assert.deepEqual(framedCalls.slice(0, 8), ['clearRect', 'putImageData', 'save', 'beginPath', 'rect', 'clip', 'translate', 'save']);
+  assert.deepEqual(calls[4].slice(1), [layout.x, layout.y, 1200, 800]);
+  assert.deepEqual(calls[6].slice(1), [layout.x, layout.y]);
+  assert.deepEqual(framedCalls.slice(-2), ['restore', 'restore']);
+  const path = () => calls.filter(call => call[0] === 'moveTo' || call[0] === 'lineTo').map(call => call.slice(1));
+  const framedPath = path();
+  state.sprocketPreviewEnabled = false;
+  calls.length = 0;
+  context.syncDisplayOverlay();
+  assert.deepEqual(path(), framedPath, 'the strokes\' photo pixels are the same with and without the border');
+  assert.ok(!calls.some(call => call[0] === 'clip' || call[0] === 'translate'), 'no clip or offset without the border');
+  noInlineBox();
+  state.dodgeBurn.active = false;
+  state.localExposure = null;
   // Nothing to show: hidden, and the backing goes.
   state.dustRemoval.showMask = false;
   context.syncDisplayOverlay();
@@ -228,7 +275,7 @@ class TestImageData {
   assert.equal(context.displayOverlayPlan(), null);
 }
 
-console.log('displayModesWiring: the GL gate keeps only its three exclusions and the mode readiness, the border underlay composes once per key and lags the smear by a settle, the overlay is display-sized over the photo and repaints only on change');
+console.log('displayModesWiring: the GL gate keeps only its three exclusions and the mode readiness, the border underlay composes once per key and lags the smear by a settle, the overlay is display-sized in the photo canvas box (framed with the border) and repaints only on change');
 
 // Software GL stays on the CPU unless deliberately forced in a driver test.
 for (const forced of [false, true]) {

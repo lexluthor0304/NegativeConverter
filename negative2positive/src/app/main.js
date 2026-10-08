@@ -3478,11 +3478,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // and its state (see the Detail layer section). Declared this early: zoom
     // resets and fits reach it from anywhere.
     const glDetailCanvas = document.getElementById('glDetailCanvas');
-    // The dust tint and dodge-and-burn strokes over the photo (#253 C).
+    // The dust tint and dodge-and-burn strokes over the photo (#253 C), in the
+    // photo canvas's box (#279).
     const displayOverlay = document.getElementById('displayOverlay');
     // `plan` and `tint`: what the last paint drew (a stroke's tint patch is put
     // straight onto an overlay that shows the tint alone).
-    const displayOverlayState = { key: null, placed: '', plan: null, tint: null,
+    const displayOverlayState = { key: null, plan: null, tint: null,
       counters: { tintRects: 0, bandedBuilds: 0, workerTints: 0 } };
     const DETAIL_LAYER_ENABLED = new URLSearchParams(window.location.search).get('detailLayer') !== '0';
     const detailLayer = {
@@ -7220,7 +7221,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           overlay: displayOverlay && displayOverlay.style.display === 'block' ? size(displayOverlay) : null,
           glBorder: webglState.borderUnderlay ? size(webglState.borderUnderlay.size()) : null
         },
-        overlayBox: displayOverlay ? ['left', 'top', 'width', 'height'].map(key => displayOverlay.style[key]) : null,
+        // Where the photo lies in the overlay's backing (#279: the overlay
+        // keeps the photo canvas's box, framed with the border).
+        overlayPhoto: displayOverlayState.plan ? { ...displayOverlayState.plan.photo } : null,
         glPhoto: glBorder.photo ? { ...glBorder.photo } : null,
         comparison: {
           ready: Boolean(beforeAfterBuiltReference?.image && beforeAfterBuiltReference.key === (state.conversionPreviewImageData || state.conversionSourceImageData)),
@@ -7358,9 +7361,47 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
             strokes: geometry ? (state.localExposure?.strokes || []).map(stroke => stroke.points.map(p => basePointToWorking(p, geometry))) : [],
             overlay: displayOverlay.style.display === 'block' ? rect(displayOverlay) : null,
             overlayBacking: [displayOverlay.width, displayOverlay.height],
-            surface: surface === glCanvas ? 'gl' : 'cpu', surfaceRect: box, photo,
+            overlayPhoto: displayOverlayState.plan ? { ...displayOverlayState.plan.photo } : null,
+            surface: surface === glCanvas ? 'gl' : 'cpu', surfaceRect: box, surfaceBacking: [surface.width, surface.height], photo,
             tint: dustTint.image ? [dustTint.width, dustTint.height] : null
           };
+        },
+        // #279: the overlay's plan drawn as it is shown (in the photo's
+        // rectangle of a framed backing) against the same plan drawn into a
+        // backing of the photo's size, as the overlay held it before it took
+        // the canvas's box: the photo's pixels must be identical and the
+        // margins empty.
+        overlayParity: () => {
+          const plan = displayOverlayState.plan;
+          if (!plan) return { error: 'no overlay' };
+          const { photo } = plan;
+          const draw = (target) => {
+            const surface = document.createElement('canvas');
+            surface.width = target.width;
+            surface.height = target.height;
+            const context = surface.getContext('2d');
+            drawDisplayOverlay(context, target);
+            return context.getImageData(0, 0, target.width, target.height).data;
+          };
+          const shown = draw(plan);
+          const alone = draw({ ...plan, width: photo.width, height: photo.height, photo: { x: 0, y: 0, width: photo.width, height: photo.height } });
+          let differing = 0, max = 0, margin = 0, drawn = 0;
+          for (let y = 0; y < plan.height; y++) {
+            for (let x = 0; x < plan.width; x++) {
+              const i = (y * plan.width + x) * 4;
+              if (x < photo.x || x >= photo.x + photo.width || y < photo.y || y >= photo.y + photo.height) {
+                if (shown[i + 3]) margin++;
+                continue;
+              }
+              const j = ((y - photo.y) * photo.width + x - photo.x) * 4;
+              let d = 0;
+              for (let c = 0; c < 4; c++) d = Math.max(d, Math.abs(shown[i + c] - alone[j + c]));
+              if (shown[i + 3]) drawn++;
+              if (d) differing++;
+              if (d > max) max = d;
+            }
+          }
+          return { size: [plan.width, plan.height], photo: { ...photo }, tint: Boolean(plan.tint), strokes: Boolean(plan.strokes), drawn, differing, max, margin };
         },
         modes: () => ({
           status: displayModes.status, reason: displayModes.reason, ready: webglState.modesReady,
@@ -10173,10 +10214,15 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // shows the photo (#glCanvas and the detail layer, or #canvas), never into
     // the photo's context, so a shown mask or the dodge tool no longer takes the
     // display off the GPU. The backing is the display photo's size (at most the
-    // display-preview cap), never the image's; with the film border it covers
-    // the photo's rectangle. It is repainted only when the tint, the strokes,
-    // the geometry, the size or the box change: never for a photo frame or a
-    // pointer move. The stroke being painted is on #brushFeedback
+    // display-preview cap), never the image's. Its box is always the photo
+    // canvas's box (#279): with the film border the backing is the framed
+    // display size, as the canvas's is, and the tint and the strokes are drawn
+    // into the photo's rectangle inside it. A box of its own over that
+    // rectangle (fractional in the wrapper) was placed by the compositor on its
+    // own pixel grid, which the zoom magnified: 1.3 screen px at 381 %. Sharing
+    // the box puts both layers on one grid. It is repainted only when the
+    // tint, the strokes, the geometry or the size change: never for a photo
+    // frame or a pointer move. The stroke being painted is on #brushFeedback
     // (brushFeedback.js, see the brush section).
     //
     // The tint is max-pooled (dustTint.js): a cell is tinted when any mask pixel
@@ -10242,7 +10288,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       displayOverlayState.counters.tintRects++;
       const shown = displayOverlayState.plan;
       if (shown && shown.tint && !shown.strokes && displayOverlayState.tint === dustTint.image) {
-        displayOverlay.getContext('2d').putImageData(dustTint.image, 0, 0, patch.x, patch.y, patch.width, patch.height);
+        displayOverlay.getContext('2d').putImageData(dustTint.image, shown.photo.x, shown.photo.y, patch.x, patch.y, patch.width, patch.height);
         displayOverlayState.key = displayOverlayKey(shown);
       }
     }
@@ -10272,8 +10318,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         }, (error) => console.warn('Dust tint failed:', error?.message || error));
     }
 
-    // The overlay's backing and CSS box for the photo on screen, or null when it
-    // has nothing to show. A tint that is not pooled yet is asked for here.
+    // The overlay's backing and the photo's rectangle in it, or null when it has
+    // nothing to show. A tint that is not pooled yet is asked for here. The
+    // overlay keeps the photo canvas's box (the stylesheet's), so the backing
+    // is the canvas's: the display photo, framed with the border preview
+    // (getSprocketFrameLayout of the display size, as both display paths frame
+    // it) with the photo at its integer offset.
     function displayOverlayPlan() {
       if (!displayOverlay || state.cropping || state.beforeAfterActive || state.currentStep < 3 || !state.processedImageData) return null;
       const size = displayOverlaySize();
@@ -10283,11 +10333,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const tint = tintWanted && dustTintCurrent(size);
       const strokes = dodgeStrokesWanted();
       if (!tint && !strokes) return null;
-      const shown = displaySourceImageData();
-      const layout = state.sprocketPreviewEnabled ? getSprocketFrameLayout(shown.width, shown.height, getSprocketFrameComposeOptions()) : null;
+      const layout = state.sprocketPreviewEnabled ? getSprocketFrameLayout(size.width, size.height, getSprocketFrameComposeOptions()) : null;
       return {
-        width: size.width, height: size.height, tint, strokes,
-        box: layout ? photoRectPercent(layout) : { left: '0px', top: '0px', width: '100%', height: '100%' }
+        width: layout ? layout.frameWidth : size.width, height: layout ? layout.frameHeight : size.height,
+        photo: { x: layout ? layout.x : 0, y: layout ? layout.y : 0, width: size.width, height: size.height },
+        tint, strokes
       };
     }
 
@@ -10296,9 +10346,29 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     function displayOverlayKey(plan) {
       if (!plan) return 'none';
       const geometry = plan.strokes ? dodgeBurnGeometry() : null;
-      return [plan.width, plan.height, plan.box.left, plan.box.top, plan.box.width, plan.box.height,
+      return [plan.width, plan.height, plan.photo.x, plan.photo.y, plan.photo.width, plan.photo.height,
         plan.tint ? `${gpuObjectId(dustTint.image)}:${dustTint.tag}` : '',
         plan.strokes ? `${gpuObjectId(state.localExposure)}:${JSON.stringify(geometry)}` : ''].join('|');
+    }
+
+    // The tint and the strokes in the photo's rectangle of `plan`'s backing:
+    // the pixels a backing of the photo's size holds, at the photo's offset
+    // (the strokes clipped to the rectangle, as that backing's edges clipped
+    // them).
+    function drawDisplayOverlay(context, plan) {
+      const { photo } = plan;
+      if (plan.tint) context.putImageData(dustTint.image, photo.x, photo.y);
+      if (!plan.strokes) return;
+      const framed = photo.x !== 0 || photo.y !== 0 || photo.width !== plan.width || photo.height !== plan.height;
+      if (framed) {
+        context.save();
+        context.beginPath();
+        context.rect(photo.x, photo.y, photo.width, photo.height);
+        context.clip();
+        context.translate(photo.x, photo.y);
+      }
+      renderDodgeBurnOverlay(context, photo.width, photo.height);
+      if (framed) context.restore();
     }
 
     function paintDisplayOverlay(plan = displayOverlayPlan()) {
@@ -10313,15 +10383,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         displayOverlay.width = plan.width;
         displayOverlay.height = plan.height;
       }
-      const placed = `${plan.box.left}|${plan.box.top}|${plan.box.width}|${plan.box.height}`;
-      if (displayOverlayState.placed !== placed) {
-        Object.assign(displayOverlay.style, plan.box);
-        displayOverlayState.placed = placed;
-      }
       const context = displayOverlay.getContext('2d');
       context.clearRect(0, 0, plan.width, plan.height);
-      if (plan.tint) context.putImageData(dustTint.image, 0, 0);
-      if (plan.strokes) renderDodgeBurnOverlay(context, plan.width, plan.height);
+      drawDisplayOverlay(context, plan);
       displayOverlay.style.display = 'block';
       displayDebugCounters.overlayPaints++;
     }
@@ -10964,8 +11028,15 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const scale = Math.min(maxWidth / fitW, maxHeight / fitH, 1);
       // CSS pixels per image pixel at zoom 1: what "100 %" is measured from.
       fit.scale = scale > 0 && Number.isFinite(scale) ? scale : 0;
-      const cssW = (fitW * scale) + 'px';
-      const cssH = (fitH * scale) + 'px';
+      // Whole CSS pixels (#279). The compositor shows a canvas layer at its
+      // box rounded to whole pixels in the wrapper's space, before the zoom
+      // scales it: a box 746.5 px wide is shown 747 px wide, which at 381 %
+      // puts a point 60 % across the photo 1.1 screen px from where its client
+      // rect says. A whole-pixel box is shown where its client rect says, so
+      // the brush mappings and #brushFeedback, which work from that rect, stay
+      // on the photo shown. The fit scale above stays the exact one.
+      const cssW = Math.round(fitW * scale) + 'px';
+      const cssH = Math.round(fitH * scale) + 'px';
       canvas.style.width = cssW;
       canvas.style.height = cssH;
       glCanvas.style.width = cssW;
@@ -26228,7 +26299,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         containerClass: canvasContainer.classList.contains('brush-tool-active'),
         feedback: brushFeedback.state(),
         layer: { visible: displayOverlay.style.display === 'block', width: displayOverlay.width, height: displayOverlay.height,
-          box: ['left', 'top', 'width', 'height'].map(key => displayOverlay.style[key]),
+          photo: displayOverlayState.plan ? { ...displayOverlayState.plan.photo } : null,
           counters: { ...displayOverlayState.counters, paints: displayDebugCounters.overlayPaints } },
         tint: dustTint.image ? { width: dustTint.width, height: dustTint.height, current: Boolean(dustTint.mask === state.dustRemoval.mask && dustTint.tag === state.dustRemoval.maskTag) } : null,
         live: { ...liveDodgeCounters, enabled: LIVE_DODGE_ENABLED,

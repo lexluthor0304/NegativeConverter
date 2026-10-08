@@ -169,7 +169,9 @@ and every count equals a full recount.
 - **Tint and brush feedback (#253, #254).** The mask is shown on
   `#displayOverlay`, a canvas in the transform wrapper at the display frame's
   size (at most the display-preview cap), so zoom and pan only move it and the
-  view stays on the GPU. A tint cell is set when any mask pixel inside it is
+  view stays on the GPU. It takes the photo canvas's box; with the border
+  preview its backing is the framed display size and the tint is put at the
+  photo's offset in it, so tint and photo share one pixel grid (#279). A tint cell is set when any mask pixel inside it is
   set (max-pooling, `dustTint.js`), so one-pixel specks show at fit. The dust
   worker pools it: `detect` (while the mask is shown) and `stroke` requests
   carry the overlay's size, and the replies carry the whole tint or the cells

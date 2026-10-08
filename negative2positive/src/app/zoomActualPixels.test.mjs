@@ -75,7 +75,13 @@ const cssWidth = f => parseFloat(f.wrapper.style.width);
 for (const container of [{ width: 1110 - 300, height: 700 - 100 }, { width: 1440 - 300, height: 900 - 100 }, { width: 1110, height: 700 }]) {
   for (const dpr of [1, 2]) {
     const f = fixture({ container, dpr });
-    const fit = cssWidth(f) / 9536;
+    // CSS pixels per image pixel at zoom 1, against the full-resolution frame.
+    const fit = Math.min((container.width - 20) / 9536, (container.height - 20) / 6336, 1);
+    // #279: the box is the nearest whole CSS pixels, the size the compositor
+    // shows a canvas at, so its client rect is where the photo is drawn.
+    assert.deepEqual([f.wrapper.style.width, f.wrapper.style.height], [`${Math.round(9536 * fit)}px`, `${Math.round(6336 * fit)}px`]);
+    assert.deepEqual([f.context.glCanvas.style.width, f.context.glCanvas.style.height], [f.wrapper.style.width, f.wrapper.style.height]);
+    assert.ok(Number.isInteger(cssWidth(f)) && Math.abs(cssWidth(f) - 9536 * fit) <= 0.5);
     const zoom100 = Math.max(1, 1 / (fit * dpr));
     assert.ok(Math.abs(f.context.actualPixelsZoom() - zoom100) < 1e-9, 'zoom100 = max(1, 1 / (fit x DPR))');
     // 200 % of native is reachable.
@@ -132,4 +138,4 @@ for (const container of [{ width: 1110 - 300, height: 700 - 100 }, { width: 1440
   assert.equal(f.timers.size, 0);
 }
 
-console.log('zoomActualPixels: true 1:1 toggle, image-relative indicator, 200 % reachable, source-checked settle hook');
+console.log('zoomActualPixels: whole-pixel box, true 1:1 toggle, image-relative indicator, 200 % reachable, source-checked settle hook');

@@ -634,10 +634,12 @@ body {
 
 /* The display overlay (#253, #254): the dust-mask tint and the saved
    dodge-and-burn strokes over the photo, whichever canvas shows it, following
-   zoom and pan with the wrapper. main.js sizes its backing to the display
-   photo and places it over the photo's rectangle when the film border is
-   shown. Under the comparison (z-index 10); the stroke being painted is on
-   .brush-feedback, outside the wrapper. */
+   zoom and pan with the wrapper. It always keeps this box, the photo canvas's
+   (#279): a box of its own is placed on its own pixel grid, which the zoom
+   magnifies. main.js sizes its backing like the canvas's (framed with the
+   film border) and draws into the photo's rectangle. Under the comparison
+   (z-index 10); the stroke being painted is on .brush-feedback, outside the
+   wrapper. */
 .display-overlay {
   position: absolute;
   left: 0;
