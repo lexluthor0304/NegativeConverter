@@ -168,7 +168,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     import { compactDustSteps, rebuildDustSteps, frameDigestSteps, coldDustRecordBytes, runSteps, runStepsInSlices } from './dustColdState.js';
     import { createDustHistoryArchive } from './dustHistoryArchive.js';
     import { loadLocalLensfunAssets } from './lensfunLoader.js';
-    import { applyLensMapsToImage, lensMapRequest } from './lensMaps.js';
+    import { applyLensMapsToImage, buildLensMaps, lensMapBuffers, lensMapRequest } from './lensMaps.js';
     import { createOpenCvLoader } from './opencvLoader.js';
     import {
       sampleFilmBase as sampleFilmBaseRobust,
@@ -1440,19 +1440,27 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       return Boolean(lensCorrection.enabled && lensCorrection.selectedLens?.handle);
     }
 
-    // lensfun's maps for a frame of this size under a resolved lens block,
-    // cached by what they are built from (lensMapRequest). `remember: false`
-    // (a display-proxy fill, #278) reads the cache without growing it.
+    // lensfun's maps for a frame of this size under a resolved lens block
+    // (buildLensMaps: distortion, with TCA and vignetting where the lens has
+    // them), cached by what they are built from (lensMapRequest).
+    // `remember: false` (a display-proxy fill, #278) reads the cache without
+    // growing it. The cache keeps the newest sets within 128 MB (a 60 MP
+    // crop's distortion, TCA and vignetting maps take about 41 MB at step 8),
+    // at most 12.
     function lensCorrectionMaps(runtime, lensCorrection, width, height, { remember = true } = {}) {
       const { key, request } = lensMapRequest(lensCorrection, width, height);
       let maps = lensMapCache.get(key);
       if (!maps) {
-        maps = runtime.client.buildCorrectionMaps(request);
+        maps = buildLensMaps(runtime.client, request);
         if (remember) {
           lensMapCache.set(key, maps);
-          if (lensMapCache.size > 12) {
-            const oldestKey = lensMapCache.keys().next().value;
-            if (oldestKey) lensMapCache.delete(oldestKey);
+          const bytesOf = entry => lensMapBuffers(entry).reduce((sum, buffer) => sum + buffer.byteLength, 0);
+          let bytes = 0;
+          for (const entry of lensMapCache.values()) bytes += bytesOf(entry);
+          for (const [oldestKey, oldest] of lensMapCache) {
+            if (lensMapCache.size <= 1 || (lensMapCache.size <= 12 && bytes <= 128 * 1024 * 1024)) break;
+            lensMapCache.delete(oldestKey);
+            bytes -= bytesOf(oldest);
           }
         }
       }
@@ -16830,15 +16838,19 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           lensRemapFailures.clear();
           return true;
         },
-        // What lens correction did to the photo on screen: its status and
-        // whether its source and display level carry the recipe's lens.
+        // What lens correction did to the photo on screen: its status,
+        // whether its source and display level carry the recipe's lens, and
+        // the corrections its source got (distortion always; TCA and
+        // vignetting where the lens has them).
         lens: () => {
           const signature = lensSignature(state);
           const source = state.conversionSourceImageData;
+          const mapping = source?.__lensMapping || null;
           return {
             active: Boolean(signature), status: state.lensCorrection.statusKey || null,
             source: source ? lensCorrectedSources.get(source) === signature && Boolean(signature) : null,
-            level: state.displayLevelImageData ? displayLevelLenses.get(state.displayLevelImageData) === signature && Boolean(signature) : null
+            level: state.displayLevelImageData ? displayLevelLenses.get(state.displayLevelImageData) === signature && Boolean(signature) : null,
+            corrections: mapping ? { tca: Boolean(mapping.includeTca && mapping.maps.tca), vignetting: Boolean(mapping.maps.vignetting) } : null
           };
         },
         // A photo that is not on screen opens cold next time (or, with

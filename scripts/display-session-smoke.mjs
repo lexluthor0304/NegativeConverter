@@ -21,7 +21,9 @@
 //  - a frame left inside the reprocess debounce of a slider nudge (R2-002)
 //    comes back from its display form without a read or decode, with the
 //    nudge and its history, showing what a cold open of that recipe shows;
-//  - a lens-corrected colour frame (#278, test lens maps) left is stored
+//  - the app's own lensfun corrects a colour frame (from lensfun-wasm 0.1.4
+//    on; 0.1.3 builds no maps and leaves it uncorrected), and a
+//    lens-corrected colour frame (#278, test lens maps) left is stored
 //    under its lens and, after a restart, opens from the store within
 //    400 ms without a read or decode, showing and exporting what a cold
 //    open of its recipe shows and exports.
@@ -33,6 +35,7 @@ import { installPhotoSessionProbe, decodePng, decodeTiff, bootPhotoSession } fro
 const pako = createRequire(import.meta.url)('pako');
 const { encodePng16Blob } = await import('../negative2positive/src/workers/imageEncoders.js');
 const { displayProxyStoreBudget, DISPLAY_PROXY_STORE_DEFAULT_LIMIT_BYTES } = await import('../negative2positive/src/app/displayProxyStore.js');
+const { lensfunPackageVersion, versionAtLeast } = await import('../negative2positive/src/app/lensfunNodeClient.mjs');
 
 // A 16-bit colour negative: an orange-masked scene inside a rebate of clear
 // film base, which the import's frame detection crops away (a colour frame is
@@ -455,11 +458,13 @@ export async function runDisplaySessionSmoke({ send, evaluate, waitFor, fail, in
     // store kept) it opens from the store without a read or decode, settles
     // within 400 ms, shows what a cold open of its recipe shows, and exports
     // what that exports (its source rebuilt with the correction, the stored
-    // level checked against it). The app's own lens runtime is tried first
-    // and reported: lensfun-wasm 0.1.3 builds no maps in a browser (its
-    // module exports no HEAPF32 view, so the editor leaves the frame
-    // uncorrected). A lensfun client of test maps (lensTestMaps.mjs,
-    // ?debug=1) then stands in for it, with the lens the search found ----
+    // level checked against it). The app's own lens runtime is tried first:
+    // from lensfun-wasm 0.1.4 on it must correct the frame (the first
+    // profile found, the Nikkor 18-55mm DX VR II, has distortion and TCA
+    // calibration, no vignetting); 0.1.3 builds no maps (its module exports
+    // no HEAPF32 view, so the editor leaves the frame uncorrected), which is
+    // reported. A lensfun client of test maps (lensTestMaps.mjs, ?debug=1)
+    // then stands in for it, with the lens the search found ----
     const lensState = () => evaluate('window.__ncDisplaySessions.lens()');
     const reopenCold = async () => {
       await open(1, Y);
@@ -487,13 +492,23 @@ export async function runDisplaySessionSmoke({ send, evaluate, waitFor, fail, in
         return select.options[0].textContent;
       })()`);
     };
+    const lensfunVersion = lensfunPackageVersion();
+    const ownCorrects = versionAtLeast(lensfunVersion, '0.1.4');
     let found = await chooseLens();
     if (found) {
       await reopenCold();
       const own = await lensState();
+      const status = await lensStatus();
       expect(own.active, 'the lens chosen is not active in the recipe: ' + JSON.stringify(own));
-      console.log(`note: the app's own lens runtime with ${found}: ${own.source ? 'corrected the frame' : `left it uncorrected (${await lensStatus()})`}`);
+      console.log(`note: the app's own lens runtime (lensfun-wasm ${lensfunVersion}) with ${found}: ${own.source
+        ? `corrected the frame (TCA ${own.corrections?.tca ? 'on' : 'off'}, vignetting ${own.corrections?.vignetting ? 'on' : 'off'}): "${status}"`
+        : `left it uncorrected ("${status}")`}`);
+      if (ownCorrects) {
+        expect(own.source && own.level && own.status === 'lensStatusApplied' && !/fail|失败|失敗/i.test(status),
+          `lensfun-wasm ${lensfunVersion}: the app's own lens runtime did not correct the frame: ${JSON.stringify(own)} "${status}"`);
+      }
     } else {
+      expect(!ownCorrects, `lensfun-wasm ${lensfunVersion}: the app's own lens runtime found no profile ("${await lensStatus()}")`);
       console.log(`note: the app's own lens runtime found no profile (${await lensStatus()})`);
     }
     expect(await evaluate(`(async () => {

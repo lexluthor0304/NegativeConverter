@@ -125,6 +125,7 @@ function withLens(h, { client = lensTestClient(), fail = null } = {}) {
     sanitizeLensCorrection: (input, fallback) => structuredClone(input || fallback),
     ensureLensfunClient: async () => { if (fail) throw new Error(fail); return { client, source: 'local' }; },
     applyLensMapsToImage: lensMaps.applyLensMapsToImage, lensMapRequest: lensMaps.lensMapRequest,
+    buildLensMaps: lensMaps.buildLensMaps, lensMapBuffers: lensMaps.lensMapBuffers,
     sanitizeLensRuntimeError: error => String(error?.message || error), lensMapCache: new Map()
   });
   vm.runInContext(['lensCorrectionActive', 'applyLensCorrectionWithSettings'].map(functionSource).join('\n'), h.context);

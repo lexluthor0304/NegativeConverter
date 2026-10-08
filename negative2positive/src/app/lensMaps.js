@@ -1,5 +1,6 @@
 // Lens correction's remap (#278). lensfun builds grid maps for a frame of
-// a given size (geometry or per-channel TCA source positions, and
+// a given size (the distortion's source positions, or per channel the
+// source positions with distortion and TCA corrected together, and
 // vignetting gains, one node every `step` pixels); every output pixel reads
 // its source positions and gains bilinearly from the grid and samples the
 // input there bilinearly. main.js applies it to the whole working image
@@ -7,7 +8,8 @@
 // apply it to row bands of that image in the geometry pool, with the same
 // arithmetic, so a band of rows is those rows of the whole image byte for
 // byte. This module also holds what decides the maps lensfun is asked for
-// (the grid step and the request), so the store's code hash covers them.
+// (the grid step, the request and which maps are built: buildLensMaps), so
+// the store's code hash covers them.
 
 import { allocPlane16, isSharedPlane, sharedPlanesAvailable } from './crossOriginIsolation.js';
 
@@ -79,6 +81,75 @@ export function lensMapRequest(lensCorrection, width, height) {
       distance: params.distance
     }
   };
+}
+
+// lensfun's modification flags (LF_MODIFY_* in lensfun.h).
+const LF_MODIFY_TCA = 0x1;
+const LF_MODIFY_VIGNETTING = 0x2;
+
+// The corrections lensfun has calibration data for, for this lens and crop
+// (every flag when the client cannot tell).
+function lensModifications(client, lensHandle, crop) {
+  if (typeof client.getAvailableModifications !== 'function') return ~0;
+  try {
+    const flags = Number(client.getAvailableModifications(lensHandle, crop));
+    return Number.isFinite(flags) ? flags : ~0;
+  } catch {
+    return ~0;
+  }
+}
+
+/**
+ * lensfun's maps for a request (lensMapRequest's), as the remap reads them:
+ * `geometry`, every channel's source x, y per node (the distortion
+ * correction); `tca`, per channel, the source x, y with distortion and TCA
+ * corrected together; `vignetting`, the gains. `tca` and `vignetting` are
+ * null where not applied.
+ *
+ * lensfun corrects distortion first and TCA at that distorted position
+ * (lfModifier::ApplySubpixelGeometryDistortion, buildSubpixelGeometryMap,
+ * lensfun-wasm 0.1.4 on). The `tca` map of buildCorrectionMaps is built
+ * with TCA correction alone and carries no distortion: sampled in place of
+ * the geometry map it would undo the distortion correction, so it is never
+ * used. The distortion alone is applied when the lens has no TCA
+ * calibration, when its TCA map fails, and on a lensfun-wasm without
+ * buildSubpixelGeometryMap. Vignetting is applied when the lens has
+ * vignetting calibration and its map builds. The distortion map is
+ * required: when it cannot be built this throws, and the frame is converted
+ * uncorrected (lensfun-wasm 0.1.3 builds no map at all: its module exports
+ * no HEAPF32 view).
+ */
+export function buildLensMaps(client, request) {
+  const { includeTca, includeVignetting, aperture, distance, ...grid } = request;
+  const available = lensModifications(client, grid.lensHandle, grid.crop);
+  const vignetting = Boolean(includeVignetting) && (available & LF_MODIFY_VIGNETTING) !== 0;
+  let built;
+  try {
+    built = client.buildCorrectionMaps({ ...grid, includeTca: false, includeVignetting: vignetting, aperture, distance });
+  } catch (error) {
+    if (!vignetting) throw error;
+    // The calibration does not reach this aperture and distance.
+    built = client.buildCorrectionMaps({ ...grid, includeTca: false, includeVignetting: false });
+  }
+  const maps = {
+    gridWidth: built.gridWidth,
+    gridHeight: built.gridHeight,
+    step: built.step,
+    geometry: built.geometry,
+    tca: null,
+    vignetting: (vignetting && built.vignetting) || null
+  };
+  if (includeTca && (available & LF_MODIFY_TCA) && typeof client.buildSubpixelGeometryMap === 'function') {
+    try {
+      const combined = client.buildSubpixelGeometryMap(grid);
+      if ((combined.modifications & LF_MODIFY_TCA) && combined.coords?.length === maps.gridWidth * maps.gridHeight * 6) {
+        maps.tca = combined.coords;
+      }
+    } catch {
+      // The distortion alone.
+    }
+  }
+  return maps;
 }
 
 function bilerp(a00, a10, a01, a11, fx, fy) {

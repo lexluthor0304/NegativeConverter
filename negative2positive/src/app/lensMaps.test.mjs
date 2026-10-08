@@ -16,10 +16,10 @@ globalThis.ImageData = class ImageData {
   }
 };
 const {
-  applyLensMapsToImage, applyLensMapRows, lensMapRequest, lensMapStep, lensRowExtents, lensSourceRows, sliceLensMaps, lensMapBuffers
+  applyLensMapsToImage, applyLensMapRows, buildLensMaps, lensMapRequest, lensMapStep, lensRowExtents, lensSourceRows, sliceLensMaps, lensMapBuffers
 } = await import('./lensMaps.js');
 const { allocPlane16, isSharedPlane, sharedPlanesAvailable } = await import('./crossOriginIsolation.js');
-const { lensTestMaps } = await import('./lensTestMaps.mjs');
+const { lensTestMaps, lensTestClient } = await import('./lensTestMaps.mjs');
 
 // ---- main.js before #278, verbatim: the reference ----
 function pre278Remap() {
@@ -377,4 +377,92 @@ for (const [width, height] of [[64, 48], [23, 61]]) {
   assert.ok(plain.geometry && !plain.tca && !plain.vignetting, 'without TCA or vignetting: the geometry map only');
 }
 
-console.log(`lensMaps: the remap equals main.js's of before (${cases} cases), the map requests too, and ${bands} bands equal the rows of the whole remap`);
+// ---- Which maps buildLensMaps builds (#278): the distortion map always,
+// TCA as buildSubpixelGeometryMap's per-channel map (distortion and TCA
+// together) where the lens has TCA calibration, vignetting where it has
+// vignetting calibration; a TCA or vignetting map that fails is left out,
+// a distortion map that fails throws (the frame converts uncorrected) ----
+{
+  const LF_TCA = 0x1, LF_VIGNETTING = 0x2, LF_DISTORTION = 0x8;
+  const request = lensMapRequest({
+    enabled: true, selectedLens: { handle: 7 },
+    params: { focal: 24, crop: 1, aperture: 8, distance: 1000, stepMode: 'manual', step: 4 },
+    modes: { includeTca: true, includeVignetting: true }
+  }, 120, 80).request;
+  const expected = lensTestMaps(120, 80, 4);
+  const sameArray = (actual, wanted, label) => assert.ok(actual && bytes(actual).equals(bytes(wanted)), label);
+
+  // A lens with all three: lensfun's geometry and vignetting, and the
+  // per-channel map of distortion and TCA together; buildCorrectionMaps is
+  // never asked for its TCA-only map.
+  const full = lensTestClient();
+  const maps = buildLensMaps(full, request);
+  sameArray(maps.geometry, expected.geometry, 'the geometry map');
+  sameArray(maps.tca, expected.tca, 'TCA: buildSubpixelGeometryMap\'s per-channel map');
+  sameArray(maps.vignetting, expected.vignetting, 'the vignetting map');
+  assert.deepEqual([maps.gridWidth, maps.gridHeight, maps.step], [expected.gridWidth, expected.gridHeight, 4]);
+  assert.deepEqual(full.requests.map(r => [r.includeTca, r.includeVignetting, r.aperture, r.distance]), [[false, true, 8, 1000]]);
+  const { includeTca, includeVignetting, aperture, distance, ...grid } = request;
+  assert.deepEqual(full.subpixelRequests, [grid], 'the per-channel map is asked for the same grid');
+
+  // Without TCA or vignetting calibration: neither is asked for.
+  for (const [label, modifications, tca, vignetting] of [
+    ['no TCA calibration', LF_DISTORTION | LF_VIGNETTING, false, true],
+    ['no vignetting calibration', LF_DISTORTION | LF_TCA, true, false],
+    ['distortion only', LF_DISTORTION, false, false]
+  ]) {
+    const client = lensTestClient({ modifications });
+    const built = buildLensMaps(client, request);
+    assert.equal(Boolean(built.tca), tca, `${label}: TCA`);
+    assert.equal(Boolean(built.vignetting), vignetting, `${label}: vignetting`);
+    assert.equal(client.subpixelRequests.length, tca ? 1 : 0, `${label}: the per-channel map asked for`);
+    assert.deepEqual(client.requests.map(r => r.includeVignetting), [vignetting], `${label}: one geometry request`);
+  }
+  // The modes switched off: neither is built.
+  {
+    const client = lensTestClient();
+    const built = buildLensMaps(client, { ...request, includeTca: false, includeVignetting: false });
+    assert.ok(built.geometry && !built.tca && !built.vignetting && client.subpixelRequests.length === 0, 'TCA and vignetting off');
+  }
+  // A per-channel map that fails, reports no TCA, or a lensfun-wasm without
+  // buildSubpixelGeometryMap (before 0.1.4): the distortion alone. Its
+  // TCA-only map would drop the distortion, so it is never used.
+  for (const [label, patch] of [
+    ['a per-channel map that throws', { buildSubpixelGeometryMap() { throw new Error('native map builder failed with code -4'); } }],
+    ['a per-channel map without TCA', { buildSubpixelGeometryMap(r) { const m = lensTestMaps(r.width, r.height, r.step); return { ...m, coords: m.tca, modifications: LF_DISTORTION }; } }],
+    ['a client without buildSubpixelGeometryMap', { buildSubpixelGeometryMap: undefined }]
+  ]) {
+    const client = Object.assign(lensTestClient(), patch);
+    const built = buildLensMaps(client, request);
+    sameArray(built.geometry, expected.geometry, `${label}: the geometry map`);
+    assert.equal(built.tca, null, `${label}: no TCA`);
+    assert.ok(client.requests.every(r => r.includeTca === false), `${label}: no TCA-only map`);
+  }
+  // A vignetting map that fails: built again without it.
+  {
+    const client = lensTestClient();
+    const build = client.buildCorrectionMaps;
+    client.buildCorrectionMaps = r => { if (r.includeVignetting) throw new Error('native map builder failed with code -4'); return build(r); };
+    const built = buildLensMaps(client, request);
+    assert.ok(built.geometry && built.tca && !built.vignetting, 'a failed vignetting map is left out');
+    assert.deepEqual(client.requests.map(r => r.includeVignetting), [false]);
+  }
+  // A client that cannot tell what the lens has: every map is tried.
+  {
+    const client = Object.assign(lensTestClient(), { getAvailableModifications: undefined });
+    const built = buildLensMaps(client, request);
+    assert.ok(built.geometry && built.tca && built.vignetting, 'without getAvailableModifications');
+  }
+  // A distortion map that fails (lensfun-wasm 0.1.3 reads a heap view its
+  // module does not export): buildLensMaps throws, with and without the
+  // vignetting retry.
+  for (const modifications of [LF_DISTORTION | LF_TCA | LF_VIGNETTING, LF_DISTORTION]) {
+    const client = Object.assign(lensTestClient({ modifications }), {
+      buildCorrectionMaps() { throw new TypeError("Cannot read properties of undefined (reading 'subarray')"); }
+    });
+    assert.throws(() => buildLensMaps(client, request), TypeError);
+    assert.equal(client.subpixelRequests.length, 0, 'nothing else is built');
+  }
+}
+
+console.log(`lensMaps: the remap equals main.js's of before (${cases} cases), the map requests too, ${bands} bands equal the rows of the whole remap, and buildLensMaps builds distortion, TCA (with the distortion) and vignetting where the lens has them`);

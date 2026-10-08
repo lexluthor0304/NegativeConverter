@@ -243,17 +243,30 @@ the fill. Lens-corrected frames are filled too (below).
 
 **Lens correction** (#278). The editor corrects the working image after the
 crop: lensfun's maps for the crop's size (`lensCorrectionMaps`, cached by
-`lensMapRequest`), then the remap of `lensMaps.js` (`applyLensMapsToImage`,
-moved out of `main.js` byte for byte), and builds the level from the
-corrected source. A fill does the same in the pool
-(`renderLensDisplayLevel`): each band renders the crop rows its corrected rows
-read, which `lensSourceRows` bounds by the least and greatest source row of
-the grid nodes those rows interpolate (a row of margin each way), remaps its
-rows with the grid rows `sliceLensMaps` posts with it, and box-averages them
-as `renderDisplayLevel`'s bands do, so its level is the editor's byte for
-byte (`displayPlaneHash` of every fill site equals that of a cold open's
-`conversionPreviewImageData`, `displaySessions.test.mjs`). A band holds its
-copied base rows and the rows it renders: the bands are planned by those
+`lensMapRequest` within 128 MB, at most 12 sets), then the remap of
+`lensMaps.js` (`applyLensMapsToImage`, moved out of `main.js` byte for
+byte), and builds the level from the corrected source. `buildLensMaps`
+decides the maps: always the distortion map; with TCA on and TCA
+calibration for the lens, lensfun's per-channel map of distortion and TCA
+corrected together (`buildSubpixelGeometryMap`, lensfun-wasm 0.1.4 on:
+lensfun's own order, the distortion first and TCA at the distorted
+position; green stays where the distortion puts it); with vignetting on and
+vignetting calibration, the gains. A lens without TCA calibration, a TCA map
+that fails and a lensfun-wasm without `buildSubpixelGeometryMap` get the
+distortion alone (the TCA map of `buildCorrectionMaps` is built with TCA
+correction alone and carries no distortion, so it is never used); a
+vignetting map that fails is left out. A distortion map that cannot be built
+leaves the frame uncorrected ("Lens correction failed"), as every map did with
+lensfun-wasm 0.1.3, whose module exports no HEAPF32 view. The editor,
+exports, batch lanes and fills all build their maps this way. A fill does the
+same in the pool (`renderLensDisplayLevel`): each band renders the crop rows
+its corrected rows read, which `lensSourceRows` bounds by the least and
+greatest source row of the grid nodes those rows interpolate (a row of margin
+each way), remaps its rows with the grid rows `sliceLensMaps` posts with it,
+and box-averages them as `renderDisplayLevel`'s bands do, so its level is the
+editor's byte for byte (`displayPlaneHash` of every fill site equals that of a
+cold open's `conversionPreviewImageData`, `displaySessions.test.mjs`). A band
+holds its copied base rows and the rows it renders: the bands are planned by those
 bytes within the same 2 bytes per base pixel (the maps, about 0.7 bytes per
 pixel at 60 MP, come beside them as the level does), each at most a third over
 twice its own rows when several run at once. Planned for a 60 MP frame at
@@ -308,10 +321,11 @@ runtime that failed, or lens settings changed without a conversion since
 cold open of the recipe would not show: it is not stored, nor a corrected
 level whose recipe has switched the lens off since; the session and its
 spill keep it, as they keep what the photo was left showing. Lens-free
-levels are stored as before. In this release lens correction never applies
-(lensfun-wasm 0.1.3 builds no maps in a browser, `docs/audit-backlog.md`),
-so lens-active photos get no lens-keyed proxy until it does: they reopen
-through a decode, as before. The desktop app keeps records in
+levels are stored as before. With lensfun-wasm 0.1.3, which the app still
+pins, lens correction never applies (it builds no maps,
+`docs/audit-backlog.md`), so lens-active photos get no lens-keyed proxy and
+reopen through a decode; with 0.1.4 they are corrected and stored like any
+other photo. The desktop app keeps records in
 `app_cache_dir()/display-proxies` through `src-tauri/src/display_proxy_store.rs`
 (chunked atomic writes and reads, the volume's free space, `CACHEDIR.TAG` and
 Time Machine's exclusion; the spill of an earlier run is removed at start,
@@ -836,9 +850,11 @@ a Tier B return and clicks another photo in the same task (inside the
 reprocess debounce): the frame must come back without a read or decode, with
 the nudge and its history, showing what a cold open of the nudged recipe
 shows (GPU sample hash, white balance, saved settings). Last, it gives the
-colour frame a lens (#278): the app's own lens runtime is tried and reported
-(a note; lensfun-wasm 0.1.3 leaves the frame uncorrected), then a lensfun
-client of test maps (`lensTestMaps.mjs`, through
+colour frame a lens (#278): the app's own lens runtime is tried first and
+must correct the frame from lensfun-wasm 0.1.4 on (the Nikkor 18-55mm DX
+VR II it picks has distortion and TCA calibration, no vignetting; 0.1.3
+leaves the frame uncorrected, which is reported), then a lensfun client of
+test maps (`lensTestMaps.mjs`, through
 `window.__ncDisplaySessions.lensRuntime` with `?debug=1`) corrects a cold
 open; left, the frame is stored under its lens, and after a restart (its
 session and spill dropped, the store kept) it opens from the store without a
