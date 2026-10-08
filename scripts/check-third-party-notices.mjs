@@ -168,9 +168,12 @@ if (!about.includes(`href="/${NOTICES_PATH}"`)) problems.push(`about.html does n
 
 // The GitHub release text: LibRaw, its licence, where its source is, and the notices.
 const workflow = readFileSync(join(repoRoot, '.github', 'workflows', 'desktop-release.yml'), 'utf8');
-const releaseBody = /append_body: \|\n((?:[ \t]*\n| {12,}.*\n)+)/.exec(workflow)?.[1] || '';
+// action-gh-release takes the text as `body`; its `append_body` is only a
+// switch, so text given there never reached a release (v1.0.32 and earlier).
+if (/append_body: \|/.test(workflow)) problems.push("desktop-release.yml gives append_body text; append_body is a switch, the text belongs in body");
+const releaseBody = /\n {10}body: \|\n((?:[ \t]*\n| {12,}.*\n)+)/.exec(workflow)?.[1] || '';
 for (const needle of ['LibRaw', 'CDDL-1.0', 'https://github.com/LibRaw/LibRaw', NOTICES_PATH]) {
-  if (!releaseBody.includes(needle)) problems.push(`desktop-release.yml's release text (append_body) does not mention ${needle}`);
+  if (!releaseBody.includes(needle)) problems.push(`desktop-release.yml's release text (body) does not mention ${needle}`);
 }
 
 if (problems.length) {
