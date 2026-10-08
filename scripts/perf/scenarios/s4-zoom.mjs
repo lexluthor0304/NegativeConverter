@@ -43,9 +43,32 @@ async function stepMetrics(ctx, prefix, inputT, source) {
   metrics.detailReadyMs = detailUpload ? round(detailUpload.t - inputT) : null;
   metrics.detailVisible = Boolean(detail?.visible);
   metrics.sourcePxPerDevicePx = detail ? round(detail.sourcePxPerDevicePx, 2) : null;
-  const reached = native || (detailUpload && detail?.visible && detail.sourcePxPerDevicePx >= 0.95 ? detailUpload : null);
-  metrics.nativeDetailMs = reached ? round(reached.t - inputT) : OBSERVE_MS;
-  metrics.nativeDetailReached = Boolean(reached);
+  // The most the view can show is one source pixel per device pixel (#270):
+  // above true 100 % a native region gives source ÷ on-screen device pixels.
+  const best = displayedCssWidth > 0 ? Math.min(1, source.width / (displayedCssWidth * session.dpr)) : 1;
+  metrics.bestSourcePxPerDevicePx = round(best, 2);
+  const sharp = Boolean(detail?.visible) && detail.sourcePxPerDevicePx >= 0.95 * best;
+  // A region shown before the step that still covers the view that sharply (a
+  // step inside a native region) is native detail from the step's first
+  // frame on: it counts at the transform.
+  const kept = sharp && !detailUpload && Number.isFinite(metrics.transformAppliedMs);
+  const reached = native || (detailUpload && sharp ? detailUpload : null);
+  metrics.nativeDetailMs = reached ? round(reached.t - inputT) : kept ? metrics.transformAppliedMs : OBSERVE_MS;
+  metrics.nativeDetailReached = Boolean(reached) || kept;
+  // Where the time of the step's region went (#270), from the app's
+  // nc:detailRegion measure (?perf=1): input → request (settle, waits),
+  // request → converted pixels (row cuts, analysis, workers), → drawn.
+  const region = byKind(session.events, 'um').find(entry => entry.n === 'nc:detailRegion' && entry.s >= inputT
+    && entry.s <= inputT + OBSERVE_MS && entry.detail?.stages?.some(stage => stage.stage === 'shown'));
+  if (region) {
+    const stage = name => region.detail.stages.find(entry => entry.stage === name) || null;
+    metrics.detailRequestMs = round(region.s - inputT);
+    metrics.detailConvertMs = stage('converted')?.totalMs ?? null;
+    metrics.detailDrawMs = stage('shown')?.ms ?? null;
+    metrics.detailBands = region.detail.bands || 1;
+    const workers = [].concat(region.detail.worker || []).filter(Boolean);
+    if (workers.length) metrics.detailWorkerMs = round(Math.max(...workers.map(times => (times.analysis || 0) + (times.input || 0) + (times.convert || 0))));
+  }
   metrics.zoom = round(zoomOf(snapshot.transform), 2);
   for (const [key, value] of Object.entries(metrics)) ctx.record(`${prefix}.${key}`, value);
   return metrics;

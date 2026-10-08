@@ -270,6 +270,10 @@ class FakeSession {
       this.zoom = this.zoom > 1 ? 1 : 5.3;
       this.emit({ k: 'mut', t: this.step(12), what: 'transform', v: `matrix(${this.zoom}, 0, 0, ${this.zoom}, 0, 0)` });
       if (this.zoom > 1) this.emit({ k: 'gl.upload', t: t + 190, c: 'glDetailCanvas', w: 2476, h: 1656, hash: `detail${t}` });
+      // #270: the app's trace of that region (?perf=1).
+      if (this.zoom > 1) this.emit({ k: 'um', t: t + 20, n: 'nc:detailRegion', s: t + 20, d: 172, detail: { bands: 4,
+        stages: [{ stage: 'converted', ms: 150, totalMs: 150 }, { stage: 'shown', ms: 22, totalMs: 172 }],
+        worker: [{ input: 12, convert: 96 }, { input: 11, convert: 101 }, { input: 9, convert: 99 }, { input: 10, convert: 98 }] } });
     }
     if (id === 'cropBtn') this.emit({ k: 'c2d', t: this.step(30), c: 'canvas', fn: 'putImageData', w: 953, h: 633, hash: `crop${t}` });
     if (id === 'applyCropBtn' || id === 'rotateRightBtn' || id === 'mirrorBtn') {
@@ -479,6 +483,15 @@ try {
   assert.equal(s4.metrics['s4.dpr2.fitTo100.detailReadyMs'], 190, 'true 100 %: the detail region lands');
   assert.equal(s4.metrics['s4.dpr2.fitTo100.nativeDetailReached'], true);
   assert.equal(s4.metrics['s4.dpr2.fitTo100.sourcePxPerDevicePx'], 1);
+  // #270: where the region's time went, from the app's nc:detailRegion trace.
+  assert.deepEqual(['detailRequestMs', 'detailConvertMs', 'detailDrawMs', 'detailBands', 'detailWorkerMs'].map(key => s4.metrics[`s4.dpr2.fitTo100.${key}`]),
+    [20, 150, 22, 4, 112]);
+  // Above true 100 % the best a view can show is below one source pixel per
+  // device pixel: a native region already covering the view counts at the transform.
+  assert.ok(s4.metrics['s4.dpr2.to7_6x.bestSourcePxPerDevicePx'] < 0.95);
+  assert.equal(s4.metrics['s4.dpr2.to7_6x.nativeDetailReached'], true);
+  assert.equal(s4.metrics['s4.dpr2.to7_6x.nativeDetailMs'], s4.metrics['s4.dpr2.to7_6x.transformAppliedMs']);
+  assert.equal(s4.metrics['s4.dpr2.to3_9x.nativeDetailReached'], false, 'a soft view below 100 % is not native detail');
   assert.equal(s4.metrics['s4.dpr2.wheel.transformAppliedMs'], 0.4);
   assert.equal(s4.metrics['s4.dpr2.pan.moveToFrameP50Ms'], 8);
 
