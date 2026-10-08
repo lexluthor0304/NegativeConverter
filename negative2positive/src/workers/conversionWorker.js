@@ -16,7 +16,7 @@ import { convertAdjustedFrame } from '../pipeline/adjustedFrame.js';
 import { createAdjustmentLutScratch } from '../app/adjustmentPipeline.js';
 import { fromImageData8 } from '../silvercore/util/image16.js';
 import { downsampleImageDataForMaxPixels } from '../app/imageDataOps.js';
-import { resampleDisplayLevel, filterDisplayImage, buildDisplayLevel, displayLevelFactor } from '../app/displayPreview.js';
+import { resampleDisplayLevel, filterDisplayImage, buildDisplayLevel, displayLevelFactor, displayLevelRows, resampleDisplayLevelRows } from '../app/displayPreview.js';
 import { assertDetailAllocation, assertDetailRoiAllocation, assertDetailGeometry, DETAIL_MAX_OUTPUT_PIXELS, DETAIL_MAX_DIMENSION } from '../app/detailLayer.js';
 
 let cachedSource = null;
@@ -375,79 +375,140 @@ function cropPlane(plane, rect) {
   return { width: rect.width, height: rect.height, data };
 }
 
-// `plane` at the top-left of a width x height plane, its last column and row
-// repeated into the rest.
-function padPlane(plane, width, height) {
-  assertDetailAllocation(width, height, DETAIL_MAX_OUTPUT_PIXELS, DETAIL_MAX_DIMENSION);
-  if (plane.width === width && plane.height === height) return plane;
+// A plane of the warm-up's size whose colours reach every hue band, so the
+// stages a region runs (the HSL float path among them) are compiled at idle.
+function warmPlane(width, height) {
   const data = new Uint16Array(width * height * 4);
-  for (let y = 0; y < height; y++) {
-    const sy = Math.min(plane.height - 1, y);
-    const row = plane.data.subarray(sy * plane.width * 4, (sy + 1) * plane.width * 4);
-    data.set(row, y * width * 4);
-    const last = row.subarray((plane.width - 1) * 4);
-    for (let x = plane.width; x < width; x++) data.set(last, (y * width + x) * 4);
+  for (let y = 0, i = 0; y < height; y++) {
+    for (let x = 0; x < width; x++, i += 4) {
+      data[i] = (x * 977 + y * 131) & 0xffff;
+      data[i + 1] = (x * 389 + y * 619) & 0xffff;
+      data[i + 2] = (x * 193 + y * 853) & 0xffff;
+      data[i + 3] = 65535;
+    }
   }
   return { width, height, data };
+}
+const DETAIL_WARM_WIDTH = 512;
+const DETAIL_WARM_HEIGHT = 256;
+
+// The 16-bit plane of output rows [band.y0, band.y1) of a detail region from
+// the band's input rows (planDetailBands, #270): native rows of the region at
+// full density, else the rows its resample's taps read, of the region's block
+// of the level or of its native rows (in whole boxes of their box filter).
+// The values equal the same rows of the whole region's plane.
+function detailBandPlane(region, band, input) {
+  const out = { width: region.outWidth, height: region.outHeight };
+  const rows = band.y1 - band.y0;
+  if (!region.fromLevel && out.width === region.width && out.height === region.height) {
+    if (input.width !== out.width || input.height !== rows || band.rowY !== band.y0) throw new RangeError('Invalid detail band');
+    return input;
+  }
+  const k = region.fromLevel ? region.levelFactor
+    : Math.max(1, Math.floor(Math.min(region.width / out.width, region.height / out.height)));
+  const geometry = { sourceWidth: region.width, sourceHeight: region.height, k };
+  const levelWidth = Math.floor(region.width / k);
+  const levelHeight = Math.floor(region.height / k);
+  if (region.fromLevel) {
+    if (input.width !== levelWidth || input.height !== band.rows) throw new RangeError('Invalid detail band');
+    return resampleDisplayLevelRows(input.data, band.rowY, levelWidth, levelHeight, geometry, out, band.y0, band.y1);
+  }
+  if (input.width !== region.width || input.height !== band.rows || band.rowY % k || band.rows % k) throw new RangeError('Invalid detail band');
+  const block = k > 1 ? displayLevelRows(input, k, levelWidth) : input.data;
+  return resampleDisplayLevelRows(block, band.rowY / k, levelWidth, levelHeight, geometry, out, band.y0, band.y1);
 }
 
 // A detail region (#248 part 5): source pixels of a region of the conversion
 // source (or of the cached level, when it holds enough detail), converted in
-// the fixed roi slot with the base display image's analysis and with the
-// stops and flat field of its place in the frame, so it meets the base without
-// a seam. It leaves the cached source, analysis and strokes alone.
+// the roi slot with the base display image's analysis and with the stops and
+// flat field of its place in the frame, so it meets the base without a seam.
+// It leaves the cached source, analysis and strokes alone. `band` (#270): only
+// output rows [band.y0, band.y1), from the input rows main sent and with the
+// base's analysis main passed, so several workers convert one region at once;
+// every stage is per pixel, so the bands add up to the whole region exactly.
+// The plane is converted at its own size: a transient conversion keeps no
+// plane, so a new size rebuilds nothing worth avoiding.
 async function roi(msg) {
-  const { id, settings, region, base } = msg;
+  const { id, settings, region, base, band = null } = msg;
   try {
-    assertDetailRoiAllocation(region, msg.warm);
+    assertDetailRoiAllocation(region, msg.warm, band);
     const mode = resolveConversionMode(settings);
     if (msg.warm) {
-      // A first conversion costs engine set-up and compilation: done at idle.
-      const blank = { width: region.slotWidth, height: region.slotHeight, data: new Uint16Array(region.slotWidth * region.slotHeight * 4) };
-      await convertFrameWithRouter({ imageData: blank, settings, options: { region: { originX: 0, originY: 0, frameWidth: blank.width, frameHeight: blank.height },
-        forceFullProcess: true, ownedSource: true, includeAnalysisPreview: false } });
+      // A first conversion costs module, profile and compilation set-up: done
+      // at idle, twice, on a small plane with colours of every hue band, after
+      // the box filter and resamples a band below full density runs.
+      for (let pass = 0; pass < 2; pass++) {
+        const plane = warmPlane(DETAIL_WARM_WIDTH, DETAIL_WARM_HEIGHT);
+        const whole = { x: 0, y: 0, width: plane.width, height: plane.height, fromLevel: false, levelFactor: 1 };
+        for (const scale of [0.39, 0.6]) {
+          const outWidth = Math.floor(plane.width * scale), outHeight = Math.floor(plane.height * scale);
+          detailBandPlane({ ...whole, outWidth, outHeight }, { y0: 0, y1: outHeight, rowY: 0, rows: plane.height, input: 'native' }, plane);
+        }
+        await convertFrameWithRouter({ imageData: plane, settings, options: { region: { originX: 0, originY: 0, frameWidth: plane.width, frameHeight: plane.height },
+          forceFullProcess: true, ownedSource: true, includeAnalysisPreview: false } });
+      }
       self.postMessage({ type: 'roi', id, warm: true, width: 0, height: 0 });
       return;
     }
-    const level = cachedSource;
-    if (!level || level.width !== base.levelWidth || level.height !== base.levelHeight) throw new Error('Missing preview source');
-    // The analysis the base's next frame of these settings uses (the preview
-    // slot keeps it, as the GPU preview's `analyze` does).
-    const baseNegative = base.display ? displayNegativeFor(level, base.display) : level;
-    const analysis = await analyzeSilverCorePreview(baseNegative, settings, mode, { preview: true, analysisImageData: cachedAnalysis });
-    if (cancelledRequests.has(id)) return;
+    const timings = {};
+    let clock = performance.now();
+    const lap = (name) => {
+      const now = performance.now();
+      timings[name] = Math.round((now - clock) * 10) / 10;
+      clock = now;
+    };
     const out = { width: region.outWidth, height: region.outHeight };
+    let analysis;
     let plane;
-    if (region.fromLevel) {
-      const k = region.levelFactor;
-      const block = cropPlane(planeOf(level), { x: region.x / k, y: region.y / k, width: region.width / k, height: region.height / k });
-      plane = resampleDisplayLevel(block, { sourceWidth: region.width, sourceHeight: region.height, k }, out);
+    if (band) {
+      if (!msg.analysis || !(msg.image16 instanceof ArrayBuffer || msg.rgba instanceof ArrayBuffer)) throw new Error('A detail band needs its rows and the base analysis');
+      analysis = msg.analysis;
+      const width = band.input === 'level' ? region.width / region.levelFactor : region.width;
+      // 8-bit native rows are promoted as the whole region's are.
+      const input = msg.image16 ? { width, height: band.rows, data: new Uint16Array(msg.image16) }
+        : fromImageData8({ width, height: band.rows, data: new Uint8ClampedArray(msg.rgba) });
+      plane = detailBandPlane(region, band, input);
+      lap('input');
     } else {
-      const rows = msg.image16
-        ? { width: region.width, height: region.height, data: new Uint16Array(msg.image16) }
-        : fromImageData8({ width: region.width, height: region.height, data: new Uint8ClampedArray(msg.rgba) });
-      if (out.width === rows.width && out.height === rows.height) plane = rows;
-      else {
-        // Below full density the native rows are box-decimated first.
-        const k = Math.max(1, Math.floor(Math.min(rows.width / out.width, rows.height / out.height)));
-        const box = k > 1 ? buildDisplayLevel({ width: rows.width, height: rows.height, data: rows.data }, k).__image16 : rows;
-        plane = resampleDisplayLevel(box, { sourceWidth: rows.width, sourceHeight: rows.height, k }, out);
+      const level = cachedSource;
+      if (!level || level.width !== base.levelWidth || level.height !== base.levelHeight) throw new Error('Missing preview source');
+      // The analysis the base's next frame of these settings uses (the preview
+      // slot keeps it, as the GPU preview's `analyze` does).
+      const baseNegative = base.display ? displayNegativeFor(level, base.display) : level;
+      analysis = await analyzeSilverCorePreview(baseNegative, settings, mode, { preview: true, analysisImageData: cachedAnalysis });
+      if (cancelledRequests.has(id)) return;
+      lap('analysis');
+      if (region.fromLevel) {
+        const k = region.levelFactor;
+        const block = cropPlane(planeOf(level), { x: region.x / k, y: region.y / k, width: region.width / k, height: region.height / k });
+        plane = resampleDisplayLevel(block, { sourceWidth: region.width, sourceHeight: region.height, k }, out);
+      } else {
+        const rows = msg.image16
+          ? { width: region.width, height: region.height, data: new Uint16Array(msg.image16) }
+          : fromImageData8({ width: region.width, height: region.height, data: new Uint8ClampedArray(msg.rgba) });
+        if (out.width === rows.width && out.height === rows.height) plane = rows;
+        else {
+          // Below full density the native rows are box-decimated first.
+          const k = Math.max(1, Math.floor(Math.min(rows.width / out.width, rows.height / out.height)));
+          const box = k > 1 ? buildDisplayLevel({ width: rows.width, height: rows.height, data: rows.data }, k).__image16 : rows;
+          plane = resampleDisplayLevel(box, { sourceWidth: rows.width, sourceHeight: rows.height, k }, out);
+        }
       }
+      lap('input');
     }
-    const density = out.width / region.width;
-    const padded = padPlane(plane, Math.max(region.slotWidth, out.width), Math.max(region.slotHeight, out.height));
-    // The padded plane is private. Release received rows and resampling scratch
-    // before the adapter awaits profile loading, then convert this plane in place.
-    plane = null;
+    // The plane is private. Release received rows and resampling scratch
+    // before the adapter awaits profile loading, then convert it in place.
     msg.image16 = null;
     msg.rgba = null;
+    const y0 = band ? band.y0 : 0;
+    const density = out.width / region.width;
     const result = await convertFrameWithRouter({
-      imageData: padded,
+      imageData: plane,
       settings,
       options: {
         region: density === 1
-          ? { originX: region.x, originY: region.y, frameWidth: region.frameWidth, frameHeight: region.frameHeight }
-          : { originX: Math.round(region.x * density), originY: Math.round(region.y * density),
+          ? { originX: region.x, originY: region.y + y0, frameWidth: region.frameWidth, frameHeight: region.frameHeight }
+          : { originX: Math.round(region.x * density), originY: Math.round(region.y * density) + y0,
             frameWidth: Math.round(region.frameWidth * density), frameHeight: Math.round(region.frameHeight * density) },
         forceFullProcess: true,
         ownedSource: true,
@@ -455,13 +516,11 @@ async function roi(msg) {
         sharedAnalysis: { channelData: analysis.channelData, positiveAnalysis: analysis.positiveAnalysis }
       }
     });
+    plane = null;
     if (cancelledRequests.has(id)) return;
-    const rgba = out.width === result.width && out.height === result.height
-      ? result.data : new Uint8ClampedArray(out.width * out.height * 4);
-    if (rgba !== result.data) for (let row = 0; row < out.height; row++) {
-      rgba.set(result.data.subarray(row * padded.width * 4, (row * padded.width + out.width) * 4), row * out.width * 4);
-    }
-    self.postMessage({ type: 'roi', id, width: out.width, height: out.height, rgba: rgba.buffer }, [rgba.buffer]);
+    lap('convert');
+    const rgba = result.data;
+    self.postMessage({ type: 'roi', id, width: result.width, height: result.height, rgba: rgba.buffer, timings }, [rgba.buffer]);
   } catch (err) {
     self.postMessage({ type: 'error', id, message: err?.message || String(err) });
   } finally {

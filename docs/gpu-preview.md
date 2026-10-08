@@ -295,7 +295,9 @@ region becomes stale as soon as that frame arrives; the next base draw recrops
 it without a pan. Tier B uses its pending whole-frame size for fog and mean-grid
 coordinates. Conversion completion wakes a waiting request directly; retaining
 or committing a preview plane does not block an ROI. The 250 ms release budget
-is exercised with fake timers; real driver/worker latency remains device-dependent.
+is exercised with fake timers; in Chrome the zoom-detail smoke measured 47 ms
+from a slider release at 100 % to a current region (its 6 MP fixture, 4 bands,
+#270). Real driver/worker latency remains device-dependent.
 
 Only one current region is requested. Matching cuts deduplicate even when they
 cannot cover the entire view, and superseded requests abort and drop queued row
@@ -312,25 +314,47 @@ the rectangle, placement and whole-frame fog coordinates stay the same. It
 never substitutes the retained source-conversion level for the exact frame.
 Cancellation stops before the next band or transfer.
 
-The worker owns the private padded RGBA16 plane, converts it in place, releases
-received rows before conversion, and uses its result's RGBA8 bytes directly when
-slot and output sizes match. The former unconditional 128 MB claim is replaced
-by conservative allocation accounting: at DPR 2, a 1110x700 CSS view has a
-2560x1792 slot and a <=2478x1658 native-density region. At lower densities native
-rows may approach the 16 MP cap. Including that resampling peak, a worst-case sparse
-stops map and old/new detail textures plus the drawing buffer, allow **384 MiB**
-for that slot, and **512 MiB** for a 1600x1000 view (3584x2304 slot). The bound
-also allows one superseding row payload while an active synchronous
-pass finishes; older queued payloads are discarded. These bounds
-exclude the already retained base/analysis and driver-internal overhead; they
-are estimates, not measured process RSS. Planning uses a 60 MP descriptor while
-tests allocate at most 12 MP. `estimateDetailRoiBytes` checks the plane/texture
-accounting against these bounds. `?detailProbe=1` retains a test-only region for CPU
-parity checks; its retained plane and transient reference/readback copies are additional.
+A region converts at its own size (#270): the padded fixed-size slot is gone,
+since a transient conversion keeps no plane and a new size costs the engine
+under 0.5 ms (Node, alternating 640x384 and 641x385 regions). With cores to
+spare it converts in row bands at once, in the preview worker and up to three
+detail workers (`planDetailBandCount`: 4 bands from 8 cores, 3 from 6, 2 from
+4, 1 below that, with sharpening, or after a band failed; 2 at most where
+memory is short). Main cuts each band's rows (native rows, or the level block's
+rows; below full density the rows the resample's taps read, in whole boxes of
+the native box filter), asks the preview worker for the base's analysis, posts
+the bands, and assembles the RGBA8 replies before one upload. Every stage is per
+pixel, so the bands equal the whole region byte for byte
+(`conversionWorker.roi.test.mjs`, 92 banded regions; the zoom-detail smoke's
+`bandParity`). Each worker owns its plane, converts it in place and releases
+its received rows before conversion.
 
-The limits bind allocation callers: native/level copies are at most 16 MP,
-exact-frame native bands at most 1 MP, and output/padded-slot/GL surfaces at
-most 8,388,608 pixels with dimensions at most 8192. Planning and warm-up skip
+The former unconditional 128 MB claim is replaced by conservative allocation
+accounting (`estimateDetailRoiBytes`): each band holds at most its input rows
+(8 B per input pixel), one superseding request's rows, the box level of native
+rows and 16 B per output pixel (resampled plane, RGBA8 output, a dense stops map
+at worst); main adds 8 B per output pixel while bands run (the shown texture and
+drawing buffer) and 24 B after they end (replies, assembly, old and new texture
+and drawing buffer). The bound is 16 x input + box + 24 x output + 1 MiB. At
+DPR 2, a 1110x700 CSS view (2560x1792 slot) with the worst native input (16 MP
+at the cap) gives 350 MiB, under **384 MiB**; a 1600x1000 view (3584x2304 slot)
+gives 434 MiB, under **512 MiB**. In the benchmark's view (1076x621 CSS at DPR
+2, 60 MP) the steps of S4 give 113-193 MB (true 100 %: a 2408x1498 native
+region, 145 MB). Exact-frame crops give 182 MB and 265 MB for the two views at
+1.5x fit. These bounds exclude the already retained base/analysis, each detail
+worker's own heap (module code and engine tables) and driver-internal overhead;
+they are estimates, not measured process RSS. Measured (S4 `--quick`, noisy,
+2026-10-08): the renderer's peak was 1829 MB against 1742 MB before (medians)
+and 1212 MB against 1140 MB after the scenario; that difference is mostly the
+three detail workers' heaps with the planes of their last band, which each
+worker frees at its next garbage collection. Planning uses a 60 MP descriptor
+while tests allocate at most 12 MP. `?detailProbe=1` retains a test-only region
+for CPU parity checks; its retained plane and transient reference/readback
+copies are additional.
+
+The limits bind allocation callers: native/level copies (and each band's rows)
+are at most 16 MP, exact-frame native bands at most 1 MP, and output/slot/GL
+surfaces at most 8,388,608 pixels with dimensions at most 8192. Planning and warm-up skip
 unsupported viewport sizes; the base display continues. The page client and
 worker check dimensions before copying, posting, resampling or padding, and
 the detail upload checks again. `estimateDetailRoiBytes(..., { exactFrame: true })`

@@ -15,7 +15,7 @@ import { learnedDefaultsKey, learnedDelta, recordLearnedObservation, applyLearne
 import { readLearnedDefaults, writeLearnedDefaults, resetLearnedDefaults } from './learnedDefaultsStore.js';
 import { exportNameStem } from './exportFileName.js';
 import { frameNeedsReview } from './reviewQueue.js';
-import { yieldForJob, yieldToPaint, yieldTaskForJob } from './yieldToPaint.js';
+import { yieldForJob, yieldToPaint, yieldTaskForJob, yieldTask } from './yieldToPaint.js';
 import { createHiddenJobGate, hiddenJobLimitsApply, estimateHiddenJobBytes, HIDDEN_BUDGET_BYTES } from './hiddenJobGate.js';
 import { createMemoryBudget, createRetainedLedger, createMemoryClaim, createIdleCheck, relievePressure, budgetFor, resolveMemoryRam, memoryEngine, hasPeriodicMemoryPurge, DECODED_BYTES_PER_PIXEL, IDLE_RETAINED_TARGET_BYTES, RAM_OVERRIDE_KEY } from './memoryBudget.js';
 import { createBackgroundGate, BACKGROUND_STEP_WAIT_CAP_MS, BACKGROUND_INPUT_QUIET_MS, BACKGROUND_BUSY_POLL_MS } from './backgroundGate.js';
@@ -113,7 +113,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     import { VERTEX_SHADER_100, STEP3_FRAGMENT_SHADER_100 } from '../render/previewShader.js';
     import { createGpuPreviewRenderer, webgl2PrecisionOk } from '../render/gpuPreviewRenderer.js';
     import { planDetailRegion, detailRegionServes, detailSlotSize, snapPanToDevicePixels, copyRegionRows, buildDetailFrameLevel,
-      assertDetailAllocation, assertDetailRoiAllocation, detailSizeAllowed, DETAIL_MAX_NATIVE_PIXELS, DETAIL_MAX_OUTPUT_PIXELS, DETAIL_MAX_DIMENSION, DETAIL_SETTLE_MS } from './detailLayer.js';
+      assertDetailAllocation, assertDetailRoiAllocation, detailSizeAllowed, DETAIL_MAX_NATIVE_PIXELS, DETAIL_MAX_OUTPUT_PIXELS, DETAIL_MAX_DIMENSION, DETAIL_SETTLE_MS,
+      DETAIL_STEP_SETTLE_MS, planDetailBands, planDetailBandCount } from './detailLayer.js';
     import { applyPreviewChain, displayStageUniforms, displayModesSupported, regionFrame } from '../render/previewTables.js';
     import { buildSelfTestCases, buildDisplayModesCases, displayParity } from '../render/gpuPreviewSelfTest.js';
     import { createBorderUnderlay, photoViewport } from '../render/borderUnderlay.js';
@@ -3646,7 +3647,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     const detailLayer = {
       renderer: null, failed: false, timer: null, request: null, shown: null, visible: false, warmed: null, modesPoll: 0,
       probe: new URLSearchParams(window.location.search).get('detailProbe') === '1',
-      counters: { requests: 0, conversions: 0, crops: 0, shown: 0, dropped: 0, failures: 0, lastReadyMs: null }
+      // Detail workers (#270): with the preview worker, they convert a
+      // region's row bands at once. Made at idle; off after a failure.
+      workers: [], bandsFailed: false,
+      counters: { requests: 0, conversions: 0, crops: 0, shown: 0, dropped: 0, failures: 0, lastReadyMs: null, banded: 0 }
     };
     // The settings token of the conversion frame on screen: a region is never
     // drawn over a base of newer settings (read by the smoke tests).
@@ -6848,11 +6852,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     // Zoom, pan and fit changes: the transform moves the region with the base
-    // at once; a new region is planned once the view settles.
-    function noteDetailViewChanged() {
+    // at once; a new region is planned once the view settles. A discrete zoom
+    // step settles at once (`delay` DETAIL_STEP_SETTLE_MS, #270).
+    function noteDetailViewChanged(delay = DETAIL_SETTLE_MS) {
       if (!detailLayer.shown && !detailLayerAllowed()) return;
       positionDetailCanvas();
-      scheduleDetailRequest(DETAIL_SETTLE_MS);
+      scheduleDetailRequest(delay);
     }
 
     function scheduleDetailRequest(delay) {
@@ -6863,7 +6868,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       }, delay);
     }
 
-    // The roi slot's engine is set up at idle: its first conversion costs more.
+    // Set up at idle what the first region needs (#270): the layer's WebGL2
+    // context and Step-3 program (compiled with the first region, they made a
+    // long task in the zoom window) and, in the preview worker and the detail
+    // workers, the conversion's modules, profile and compiled code.
     function scheduleDetailWarmUp() {
       const container = getCanvasContainerSize();
       const slot = detailSlotSize(container.width, container.height, window.devicePixelRatio || 1);
@@ -6876,9 +6884,44 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           detailLayer.warmed = null;
           return;
         }
-        convertPreviewFrameInWorker.roi({ settings: buildRouterSettings(state), region: { slotWidth: slot.width, slotHeight: slot.height }, warm: true })
+        const settings = buildRouterSettings(state);
+        const region = { slotWidth: slot.width, slotHeight: slot.height };
+        Promise.all(detailClients(detailBandCount(settings)).map(client => client.roi({ settings, region, warm: true })))
           .catch(() => { detailLayer.warmed = null; });
+        // The context and program in an idle slot of their own: with the
+        // workers' start they made one task of 45-60 ms (S4, 60 MP).
+        runWhenIdle(() => {
+          if (detailLayerAllowed()) detailRenderer();
+        });
       });
+    }
+
+    // How many workers convert one region (#270): planDetailBandCount, one
+    // after a band failure or where workers cannot start.
+    function detailBandCount(settings) {
+      if (detailLayer.bandsFailed || typeof Worker !== 'function') return 1;
+      return planDetailBandCount({ hardwareConcurrency: navigator.hardwareConcurrency, lowMemory: lowMemoryPhotoDevice(),
+        pointwise: !(settings?.sharpenAmount > 0) });
+    }
+
+    // The clients of `count` bands: the preview worker (it keeps the base's
+    // level and analysis), then detail workers, made on first use and kept.
+    // Their requests never touch a cached source.
+    function detailClients(count) {
+      const clients = [convertPreviewFrameInWorker];
+      for (let i = 0; i < count - 1; i++) {
+        if (!detailLayer.workers[i]) detailLayer.workers[i] = createConversionWorkerClient({ retainWorker: true });
+        clients.push(detailLayer.workers[i]);
+      }
+      return clients;
+    }
+
+    // A band failed: later regions convert in the preview worker alone.
+    function retireDetailWorkers(err) {
+      detailLayer.bandsFailed = true;
+      for (const client of detailLayer.workers) client.dispose();
+      detailLayer.workers = [];
+      console.warn('Detail bands failed, converting regions in one worker:', err?.message || err);
     }
 
     // A retained 16-bit preview and its commit do not change ROI analysis.
@@ -6953,12 +6996,18 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const job = { tag, plan, controller: new AbortController(), started: performance.now() };
       detailLayer.request = job;
       detailLayer.counters.requests += 1;
+      // Stage timings under ?perf=1 (#270): the benchmark's S4 reads them.
+      const trace = createPerfTrace('detailRegion', { fromLevel: plan.fromLevel, exact: Boolean(full),
+        density: Math.round(plan.density * 1000) / 1000, outWidth: plan.outWidth, outHeight: plan.outHeight });
       try {
         const image = full ? await detailFromFrame(full, plan, job.controller.signal) : await detailFromSource(plan, job.controller.signal);
+        trace.mark('converted');
         if (detailLayer.request !== job) return;
         detailLayer.request = null;
         if (!image || !detailTagCurrent(tag) || !detailLayerAllowed()) return;
         showDetailRegion(image, plan, tag);
+        trace.mark('shown');
+        trace.end({ bands: image.__detailStats?.bands || 1, worker: image.__detailStats?.timings || image.__timings || null });
         detailLayer.counters.lastReadyMs = Math.round(performance.now() - job.started);
       } catch (err) {
         if (detailLayer.request === job) detailLayer.request = null;
@@ -7007,6 +7056,20 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       assertDetailRoiAllocation(region);
       const settings = buildRouterSettings(state);
       const analysisImageData = getColorAnalysisSample(state);
+      const bands = detailBandsFor(region, settings, base);
+      if (bands) {
+        try {
+          // The base's analysis (and, on a warm photo switch, this photo's
+          // level back in the preview worker), then the bands at once.
+          const analysis = await convertPreviewFrameInWorker.analyze({ ...base, settings, options: { preview: true, analysisImageData } });
+          if (signal?.aborted) return null;
+          return await detailInBands(region, bands, analysis, settings, base, signal);
+        } catch (err) {
+          if (err?.code === WORKER_ABORTED || signal?.aborted) throw err;
+          retireDetailWorkers(err);
+          if (signal?.aborted) return null;
+        }
+      }
       // The worker may keep another photo's level (a warm photo switch converts
       // nothing): the base's analysis request puts this one back first.
       if (!convertPreviewFrameInWorker.holds(base.imageData, analysisImageData)) {
@@ -7021,6 +7084,60 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       });
     }
 
+    // The row bands of a region (#270), or null for one conversion: one
+    // worker, a stage that reads neighbours, or rows main cannot cut (an
+    // 8-bit source, a level without its 16-bit plane).
+    function detailBandsFor(region, settings, base) {
+      const count = detailBandCount(settings);
+      if (count < 2) return null;
+      if (!detailRowsPlane(region.fromLevel ? base.imageData : state.conversionSourceImageData)) return null;
+      const bands = planDetailBands(region, count);
+      return bands.length > 1 ? bands : null;
+    }
+
+    // The samples a band's rows are cut from: the 16-bit plane of a source or
+    // level, else an 8-bit source's own (the worker promotes those rows as it
+    // promotes a whole region's).
+    function detailRowsPlane(image) {
+      if (image?.__image16?.data instanceof Uint16Array) return image.__image16.data;
+      return image?.data instanceof Uint16Array || image?.data instanceof Uint8ClampedArray ? image.data : null;
+    }
+
+    // A region converted by several workers at once (#270): each band's rows
+    // are cut and posted in a task of their own (native rows of a 3.9x view
+    // are about 54 MB to copy), so the first worker starts while main cuts
+    // the next, and the replies are assembled in place.
+    async function detailInBands(region, bands, analysis, settings, base, signal) {
+      const shared = { channelData: analysis.channelData, positiveAnalysis: analysis.positiveAnalysis };
+      const clients = detailClients(bands.length);
+      const k = region.levelFactor;
+      const level = region.fromLevel ? base.imageData : null;
+      const source = state.conversionSourceImageData;
+      const plane = detailRowsPlane(level || source);
+      const out = new ImageData(region.outWidth, region.outHeight);
+      const timings = [];
+      const jobs = [];
+      for (const [index, band] of bands.entries()) {
+        if (index) await yieldTask();
+        if (signal?.aborted) break;
+        const rows = level
+          ? copyRegionRows(plane, level.width, { x: region.x / k, y: region.y / k + band.rowY, width: region.width / k, height: band.rows })
+          : copyRegionRows(plane, source.width, { x: region.x, y: region.y + band.rowY, width: region.width, height: band.rows });
+        const job = clients[index].roi({ settings, region, band, rows, analysis: shared, signal }).then((image) => {
+          out.data.set(image.data, band.y0 * region.outWidth * 4);
+          timings.push(image.__timings || null);
+        });
+        // Observed now: a band may fail while the next is still being cut.
+        job.catch(() => {});
+        jobs.push(job);
+      }
+      await Promise.all(jobs);
+      if (signal?.aborted) return null;
+      detailLayer.counters.banded += 1;
+      out.__detailStats = { bands: bands.length, timings };
+      return out;
+    }
+
     function showDetailRegion(image, plan, tag) {
       if (!detailSizeAllowed(image.width, image.height, DETAIL_MAX_OUTPUT_PIXELS, DETAIL_MAX_DIMENSION)) return;
       const renderer = detailRenderer();
@@ -7030,7 +7147,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (!renderer.uploadExact(image, true)) return;
       if (glDetailCanvas.width !== image.width) glDetailCanvas.width = image.width;
       if (glDetailCanvas.height !== image.height) glDetailCanvas.height = image.height;
-      detailLayer.shown = { plan, tag, width: image.width, height: image.height, image: detailLayer.probe ? image : null };
+      detailLayer.shown = { plan, tag, width: image.width, height: image.height, image: detailLayer.probe ? image : null,
+        bands: image.__detailStats?.bands || 1 };
       detailLayer.counters.shown += 1;
       drawDetailLayer();
     }
@@ -7096,6 +7214,23 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         return { ...displayParity(expected.data, data), exact: Boolean(tag.full), cropEqual, fromLevel: plan.fromLevel,
           fog: Boolean(webglStep3Values().stages?.fogOn), source: [source.width, source.height] };
       },
+      // Explicit test opt-in (#270): the region on screen, converted in row
+      // bands, converted again by the preview worker alone; the bytes match.
+      bandParity: async () => {
+        const shown = detailLayer.shown;
+        if (!shown?.image || shown.tag.full || !detailTagCurrent(shown.tag)) return { error: 'no current converted probe region' };
+        const bands = shown.bands;
+        const failed = detailLayer.bandsFailed;
+        detailLayer.bandsFailed = true;
+        let single;
+        try { single = await detailFromSource(shown.plan, null); }
+        finally { detailLayer.bandsFailed = failed; }
+        if (!single || detailLayer.shown !== shown) return { error: 'the region changed meanwhile' };
+        const a = shown.image.data, b = single.data;
+        let differing = 0;
+        for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) differing++;
+        return { bands, width: single.width, height: single.height, sameSize: a.length === b.length, differing };
+      },
       state: () => {
         const shown = detailLayer.shown;
         const fit = canvasDisplayFit.scale;
@@ -7110,7 +7245,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
             ? shown.width / (shown.plan.width * fit * state.zoomLevel * dpr)
             : (webglState.sourceSize.w || 0) / Math.max(1e-9, (state.conversionSourceImageData?.width || 1) * fit * state.zoomLevel * dpr),
           current: shown ? detailTagCurrent(shown.tag) : false, exact: Boolean(shown?.tag.full),
-          roiToken: shown ? shown.tag.token : null, baseToken: displayedFrameToken
+          roiToken: shown ? shown.tag.token : null, baseToken: displayedFrameToken,
+          // Workers of a region (#270): the bands of the one on screen.
+          bands: shown ? shown.bands : null, detailWorkers: detailLayer.workers.length,
+          bandsFailed: detailLayer.bandsFailed
         };
       }
     };
@@ -11329,7 +11467,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       return Math.round(percent) + '%';
     }
 
-    function applyZoomPanTransform() {
+    // `detailDelay`: how long the detail layer waits for the view to settle
+    // before it plans its region (a discrete zoom step: none, #270).
+    function applyZoomPanTransform(detailDelay = DETAIL_SETTLE_MS) {
       const z = state.zoomLevel;
       canvasTransformWrapper.style.transform = `matrix(${z}, 0, 0, ${z}, ${state.panX}, ${state.panY}) ${interimGeometryCss()}`.trim();
       // A stroke being painted follows the image it is painted on (#254).
@@ -11343,7 +11483,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         canvasContainer.classList.remove('zoom-pan-active');
       }
       // The detail layer moves with the transform; its region follows the settle.
-      noteDetailViewChanged();
+      noteDetailViewChanged(detailDelay);
     }
 
     function getZoomGeometry(zoom = state.zoomLevel) {
@@ -11394,6 +11534,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     // "1:1": fit -> actual pixels, centred on the view; any zoom -> fit.
+    // A discrete step: the detail layer asks for its region at once.
     function toggleActualPixels(clientX = null, clientY = null) {
       if (state.zoomLevel > ZOOM_MIN) {
         resetUserZoom();
@@ -11406,10 +11547,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         clientX = containerRect.left + containerRect.width / 2;
         clientY = containerRect.top + containerRect.height / 2;
       }
-      zoomAtPoint(target, clientX, clientY);
+      zoomAtPoint(target, clientX, clientY, { step: true });
     }
 
-    function zoomAtPoint(newZoom, clientX, clientY) {
+    // `step`: a discrete zoom (a button, a key, a double-click, 1:1) ends its
+    // own gesture, so the detail layer asks for its region at once (#270);
+    // wheel and pinch ticks wait for the view to settle.
+    function zoomAtPoint(newZoom, clientX, clientY, { step = false } = {}) {
       const oldZoom = state.zoomLevel;
       newZoom = Math.max(ZOOM_MIN, Math.min(zoomMax(), newZoom));
       if (newZoom <= ZOOM_MIN + 0.01) newZoom = ZOOM_MIN;
@@ -11430,7 +11574,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       state.panY = cursorY - newGeometry.baseY - contentY * newZoom;
 
       clampPan();
-      applyZoomPanTransform();
+      applyZoomPanTransform(step ? DETAIL_STEP_SETTLE_MS : DETAIL_SETTLE_MS);
       // Zoom changes no pixels until the display preview settles at the new
       // size, so a tick is a compositor transform only. It still keeps a
       // full render of a <=16 MP image from landing mid-gesture.
@@ -17665,13 +17809,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         const containerRect = canvasContainer.getBoundingClientRect();
         const cx = containerRect.left + containerRect.width / 2;
         const cy = containerRect.top + containerRect.height / 2;
-        zoomAtPoint(state.zoomLevel * ZOOM_BUTTON_FACTOR, cx, cy);
+        zoomAtPoint(state.zoomLevel * ZOOM_BUTTON_FACTOR, cx, cy, { step: true });
       } else if (key === '-') {
         event.preventDefault();
         const containerRect = canvasContainer.getBoundingClientRect();
         const cx = containerRect.left + containerRect.width / 2;
         const cy = containerRect.top + containerRect.height / 2;
-        zoomAtPoint(state.zoomLevel / ZOOM_BUTTON_FACTOR, cx, cy);
+        zoomAtPoint(state.zoomLevel / ZOOM_BUTTON_FACTOR, cx, cy, { step: true });
       } else if (key === '0') {
         event.preventDefault();
         resetUserZoom();
@@ -17760,14 +17904,14 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const containerRect = canvasContainer.getBoundingClientRect();
       const cx = containerRect.left + containerRect.width / 2;
       const cy = containerRect.top + containerRect.height / 2;
-      zoomAtPoint(state.zoomLevel * ZOOM_BUTTON_FACTOR, cx, cy);
+      zoomAtPoint(state.zoomLevel * ZOOM_BUTTON_FACTOR, cx, cy, { step: true });
     });
 
     document.getElementById('zoomOutBtn').addEventListener('click', () => {
       const containerRect = canvasContainer.getBoundingClientRect();
       const cx = containerRect.left + containerRect.width / 2;
       const cy = containerRect.top + containerRect.height / 2;
-      zoomAtPoint(state.zoomLevel / ZOOM_BUTTON_FACTOR, cx, cy);
+      zoomAtPoint(state.zoomLevel / ZOOM_BUTTON_FACTOR, cx, cy, { step: true });
     });
 
     document.getElementById('zoomResetBtn').addEventListener('click', () => {
@@ -18935,7 +19079,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (state.zoomLevel > 1) {
         resetUserZoom();
       } else {
-        zoomAtPoint(ZOOM_DOUBLE_CLICK_FACTOR, e.clientX, e.clientY);
+        zoomAtPoint(ZOOM_DOUBLE_CLICK_FACTOR, e.clientX, e.clientY, { step: true });
       }
     });
 

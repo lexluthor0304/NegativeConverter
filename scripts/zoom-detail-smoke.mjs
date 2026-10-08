@@ -259,9 +259,19 @@ export async function runZoomDetailSmoke({ send, evaluate, waitFor, fail, instal
       }
       slider.dispatchEvent(new Event('change', { bubbles: true }));
       window.dispatchEvent(new Event('pointerup'));
+      // Release -> a current region on screen again (#229 review R1-086, #270):
+      // polled every frame here, logged (timing is not asserted in a smoke).
+      const released = performance.now();
+      let releaseToDetailMs = null;
+      while (performance.now() - released < 10000) {
+        await new Promise(resolve => requestAnimationFrame(() => resolve()));
+        const state = window.__ncDetailLayer.state();
+        seen.push(state);
+        if (state.visible && state.current) { releaseToDetailMs = Math.round(performance.now() - released); break; }
+      }
       // A region of older settings than the base frame on screen is never drawn.
       return { staleShown: seen.filter(entry => entry.visible && entry.roiToken < entry.baseToken).length,
-        hidden: seen.filter(entry => !entry.visible).length };
+        hidden: seen.filter(entry => !entry.visible).length, releaseToDetailMs };
     })()`);
     expect(drag.staleShown === 0, 'a stale detail region was drawn during a drag: ' + JSON.stringify(drag));
     const conversionsBefore = atActual.counters.conversions;
@@ -272,6 +282,7 @@ export async function runZoomDetailSmoke({ send, evaluate, waitFor, fail, instal
     expect(afterDrag.counters.conversions > conversionsBefore && (await counts(mark)).roi >= 1,
       'the detail layer after a drag was not converted from the source: ' + JSON.stringify(afterDrag));
     console.log('ok: the detail layer never shows a stale region during a drag and returns after it ' + JSON.stringify({ drag, ready: (await detail()).counters.lastReadyMs }));
+
     await quiet('drag at 100 % settled', 3000);
 
     // Exports ignore zoom and the layer.
@@ -369,6 +380,14 @@ export async function runZoomDetailSmoke({ send, evaluate, waitFor, fail, instal
     expect(!(await display()).full, 'the large fixture unexpectedly settled a whole frame before export');
     await evaluate(`document.getElementById('zoomResetBtn').click(); document.getElementById('zoomInBtn').click()`);
     await until('large source ROI', 'window.__ncDetailLayer.state().current && window.__ncDetailLayer.state().visible');
+    // #270: with cores to spare the region converts in row bands in several
+    // workers at once; the bands equal one worker's conversion byte for byte.
+    // (No settle render replaces a large source's region here.)
+    const cores = await evaluate('navigator.hardwareConcurrency || 0');
+    const bandParity = await evaluate('window.__ncDetailLayer.bandParity()');
+    expect(!bandParity.error && bandParity.sameSize && bandParity.differing === 0 && (cores < 4 || bandParity.bands > 1),
+      'the banded detail region differs from one worker\'s: ' + JSON.stringify({ cores, bandParity }));
+    console.log('ok: banded detail region equals the single-worker conversion ' + JSON.stringify({ cores, bandParity }));
     const beforeExport = await display();
     await exportPng('large zoomed export');
     await until('export exact region replaces source ROI', 'window.__ncDetailLayer.state().current && window.__ncDetailLayer.state().exact');

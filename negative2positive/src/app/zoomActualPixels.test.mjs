@@ -33,6 +33,7 @@ function fixture({ source: size = { width: 9536, height: 6336 }, container = { w
     conversionSourceImageData: conversionSource, sprocketPreviewEnabled: false
   };
   const refreshed = [];
+  const detailDelays = [];
   const wrapper = element();
   const context = vm.createContext({
     state, window: { devicePixelRatio: dpr }, Math, Number, parseFloat,
@@ -48,8 +49,10 @@ function fixture({ source: size = { width: 9536, height: 6336 }, container = { w
     step3FrameReference, upscaleReference,
     computeZoomGeometry, clampPanValues, interimGeometryCss: () => '',
     postponeFullResolutionRenderForInteraction: () => {},
-    // The detail layer (#248 part 5) follows zoom and pan on its own.
-    noteDetailViewChanged: () => {}, dropDetailLayer: () => {},
+    // The detail layer (#248 part 5) follows zoom and pan on its own; a
+    // discrete step asks for its region at once (#270).
+    noteDetailViewChanged: (delay) => detailDelays.push(delay), dropDetailLayer: () => {},
+    DETAIL_SETTLE_MS: 100, DETAIL_STEP_SETTLE_MS: 0,
     // A brush stroke follows zoom and pan on the overlay (#254).
     brushFeedback: { drawing: false }, remapBrushStroke: () => {},
     refreshDisplayPreviewForViewport: () => refreshed.push(state.conversionSourceImageData),
@@ -67,7 +70,7 @@ function fixture({ source: size = { width: 9536, height: 6336 }, container = { w
   const runTimers = () => { for (const [id, timer] of [...timers]) { timers.delete(id); timer.callback(); } };
   // The first draw fits the stand-in texture against the full-resolution reference.
   context.adjustCanvasDisplay(1809, 1202);
-  return { context, state, wrapper, refreshed, timers, runTimers, container, conversionSource };
+  return { context, state, wrapper, refreshed, timers, runTimers, container, conversionSource, detailDelays };
 }
 
 const cssWidth = f => parseFloat(f.wrapper.style.width);
@@ -87,12 +90,14 @@ for (const container of [{ width: 1110 - 300, height: 700 - 100 }, { width: 1440
     // 200 % of native is reachable.
     assert.ok(f.context.zoomMax() >= 2 * zoom100 - 1e-9);
     f.context.zoomAtPoint(1000, 100, 100);
+    assert.equal(f.detailDelays.at(-1), 100, 'a wheel or pinch tick lets the detail layer settle');
     assert.ok(Math.abs(f.state.zoomLevel - 2 * zoom100) < 1e-9, `max zoom is 200 % of native (${JSON.stringify(container)} @${dpr})`);
     assert.equal(f.context.zoomIndicatorText(), '200%');
     f.context.resetZoomPan();
 
     // "1:1" from fit: one image pixel per device pixel, centred on the view.
     f.context.toggleActualPixels();
+    assert.equal(f.detailDelays.at(-1), 0, '1:1 is a step: the detail layer asks at once (#270)');
     assert.ok(Math.abs(f.state.zoomLevel - zoom100) < 1e-9, '1:1 reaches true 100 %');
     assert.equal(f.context.zoomIndicatorText(), '100%', 'the indicator reads 100 % at true 100 %');
     const geometry = f.context.getZoomGeometry();

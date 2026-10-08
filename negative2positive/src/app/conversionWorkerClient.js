@@ -475,21 +475,28 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
 
   // A detail region (#248 part 5), converted from `rows` (the region's native
   // 16- or 8-bit pixels, transferred) or from the cached level, with the base's
-  // analysis. `warm` only sets up the roi slot. Resolves to the region's 8-bit
-  // ImageData (null for `warm`).
-  convert.roi = async ({ settings, base = null, region, rows = null, warm = false, signal = null }) => {
-    assertDetailRoiAllocation(region, warm);
+  // analysis. `warm` only sets up the conversion at idle. With `band` and
+  // `analysis` (#270) only that band's output rows, from its 16-bit `rows`,
+  // with the analysis main passes: any worker can take it. Resolves to the
+  // region's (or band's) 8-bit ImageData, with the worker's stage times in
+  // `__timings` (null for `warm`).
+  convert.roi = async ({ settings, base = null, region, rows = null, warm = false, band = null, analysis = null, signal = null }) => {
+    assertDetailRoiAllocation(region, warm, band);
     const body = { settings, base, region, warm };
+    if (band) Object.assign(body, { band, analysis });
     const transfers = [];
     if (rows) {
       if (rows instanceof Uint16Array) body.image16 = rows.buffer;
       else body.rgba = rows.buffer;
       transfers.push(rows.buffer);
     }
-    const reply = await postUncached('roi', body, transfers, region.slotWidth * region.slotHeight, signal);
+    const pixels = warm ? region.slotWidth * region.slotHeight : region.outWidth * (band ? band.y1 - band.y0 : region.outHeight);
+    const reply = await postUncached('roi', body, transfers, pixels, signal);
     if (reply.warm) return null;
     assertDetailAllocation(reply.width, reply.height, DETAIL_MAX_OUTPUT_PIXELS, DETAIL_MAX_DIMENSION);
-    return new ImageData(new Uint8ClampedArray(reply.rgba), reply.width, reply.height);
+    const image = new ImageData(new Uint8ClampedArray(reply.rgba), reply.width, reply.height);
+    if (reply.timings) image.__timings = reply.timings;
+    return image;
   };
 
   // The live frame a conversion result stands for in this client's current
