@@ -4,7 +4,8 @@ import { sanitizeLocalExposureForSettings, strokeSanitizerStats } from './localE
 import { sanitizeRepairStrokes } from './repairBrush.js';
 import { deepCopySanitizedSettings } from './settingsSnapshot.js';
 
-// The uncached sanitisers as they were at 1703835, kept as the reference.
+// The uncached sanitisers as they were at 1703835, kept as the reference, with
+// #280's stored-point cap (1000; it was 400).
 function clamp(value, min, max) { return value < min ? min : value > max ? max : value; }
 function referenceLocalExposure(input) {
   if (!input || typeof input !== 'object' || !Array.isArray(input.strokes)) return null;
@@ -15,7 +16,7 @@ function referenceLocalExposure(input) {
     const size = Number(stroke.size);
     if (!Number.isFinite(stops) || !Number.isFinite(size)) continue;
     const points = [];
-    for (const point of stroke.points.slice(0, 400)) {
+    for (const point of stroke.points.slice(0, 1000)) {
       const x = Number(point?.x); const y = Number(point?.y);
       if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
       const pressure = Number(point?.p);
@@ -53,7 +54,7 @@ const strokes = (count, points = 150) => Array.from({ length: count }, () => str
 const inputs = [
   null, undefined, 0, 'x', {}, { strokes: 'x' }, { strokes: [] }, { strokes: [null, { points: [] }, { stops: 'a', size: 1, points: [{ x: 0, y: 0 }] }] },
   { strokes: strokes(3, 20) }, { strokes: [stroke(5, { feather: -1 })] }, { strokes: [stroke(5, { feather: 0.0004 })] },
-  { strokes: [stroke(5, { feather: 0 })] }, { strokes: [stroke(450)] }, { strokes: strokes(210, 2) },
+  { strokes: [stroke(5, { feather: 0 })] }, { strokes: [stroke(450)] }, { strokes: [stroke(1100)] }, { strokes: strokes(210, 2) },
 ];
 for (const input of inputs) {
   const expected = referenceLocalExposure(input);

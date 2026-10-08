@@ -275,6 +275,83 @@ export async function runDarkroomSmoke({ send, evaluate, waitFor, wait, fail, in
   const cleared = await canvasLuminance(region);
   if (Math.abs(cleared - untouched) > 1.5) fail(`removing the stroke did not restore the region: ${untouched} -> ${cleared}`);
 
+  // #280: a long pen stroke of 522 samples, all but the last 1.2 px apart,
+  // with pen pressure that changes fast. Its first 400 samples are kept as
+  // recorded, then one per eighth of the brush radius, and the live effect
+  // paints exactly the points stored: more than 400 (resampled to 400, as
+  // before #280, its feather edge jumped at pen-up). The last sample lies a
+  // jump away, so the recorder keeps it while painting and the frame read
+  // before pen-up is the last live frame. Over the worker's own frame
+  // ('exact') the pen-up frame must equal it within the acceptance bound
+  // (2/255 in 99.9 % of the stroke's pixels; silverAdapter.live.test.mjs
+  // checks it bitwise). Over another frame ('delta', the usual case here) the
+  // pen-up frame replaces the frame on screen as a whole: the pixels outside
+  // the stroke's box change by as much as those inside it, so the comparison
+  // is only logged, with both sides.
+  {
+    const pen = (type, x, y, force) => send('Input.dispatchMouseEvent', { type, x, y, button: 'left', pointerType: 'pen', force,
+      clickCount: type === 'mousePressed' ? 1 : 0, buttons: type === 'mouseReleased' ? 0 : 1 });
+    const cx = rect.x + rect.width * 0.5, cy = rect.y + rect.height * 0.5;
+    const radius = Math.min(rect.width, rect.height) * 0.25;
+    const at = (i) => [cx + radius * Math.cos(i * 1.2 / radius), cy + radius * Math.sin(i * 1.2 / radius)];
+    await evaluate(`(() => { window.__darkroomPen = { pre: window.__ncDisplay.shownFrame() }; })()`);
+    await evaluate('window.__ncBrush.resetCounters()');
+    await pen('mousePressed', ...at(0), 0.5);
+    for (let i = 1; i <= 520; i++) await pen('mouseMoved', ...at(i), 0.3 + 0.7 * Math.abs(Math.sin(i / 20)));
+    // Outwards by a fifth of the photo's short side, far more than an eighth of the brush radius.
+    const [lx, ly] = at(520);
+    const end = [cx + (lx - cx) * 1.8, cy + (ly - cy) * 1.8];
+    await pen('mouseMoved', ...end, 0.6);
+    await waitFor('long pen stroke painted live', `(() => { const s = window.__ncBrush.state().live.session;
+      return Boolean(s && s.touched && !s.inFlight && s.sent === s.points); })()`, 30_000);
+    await wait(300);
+    const painting = await evaluate(`window.__ncBrush.state().live`);
+    await evaluate(`(() => { window.__darkroomPen.live = window.__ncDisplay.shownFrame(); })()`);
+    await pen('mouseReleased', ...end, 0);
+    await waitFor('long pen stroke recorded', `/1 stroke/.test(document.getElementById('dodgeBurnStatus').textContent)`, 10_000);
+    const penUpToken = await evaluate('window.__ncDisplay.state().token');
+    await waitFor('pen-up frame on screen', `window.__ncDisplay.state().displayed >= ${penUpToken}`, 30_000);
+    const penStroke = await evaluate(`(() => {
+      const { pre, live } = window.__darkroomPen, settled = window.__ncDisplay.shownFrame();
+      delete window.__darkroomPen;
+      const box = ${JSON.stringify(painting.box)};
+      if (!pre || !live || !settled || !box || pre.width !== settled.width || live.width !== settled.width
+        || pre.height !== settled.height || live.height !== settled.height) return { error: 'frames', box, sizes: [pre?.width, live?.width, settled?.width] };
+      // Inside the stroke's box: the pixels the live or the settled frame
+      // changed. Outside it: every pixel the pen-up frame changed.
+      const inside = { area: 0, within2: 0, max: 0 }, outside = { changed: 0, max: 0 };
+      for (let y = 0; y < settled.height; y++) for (let x = 0; x < settled.width; x++) {
+        const i = (y * settled.width + x) * 4;
+        let changed = false, d = 0;
+        for (let c = 0; c < 3; c++) {
+          if (pre.data[i + c] !== live.data[i + c] || pre.data[i + c] !== settled.data[i + c]) changed = true;
+          d = Math.max(d, Math.abs(live.data[i + c] - settled.data[i + c]));
+        }
+        if (x >= box.x && x < box.x + box.width && y >= box.y && y < box.y + box.height) {
+          if (!changed) continue;
+          inside.area++;
+          if (d <= 2) inside.within2++;
+          inside.max = Math.max(inside.max, d);
+        } else if (d) {
+          outside.changed++;
+          outside.max = Math.max(outside.max, d);
+        }
+      }
+      inside.within2 = inside.area ? +(100 * inside.within2 / inside.area).toFixed(3) : 0;
+      return { surface: settled.surface, inside, outside, strokePoints: window.__ncBrush.state().strokePoints };
+    })()`);
+    penStroke.live = { mode: painting.session?.mode ?? null, points: painting.session?.points, rects: painting.rects };
+    console.log('darkroom long pen stroke:', JSON.stringify(penStroke));
+    if (penStroke.error || !(penStroke.inside.area > 2000)) fail('the long pen stroke did not paint: ' + JSON.stringify(penStroke));
+    if (!(penStroke.strokePoints?.length === 1 && penStroke.strokePoints[0] > 400 && penStroke.strokePoints[0] === penStroke.live.points)) {
+      fail('the long pen stroke was not stored as painted (the points painted live, more than 400): ' + JSON.stringify(penStroke));
+    }
+    if (penStroke.live.mode === 'exact' && !(penStroke.inside.within2 >= 99.9)) fail('the long pen stroke jumped at pen-up: ' + JSON.stringify(penStroke));
+    await evaluate(`document.getElementById('dodgeBurnUndoStrokeBtn').click()`);
+    await waitFor('long pen stroke removed', `/No strokes/.test(document.getElementById('dodgeBurnStatus').textContent)`, 10_000);
+    await wait(2500);
+  }
+
   // #254's third brush session: dodge with dust removal on. The frame on
   // screen is the repaired full-resolution frame's display preview, so the
   // effect shows as displayed + (live - committed) of the preview worker's

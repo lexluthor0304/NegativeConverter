@@ -108,10 +108,19 @@ conversion produced (`renderLiveExposureRect`, the stored raster's arithmetic),
 and the page puts it into the exact frame's texture on the GPU display, or runs
 Step 3 on the rectangle at its place in the frame and puts it on a CPU display.
 For the same points it is exactly the frame the stored stroke gets, so the
-pen-up frame replaces it without a jump; a stroke of more than 400 points is
-resampled at pen-up (the repair strokes' index formula) and keeps its end
-(its settled frame then differs from the live one at the edge, within 1/255
-for mouse strokes; see Limits). When
+pen-up frame replaces it without a jump. The points come from one recorder
+(`createStrokeRecorder` in `brushFeedback.js`, #280): every point up to 400,
+so such a stroke is stored as recorded. Past 400, a pen stroke keeps one point
+per eighth of the brush radius; the live effect paints exactly those points
+and the pen-up stores them, up to 1000 points (`MAX_STROKE_POINTS`, the
+sanitiser's cap, 400 before #280), so its settled frame is its last live frame
+whatever the pen pressure does. A mouse or touch stroke (one pressure) keeps
+every point and is resampled to 400 at pen-up with the repair strokes' index
+formula, keeping its end; its settled frame stays within 1/255 of the live
+one. Resampling a pen stroke cannot do that: a merged segment paints with the
+larger of its two pressures, which moves the feather edge where the pressure
+changes, and no choice of 400 of a fast-pressure stroke's 600 points stays
+within the acceptance bound (see Limits). When
 the frame on screen is not that conversion (a repaired full-resolution frame,
 say), the worker also returns the rectangle without the stroke and the screen
 shows displayed + (live - committed) until pen-up. A stroke stored before its
@@ -166,7 +175,9 @@ colorimetric match.
   30Y → temperature +10, +0.5 stop → exposure ≈ 39, and a digital tint change
   back to 50M; selects Crystal Archive matte (mean 110 → 122) and back to none
   (restored within 1); paints a 1.5-stop burn stroke (region 138 → 86) and
-  removes it (restored).
+  removes it (restored); paints a 522-sample pen stroke with fast-changing
+  pressure and checks that it stores the points the live effect painted, more
+  than 400 (#280).
 
 ```sh
 npm test
@@ -178,13 +189,27 @@ NC_DARKROOM_CPU=1 node scripts/smoke-test.mjs --darkroom-only
 
 - The brushes map through the photo inside the sprocket border (#254), so
   strokes land on the image with the border preview on too.
-- A stroke of more than 400 points is stored resampled to 400. With a mouse
-  the settled frame stays within 1/255 of the live one; pen pressure that
-  changes within a few hundred samples cannot be carried by 400 points, so the
-  feather edge can jump by 19–31/255 at pen-up. The fast-pressure fixture
-  reports about 93% of stroke pixels within 2/255 (about 7% beyond it), below
-  the 99.9% acceptance target. `silverAdapter.live.test.mjs` logs the current
-  measurement; see the brush-relative decimation entry in `FOLLOWUPS.md`.
+- A pen stroke that goes on past 1000 stored points (at least 75 brush radii
+  beyond its first 400 samples, so a long stroke with a small brush gets there
+  first) is resampled to 1000 at pen-up and can still jump at the feather edge.
+  `silverAdapter.live.test.mjs` logs one: a 2,400-sample stroke with a 3 %
+  brush keeps 2,056 points, and resampled to 1000 it has 88 % of its pixels
+  within 2/255, up to 104/255 (82 %, up to 143/255, when it was resampled to
+  400 before #280). Shorter pen strokes are exact, and the test asserts the
+  acceptance bound (2/255 in 99.9 % of the stroke's pixels) for mouse, slow
+  and fast pen pressure. Before #280 the fast-pressure stroke had 93 % of its
+  pixels within 2/255 (up to 19/255).
+- The pen-up bound holds against the preview worker's own frame. When the
+  frame on screen is another one (the live effect then shows displayed +
+  (live - committed)), the pen-up frame replaces it as a whole: in the darkroom
+  smoke's long pen stroke the pixels outside the stroke's box change by up to
+  67/255, as much as inside it. The smoke checks that the stroke stores the
+  points it painted live and logs that comparison.
+- A long pen stroke stores up to 1000 points instead of 400, so its share of
+  the settings, the undo snapshots and the export raster grows with it. A
+  2,400-sample pen stroke rasterised for a 24 MP export (Node): 0.70 → 0.97 s
+  with the default 12 % brush (400 → 602 points), 64 → 128 ms with a 3 % brush
+  (400 → 1000 points).
 - Test strip patches analyse the 360 px copy themselves; the auto white
   balance can differ slightly from the main preview.
 - Paper curves are parametric approximations; no split-grade printing; the

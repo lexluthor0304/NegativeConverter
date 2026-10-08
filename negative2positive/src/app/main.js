@@ -64,8 +64,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     import { loadDxFilmTable, describeDxFilm, shortFilmName } from './dxFilmDatabase.js';
     import { groupAutomaticRollFrames, aggregateRollAnalysis, measureNegativeMean, sanitizeRollFrameForSettings, rollFrameExposureUnits } from './rollAnalysis.js';
     import { filtrationFromSliders, slidersFromFiltration, stopsFromExposureUnits, exposureUnitsFromStops, contrastForGradeValue, gradeValueForContrast, gradeLabelForValue, TEST_STRIP_AXES, formatAxisValue, testStripValues } from './enlarger.js';
-    import { sanitizeLocalExposureForSettings, sanitizeLocalExposureStrokes, sanitizeStrokePoint, workingPointToBase, basePointToWorking, strokeBrush } from './localExposure.js';
-    import { createBrushFeedback, BRUSH_FEEDBACK_STYLES, pointerSamples, movedEnough, resampleStrokePoints } from './brushFeedback.js';
+    import { sanitizeLocalExposureForSettings, sanitizeLocalExposureStrokes, sanitizeStrokePoint, workingPointToBase, basePointToWorking, strokeBrush, MAX_STROKE_POINTS } from './localExposure.js';
+    import { createBrushFeedback, BRUSH_FEEDBACK_STYLES, pointerSamples, movedEnough, resampleStrokePoints, createStrokeRecorder, DENSE_STROKE_POINTS } from './brushFeedback.js';
     import { buildDustTintRect, buildDustTintInBands } from './dustTint.js';
     import { sanitizeRepairStrokes, buildRepairMask, pointerToRepairPoint, lensSourcePoint } from './repairBrush.js';
     import { createRepairStamps, sameRepairStrokes, captureDustPass, dustPassMatches, restoreDustPass } from './repairReuse.js';
@@ -6899,6 +6899,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         const shown = state.previewSourceImageData;
         return {
           token: coreReprocessToken,
+          // The token of the frame on screen: a request's frame has landed once it reaches that request's token.
+          displayed: displayedFrameToken,
           level: level ? { width: level.width, height: level.height, k: displayLevelGeometry(level).k,
             isSource: level === state.conversionSourceImageData } : null,
           target: preview ? { width: preview.width, height: preview.height, displayTarget: isDisplayTarget(preview) } : null,
@@ -25884,7 +25886,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // only with those live rectangles.
     let dodgeBurnDrawing = false;
     let dodgeBurnPointerId = null;
-    let dodgeBurnPoints = [];
+    // The stroke's points (working pixels): the ones the live effect paints
+    // and the pen-up stores (createStrokeRecorder, #280).
+    let dodgeBurnRecorder = null;
     let dodgeBurnSurface = null;
     let dodgeBurnRect = null;
     let dodgeBurnLastSample = null;
@@ -25941,15 +25945,19 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // The container's touch pan must not start under the brush.
       event.stopPropagation();
       captureBrushPointer(event.currentTarget, event.pointerId);
+      const { radius } = strokeBrush(parameters, geometry);
       dodgeBurnDrawing = true;
       dodgeBurnPointerId = event.pointerId;
       dodgeBurnSurface = event.currentTarget;
       dodgeBurnRect = rect;
       dodgeBurnBrush = brush;
-      dodgeBurnPoints = [point];
+      // Every point up to 400; past that a pen stroke keeps one per eighth of
+      // the brush radius, so it is stored as painted (#280).
+      dodgeBurnRecorder = createStrokeRecorder({ spacing: radius / 8, decimate: event.pointerType === 'pen' });
+      dodgeBurnRecorder.add(point);
       dodgeBurnLastSample = { clientX: event.clientX, clientY: event.clientY };
       brushFeedback.begin({ tool: 'dodge', color: BRUSH_FEEDBACK_STYLES.dodge.colors[parameters.stops < 0 ? 'dodge' : 'burn'],
-        radius: strokeBrush(parameters, geometry).radius, frameWidth: geometry.width, frameHeight: geometry.height, surface: rect });
+        radius, frameWidth: geometry.width, frameHeight: geometry.height, surface: rect });
       brushFeedback.add([point]);
       beginLiveDodge(parameters, geometry, point);
     }
@@ -25957,7 +25965,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     function onDodgeBurnPointerMove(event) {
       if (!dodgeBurnDrawing || event.pointerId !== dodgeBurnPointerId) return;
       const dpr = window.devicePixelRatio || 1;
-      const added = [];
+      const samples = [];
+      const kept = [];
       for (const sample of pointerSamples(event)) {
         // At least a device pixel apart (#254 A.3): coalesced samples make a
         // fast stroke a curve instead of a few long chords.
@@ -25965,12 +25974,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         const point = pointerToWorkingPoint(sample, dodgeBurnRect);
         if (!point) continue;
         dodgeBurnLastSample = { clientX: sample.clientX, clientY: sample.clientY };
-        dodgeBurnPoints.push(point);
-        added.push(point);
+        samples.push(point);
+        if (dodgeBurnRecorder.add(point)) kept.push(point);
       }
-      if (!added.length) return;
-      brushFeedback.add(added);
-      addLiveDodgePoints(added);
+      // The trail follows every sample; the live effect paints the points kept.
+      if (samples.length) brushFeedback.add(samples);
+      if (kept.length) addLiveDodgePoints(kept);
     }
 
     function releaseDodgeBurnPointer() {
@@ -25986,13 +25995,20 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     function onDodgeBurnPointerUp(event) {
       if (!dodgeBurnDrawing || event.pointerId !== dodgeBurnPointerId) return;
       releaseDodgeBurnPointer();
-      const points = dodgeBurnPoints;
-      dodgeBurnPoints = [];
+      const recorder = dodgeBurnRecorder;
+      dodgeBurnRecorder = null;
+      // The last sample ends a pen stroke even when the recorder skipped it;
+      // the live effect paints it too, so the stored stroke is the painted one.
+      const end = recorder?.finish();
+      if (end) addLiveDodgePoints([end]);
+      const points = recorder ? recorder.points : [];
       const geometry = dodgeBurnGeometry();
       if (!points.length || !geometry) { endLiveDodge(false); return; }
-      // More than 400 points are resampled, as repair strokes are, so the
-      // stroke keeps its end; the sanitiser itself stays as it is (#254 A.6).
-      const kept = resampleStrokePoints(points);
+      // A mouse or touch stroke (one pressure) of more than 400 points is
+      // resampled, as repair strokes are, so it keeps its end (#254 A.6;
+      // within 1/255 of the live frame). A pen stroke is stored as painted
+      // (#280); only one that goes on past MAX_STROKE_POINTS is resampled.
+      const kept = resampleStrokePoints(points, recorder.decimate ? MAX_STROKE_POINTS : DENSE_STROKE_POINTS);
       const stroke = {
         ...(dodgeBurnBrush || dodgeBurnBrushValues()),
         points: kept.map((p) => ({ ...workingPointToBase(p, geometry), p: p.p }))
@@ -26014,7 +26030,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     function cancelDodgeBurnStroke() {
       if (!dodgeBurnDrawing) return;
       releaseDodgeBurnPointer();
-      dodgeBurnPoints = [];
+      dodgeBurnRecorder = null;
       endLiveDodge(false);
     }
 
@@ -26303,7 +26319,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           counters: { ...displayOverlayState.counters, paints: displayDebugCounters.overlayPaints } },
         tint: dustTint.image ? { width: dustTint.width, height: dustTint.height, current: Boolean(dustTint.mask === state.dustRemoval.mask && dustTint.tag === state.dustRemoval.maskTag) } : null,
         live: { ...liveDodgeCounters, enabled: LIVE_DODGE_ENABLED,
-          session: liveDodge ? { mode: liveDodge.target?.mode || null, ended: liveDodge.ended, points: liveDodge.base.length, touched: liveDodge.touched } : null },
+          session: liveDodge ? { mode: liveDodge.target?.mode || null, ended: liveDodge.ended, points: liveDodge.base.length, touched: liveDodge.touched,
+            sent: liveDodge.sent, inFlight: liveDodge.inFlight } : null },
+        // Points of each stored dodge-and-burn stroke (#280).
+        strokePoints: (state.localExposure?.strokes || []).map((stroke) => stroke.points.length),
         canvasWrites: { ...mainCanvasWrites },
         photoRect: (() => { const rect = brushSurfaceRect(); return { left: rect.left, top: rect.top, width: rect.width, height: rect.height }; })()
       }),

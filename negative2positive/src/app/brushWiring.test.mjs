@@ -11,8 +11,11 @@ import vm from 'node:vm';
 import { live as adapter } from '../pipeline/oracle/adapterParity.mjs';
 import {
   sanitizeLocalExposureForSettings, sanitizeLocalExposureStrokes, sanitizeStrokePoint, workingPointToBase, basePointToWorking,
-  strokeBrush, createLiveStrokeCoverage, addLiveStrokePoints, unionRect,
+  strokeBrush, createLiveStrokeCoverage, addLiveStrokePoints, unionRect, MAX_STROKE_POINTS,
 } from './localExposure.js';
+import {
+  BRUSH_FEEDBACK_STYLES, pointerSamples, movedEnough, resampleStrokePoints, createStrokeRecorder, DENSE_STROKE_POINTS,
+} from './brushFeedback.js';
 import { buildDustTint, buildDustTintRect } from './dustTint.js';
 import { applyPreparedAdjustmentsToBuffer, createAdjustmentLutScratch } from './adjustmentPipeline.js';
 
@@ -314,7 +317,71 @@ for (const mode of ['exact', 'delta']) {
   assert.equal(f.context.liveDodge, null);
 }
 
-console.log('brushWiring: border-aware mapping on both canvases (+-1 px of the old one), worker-pooled tint with dirty-rect patches and strokes drawn once on the display overlay, live dodge texture == stored stroke (exact) and displayed + (live - committed) (delta)');
+// #280: the dodge pointer handlers record the stroke that the live effect
+// paints and the pen-up stores. A long pen stroke keeps every sample up to
+// 400, then one per eighth of the brush radius, and its live texture is the
+// frame of the stored stroke; a long mouse stroke is resampled to 400 points
+// as before; a pen stroke of up to 400 samples is stored as recorded.
+for (const { pointerType, count } of [{ pointerType: 'pen', count: 900 }, { pointerType: 'mouse', count: 700 }, { pointerType: 'pen', count: 250 }]) {
+  adapter.invalidateSilverCoreCache();
+  const f = liveFixture();
+  const frame = await adapter.convertColorWithSilverCore(negative(), structuredClone(settingsFor(committed)), { preview: true, includeAnalysisPreview: false });
+  frame.__liveSeq = frame.__liveFrame;
+  Object.assign(f.state, { previewSourceImageData: frame, processedImageData: frame, webglSourceImageData: frame,
+    dodgeBurn: { active: true, mode: 'burn', stops: 0.6, size: 50, feather: 40 } });
+  f.texture.data = new Uint8ClampedArray(frame.data);
+  const working = { ...geometry, width: W, height: H };
+  const rect = { left: 0, top: 0, width: W, height: H };
+  const surface = { setPointerCapture() {}, hasPointerCapture: () => true, releasePointerCapture() {} };
+  let recorder = null;
+  Object.assign(f.context, {
+    window: { devicePixelRatio: 1 }, dodgeBurnDrawing: false, dustDrawing: false, dodgeBurnRecorder: null, dodgeBurnPointerId: null,
+    dodgeBurnSurface: null, dodgeBurnRect: null, dodgeBurnLastSample: null, dodgeBurnBrush: null,
+    canPaintDodgeBurn: () => true, brushSurfaceRect: () => rect, dodgeBurnGeometry: () => working, captureBrushPointer() {},
+    brushFeedback: { begin() {}, add() {}, end() {} }, BRUSH_FEEDBACK_STYLES, strokeBrush, sanitizeLocalExposureStrokes,
+    sanitizeLocalExposureForSettings, resampleStrokePoints, DENSE_STROKE_POINTS, MAX_STROKE_POINTS, pointerSamples, movedEnough,
+    createStrokeRecorder: (options) => (recorder = createStrokeRecorder(options)),
+    pushUndo() {}, markCurrentFileDirty() {}, updateDodgeBurnUI() {}, scheduleCoreReprocess() {}, syncDisplayOverlay() {},
+  });
+  vm.runInContext(['clientToImageCoords', 'pointerToWorkingPoint', 'dodgeBurnBrushValues', 'dodgeBurnStrokeParameters',
+    'onDodgeBurnPointerDown', 'onDodgeBurnPointerMove', 'releaseDodgeBurnPointer', 'onDodgeBurnPointerUp'].map(functionSource).join('\n'), f.context);
+  // Loops inside the frame, a pixel or so per sample, with fast pen pressure.
+  const samples = Array.from({ length: count }, (_, k) => ({ clientX: 45 + 35 * Math.sin(k / 25), clientY: 30 + 22 * Math.sin(k / 18 + 0.5),
+    pointerType, pressure: 0.3 + 0.7 * Math.abs(Math.sin(k / 15)) }));
+  const event = (sample, extra = {}) => ({ ...sample, pointerId: 7, button: 0, currentTarget: surface, preventDefault() {}, stopPropagation() {}, ...extra });
+  f.context.onDodgeBurnPointerDown(event(samples[0]));
+  for (let k = 1; k < count; k += 4) {
+    const batch = samples.slice(k, k + 4);
+    f.context.onDodgeBurnPointerMove(event(batch.at(-1), { getCoalescedEvents: () => batch }));
+    await settle();
+  }
+  const recorded = recorder.points.slice();
+  f.context.onDodgeBurnPointerUp(event(samples.at(-1)));
+  await drain();
+  assert.equal(f.state.localExposure.strokes.length, committed.strokes.length + 1);
+  const stored = f.state.localExposure.strokes.at(-1);
+  const toBase = (point) => ({ ...workingPointToBase(point, working), p: point.p });
+  const label = `${pointerType} ${count}`;
+  if (pointerType === 'mouse') {
+    assert.ok(recorded.length > DENSE_STROKE_POINTS, `${label}: ${recorded.length} samples recorded`);
+    assert.deepEqual(stored.points, resampleStrokePoints(recorded).map(point => sanitizeStrokePoint(toBase(point))), `${label}: resampled to 400 as before`);
+  } else {
+    // The stored stroke is the recorder's points, the last sample included.
+    assert.deepEqual(stored.points, recorder.points.map(point => sanitizeStrokePoint(toBase(point))), `${label}: stored as painted`);
+    if (count < DENSE_STROKE_POINTS) {
+      assert.equal(recorder.points.length, recorded.length, `${label}: every sample kept`);
+    } else {
+      assert.ok(stored.points.length > DENSE_STROKE_POINTS && stored.points.length <= MAX_STROKE_POINTS, `${label}: ${stored.points.length} points stored`);
+      assert.deepEqual(recorder.points.slice(0, DENSE_STROKE_POINTS), recorded.slice(0, DENSE_STROKE_POINTS));
+    }
+    assert.ok(new Set(stored.points.map(point => point.p)).size > 10, `${label}: the stroke carries pen pressure`);
+    const after = await adapter.convertColorWithSilverCore(negative(), structuredClone(settingsFor(f.state.localExposure)), { scratch: true, includeAnalysisPreview: false });
+    assert.deepEqual(f.texture.data, after.data, `${label}: the live texture is the stored stroke's frame`);
+  }
+  assert.equal(f.worker.ends, 1, `${label}: the stroke's live session is released once`);
+}
+
+console.log('brushWiring: border-aware mapping on both canvases (+-1 px of the old one), worker-pooled tint with dirty-rect patches and strokes drawn once on the display overlay, live dodge texture == stored stroke (exact) and displayed + (live - committed) (delta), a long pen stroke stored as painted through the pointer handlers');
 
 // The CPU display puts only Step-3-adjusted live rows at the photo's offset,
 // including a sprocket border. The whole-frame settled pass is the reference.

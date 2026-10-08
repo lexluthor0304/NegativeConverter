@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict';
 import {
   resampleStrokePoints, pointerSamples, movedEnough, overlayMapping, mapToOverlay, createBrushFeedback, BRUSH_FEEDBACK_STYLES,
+  createStrokeRecorder, DENSE_STROKE_POINTS,
 } from './brushFeedback.js';
 import { sanitizeRepairStrokes } from './repairBrush.js';
 
@@ -18,6 +19,46 @@ import { sanitizeRepairStrokes } from './repairBrush.js';
   assert.deepEqual(kept.map(p => p.x.toFixed(5)), viaRepair.map(p => p.x.toFixed(5)));
   const short = points.slice(0, 12);
   assert.equal(resampleStrokePoints(short), short);
+}
+
+// The stroke recorder (#280). Up to 400 points every point is kept, as
+// recorded, so such a stroke is stored as before, pen or not. Past 400 a pen
+// stroke keeps a point only once it is `spacing` from the last one kept, and
+// its last sample ends it; a mouse stroke keeps every point (resampled to 400
+// at pen-up, as before).
+{
+  const samples = Array.from({ length: 700 }, (_, i) => ({ x: i * 0.5, y: 10 + Math.sin(i / 30) * 4, p: 0.5 + 0.4 * Math.sin(i / 20) }));
+  assert.equal(DENSE_STROKE_POINTS, 400);
+  for (const decimate of [false, true]) {
+    const recorder = createStrokeRecorder({ spacing: 3, decimate });
+    const short = samples.slice(0, DENSE_STROKE_POINTS);
+    assert.ok(short.every(point => recorder.add(point)), 'every point up to 400 is kept');
+    assert.equal(recorder.finish(), null);
+    assert.equal(recorder.points.length, short.length);
+    assert.ok(recorder.points.every((point, i) => point === short[i]), 'the points as recorded, in order');
+  }
+  const mouse = createStrokeRecorder({ spacing: 3, decimate: false });
+  assert.ok(samples.every(point => mouse.add(point)));
+  assert.equal(mouse.finish(), null);
+  assert.equal(mouse.points.length, samples.length, 'a mouse stroke keeps every point');
+  const pen = createStrokeRecorder({ spacing: 3, decimate: true });
+  const kept = samples.filter(point => pen.add(point));
+  assert.ok(kept.slice(0, DENSE_STROKE_POINTS).every((point, i) => point === samples[i]));
+  for (let i = DENSE_STROKE_POINTS; i < kept.length; i++) {
+    assert.ok(Math.hypot(kept[i].x - kept[i - 1].x, kept[i].y - kept[i - 1].y) >= 3, 'past 400, a spacing apart');
+  }
+  assert.ok(kept.length > DENSE_STROKE_POINTS && kept.length < 460, `${kept.length} points kept of 700`);
+  const end = pen.finish();
+  assert.equal(pen.points.at(-1), samples.at(-1), 'the last sample ends the stroke');
+  assert.equal(pen.points.length, kept.length + (end ? 1 : 0));
+  assert.equal(pen.finish(), null, 'the end is added once');
+  // A last sample closer than the spacing is skipped while painting, then ends the stroke.
+  const close = createStrokeRecorder({ spacing: 3, decimate: true });
+  samples.slice(0, DENSE_STROKE_POINTS).forEach(point => close.add(point));
+  const last = { x: samples[399].x + 1, y: samples[399].y, p: 0.2 };
+  assert.equal(close.add(last), false);
+  assert.equal(close.finish(), last);
+  assert.equal(close.points.length, DENSE_STROKE_POINTS + 1);
 }
 
 // Coalesced samples where the browser has them; the event itself otherwise.
