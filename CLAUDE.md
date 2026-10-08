@@ -41,6 +41,11 @@ Rust unit tests for the desktop layer (URL validation, export path grants):
 npm run test:rust
 ```
 
+`src-tauri/Cargo.toml` pins a fork of wry through `[patch.crates-io]` (#282:
+WebKitGTK memory-pressure settings on Linux, `docs/memory-budget.md`). When
+Tauri bumps wry, re-base branch `nc/<wry version>-memory-pressure` of
+lexluthor0304/wry on the new `wry-v<version>` tag and update the `rev`.
+
 実際の Chrome / CDP で唯一の Studio 画面に画像を読み込み、自動変換・除塵・曲線・
 履歴・一括書き出し・裁切時の色解析・ピクセル字体・クロスオリジン分離を検証する。
 `main.js`、パイプライン、画面構成を変更したら実行する:

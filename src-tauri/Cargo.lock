@@ -2314,6 +2314,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-process",
  "tauri-plugin-updater",
+ "tauri-runtime-wry",
  "windows-sys 0.61.2",
 ]
 
@@ -5461,8 +5462,7 @@ checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 [[package]]
 name = "wry"
 version = "0.55.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "186f9871daa55fd9c016578b810d149de58367113db7fb72b462d2323ce19514"
+source = "git+https://github.com/lexluthor0304/wry?rev=7a6fbb061b7fb1183a85ad273281e63075d076f6#7a6fbb061b7fb1183a85ad273281e63075d076f6"
 dependencies = [
  "base64 0.22.1",
  "block2",

@@ -47,6 +47,27 @@ libc = "0.2"
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_System_SystemInformation"] }
 
+# WebKitGTK's memory-pressure settings before the first webview (#282): run()
+# sets wry's process-wide default through the wry instance Tauri builds the
+# WebContext with. tauri-runtime-wry re-exports it and always unifies with
+# tauri's own requirement (same major); a direct `wry = "0.55"` could become a
+# second wry copy after a Tauri bump and the setting would go nowhere. No
+# features: they unify with tauri's. Already in Cargo.lock.
+[target.'cfg(target_os = "linux")'.dependencies]
+tauri-runtime-wry = { version = "2", default-features = false }
+
+# #282: that process-wide default is not in upstream wry. The fork is wry
+# 0.55.1 (the version tauri 2.11.5 / tauri-runtime-wry 2.11.4 use) plus the
+# `MemoryPressureSettings` API and `set_default_memory_pressure_settings`,
+# branch nc/0.55.1-memory-pressure of https://github.com/lexluthor0304/wry;
+# every platform compiles wry from this pin (the additions are Linux-only).
+# When Tauri bumps wry, re-base that branch on the new wry-vX.Y.Z tag and
+# update `rev`. Remove this section, the Linux dependency above and the fork
+# once wry or Tauri expose the settings (docs/audit-backlog.md, "Build and
+# release"; docs/memory-budget.md, "Linux").
+[patch.crates-io]
+wry = { git = "https://github.com/lexluthor0304/wry", rev = "7a6fbb061b7fb1183a85ad273281e63075d076f6" }
+
 [dev-dependencies]
 # RGB16 hashes in the native decoder's parity tests (#264). Already in
 # Cargo.lock (tauri-codegen, wry).

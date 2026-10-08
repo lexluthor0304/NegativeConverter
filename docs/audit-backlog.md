@@ -526,6 +526,11 @@ proof does not establish the unmeasured performance targets.
   `npm run tauri:build` on `macos-latest` builds only the host target (aarch64). The published assets and R2 manifest contain a single `..._aarch64.dmg` (verified `lipo -info` -> 'architecture: arm64'), yet download.html's macOS card picks `preferredTypes: ['dmg']` with no arch check, so Intel Mac visitors download a binary that macOS refuses to launch. The Mac App Store build already goes universal…  
   _Suggested fix:_ In the macOS matrix entry add `targets: aarch64-apple-darwin,x86_64-apple-darwin` to the dtolnay/rust-toolchain step and run `npm run tauri:build -- --target universal-apple-darwin` (upload path becomes `src-tauri/target/universal-apple-darwin/release/bundle/**`). If binary size …
 
+- **low/build** — Remove the wry patch once wry or Tauri expose WebKitGTK's memory-pressure settings (#282)  
+  `src-tauri/Cargo.toml` (`[patch.crates-io] wry`), `src-tauri/src/memory_info.rs:apply_linux_memory_pressure_settings`  
+  The Linux build applies WebKitGTK's `memory-limit` (half of RAM) through a fork of wry 0.55.1 (branch `nc/0.55.1-memory-pressure` of lexluthor0304/wry: the `MemoryPressureSettings` API of the withdrawn upstream PR tauri-apps/wry#1884 plus a process-wide `set_default_memory_pressure_settings` that `WebContext::new` applies). Every platform compiles wry from that git pin, and whenever Tauri bumps its wry requirement the branch must be re-based on the new `wry-vX.Y.Z` tag (keeping the crate version) and the `rev` updated, or the patch silently stops matching and the Linux compile fails on the missing function.  
+  _Suggested fix:_ When a wry release exposes `WebContextExtUnix::new_with_memory_pressure_settings` or a process-wide default, and Tauri exposes it (a runtime attribute or builder setter) or depends on that wry: drop the patch section, the Linux `tauri-runtime-wry` dependency and the fork branch, and call the released API from `apply_linux_memory_pressure_settings`; `docs/memory-budget.md` "Linux" describes the current arrangement.
+
 ## Public pages
 
 - **medium/docs** — Every page promises 16-bit export that 'preserves tonal range' while the exporters emit 8-bit data x257  
