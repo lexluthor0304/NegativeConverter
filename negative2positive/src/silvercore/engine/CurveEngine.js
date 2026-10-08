@@ -742,14 +742,70 @@ export function generateCurves(channelData, settings) {
 }
 
 /**
- * Interpolate sparse curve points to a full 65536-entry LUT.
- * Uses linear interpolation with progressive index (O(n+m) instead of O(n*m)).
+ * Interpolate sparse curve points to a full 65536-entry LUT: entries at or
+ * before the first knot take its value, entries at or past the last knot take
+ * the last one, and every entry between two knots is their linear
+ * interpolation, rounded and clamped to [0, 65535]. Sorts `points` by x.
+ *
+ * Every slider tick of the GPU preview builds three of these on the main
+ * thread (#272), so the integer knots generateCurves makes are walked segment
+ * by segment: each entry gets the same float64 expression, in the same order,
+ * as the entry-by-entry loop it replaced, with the knots read once per segment
+ * instead of searched for per entry. Knots that are not integers take that
+ * loop (interpolateEntries), so every input gives the same table as before.
  */
-function interpolateToLUT(points) {
-  const lut = new Uint16Array(LUT_SIZE);
-
+export function interpolateToLUT(points) {
   // Sort by x
   points.sort((a, b) => a.x - b.x);
+  const n = points.length;
+  for (let k = 0; k < n; k++) {
+    if (!Number.isInteger(points[k].x)) return interpolateEntries(points);
+  }
+
+  const lut = new Uint16Array(LUT_SIZE);
+  const x0 = points[0].x;
+  const lastX = points[n - 1].x;
+  const firstY = points[0].y < 0 ? 0 : points[0].y > PIXEL_MAX ? PIXEL_MAX : points[0].y;
+  const lastY = points[n - 1].y < 0 ? 0 : points[n - 1].y > PIXEL_MAX ? PIXEL_MAX : points[n - 1].y;
+
+  // i <= x0: the first knot's value.
+  const headEnd = Math.min(x0, LUT_SIZE - 1);
+  if (headEnd >= 0) lut.fill(firstY, 0, headEnd + 1);
+
+  // x0 < i < lastX: segment l serves x_l < i <= x_(l+1), the first knot at or
+  // past i (the entry loop's progressive index). A zero-width segment serves
+  // no entry.
+  const from = Math.max(x0 + 1, 0);
+  const to = Math.min(lastX - 1, LUT_SIZE - 1);
+  if (from <= to) {
+    for (let l = 0; l < n - 1; l++) {
+      const p0 = points[l];
+      const p1 = points[l + 1];
+      const start = Math.max(p0.x + 1, from);
+      const end = Math.min(p1.x, to);
+      if (start > end) continue;
+      const px = p0.x;
+      const py = p0.y;
+      const dx = p1.x - p0.x;
+      const dy = p1.y - p0.y;
+      for (let i = start; i <= end; i++) {
+        const t = (i - px) / dx;
+        const v = py + t * dy;
+        lut[i] = v < 0 ? 0 : v > PIXEL_MAX ? PIXEL_MAX : (v + 0.5) | 0;
+      }
+    }
+  }
+
+  // i >= lastX (and past the first knot): the last knot's value.
+  const tailStart = Math.max(lastX, x0 + 1, 0);
+  if (tailStart <= LUT_SIZE - 1) lut.fill(lastY, tailStart);
+  return lut;
+}
+
+// The entry-by-entry interpolation, for knots sorted by x. Uses linear
+// interpolation with progressive index (O(n+m) instead of O(n*m)).
+function interpolateEntries(points) {
+  const lut = new Uint16Array(LUT_SIZE);
 
   const firstY = points[0].y < 0 ? 0 : points[0].y > PIXEL_MAX ? PIXEL_MAX : points[0].y;
   const lastY = points[points.length - 1].y < 0 ? 0 : points[points.length - 1].y > PIXEL_MAX ? PIXEL_MAX : points[points.length - 1].y;

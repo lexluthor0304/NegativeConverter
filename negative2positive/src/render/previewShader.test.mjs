@@ -96,6 +96,17 @@ const { LINEAR_LUT } = await import('../silvercore/util/localExposure.js');
     assert.deepEqual([...texels.subarray(i, i + 4)], [r[v], g[v], b[v], 0]);
   }
   assert.equal(packTableTexture(r, g, b, texels), texels, 'the pack buffer is reused');
+  // #272: the word-wise pack writes the same 16-bit values as per-channel stores,
+  // over a reused buffer holding other data (alpha written back to 0), and the
+  // per-channel loop serves other inputs and an unaligned buffer alike.
+  const expected = new Uint16Array(65536 * 4);
+  for (let v = 0; v < 65536; v++) expected.set([r[v], g[v], b[v], 0], v * 4);
+  const reused = new Uint16Array(65536 * 4).fill(0xABCD);
+  assert.deepEqual(packTableTexture(r, g, b, reused), expected, 'every texel, alpha 0, over stale data');
+  assert.deepEqual(packTableTexture([...r], [...g], [...b], new Uint16Array(65536 * 4).fill(7)), expected,
+    'plain arrays take the per-channel loop');
+  const unaligned = new Uint16Array(65536 * 4 + 1).subarray(1).fill(9);
+  assert.deepEqual(packTableTexture(r, g, b, unaligned), expected, 'a buffer at an odd 16-bit offset takes the per-channel loop');
   const hue = packHueWeights();
   const [tR, tG, tB] = hueWeightTables();
   assert.equal(hue.width, 64);

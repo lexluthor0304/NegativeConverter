@@ -14,10 +14,25 @@ export function packedRows(entries) {
   return Math.ceil(entries / PACKED_ROW_TEXELS);
 }
 
+// Whether a 32-bit store puts its low half at the lower 16-bit index, as on every
+// platform the app runs on; the word-wise pack below relies on it.
+const LITTLE_ENDIAN = new Uint16Array(new Uint32Array([1]).buffer)[0] === 1;
+
 // Three 65536-entry tables as RGBA16UI texels (alpha 0), into `out` when given: the
 // preview keeps one buffer, so a tick allocates nothing here.
 export function packTableTexture(r, g, b, out = null) {
   const data = out && out.length === TABLE_ENTRIES * 4 ? out : new Uint16Array(TABLE_ENTRIES * 4);
+  if (LITTLE_ENDIAN && data.byteOffset % 4 === 0
+    && r instanceof Uint16Array && g instanceof Uint16Array && b instanceof Uint16Array) {
+    // Every tick packs the tone LUT on the main thread (#272): two 32-bit stores
+    // per texel, (r, g) and (b, alpha 0), write the same 16-bit values.
+    const words = new Uint32Array(data.buffer, data.byteOffset, TABLE_ENTRIES * 2);
+    for (let v = 0, i = 0; v < TABLE_ENTRIES; v++, i += 2) {
+      words[i] = r[v] | (g[v] << 16);
+      words[i + 1] = b[v];
+    }
+    return data;
+  }
   for (let v = 0, i = 0; v < TABLE_ENTRIES; v++, i += 4) {
     data[i] = r[v];
     data[i + 1] = g[v];
