@@ -110,7 +110,9 @@ lock; 4 refused by the pre-flight; 5 no Chrome.
    GL are refused without `--allow-software-gl`. The page and worker debugger is enabled only for H, profiled repetitions and the hang self-test, before a potential hang. Timing and export-verification repetitions retain V8’s normal Wasm tier. Workers are auto-attached recursively (LibRaw spawns nested workers).
 6. **Input.** Trusted CDP input only (`Input.dispatchMouseEvent`,
    `Input.dispatchKeyEvent`, wheel events) on an absolute 60 Hz schedule (a late
-   step never delays the next). Files through `DOM.setFileInputFiles` on
+   step never delays the next; a command that fails because a guard stopped
+   the browser mid-drag is reported with the others, never left unhandled,
+   which ended the whole run until #273). Files through `DOM.setFileInputFiles` on
    `#fileInput`. Controls are revealed (tab, `<details>`, scroll) before a
    measured window, never inside it. The reveal waits for running finite
    animations on the control and its ancestors and then for a rect that holds
@@ -184,6 +186,30 @@ S9's verification repetition, which decodes a JPEG export on an
 `OffscreenCanvas` after the measured window to hash its pixels. Its own time is
 reported per window as `probeSelfMs`/`probeSelfPct` (budget: ≤ 1 % of
 main-thread task time in S2; `probe.selfPctMax` in every S2 summary).
+
+Probe cost (#273). The quick runs at 8f8faa6a and 12ed8051 put `probeSelfPct`
+at 2.1–2.5 % for the drags that moved (3.5 % for the idle `wbR` window). A
+Chrome CPU profile of S2-style drags (Vite dev server, the 1.8 MP JPEG
+negative, DPR 2) attributed the probe's time to its input listeners (42 %,
+half of it the capturing `pointermove` listener on every move), the draw
+wrapper's signature text over every uniform and bound texture (14 %), hashing
+(8 %), the worker `postMessage` wrapper (8 %), uniform wrappers (5 %) and the
+rAF recorder (4 %). After the changes above, the quick run at 49efdf33
+(Chrome 155, `synthetic-60mp-cfa.dng`, DPR 2) measures 1.4–1.8 % per drag:
+medians 1.6 % for the three SilverCore sliders and 1.7 % for `cyan` and
+`wbR`, `probe.selfPctMax` 1.8 % (was 3.5 %). The ≤ 1 % bound is not met, so
+`probe.selfPctMax` stays tracked in `budgets.json`. What remains is a floor
+per frame: every value change costs two listener calls (the trusted move,
+whose platform time input→draw needs, and the `input` event), a rAF sample
+and one or two draw records, and a SilverCore frame adds about 40 uniform
+calls and two 256×256 table uploads whose sparse hashes keep picture
+detection exact. The Step-3 drags keep the main thread only 4–5 % busy, so
+that floor alone is about 1.5 % of their task time. In the light check, the
+`--no-probe` control's main-thread share was 14.3 % (`coreExposure`),
+4.3 % (`cyan`) and 3.2 % (`wbR`) against 14.7–16.7 %, 3.8–7.8 % and
+3.4–6.8 % with the probe on a busy machine; the S2 control on the 60 MP
+fixture was stopped twice by the disk guard (other runs on the machine) and
+is still to be repeated.
 `scripts/perf/probe-worker.js` adds worker-side start/reply timestamps through
 a CDP binding (Chrome only). Worker attachment and wrappers still impose some cost. Compare S1/S2 `control.stage.librawDecodeMs` and `control.stage.autoFrameMs`, ready time and main busy time against `--no-probe`. That control uses only a minimal stage observer: no debugger, draw hashing, worker attachment or performance observers. Diagnostic repetitions intentionally include debugger/trace bias and are excluded from timing medians.
 
