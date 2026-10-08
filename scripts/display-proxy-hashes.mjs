@@ -1,12 +1,13 @@
 // Build-derived hashes in every display proxy's store key (#249): the
 // decoders (LibRaw's WebAssembly, the pinned scan decoders and the HEIF codec
-// the app serves), and the code that shapes a proxy's pixels and the
-// colour-analysis sample stored with them (the RAW and scan decoders with the
-// sensor-defect pass, the 16-bit packing, the geometry chain and its pool,
-// the lens loader, the display level, the record's packing and the sample). A
-// build that changes any of them misses every stored proxy instead of
-// converting pixels a cold open would no longer produce. Stamped by
-// vite.config.js.
+// the app serves) with the lens database and runtime (lensfun-wasm, whose
+// maps a lens-corrected proxy is remapped with, #278), and the code that
+// shapes a proxy's pixels and the colour-analysis sample stored with them
+// (the RAW and scan decoders with the sensor-defect pass, the 16-bit packing,
+// the geometry chain and its pool, the lens loader and remap, the display
+// level, the record's packing and the sample). A build that changes any of
+// them misses every stored proxy instead of converting pixels a cold open
+// would no longer produce. Stamped by vite.config.js.
 //
 // The RAW decoders include #264's: the decoder choice (librawRuntime.js), the
 // desktop's native LibRaw plane and its transfer, and libraw-wasm's threaded
@@ -20,10 +21,10 @@ import { join } from 'node:path';
 // What main.js calls to shape a stored proxy, relative to negative2positive/src:
 // the decode (RAW, PNG, scans and HEIF), the geometry chain and the pool that
 // renders fills, the display level, the record's packing, the lens loader and
-// the colour-analysis sample.
+// remap (with the map step and request) and the colour-analysis sample.
 export const DISPLAY_PROXY_ENTRY_FILES = [
   'app/imageFileLoaders.js', 'app/imageGeometry.js', 'app/geometryPool.js', 'app/displayPreview.js',
-  'app/displayProxy.js', 'app/lensfunLoader.js', 'app/analysisRegion.js'
+  'app/displayProxy.js', 'app/lensfunLoader.js', 'app/lensMaps.js', 'app/analysisRegion.js'
 ];
 
 // The entry files and their whole relative-import closure (static, dynamic
@@ -34,7 +35,7 @@ export const DISPLAY_PROXY_CODE_FILES = [
   'app/rawResultToRgb16.js', 'silvercore/util/image16.js', 'silvercore/util/sensorDefects.js',
   'app/tiffFileLoader.js', 'app/imageFileLoaders.js', 'workers/scanDecodeWorker.js',
   'app/imageGeometry.js', 'app/imageDataOps.js', 'app/geometryPool.js', 'workers/geometryWorker.js',
-  'app/lensfunLoader.js', 'app/displayPreview.js', 'app/displayProxy.js',
+  'app/lensfunLoader.js', 'app/lensMaps.js', 'app/displayPreview.js', 'app/displayProxy.js',
   'app/librawRuntime.js', 'app/nativeRawDecoder.js', 'app/nativeRawTransfer.js', 'workers/nativeRawFetchWorker.js',
   'app/analysisRegion.js', 'app/pngFileLoader.js', 'app/heifLoader.js', 'app/scanDecodeClient.js',
   'app/embeddedPreviewRender.js', 'app/rawEmbeddedPreview.js', 'app/jpegHeader.js', 'app/nefJpegPreview.js',
@@ -61,6 +62,15 @@ export const DISPLAY_PROXY_SCAN_DECODER_FILES = {
 // The HEIF codec the app serves (libheif-js, copied into public/codecs),
 // relative to negative2positive/public.
 export const DISPLAY_PROXY_CODEC_FILES = ['codecs/heif-worker.js', 'codecs/libheif.js', 'codecs/libheif.wasm'];
+
+// The lens database and runtime (#278), relative to the package: the module
+// lensfunLoader.js imports, the core it starts with its wasm and data, and
+// the release main.js's CDN fallback loads (the same version, its IIFE).
+export const DISPLAY_PROXY_LENS_PACKAGE = '@neoanaloglabkk/lensfun-wasm';
+export const DISPLAY_PROXY_LENS_FILES = [
+  'package.json', 'dist/esm/index.js', 'dist/umd/index.iife.js',
+  'dist/assets/lensfun-core.js', 'dist/assets/lensfun-core.wasm', 'dist/assets/lensfun-core.data'
+];
 
 // The names (relative to `root`, after `prefix`) and contents of `files`, so
 // the hash does not depend on where the checkout lives.
@@ -92,5 +102,6 @@ export function displayProxyBuildHashes(appRoot, { librawDist = null } = {}) {
     hashFiles(decoder, realDirectory(join(modules, name)), files, `${name}/`);
   }
   hashFiles(decoder, join(appRoot, 'public'), DISPLAY_PROXY_CODEC_FILES);
+  hashFiles(decoder, realDirectory(join(modules, DISPLAY_PROXY_LENS_PACKAGE)), DISPLAY_PROXY_LENS_FILES, `${DISPLAY_PROXY_LENS_PACKAGE}/`);
   return { decoder: decoder.digest('hex'), code };
 }

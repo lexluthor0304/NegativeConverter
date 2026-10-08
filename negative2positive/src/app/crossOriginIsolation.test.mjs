@@ -160,12 +160,9 @@ console.log('crossOriginIsolation tests passed');
 // Lens resampling writes a private shared output fully before publishing it;
 // subsequent full conversions post that same buffer without a 16-bit clone.
 {
-  const { readFileSync } = await import('node:fs');
-  const vm = await import('node:vm');
   const { createConversionWorkerClient } = await import('./conversionWorkerClient.js');
-  const source = readFileSync(new URL('./main.js', import.meta.url), 'utf8');
-  const fn = name => { const match = new RegExp(`^    function ${name}\\(`, 'm').exec(source);
-    assert.ok(match, name); return source.slice(match.index, source.indexOf('\n    }', match.index) + 6); };
+  // main.js's lens correction runs the remap of lensMaps.js (#278).
+  const context = await import('./lensMaps.js');
   class TestImageData {
     constructor(data, width, height) { Object.assign(this, { data, width, height }); }
   }
@@ -173,9 +170,6 @@ console.log('crossOriginIsolation tests passed');
   globalThis.crossOriginIsolated = true;
   globalThis.location = { search: '' };
   globalThis.ImageData = TestImageData;
-  const context = vm.createContext({ ImageData: TestImageData, Uint16Array, Uint8ClampedArray, Math,
-    allocPlane16, isSharedPlane, sharedPlanesAvailable, clampBetween: (value, min, max) => Math.max(min, Math.min(max, value)) });
-  vm.runInContext(['bilerp', 'sampleImageChannelBilinear', 'sampleGridPair', 'sampleGridTriple', 'sampleGridTca', 'applyLensMapsToImage'].map(fn).join('\n'), context);
   const width = 9, height = 7, length = width * height * 4;
   const plane = allocPlane16(length, { shared: true });
   for (let i = 0; i < length; i++) plane[i] = i % 4 === 3 ? 65535 : (i * 7919) & 65535;

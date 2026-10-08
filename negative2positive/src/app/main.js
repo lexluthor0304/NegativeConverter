@@ -166,6 +166,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     import { applyStrokePatch, applyDustDelta, amendDustDelta, copyImageRect, pasteImageRect, sameFramePixels } from './dustStrokeHistory.js';
     import { createDustHistoryArchive } from './dustHistoryArchive.js';
     import { loadLocalLensfunAssets } from './lensfunLoader.js';
+    import { applyLensMapsToImage, lensMapRequest } from './lensMaps.js';
     import { createOpenCvLoader } from './opencvLoader.js';
     import {
       sampleFilmBase as sampleFilmBaseRobust,
@@ -328,6 +329,14 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     const LENSFUN_CDN_BASE = `https://cdn.jsdelivr.net/npm/@neoanaloglabkk/lensfun-wasm@${LENSFUN_PACKAGE_VERSION}/dist`;
     const lensScriptLoadPromises = new Map();
     const lensMapCache = new Map();
+    // The lens (lensSignatureOf) a source was corrected with, when lens
+    // correction did correct it, and the lens each display level carries
+    // (null: none). A display proxy whose key names a lens is stored only
+    // when its level carries that lens (#278, storableDisplayLevel): a lens
+    // runtime that failed, or lens settings changed since the conversion,
+    // leave a level its key does not describe.
+    const lensCorrectedSources = new WeakMap();
+    const displayLevelLenses = new WeakMap();
     const lensfunRuntime = {
       initPromise: null,
       client: null,
@@ -1412,187 +1421,6 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (stateReady) updateLensCorrectionUI();
     }
 
-    function getAutoLensMapStep(width, height) {
-      const maxSide = Math.max(width, height);
-      if (maxSide >= 5200) return 8;
-      if (maxSide >= 3600) return 6;
-      if (maxSide >= 2400) return 4;
-      if (maxSide >= 1500) return 3;
-      return 2;
-    }
-
-    function resolveLensMapStep(params, width, height) {
-      if (params.stepMode === 'manual') {
-        return Math.round(clampBetween(params.step || 2, 1, 16));
-      }
-      return getAutoLensMapStep(width, height);
-    }
-
-    function buildLensMapCacheKey(lensHandle, width, height, params, modes) {
-      return [
-        lensHandle,
-        width,
-        height,
-        params.focal.toFixed(4),
-        params.crop.toFixed(4),
-        params.aperture.toFixed(4),
-        params.distance.toFixed(4),
-        params.step,
-        params.stepMode,
-        modes.includeTca ? 1 : 0,
-        modes.includeVignetting ? 1 : 0
-      ].join('|');
-    }
-
-    function bilerp(a00, a10, a01, a11, fx, fy) {
-      const x0 = a00 + (a10 - a00) * fx;
-      const x1 = a01 + (a11 - a01) * fx;
-      return x0 + (x1 - x0) * fy;
-    }
-
-    function sampleImageChannelBilinear(data, width, height, x, y, channel) {
-      if (x < 0 || y < 0 || x > width - 1 || y > height - 1) return 0;
-      const x0 = Math.floor(x);
-      const y0 = Math.floor(y);
-      const x1 = Math.min(x0 + 1, width - 1);
-      const y1 = Math.min(y0 + 1, height - 1);
-      const fx = x - x0;
-      const fy = y - y0;
-
-      const i00 = (y0 * width + x0) * 4 + channel;
-      const i10 = (y0 * width + x1) * 4 + channel;
-      const i01 = (y1 * width + x0) * 4 + channel;
-      const i11 = (y1 * width + x1) * 4 + channel;
-
-      return bilerp(data[i00], data[i10], data[i01], data[i11], fx, fy);
-    }
-
-    function sampleGridPair(grid, gridWidth, x0, x1, y0, y1, fx, fy) {
-      const p00 = (y0 * gridWidth + x0) * 2;
-      const p10 = (y0 * gridWidth + x1) * 2;
-      const p01 = (y1 * gridWidth + x0) * 2;
-      const p11 = (y1 * gridWidth + x1) * 2;
-      return {
-        x: bilerp(grid[p00], grid[p10], grid[p01], grid[p11], fx, fy),
-        y: bilerp(grid[p00 + 1], grid[p10 + 1], grid[p01 + 1], grid[p11 + 1], fx, fy)
-      };
-    }
-
-    function sampleGridTriple(grid, gridWidth, x0, x1, y0, y1, fx, fy) {
-      const p00 = (y0 * gridWidth + x0) * 3;
-      const p10 = (y0 * gridWidth + x1) * 3;
-      const p01 = (y1 * gridWidth + x0) * 3;
-      const p11 = (y1 * gridWidth + x1) * 3;
-      return {
-        r: bilerp(grid[p00], grid[p10], grid[p01], grid[p11], fx, fy),
-        g: bilerp(grid[p00 + 1], grid[p10 + 1], grid[p01 + 1], grid[p11 + 1], fx, fy),
-        b: bilerp(grid[p00 + 2], grid[p10 + 2], grid[p01 + 2], grid[p11 + 2], fx, fy)
-      };
-    }
-
-    function sampleGridTca(grid, gridWidth, x0, x1, y0, y1, fx, fy) {
-      const p00 = (y0 * gridWidth + x0) * 6;
-      const p10 = (y0 * gridWidth + x1) * 6;
-      const p01 = (y1 * gridWidth + x0) * 6;
-      const p11 = (y1 * gridWidth + x1) * 6;
-      return {
-        rx: bilerp(grid[p00], grid[p10], grid[p01], grid[p11], fx, fy),
-        ry: bilerp(grid[p00 + 1], grid[p10 + 1], grid[p01 + 1], grid[p11 + 1], fx, fy),
-        gx: bilerp(grid[p00 + 2], grid[p10 + 2], grid[p01 + 2], grid[p11 + 2], fx, fy),
-        gy: bilerp(grid[p00 + 3], grid[p10 + 3], grid[p01 + 3], grid[p11 + 3], fx, fy),
-        bx: bilerp(grid[p00 + 4], grid[p10 + 4], grid[p01 + 4], grid[p11 + 4], fx, fy),
-        by: bilerp(grid[p00 + 5], grid[p10 + 5], grid[p01 + 5], grid[p11 + 5], fx, fy)
-      };
-    }
-
-    function applyLensMapsToImage(imageData, maps, modes) {
-      const { width, height, data } = imageData;
-      const output = new ImageData(new Uint8ClampedArray(data.length), width, height);
-      const outData = output.data;
-      // Resample the 16-bit plane when the loader attached one, otherwise every
-      // RAW or 16-bit PNG converted with lens correction on would reach the
-      // engine as 8-bit data upcast back to 16.
-      const plane16 = imageData.__image16;
-      const use16 = Boolean(
-        plane16
-        && plane16.data instanceof Uint16Array
-        && plane16.width === width
-        && plane16.height === height
-        && plane16.data.length === data.length
-      );
-      const source = use16 ? plane16.data : data;
-      const maxValue = use16 ? 65535 : 255;
-      const out16 = use16 ? allocPlane16(data.length, { shared: isSharedPlane(plane16.data) && sharedPlanesAvailable() }) : null;
-      const gridWidth = maps.gridWidth;
-      const gridHeight = maps.gridHeight;
-      const step = Math.max(1, maps.step || 1);
-      const geometry = maps.geometry;
-      const tca = (modes.includeTca && maps.tca) ? maps.tca : null;
-      const vignetting = (modes.includeVignetting && maps.vignetting) ? maps.vignetting : null;
-
-      for (let y = 0; y < height; y++) {
-        const gyRaw = y / step;
-        const y0 = clampBetween(Math.floor(gyRaw), 0, gridHeight - 1);
-        const y1 = clampBetween(y0 + 1, 0, gridHeight - 1);
-        const fy = clampBetween(gyRaw - y0, 0, 1);
-
-        for (let x = 0; x < width; x++) {
-          const gxRaw = x / step;
-          const x0 = clampBetween(Math.floor(gxRaw), 0, gridWidth - 1);
-          const x1 = clampBetween(x0 + 1, 0, gridWidth - 1);
-          const fx = clampBetween(gxRaw - x0, 0, 1);
-
-          let rX, rY, gX, gY, bX, bY;
-          if (tca) {
-            const tcaCoords = sampleGridTca(tca, gridWidth, x0, x1, y0, y1, fx, fy);
-            rX = tcaCoords.rx; rY = tcaCoords.ry;
-            gX = tcaCoords.gx; gY = tcaCoords.gy;
-            bX = tcaCoords.bx; bY = tcaCoords.by;
-          } else {
-            const geometryCoords = sampleGridPair(geometry, gridWidth, x0, x1, y0, y1, fx, fy);
-            rX = geometryCoords.x; rY = geometryCoords.y;
-            gX = geometryCoords.x; gY = geometryCoords.y;
-            bX = geometryCoords.x; bY = geometryCoords.y;
-          }
-
-          let r = sampleImageChannelBilinear(source, width, height, rX, rY, 0);
-          let g = sampleImageChannelBilinear(source, width, height, gX, gY, 1);
-          let b = sampleImageChannelBilinear(source, width, height, bX, bY, 2);
-
-          if (vignetting) {
-            const gains = sampleGridTriple(vignetting, gridWidth, x0, x1, y0, y1, fx, fy);
-            r *= gains.r;
-            g *= gains.g;
-            b *= gains.b;
-          }
-
-          const outIdx = (y * width + x) * 4;
-          const rv = clampBetween(Math.round(r), 0, maxValue);
-          const gv = clampBetween(Math.round(g), 0, maxValue);
-          const bv = clampBetween(Math.round(b), 0, maxValue);
-          if (out16) {
-            out16[outIdx] = rv;
-            out16[outIdx + 1] = gv;
-            out16[outIdx + 2] = bv;
-            out16[outIdx + 3] = 65535;
-            // Keep the 8-bit view exactly consistent with the 16-bit plane.
-            outData[outIdx] = rv >>> 8;
-            outData[outIdx + 1] = gv >>> 8;
-            outData[outIdx + 2] = bv >>> 8;
-          } else {
-            outData[outIdx] = rv;
-            outData[outIdx + 1] = gv;
-            outData[outIdx + 2] = bv;
-          }
-          outData[outIdx + 3] = 255;
-        }
-      }
-      if (out16) {
-        output.__image16 = { width, height, data: out16 };
-      }
-      return output;
-    }
-
     // The lens block a frame converts with: its own, or the global one when it
     // has none (sanitised with `state` as fallback).
     function resolveLensCorrection(settings) {
@@ -1608,6 +1436,25 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     function lensCorrectionActive(settings) {
       const lensCorrection = resolveLensCorrection(settings);
       return Boolean(lensCorrection.enabled && lensCorrection.selectedLens?.handle);
+    }
+
+    // lensfun's maps for a frame of this size under a resolved lens block,
+    // cached by what they are built from (lensMapRequest). `remember: false`
+    // (a display-proxy fill, #278) reads the cache without growing it.
+    function lensCorrectionMaps(runtime, lensCorrection, width, height, { remember = true } = {}) {
+      const { key, request } = lensMapRequest(lensCorrection, width, height);
+      let maps = lensMapCache.get(key);
+      if (!maps) {
+        maps = runtime.client.buildCorrectionMaps(request);
+        if (remember) {
+          lensMapCache.set(key, maps);
+          if (lensMapCache.size > 12) {
+            const oldestKey = lensMapCache.keys().next().value;
+            if (oldestKey) lensMapCache.delete(oldestKey);
+          }
+        }
+      }
+      return maps;
     }
 
     async function applyLensCorrectionWithSettings(imageData, settings, options = {}) {
@@ -1645,47 +1492,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       }
 
       try {
-        const params = {
-          focal: lensCorrection.params.focal,
-          crop: lensCorrection.params.crop,
-          aperture: lensCorrection.params.aperture,
-          distance: lensCorrection.params.distance,
-          stepMode: lensCorrection.params.stepMode,
-          step: resolveLensMapStep(lensCorrection.params, imageData.width, imageData.height)
-        };
-        const cacheKey = buildLensMapCacheKey(
-          selectedLens.handle,
-          imageData.width,
-          imageData.height,
-          params,
-          lensCorrection.modes
-        );
-        let maps = lensMapCache.get(cacheKey);
-        if (!maps) {
-          maps = runtime.client.buildCorrectionMaps({
-            lensHandle: selectedLens.handle,
-            width: imageData.width,
-            height: imageData.height,
-            focal: params.focal,
-            crop: params.crop,
-            step: params.step,
-            reverse: false,
-            includeTca: lensCorrection.modes.includeTca,
-            includeVignetting: lensCorrection.modes.includeVignetting,
-            aperture: params.aperture,
-            distance: params.distance
-          });
-          lensMapCache.set(cacheKey, maps);
-          if (lensMapCache.size > 12) {
-            const oldestKey = lensMapCache.keys().next().value;
-            if (oldestKey) lensMapCache.delete(oldestKey);
-          }
-        }
-
+        const maps = lensCorrectionMaps(runtime, lensCorrection, imageData.width, imageData.height);
         const corrected = applyLensMapsToImage(imageData, maps, lensCorrection.modes);
         // Keep the display-to-source map for brush coordinates. Non-enumerable
         // metadata avoids copying the grid into conversion worker messages.
         Object.defineProperty(corrected, '__lensMapping', { value: { maps, includeTca: lensCorrection.modes.includeTca } });
+        // The lens it carries, which a display proxy of it names (#278).
+        lensCorrectedSources.set(corrected, lensSignatureOf(lensCorrection));
         if (updateUi) {
           state.lensCorrection.lastError = '';
           setLensStatus('lensStatusApplied');
@@ -9792,6 +9605,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
             const level = prebuiltLevel && displayLevelGeometry(prebuiltLevel).k === levelFactor ? prebuiltLevel
               : await buildDisplayLevelInBands(correctedSourceData, levelFactor, { isCurrent: isCurrentConversion });
             if (!level || !isCurrentConversion()) return;
+            // The lens this level carries (#278): the one its source was corrected with.
+            displayLevelLenses.set(level, lensCorrectedSources.get(correctedSourceData) || null);
             trace.mark('displayLevel', { outputPixels: getImageDataPixelCount(level) });
             invalidateSilverCoreCache();
             // A GPU frame of the previous source has nothing left to settle.
@@ -12325,11 +12140,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const display = settled ? captureDisplaySession(item, entry) : null;
       if (display) entry.display = display;
       // The persistent store keeps the display proxy of an exact route across
-      // restarts (part 3), after the next paint (the planes are copied). Not
-      // with lens correction, which the fills skip too: a cold open looks a
-      // stored proxy up without it (expectedStoredProxyKey), so this one could
-      // never be read back and would only push readable ones out (R2-006).
-      if (display && displayProxyStore && !lensCorrectionActive(state)) {
+      // restarts (part 3), after the next paint (the planes are copied), when
+      // its level carries the lens correction its key names (#278,
+      // storableDisplayLevel).
+      if (display && displayProxyStore && storableDisplayLevel(display.snapshot.refs.displayLevelImageData)) {
         const proxy = { image: display.snapshot.refs.displayLevelImageData, sample: display.sample,
           proxyKey: display.sourcePending.key, meta: displaySessionMeta(display) };
         schedulePostPaintTask(() => { void persistDisplayProxy(item, proxy); });
@@ -12405,6 +12219,17 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         });
       }
       return stored;
+    }
+
+    // Whether the live display level carries the lens correction the live
+    // proxy key names (#278): the one its source was corrected with, or one
+    // carried with a record of it (none when nothing says). A lens runtime
+    // that failed, or lens settings changed without a conversion since,
+    // leave a level a cold open of the recipe would not show: it is not
+    // stored (the session and its spill still keep it, as they keep what
+    // the photo was left showing).
+    function storableDisplayLevel(level) {
+      return (displayLevelLenses.get(level) ?? null) === lensSignature(state);
     }
 
     // A session without its base left before it settled (#249, R2-002): a
@@ -12631,10 +12456,16 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       return samples;
     }
 
-    // The lens remap applyLensCorrectionWithSettings runs, or null.
+    // The lens remap applyLensCorrectionWithSettings runs, or null: the lens
+    // part of a display proxy's key. Everything lensfun's maps and the remap
+    // are built from (the crop's size is the geometry part).
     function lensSignature(settings = state) {
-      if (!lensCorrectionActive(settings)) return null;
-      const lens = resolveLensCorrection(settings);
+      return lensSignatureOf(resolveLensCorrection(settings));
+    }
+
+    // The same of a resolved lens block (resolveLensCorrection).
+    function lensSignatureOf(lens) {
+      if (!(lens?.enabled && lens.selectedLens?.handle)) return null;
       return JSON.stringify([lens.selectedLens, lens.params, lens.modes]);
     }
 
@@ -12904,16 +12735,17 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     // The proxy key a cold open of `item` would convert now, for a stored
-    // entry of these base sizes: the recipe's geometry and analysis area (as
+    // entry of these base sizes: the recipe's geometry, lens correction (as
+    // restoreSettings resolves it, #278) and analysis area (as
     // fillDisplayProxy keys it).
     function expectedStoredProxyKey(item, meta) {
       const settings = item?.settings;
-      if (!settings?.autoFrameMeta || !meta?.base || lensCorrectionActive(settings)) return null;
+      if (!settings?.autoFrameMeta || !meta?.base) return null;
       const descriptor = { width: meta.base.width, height: meta.base.height, has16: meta.base.has16, route: meta.base.route };
       const key = geometryKeyFor(descriptor, { rotationAngle: settings.rotationAngle, mirrored: settings.mirrored, cropRegion: settings.cropRegion });
       return displayProxyKey({
         id: null, route: descriptor.route, base: descriptor, rotationAngle: key.angle, mirrored: key.mirrored, cropRegion: key.crop,
-        lens: null, area: analysisAreaOf(settings.autoFrameMeta)
+        lens: lensSignature(settings), area: analysisAreaOf(settings.autoFrameMeta)
       });
     }
 
@@ -12952,16 +12784,20 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       return true;
     }
 
-    // What installs a spilled or stored proxy again, besides the planes.
+    // What installs a spilled or stored proxy again, besides the planes; a
+    // lens-corrected level's lens comes with it (#278).
     function displaySessionMeta(display) {
       const base = display.baseDescriptor;
       const key = display.geometry;
+      const level = display.snapshot.refs.displayLevelImageData;
+      const levelLens = displayLevelLenses.get(level);
       return {
         base: { width: base.width, height: base.height, has16: base.has16, route: base.route },
         geometry: { angle: key.angle, mirrored: key.mirrored, crop: key.crop, frameWidth: key.frameWidth, frameHeight: key.frameHeight },
         cropSize: display.cropSize, source: { width: display.sourcePending.width, height: display.sourcePending.height },
-        area: display.sourcePending.area, level: displayLevelGeometry(display.snapshot.refs.displayLevelImageData),
-        rawMetadata: display.rawMetadata || null, filmEdge: display.filmEdge || null
+        area: display.sourcePending.area, level: displayLevelGeometry(level),
+        rawMetadata: display.rawMetadata || null, filmEdge: display.filmEdge || null,
+        ...(levelLens ? { levelLens } : {})
       };
     }
 
@@ -12995,6 +12831,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // threshold lowers it) comes back as the plane itself.
       const level = meta.level?.k > 1 && image.__image16?.data
         ? adoptDisplayLevel(image.__image16.data, image.width, image.height, meta.level) : image;
+      // The lens correction its writer saw the level carry (#278).
+      if (typeof meta.levelLens === 'string') displayLevelLenses.set(level, meta.levelLens);
       return {
         tier: 'B', spilled: true, stored, file: item.file, base: null, baseDescriptor: base, rawMetadata: meta.rawMetadata, filmEdge: meta.filmEdge,
         planes: { frame, crop, level }, sample,
@@ -13019,13 +12857,19 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // (R2-003: after a restart or a project reopen, a roll pass, lane or
     // prefetch decode of a stored frame renders nothing). A roll frame held
     // in its worker (#252) comes back to the page only when there is a proxy
-    // to fill.
+    // to fill. With lens correction (#278) the resolved lens block it is
+    // keyed by comes too (`lensCorrection`): the fill corrects with that one.
     async function displayProxyFillPlan(item, shape, settings) {
       if (!(displayProxySpill.enabled || displayProxyStore) || !item || !shape || !state.fileQueue.includes(item)) return null;
       const skip = { skip: true };
-      if (!settings?.autoFrameMeta || !settings.filmEdge?.checked || lensCorrectionActive(settings)) return skip;
+      if (!settings?.autoFrameMeta || !settings.filmEdge?.checked) return skip;
       if (!usesSilverCoreConversion(settings) || state.dustRemoval.enabled || settings.repairStrokes?.length) return skip;
       if (shape.route === 'raw-fallback') return skip;
+      // Resolved once, before anything awaits: the key and the remap name the
+      // same lens. A fill remaps the 16-bit plane only.
+      const lensCorrection = resolveLensCorrection(settings);
+      const lens = lensSignatureOf(lensCorrection);
+      if (lens && (!shape.has16 || lensRemapFailed(lens))) return skip;
       const key = geometryKeyFor(shape, { rotationAngle: settings.rotationAngle, mirrored: settings.mirrored, cropRegion: settings.cropRegion });
       // Step 2's border mode of a colour frame without a crop reads its pixels.
       if (!key.crop && requiresFilmBase(settings)) return skip;
@@ -13035,12 +12879,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const descriptor = { width: shape.width, height: shape.height, has16: Boolean(shape.has16), route: shape.route };
       const area = analysisAreaOf(settings.autoFrameMeta);
       const proxyKey = displayProxyKey({
-        id: null, route: shape.route, base: descriptor, rotationAngle: key.angle, mirrored: key.mirrored, cropRegion: key.crop, lens: null, area
+        id: null, route: shape.route, base: descriptor, rotationAngle: key.angle, mirrored: key.mirrored, cropRegion: key.crop, lens, area
       });
       const kept = displayProxySpill.proxyKey(item.id) === proxyKey || await storedDisplayProxyKept(item, proxyKey);
       // The item may have left the queue while its file was hashed.
       if (!state.fileQueue.includes(item)) return null;
-      return { key, source, k, descriptor, area, proxyKey, kept };
+      return { key, source, k, descriptor, area, proxyKey, kept, lensCorrection: lens ? lensCorrection : null };
     }
 
     // Whether the persistent store holds `proxyKey` for `item`'s file (the
@@ -13058,6 +12902,38 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       }
     }
 
+    // The remap a lens-corrected fill applies (#278): lensfun's maps for its
+    // crop, as the editor builds them (from the cache, which fills do not
+    // grow), or null when the lens runtime or the maps fail. A lens that
+    // failed is not tried again by fills (lensRemapFailed): its frames are
+    // planned as skipped, so a roll frame's planes stay in its worker.
+    const lensRemapFailures = new Map();
+    async function lensRemapFor(lensCorrection, width, height) {
+      const signature = lensSignatureOf(lensCorrection);
+      if (lensRemapFailed(signature)) return null;
+      let failure = 'runtime';
+      try {
+        const runtime = await ensureLensfunClient();
+        failure = 'maps';
+        return { maps: lensCorrectionMaps(runtime, lensCorrection, width, height, { remember: false }), modes: lensCorrection.modes };
+      } catch (error) {
+        lensRemapFailures.set(signature, failure);
+        console.warn('Lens correction failed; display proxies of frames with this lens are not filled:', sanitizeLensRuntimeError(error));
+        return null;
+      }
+    }
+
+    // Whether fills gave up on this lens: for the session when lensfun could
+    // not build its maps, until the runtime loads when it did not load.
+    function lensRemapFailed(signature) {
+      const failure = lensRemapFailures.get(signature);
+      if (failure === 'runtime' && lensfunRuntime.client) {
+        lensRemapFailures.delete(signature);
+        return false;
+      }
+      return Boolean(failure);
+    }
+
     // Roll analysis and the lanes decode frames the editor has not opened.
     // While such a decode is in hand, the display proxy a cold open of the
     // frame would convert, its display level (#248), is rendered from it in
@@ -13065,9 +12941,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // with buildDisplayLevel's own sums) and stored or spilled with the
     // frame's colour-analysis sample, so the first open converts it without
     // a decode, at any window size. Only for decided geometry (the frame and
-    // film-edge detections done), without lens correction or repairs, and
-    // for a frame whose level is smaller than it (k > 1). Resolves whether a
-    // proxy of that key is kept.
+    // film-edge detections done), without repairs, and for a frame whose
+    // level is smaller than it (k > 1). A lens-corrected frame (#278) is
+    // remapped as the editor remaps it after the crop, band by band in the
+    // pool too, with the maps lensfun builds for it: not when they cannot be
+    // built (the editor would show the frame uncorrected, which no key
+    // names) or the lens moves rows too far for the bands' budget. Resolves
+    // whether a proxy of that key is kept.
     async function fillDisplayProxy(item, base, settings, { isCurrent = () => true } = {}) {
       const skip = () => { displaySessionDiagnostics.fillSkips++; return false; };
       if (!base?.data || isReleasedPlane(base)) return false;
@@ -13078,17 +12958,27 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         displaySessionDiagnostics.fillsKept++;
         return true;
       }
-      const { key, source, k, descriptor, area, proxyKey } = fill;
+      const { key, source, k, descriptor, area, proxyKey, lensCorrection } = fill;
       const plan = geometryPlanFor(base, key);
       if (!plan) return skip();
-      const level = await geometryPool.renderDisplayLevel(base, plan, { k, isCurrent });
+      let level;
+      if (lensCorrection) {
+        const lens = plan.has16 ? await lensRemapFor(lensCorrection, plan.outWidth, plan.outHeight) : null;
+        if (!isCurrent() || !state.fileQueue.includes(item)) return false;
+        if (!lens) return skip();
+        level = await geometryPool.renderLensDisplayLevel(base, plan, lens, { k, isCurrent });
+        if (!level && isCurrent() && state.fileQueue.includes(item)) return skip();
+      } else {
+        level = await geometryPool.renderDisplayLevel(base, plan, { k, isCurrent });
+      }
       if (!level || !isCurrent() || !state.fileQueue.includes(item)) return false;
       const sample = getColorAnalysisSample(settings, base);
       const meta = {
         base: descriptor,
         geometry: { angle: key.angle, mirrored: key.mirrored, crop: key.crop, frameWidth: key.frameWidth, frameHeight: key.frameHeight },
         cropSize: key.crop ? { width: key.crop.width, height: key.crop.height } : null, source, area, level: displayLevelGeometry(level),
-        rawMetadata: null, filmEdge: settings.filmEdge || null
+        rawMetadata: null, filmEdge: settings.filmEdge || null,
+        ...(lensCorrection ? { levelLens: lensSignatureOf(lensCorrection) } : {})
       };
       // The persistent store keeps it across restarts (part 3); the session
       // spill takes it when the store is off or full.
@@ -13451,6 +13341,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       displaySessionDiagnostics.selfChecks++;
       const levelMatches = rebuilt.width === level.width && rebuilt.height === level.height
         && displayPlaneHash(rebuilt) === displayPlaneHash(level);
+      // The level in use now carries the source's lens (#278).
+      displayLevelLenses.set(levelMatches ? level : rebuilt, lensCorrectedSources.get(source) || null);
       const base = state.loadedBaseImageData;
       const cached = base ? colorAnalysisSamples.get(base) : null;
       const area = cached?.key === analysisAreaOf(state.autoFrame.lastDiagnostics) ? JSON.parse(cached.key) : null;
@@ -16365,6 +16257,26 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           settings: extractCurrentSettings(),
           wb: { r: state.wbR, g: state.wbG, b: state.wbB, confidence: state.wbAutoConfidence ?? null }
         })),
+        // With ?debug=1, a lensfun client of the smoke's own (#278): its
+        // maps, so a lens-corrected display session runs the real remap.
+        lensRuntime: client => {
+          if (!DEBUG_UI) return false;
+          Object.assign(lensfunRuntime, { client, source: 'local', initPromise: null, lastError: '' });
+          lensMapCache.clear();
+          lensRemapFailures.clear();
+          return true;
+        },
+        // What lens correction did to the photo on screen: its status and
+        // whether its source and display level carry the recipe's lens.
+        lens: () => {
+          const signature = lensSignature(state);
+          const source = state.conversionSourceImageData;
+          return {
+            active: Boolean(signature), status: state.lensCorrection.statusKey || null,
+            source: source ? lensCorrectedSources.get(source) === signature && Boolean(signature) : null,
+            level: state.displayLevelImageData ? displayLevelLenses.get(state.displayLevelImageData) === signature && Boolean(signature) : null
+          };
+        },
         // A photo that is not on screen opens cold next time (or, with
         // `keepStore`, from the persistent store): its session, prefetched
         // base and spilled (and stored) proxies go.

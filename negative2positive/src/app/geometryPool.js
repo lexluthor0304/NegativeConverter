@@ -9,6 +9,7 @@ import {
 } from './imageGeometry.js';
 import { displayLevelFactor, displayLevelRows, adoptDisplayLevel } from './displayPreview.js';
 import { allocPlane16, hasDerivedEightBit, markDerivedEightBit, isSharedPlane, deriveEightBit, guardSharedPlanes } from './crossOriginIsolation.js';
+import { applyLensMapRows, lensRowExtents, lensSourceRows, sliceLensMaps, lensMapBuffers } from './lensMaps.js';
 
 // Below this many output pixels a band is not worth a worker round trip.
 const MIN_BAND_PIXELS = 1_000_000;
@@ -28,6 +29,9 @@ const LEVEL_BAND_MAX_OVERLAP = 1 / 3;
 // A level band's rows are copied at most this many bytes per main-thread
 // task (a steep angle's single band holds the whole window's rows).
 const LEVEL_COPY_TASK_BYTES = 32 * 1024 * 1024;
+// A lens-corrected level's band on the main thread (#278) renders the rows
+// its remap reads this many at a time per task.
+const LENS_WINDOW_ROWS_PER_TASK = 32;
 
 export function defaultGeometryPoolSize(hardwareConcurrency = globalThis.navigator?.hardwareConcurrency) {
   const cores = Number(hardwareConcurrency) || 4;
@@ -52,21 +56,30 @@ export function geometryBandCount(plan, poolSize = defaultGeometryPoolSize()) {
  * a time takes the whole budget while that copies each row at most twice;
  * beyond that (steep angles) one band reads the window once.
  *
+ * A lens-corrected level's band (#278) holds what `held(y0, y1)` says
+ * instead (its copy and the output rows it renders, which differ along the
+ * frame), at least `heldCopies` times its own rows.
+ *
  * @returns {{ rows: number, inFlight: number }} output rows per band (a
  *   multiple of k) and bands in flight
  */
-export function planDisplayLevelBands(plan, k, { workers = 1, maxBytes, bytesPerPixel = plan.has16 ? 8 : 4 } = {}) {
+export function planDisplayLevelBands(plan, k, { workers = 1, maxBytes, bytesPerPixel = plan.has16 ? 8 : 4, held = null, heldCopies = 1 } = {}) {
   const groups = Math.floor(plan.outHeight / k);
   if (groups < 1) return { rows: k, inFlight: 1 };
   const middle = Math.floor(groups / 2);
   // The copy of a band of `count` k-row groups at the window's middle, where
-  // a band's rectangle is the tallest (the base clamps it near its edges).
-  const copy = count => {
+  // a band's rectangle is the tallest (the base clamps it near its edges);
+  // with `held`, the most any band of that partition holds.
+  const copy = held ? count => {
+    let most = 0;
+    for (let group = 0; group < groups; group += count) most = Math.max(most, held(group * k, Math.min(groups, group + count) * k));
+    return most;
+  } : count => {
     const y0 = Math.max(0, Math.min(middle, groups - count)) * k;
     const rect = geometrySourceRect(plan, y0, y0 + count * k);
     return rect.width * rect.height * bytesPerPixel;
   };
-  const own = count => count * k * plan.step * plan.outWidth * plan.step * bytesPerPixel;
+  const own = count => heldCopies * count * k * plan.step * plan.outWidth * plan.step * bytesPerPixel;
   // The most groups (up to `cap`) whose copy fits `budget`; 0 if none does.
   const tallest = (budget, cap) => {
     let low = 0;
@@ -159,6 +172,38 @@ function renderRows16(plan, src, data16, y0, y1) {
   }
 }
 
+// The display level rows of lens-corrected output rows [y0, y1) (#278):
+// the output rows they read (`lens.window`, lensSourceRows) rendered from
+// `src` (16-bit only, from zeros as a fresh output), then lensLevelRows.
+function renderLensLevelRows(plan, src, lens, y0, y1, k) {
+  const { y0: wy0, y1: wy1 } = lens.window;
+  const window16 = new Uint16Array((wy1 - wy0) * plan.outWidth * 4);
+  renderRows16(plan, src, window16, wy0, wy1);
+  return lensLevelRows(plan, window16, lens, y0, y1, k);
+}
+
+// Output rows [y0, y1) remapped from `window16` (the output's rows of
+// `lens.window`), LEVEL_ROWS_PER_PASS level rows at a time into one scratch
+// band, and box-averaged: buildDisplayLevel of applyLensMapsToImage of the
+// whole output, those rows. `lens.maps` holds at least the grid rows these
+// rows read (sliceLensMaps).
+function lensLevelRows(plan, window16, lens, y0, y1, k) {
+  const width = plan.outWidth;
+  const rowLength = width * 4;
+  const input = { source: window16, sourceRow0: lens.window.y0, width, height: plan.outHeight, maxValue: 65535 };
+  const levelWidth = Math.floor(width / k);
+  const out = new Uint16Array(((y1 - y0) / k) * levelWidth * 4);
+  const pass = LEVEL_ROWS_PER_PASS * k;
+  const scratch = new Uint16Array(Math.min(pass, y1 - y0) * rowLength);
+  for (let a = y0; a < y1; a += pass) {
+    const b = Math.min(y1, a + pass);
+    const rows = scratch.subarray(0, (b - a) * rowLength);
+    applyLensMapRows(input, lens.maps, lens.modes, { out16: rows }, a, b);
+    out.set(displayLevelRows({ width, height: b - a, __image16: { data: rows } }, k, levelWidth), ((a - y0) / k) * levelWidth * 4);
+  }
+  return out;
+}
+
 // A band's source when the base is shared (#264): full-width rows [y, y +
 // height) of the base, as a view of its shared 16-bit plane (no copy), and
 // the 8-bit rows an index plan reads, derived here (`derive8`) or posted.
@@ -171,17 +216,18 @@ function bandSource(src) {
 
 // The worker side: one band of one plan, and with `levelFactor` > 1 its rows
 // of the display level (#248); with `levelOnly` (#249) those level rows
-// alone; with `planes16` (#256) its 16-bit rows only. `out16` (#264): the
-// band's rows of a shared output plane, written in place (only the 8-bit
-// rows go back).
+// alone, of the lens-corrected output with `lens` (#278); with `planes16`
+// (#256) its 16-bit rows only. `out16` (#264): the band's rows of a shared
+// output plane, written in place (only the 8-bit rows go back).
 export function runGeometryBand(message) {
-  const { id, plan, y0, y1, levelFactor = 1, planes16 = false, levelOnly = false } = message;
+  const { id, plan, y0, y1, levelFactor = 1, planes16 = false, levelOnly = false, lens = null } = message;
   const src = bandSource(message.src);
   // A display proxy band (#249) sends back its level rows only, and the
   // buffers of the rows it was sent, for the page to copy the next band's
   // rows into (R2-003); never a shared base's.
   if (levelOnly) {
-    const level16 = renderLevelRows(plan, levelBandSource(plan, src), y0, y1, levelFactor);
+    const level16 = lens ? renderLensLevelRows(plan, levelBandSource(plan, src), lens, y0, y1, levelFactor)
+      : renderLevelRows(plan, levelBandSource(plan, src), y0, y1, levelFactor);
     const spent = [...new Set([src.data16?.buffer, src.data8?.buffer])].filter(buffer => buffer instanceof ArrayBuffer);
     return { payload: { id, level16, spent }, transfers: [level16.buffer, ...spent] };
   }
@@ -380,7 +426,7 @@ export function createGeometryPool({
     return new Promise(resolve => waiters.push(resolve));
   }
 
-  function postBand(entry, plan, band, src, levelFactor = 1, { planes16 = false, levelOnly = false, out16 = null } = {}) {
+  function postBand(entry, plan, band, src, levelFactor = 1, { planes16 = false, levelOnly = false, out16 = null, lens = null } = {}) {
     return new Promise((resolve, reject) => {
       const id = ++sequence;
       const timer = setTimeout(() => fail(entry, new Error('Geometry worker timed out')), timeoutMs);
@@ -388,10 +434,13 @@ export function createGeometryPool({
       const transfers = [];
       if (src.data8) transfers.push(src.data8.buffer);
       if (src.data16) transfers.push(src.data16.buffer);
+      // A lens band's grid rows are its own copies (sliceLensMaps).
+      if (lens) transfers.push(...lensMapBuffers(lens.maps));
       try {
         entry.worker.postMessage({
           type: 'geometry-band', id, plan, y0: band.y0, y1: band.y1, src, levelFactor,
-          ...(planes16 ? { planes16: true } : {}), ...(levelOnly ? { levelOnly: true } : {}), ...(out16 ? { out16 } : {})
+          ...(planes16 ? { planes16: true } : {}), ...(levelOnly ? { levelOnly: true } : {}), ...(out16 ? { out16 } : {}),
+          ...(lens ? { lens } : {})
         }, transfers);
       } catch (error) {
         fail(entry, error);
@@ -623,9 +672,150 @@ export function createGeometryPool({
     return adoptDisplayLevel(level16, levelWidth, levelHeight, { sourceWidth: plan.outWidth, sourceHeight: plan.outHeight, k });
   }
 
+  /**
+   * The display level (#248) of the lens-corrected output of `plan` (#278):
+   * buildDisplayLevel of applyLensMapsToImage of the whole output, the remap
+   * the editor runs after the crop, without building either. `lens` is
+   * `{ maps, modes }`: lensfun's maps for a plan.outWidth x plan.outHeight
+   * output; 16-bit plans only. Each band renders the output rows its
+   * corrected rows read (lensSourceRows) from the base rows those read,
+   * remaps its rows and box-averages them, as renderDisplayLevel's bands
+   * do; a worker gets only the band's grid rows. Bands are planned by what
+   * they hold (their copied base rows and the output rows they render) and
+   * stay within `maxBytesInFlight`, renderDisplayLevel's 2 bytes per base
+   * pixel (the maps, about 0.7 bytes per pixel at 60 MP, come beside them
+   * as the level does).
+   * Resolves the level, or null once `isCurrent()` turned false, for k = 1,
+   * or when no band fits that budget (a lens that moves rows that far is
+   * not filled).
+   */
+  async function renderLensDisplayLevel(source, plan, lens, options = {}) {
+    const guarded = { guard: null };
+    try {
+      return await renderLensLevelBands(source, plan, lens, options, guarded);
+    } finally {
+      guarded.guard?.verify();
+    }
+  }
+
+  async function renderLensLevelBands(source, plan, { maps, modes }, {
+    k = displayLevelFactor(plan.outWidth, plan.outHeight), isCurrent = () => true, levelRowsPerBand = null,
+    maxInFlight = null, maxBytesInFlight = null, copyTaskBytes = LEVEL_COPY_TASK_BYTES
+  } = {}, guarded = {}) {
+    if (!(k > 1) || !plan.has16) return null;
+    const width = plan.outWidth;
+    const levelWidth = Math.floor(width / k);
+    const levelHeight = Math.floor(plan.outHeight / k);
+    const limit = Math.max(1, Math.min(poolSize, Number(maxInFlight) || Number(maxBandsInFlight) || poolSize));
+    const shared = isSharedPlane(source.__image16?.data);
+    if (shared) guarded.guard = guardSharedPlanes('lens display level bands', [source.__image16.data]);
+    const extents = lensRowExtents(maps, modes);
+    const windowOf = (y0, y1) => lensSourceRows(maps, modes, y0, y1, plan.outHeight, extents);
+    const maxBytes = Number(maxBytesInFlight) || LEVEL_BAND_BYTES_PER_BASE_PIXEL * plan.baseWidth * plan.baseHeight;
+    // A band copies its base rows here unless it reads them through views
+    // (a shared base) or on this thread (no workers), and renders the
+    // output rows its window holds.
+    const copies = !shared && !broken;
+    const held = (y0, y1) => {
+      const window = windowOf(y0, y1);
+      const rendered = (window.y1 - window.y0) * width * 8;
+      if (!copies) return rendered;
+      const rect = geometrySourceRect(plan, window.y0, window.y1);
+      return rect.width * rect.height * 8 + rendered;
+    };
+    const fixed = Math.floor(Number(levelRowsPerBand)) || (broken ? LEVEL_ROWS_PER_PASS : 0);
+    const bands = fixed > 0 ? { rows: fixed * k, inFlight: broken ? 1 : limit }
+      : planDisplayLevelBands(plan, k, { workers: limit, maxBytes, held, heldCopies: copies ? 2 : 1 });
+    const queue = [];
+    let largest = 0;
+    for (let y0 = 0; y0 < levelHeight * k; y0 += bands.rows) {
+      const y1 = Math.min(levelHeight * k, y0 + bands.rows);
+      const window = windowOf(y0, y1);
+      queue.push({ y0, y1, window, rect: geometrySourceRect(plan, window.y0, window.y1) });
+      largest = Math.max(largest, held(y0, y1));
+    }
+    if (largest * Math.min(bands.inFlight, queue.length) > maxBytes) return null;
+    const level16 = new Uint16Array(levelWidth * levelHeight * 4);
+    const place = (band, rows) => level16.set(rows, (band.y0 / k) * levelWidth * 4);
+    const base = { x: 0, y: 0, width: plan.baseWidth, height: plan.baseHeight, data8: source.data, data16: source.__image16.data };
+    // A band on this thread (no workers, or its worker failed), a few level
+    // rows at a time, the window each reads rendered a few rows per task;
+    // null once stale.
+    const here = async band => {
+      const rows = new Uint16Array(((band.y1 - band.y0) / k) * levelWidth * 4);
+      const pass = LEVEL_ROWS_PER_PASS * k;
+      const rowLength = width * 4;
+      for (let a = band.y0; a < band.y1; a += pass) {
+        const b = Math.min(band.y1, a + pass);
+        const window = windowOf(a, b);
+        const window16 = new Uint16Array((window.y1 - window.y0) * rowLength);
+        for (let r = window.y0; r < window.y1; r += LENS_WINDOW_ROWS_PER_TASK) {
+          if (a > band.y0 || r > window.y0) {
+            await yieldTask();
+            if (!isCurrent()) return null;
+          }
+          const end = Math.min(window.y1, r + LENS_WINDOW_ROWS_PER_TASK);
+          renderRows16(plan, base, window16.subarray((r - window.y0) * rowLength, (end - window.y0) * rowLength), r, end);
+        }
+        rows.set(lensLevelRows(plan, window16, { window, maps, modes }, a, b, k), ((a - band.y0) / k) * levelWidth * 4);
+      }
+      counters.syncBands++;
+      return rows;
+    };
+    const bandModes = { includeTca: Boolean(modes.includeTca), includeVignetting: Boolean(modes.includeVignetting) };
+    const spare = [];
+    const running = new Map();
+    let token = 0;
+    while (queue.length || running.size) {
+      if (!isCurrent()) return null;
+      if (queue.length && running.size < bands.inFlight) {
+        const entry = await acquire();
+        if (!isCurrent()) {
+          if (entry) handOver(entry);
+          return null;
+        }
+        const band = queue.shift();
+        if (!entry) {
+          const rows = await here(band);
+          if (!rows) return null;
+          place(band, rows);
+        } else {
+          const slice = shared ? sharedBandSlice(source, plan, band.rect, { needs8: false })
+            : await sliceLevelSource(source, plan, band.rect, spare, { taskBytes: copyTaskBytes, pause: yieldTask, isCurrent });
+          if (!slice) {
+            handOver(entry);
+            return null;
+          }
+          counters.copiedBytes += copiedBytes(slice);
+          const lens = { window: band.window, maps: sliceLensMaps(maps, modes, band.y0, band.y1), modes: bandModes };
+          const key = ++token;
+          running.set(key, postBand(entry, plan, band, slice, k, { levelOnly: true, lens }).then(
+            part => ({ key, band, part }),
+            error => ({ key, band, error })
+          ));
+          counters.workerBands++;
+        }
+        await yieldTask();
+        continue;
+      }
+      const settled = await Promise.race(running.values());
+      running.delete(settled.key);
+      if (settled.part?.spent) spare.push(...settled.part.spent);
+      if (!isCurrent()) return null;
+      const rows = settled.error || !settled.part.level16 ? await here(settled.band) : settled.part.level16;
+      if (!rows) return null;
+      place(settled.band, rows);
+      await yieldTask();
+    }
+    if (!isCurrent()) return null;
+    counters.levels++;
+    return adoptDisplayLevel(level16, levelWidth, levelHeight, { sourceWidth: plan.outWidth, sourceHeight: plan.outHeight, k });
+  }
+
   return {
     render,
     renderDisplayLevel,
+    renderLensDisplayLevel,
     get size() { return poolSize; },
     get available() { return !broken; },
     counters,

@@ -107,7 +107,9 @@ const FUNCTIONS = [
   'sameDescriptorSamples', 'displaySessionMismatch',
   'hasSeparateConversionPreview', 'displayProxyShape', 'displayProxyFillPlan', 'storedDisplayProxyKept', 'fillDisplayProxy', 'readStoredDisplaySession',
   'expectedStoredProxyKey', 'persistDisplayProxy', 'displayProxyFileKeyFor', 'persistPresentationPreview',
-  'presentStoredPreview', 'encodePresentationJpeg'
+  'presentStoredPreview', 'encodePresentationJpeg',
+  // #278: the lens part of a proxy's key (null unless a test resolves a lens).
+  'lensSignature', 'lensSignatureOf', 'lensRemapFor', 'lensRemapFailed', 'lensCorrectionMaps', 'storableDisplayLevel'
 ];
 
 // The Apply Crop click handler, as a named function.
@@ -217,6 +219,8 @@ export function createHarness(base, { historyBudget = 768 * 1024 * 1024, session
     // No persistent store unless a test gives one (part 3).
     displayProxyStore: null, displayProxyFileKeys: new WeakMap(), DISPLAY_PROXY_HASHES: { decoder: 'wasm', code: 'code' },
     colorAnalysisSamples: new WeakMap(), colorAnalysisSampleMisses: new WeakSet(), autoWbFromRecords: new WeakSet(),
+    // #278: the lens each corrected source and each display level carries.
+    lensCorrectedSources: new WeakMap(), displayLevelLenses: new WeakMap(), lensRemapFailures: new Map(),
     displayProxyKey: displayProxy.displayProxyKey,
     displayPlaneHash: displayProxy.displayPlaneHash, checksum32: displayProxy.checksum32,
     displayPreviewSize: displayPreview.displayPreviewSize, resizeDisplayPreview: displayPreview.resizeDisplayPreview,

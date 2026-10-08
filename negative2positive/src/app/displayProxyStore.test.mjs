@@ -194,6 +194,43 @@ for (const stored of [0, 0.5 * GiB, 1 * GiB, 1.4 * GiB]) {
   assert.equal((await reloaded.find('file-a'))[0].lastUsed, a.lastUsed, 'and the index keeps it');
 }
 
+// ---- A lens-corrected display level (#278) is stored under a key whose
+// lens part names the correction, with that lens in its metadata: an index
+// read after a restart finds it by that key alone (not by the key without
+// the lens, nor by another lens's), and the record gives back the level
+// byte for byte, 16-bit only, with its lens ----
+{
+  const { buildDisplayLevel } = await import('./displayPreview.js');
+  const { displayProxyKey } = await import('./displayProxy.js');
+  const records = memoryRecords();
+  const make = () => createDisplayProxyStore({ port: localPort(), records, availableBytes: async () => 20 * GiB });
+  const lens = focal => JSON.stringify([{ handle: 2741040, maker: 'Test', model: 'Test 18-55mm' }, { focal, crop: 1.5, aperture: 5.6, distance: 1000, stepMode: 'auto', step: 2 },
+    { includeTca: true, includeVignetting: true }]);
+  const keyOf = lensPart => displayProxyKey({ route: 'libraw16', base: { width: 120, height: 80, has16: true }, rotationAngle: 1.3,
+    cropRegion: { left: 9, top: 7, width: 96, height: 60 }, lens: lensPart, area: '[]' });
+  const source = proxyImage(96, 60, 17);
+  const level = buildDisplayLevel(source, 2);
+  const file = { size: 4321, lastModified: 7 };
+  const meta = { base: { width: 120, height: 80, has16: true, route: 'libraw16' }, levelLens: lens(18) };
+  const writer = make();
+  assert.equal(await writer.put('file-a', keyOf(lens(18)), { file, image: level, meta }), true);
+  await writer.settled();
+  const restarted = make();
+  await restarted.load();
+  const entries = await restarted.find('file-a');
+  assert.deepEqual(entries.map(entry => entry.proxyKey), [keyOf(lens(18))], 'found by the key with its lens');
+  for (const other of [keyOf(null), keyOf(lens(24))]) {
+    assert.equal(entries.some(entry => entry.proxyKey === other), false, 'not by the key without it or with another lens');
+    assert.equal(await restarted.has('file-a', other), false);
+  }
+  assert.equal(await restarted.has('file-a', keyOf(lens(18))), true);
+  const read = await restarted.read(entries[0].name);
+  assert.equal(read.image.data, undefined, 'a 16-bit level');
+  assert.ok(Buffer.from(read.image.__image16.data.buffer).equals(Buffer.from(level.__image16.data.buffer)), 'byte for byte');
+  assert.equal(read.meta.levelLens, lens(18), 'with the lens it carries');
+  assert.equal(read.proxyKey, keyOf(lens(18)));
+}
+
 // ---- A store on a Firefox-like quota (R2-068): 10 GiB for the origin, its
 // usage the records it holds. Every put is stored and the budget stays the
 // setting as it fills ----

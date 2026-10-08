@@ -47,6 +47,8 @@ export function displaySessionStubs(overrides = {}) {
     // Every photo has its base: no colour-analysis sample is ever missing.
     colorAnalysisSampleMissing: () => false, ensureColorAnalysisSample: async () => true,
     colorAnalysisSampleMisses: new WeakSet(), analysisSamplesFor: () => new Map(), autoWbFromRecords: new WeakSet(),
+    // #278: no source or level carries a lens.
+    lensCorrectedSources: new WeakMap(), displayLevelLenses: new WeakMap(),
     forgetDisplayProxies: () => {}, readSpilledDisplaySession: async () => null,
     // The planes are always the geometry the settings name (R1-065), and no
     // session is left unsettled without its base (R2-002).

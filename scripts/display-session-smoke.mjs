@@ -20,7 +20,11 @@
 //    (PNG16, TIFF16) what a cold reopen of the recipe exports;
 //  - a frame left inside the reprocess debounce of a slider nudge (R2-002)
 //    comes back from its display form without a read or decode, with the
-//    nudge and its history, showing what a cold open of that recipe shows.
+//    nudge and its history, showing what a cold open of that recipe shows;
+//  - a lens-corrected colour frame (#278, test lens maps) left is stored
+//    under its lens and, after a restart, opens from the store within
+//    400 ms without a read or decode, showing and exporting what a cold
+//    open of its recipe shows and exports.
 // Tiers are forced through window.__ncDisplaySessions.force: the budget
 // logic itself is covered by the Node tests (displaySessions.test.mjs).
 import { createRequire } from 'node:module';
@@ -445,6 +449,116 @@ export async function runDisplaySessionSmoke({ send, evaluate, waitFor, fail, in
     }
     console.log('ok: a frame left right after a nudge comes back (Tier A, Tier B; left unsettled when the worker converts its ticks, settled first when the GPU draws them) without a read or decode, with the nudge and its history, showing what a cold open of the nudged recipe shows');
     await evaluate(`window.__ncDisplaySessions.force(null)`);
+
+    // ---- Lens correction (#278): a lens-corrected colour frame left is
+    // stored under its lens; after a restart (its session and spill gone, the
+    // store kept) it opens from the store without a read or decode, settles
+    // within 400 ms, shows what a cold open of its recipe shows, and exports
+    // what that exports (its source rebuilt with the correction, the stored
+    // level checked against it). The app's own lens runtime is tried first
+    // and reported: lensfun-wasm 0.1.3 builds no maps in a browser (its
+    // module exports no HEAPF32 view, so the editor leaves the frame
+    // uncorrected). A lensfun client of test maps (lensTestMaps.mjs,
+    // ?debug=1) then stands in for it, with the lens the search found ----
+    const lensState = () => evaluate('window.__ncDisplaySessions.lens()');
+    const reopenCold = async () => {
+      await open(1, Y);
+      await open(0, X, { before: 'await window.__ncDisplaySessions.drop(0)' });
+      expect((await live()).base, 'the lens reference was not opened cold');
+    };
+    const lensStatus = () => evaluate(`document.getElementById('lensStatusBox').textContent`);
+    // The lens panel's search and "Use selected profile": the first profile found.
+    const chooseLens = async () => {
+      await evaluate(`(() => {
+        const set = (id, value) => { const input = document.getElementById(id); input.value = value; input.dispatchEvent(new Event('input', { bubbles: true })); };
+        set('lensLensModelInput', 'AF-S DX Nikkor 18-55mm f/3.5-5.6G VR');
+        set('lensLensMakerInput', 'Nikon');
+        set('lensCameraMakerInput', 'Nikon Corporation');
+        set('lensCameraModelInput', 'Nikon D7000');
+        document.getElementById('lensSearchBtn').click();
+      })()`);
+      await until('the lens search answered', `!document.getElementById('lensSearchBtn').disabled`, 60000);
+      return evaluate(`(() => {
+        const select = document.getElementById('lensResultSelect');
+        if (!select.options[0]?.value) return null;
+        select.value = select.options[0].value;
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+        document.getElementById('lensUseSelectedBtn').click();
+        return select.options[0].textContent;
+      })()`);
+    };
+    let found = await chooseLens();
+    if (found) {
+      await reopenCold();
+      const own = await lensState();
+      expect(own.active, 'the lens chosen is not active in the recipe: ' + JSON.stringify(own));
+      console.log(`note: the app's own lens runtime with ${found}: ${own.source ? 'corrected the frame' : `left it uncorrected (${await lensStatus()})`}`);
+    } else {
+      console.log(`note: the app's own lens runtime found no profile (${await lensStatus()})`);
+    }
+    expect(await evaluate(`(async () => {
+      const { lensTestClient } = await import('/src/app/lensTestMaps.mjs');
+      return window.__ncDisplaySessions.lensRuntime(lensTestClient());
+    })()`), 'the test lens runtime was not installed (?debug=1)');
+    if (!found) found = await chooseLens();
+    expect(found, 'the test lens runtime found no profile: ' + await lensStatus());
+    await reopenCold();
+    const corrected = await lensState();
+    expect(corrected.active && corrected.source && corrected.level && corrected.status === 'lensStatusApplied',
+      'the cold open did not correct the frame with the test maps: ' + JSON.stringify(corrected));
+    const coldLens = await view();
+    const coldLensExport = await exportPixels(16);
+    await settlePreviewFrame();
+    expect((await view()).gpu === coldLens.gpu, 'the lens-corrected frame did not settle back to its preview');
+    if (storeBudget >= 64 * 1024 ** 2) {
+      const writes = (await evaluate('window.__ncDisplaySessions.store()')).writes;
+      await open(1, Y);
+      await evaluate('window.__ncDisplaySessions.settled()');
+      expect((await evaluate('window.__ncDisplaySessions.store()')).writes > writes, 'the lens-corrected frame left was not stored: ' + JSON.stringify(await evaluate('window.__ncDisplaySessions.store()')));
+      const storeHits = (await diagnostics()).storeHits;
+      const before = await counts(X);
+      // The click, and the first frame that shows the cold open's pixels.
+      const settled = await evaluate(`(async () => {
+        await window.__ncDisplaySessions.drop(0, { keepStore: true });
+        const expected = ${JSON.stringify(coldLens.gpu)};
+        const start = performance.now();
+        document.querySelector('.file-list-name[data-index="0"]').click();
+        return new Promise(resolve => {
+          const tick = () => {
+            const now = performance.now();
+            if (window.__photoSessionProbe.lastGpu?.hash === expected && document.body.dataset.photoSwitching !== 'true'
+              && document.getElementById('studioFilename').textContent === ${JSON.stringify(X)}) resolve(now - start);
+            else if (now - start > 15000) resolve(null);
+            else requestAnimationFrame(tick);
+          };
+          requestAnimationFrame(tick);
+        });
+      })()`);
+      await until(`photo ${X} open from the store`, `${ready} && document.getElementById('studioFilename').textContent === ${JSON.stringify(X)}`, 120000);
+      await idle();
+      const after = await counts(X);
+      expect((await diagnostics()).storeHits === storeHits + 1, 'the lens-corrected frame did not open from the store: ' + JSON.stringify(await diagnostics()));
+      expect(after.reads === before.reads && after.decodes === before.decodes, 'the lens-corrected store hit read or decoded: ' + JSON.stringify({ before, after }));
+      expect(settled !== null, 'the lens-corrected store hit never showed the cold open\'s pixels');
+      expect(settled <= 400, `the lens-corrected store hit settled in ${settled.toFixed(0)} ms (budget 400 ms)`);
+      const stored = await lensState();
+      expect(stored.active && stored.level && stored.source === null, 'the store hit is not a lens-corrected display session: ' + JSON.stringify(stored));
+      const hit = await view();
+      expect(hit.gpu === coldLens.gpu, `the stored lens-corrected proxy converted to other pixels (${hit.gpu} vs ${coldLens.gpu})`);
+      expect(JSON.stringify(hit.wb) === JSON.stringify(coldLens.wb), 'the store hit has another white balance than the lens-corrected cold open: ' + JSON.stringify({ hit: hit.wb, cold: coldLens.wb }));
+      // The lens panel's status line is the last correction's message, not
+      // the recipe's: a proxy opens without running lens correction.
+      const recipeOf = settings => ({ ...settings, lensCorrection: { ...settings.lensCorrection, statusKey: null, statusVars: null } });
+      const settingsDiff = differences(recipeOf(coldLens.settings), recipeOf(hit.settings));
+      expect(!settingsDiff.length, `the store hit saved other settings than the lens-corrected cold open:\n${settingsDiff.join('\n')}`);
+      const mismatches = (await diagnostics()).selfCheckMismatches;
+      const hitExport = await exportPixels(16);
+      expect(hitExport.sha256 === coldLensExport.sha256, 'the export after a lens-corrected store hit differs from the cold open\'s');
+      expect((await diagnostics()).selfCheckMismatches === mismatches, 'the stored lens-corrected level failed its self-check');
+      console.log(`ok: a lens-corrected colour frame left is stored under its lens; after a restart it opens from the store without a read or decode, settles in ${settled.toFixed(0)} ms, shows and exports what a cold open shows and exports`);
+    } else {
+      console.log('note: the display-proxy store has no budget: the lens-corrected store hit is not checked');
+    }
   } catch (error) {
     failure = error;
   } finally {

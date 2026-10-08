@@ -54,7 +54,11 @@ the k × k box level the preview worker resamples display images from. Batch
 export asks for none. A display proxy fill (#249) asks for the level alone
 (`renderDisplayLevel`): its bands read a shared base through views and copy
 only the plane the level reads from a plain one, in bands planned by the
-bytes they copy (`planDisplayLevelBands`, `docs/photo-sessions.md`).
+bytes they copy (`planDisplayLevelBands`, `docs/photo-sessions.md`). A
+lens-corrected frame's fill (#278, `renderLensDisplayLevel`) renders, per
+band, the crop rows the lens remap of its rows reads, remaps them with the
+band's grid rows (`lensMaps.js`, the editor's remap) and box-averages them,
+in bands planned by the base rows they copy and the rows they render.
 `counters.copiedBytes` counts every band row the main thread copies, for
 both kinds of job.
 

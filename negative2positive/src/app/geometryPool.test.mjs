@@ -399,6 +399,167 @@ for (const failure of [{ failOn: 1 }, { crashOn: 0 }, { throwOnPost: true }]) {
   }
 }
 
+// #278: the display level of a lens-corrected output, band by band: each
+// band renders the output rows its corrected rows read, remaps its rows with
+// the grid rows it was sent and box-averages them. It equals buildDisplayLevel
+// of applyLensMapsToImage of the whole output (what the editor converts),
+// byte for byte, on workers and on this thread, planned or in fixed bands,
+// from a shared base, with TCA and vignetting or without, for a strong lens
+// and for grids with NaN, infinite and far-off nodes. A worker that fails
+// leaves its band to this thread; a stale job stops; a band that cannot
+// keep to the budget skips the frame; an 8-bit plan has none.
+{
+  const { applyLensMapsToImage } = await import('./lensMaps.js');
+  const { lensTestMaps } = await import('./lensTestMaps.mjs');
+  const sameLevel = (actual, expected, label) => {
+    assert.ok(actual, `${label}: a level`);
+    assert.deepEqual([actual.width, actual.height], [expected.width, expected.height], label);
+    assert.ok(bytes(actual.__image16.data).equals(bytes(expected.__image16.data)), `${label}: level`);
+    assert.deepEqual(displayLevelGeometry(actual), displayLevelGeometry(expected), `${label}: geometry`);
+  };
+  const all = { includeTca: true, includeVignetting: true };
+  const lenses = [
+    ['lensfun-like', options => lensTestMaps(options.width, options.height, 2), all],
+    ['geometry only', options => lensTestMaps(options.width, options.height, 3, { tca: false, vignetting: false }), { includeTca: false, includeVignetting: false }],
+    ['strong', options => lensTestMaps(options.width, options.height, 2, { strength: 0.3 }), all],
+    ['poisoned', options => lensTestMaps(options.width, options.height, 4, { poison: true }), all]
+  ];
+  for (const geometry of [geometries[0], geometries[1], geometries[2], geometries[5]]) {
+    const plan = planGeometry(source, geometry);
+    const whole = renderGeometry(source, plan);
+    for (const [lensLabel, makeMaps, modes] of lenses) {
+      const lens = { maps: makeMaps({ width: plan.outWidth, height: plan.outHeight }), modes };
+      const corrected = applyLensMapsToImage(whole, lens.maps, modes);
+      for (const k of [2, 3]) {
+        const expected = buildDisplayLevel(corrected, k);
+        const label = `lens ${lensLabel} ${JSON.stringify(geometry)} k ${k}`;
+        for (const levelRowsPerBand of [1, 5, 40, null]) {
+          const log = [];
+          const pool = createGeometryPool({ workerFactory: fakeWorkerFactory(log), workersSupported: true, size: 3 });
+          sameLevel(await pool.renderLensDisplayLevel(source, plan, lens, { k, levelRowsPerBand, maxBytesInFlight: Infinity }), expected, `${label} bands ${levelRowsPerBand}`);
+          assert.ok(log.length > 0 && pool.counters.syncBands === 0, `${label}: banded on workers`);
+          assert.ok(log.every(entry => !entry.has8), `${label}: no 8-bit rows`);
+          pool.dispose();
+        }
+        const sync = createGeometryPool({ workersSupported: false, size: 2 });
+        sameLevel(await sync.renderLensDisplayLevel(source, plan, lens, { k, maxBytesInFlight: Infinity }), expected, `${label} here`);
+        assert.equal(sync.counters.copiedBytes, 0, 'this thread reads the base itself');
+        // A base in shared memory (#264) is read through views.
+        const shared16 = new Uint16Array(new SharedArrayBuffer(source.__image16.data.byteLength));
+        shared16.set(source.__image16.data);
+        const sharedSource = new ImageData(source.data, source.width, source.height);
+        sharedSource.__image16 = { width: source.width, height: source.height, data: shared16 };
+        const pool = createGeometryPool({ workerFactory: fakeWorkerFactory([]), workersSupported: true, size: 3 });
+        sameLevel(await pool.renderLensDisplayLevel(sharedSource, plan, lens, { k, maxBytesInFlight: Infinity }), expected, `${label} shared`);
+        assert.equal(pool.counters.copiedBytes, 0, 'a shared base is not copied');
+        pool.dispose();
+      }
+    }
+  }
+  assert.ok(bytes(source.__image16.data).equals(base16), 'the base is never transferred or changed');
+  const plan = planGeometry(source, geometries[0]);
+  const lens = { maps: lensTestMaps(plan.outWidth, plan.outHeight, 2), modes: all };
+  const expected = buildDisplayLevel(applyLensMapsToImage(renderGeometry(source, plan), lens.maps, all), 2);
+  // A worker that fails: its band renders here, the level is the same.
+  const warnings = [];
+  const failing = createGeometryPool({ workerFactory: fakeWorkerFactory([], { failOn: 1 }), workersSupported: true, size: 2, onError: error => warnings.push(error.message) });
+  sameLevel(await failing.renderLensDisplayLevel(source, plan, lens, { k: 2, levelRowsPerBand: 5, maxBytesInFlight: Infinity }), expected, 'a failed lens band');
+  assert.ok(failing.counters.syncBands >= 1 && warnings.length === 1, 'the failed band ran here');
+  // On this thread the rows a pass's remap reads are rendered 32 per task:
+  // a strong lens's windows do not make long tasks.
+  {
+    const strong = { maps: lensTestMaps(plan.outWidth, plan.outHeight, 2, { strength: 0.3 }), modes: all };
+    const { lensRowExtents, lensSourceRows } = await import('./lensMaps.js');
+    const extents = lensRowExtents(strong.maps, all);
+    let windows = 0;
+    let passes = 0;
+    for (let a = 0; a < Math.floor(plan.outHeight / 2) * 2; a += 32) {
+      const window = lensSourceRows(strong.maps, all, a, Math.min(Math.floor(plan.outHeight / 2) * 2, a + 32), plan.outHeight, extents);
+      windows += Math.ceil((window.y1 - window.y0) / 32);
+      passes++;
+    }
+    let yields = 0;
+    const slices = createGeometryPool({ workersSupported: false, size: 1, yieldTask: async () => { yields++; await yieldToEventLoop(); } });
+    sameLevel(await slices.renderLensDisplayLevel(source, plan, strong, { k: 2, maxBytesInFlight: Infinity }),
+      buildDisplayLevel(applyLensMapsToImage(renderGeometry(source, plan), strong.maps, all), 2), 'a strong lens here');
+    assert.ok(windows > passes && yields >= windows - 1, `${yields} yields for ${windows} window slices in ${passes} passes`);
+  }
+  // A stale job stops; k = 1 and an 8-bit plan have no lens level.
+  let calls = 0;
+  const stale = createGeometryPool({ workersSupported: false, size: 1 });
+  assert.equal(await stale.renderLensDisplayLevel(source, plan, lens, { k: 2, levelRowsPerBand: 1, maxBytesInFlight: Infinity, isCurrent: () => ++calls < 3 }), null, 'a superseded lens level stops');
+  assert.equal(await stale.renderLensDisplayLevel(source, plan, lens, { k: 1 }), null, 'k = 1');
+  const eight = makeSource(120, 80, 13);
+  delete eight.__image16;
+  const plan8 = planGeometry(eight, geometries[5]);
+  assert.equal(await stale.renderLensDisplayLevel(eight, plan8, { maps: lensTestMaps(plan8.outWidth, plan8.outHeight, 2), modes: all }, { k: 2, maxBytesInFlight: Infinity }), null, 'an 8-bit plan has no lens level');
+  // A budget no band fits: the frame is skipped, nothing is posted.
+  const log = [];
+  const tight = createGeometryPool({ workerFactory: fakeWorkerFactory(log), workersSupported: true, size: 2 });
+  assert.equal(await tight.renderLensDisplayLevel(source, plan, lens, { k: 2, maxBytesInFlight: 1000 }), null, 'a band over the budget skips the frame');
+  assert.equal(log.length, 0, 'nothing was posted');
+  // The default budget is 2 bytes per base pixel, as for the plain level:
+  // the bands of a lensfun-like lens keep to it.
+  const frame = makeSource(1200, 800, 41);
+  const big = planGeometry(frame, { rotationAngle: 0.7, mirrored: false, cropRegion: { left: 60, top: 40, width: 1080, height: 720 } });
+  const bigLens = { maps: lensTestMaps(big.outWidth, big.outHeight, 3), modes: all };
+  const tracker = { inFlight: 0, peak: 0 };
+  const planned = createGeometryPool({ workerFactory: fakeWorkerFactory([], { tracker }), workersSupported: true, size: 6 });
+  sameLevel(await planned.renderLensDisplayLevel(frame, big, bigLens, { k: 2 }),
+    buildDisplayLevel(applyLensMapsToImage(renderGeometry(frame, big), bigLens.maps, all), 2), 'planned within the default budget');
+  assert.ok(tracker.peakBytes <= LEVEL_BAND_BYTES_PER_BASE_PIXEL * 1200 * 800, `${tracker.peakBytes} bytes copied in flight`);
+  planned.dispose();
+}
+
+// The lens planner (#278) on a 60 MP frame's geometry (sizes only), 88 % of
+// the frame at 0.7 deg, under lenses that move rows as lensfun's maps of an
+// 18 mm zoom do (up to 135 rows), as a macro lens does (a few) and as a
+// fisheye would. A band holds its copied base rows and the output rows it
+// renders: the bands stay within 2 bytes per base pixel, several at once
+// only while each holds at most a third over twice its own rows; the
+// fisheye's would not fit one at a time, so its frame is not filled.
+// Without `held` the plan is the one before.
+{
+  const { lensRowExtents, lensSourceRows } = await import('./lensMaps.js');
+  const { lensTestMaps } = await import('./lensTestMaps.mjs');
+  const sizeOnly = (width, height) => {
+    const data16 = new Uint16Array(0);
+    Object.defineProperty(data16, 'length', { value: width * height * 4 });
+    return { width, height, data: { length: width * height * 4 }, __image16: { width, height, data: data16 } };
+  };
+  const frame = rotatedDimensions(9536, 6336, 0.7);
+  const cropRegion = { left: Math.round(frame.width * 0.06), top: Math.round(frame.height * 0.06), width: Math.round(frame.width * 0.88), height: Math.round(frame.height * 0.88) };
+  const plan = planGeometry(sizeOnly(9536, 6336), { rotationAngle: 0.7, mirrored: false, cropRegion });
+  const k = 3;
+  const rows = Math.floor(plan.outHeight / k) * k;
+  const budget = LEVEL_BAND_BYTES_PER_BASE_PIXEL * 9536 * 6336;
+  const modes = { includeTca: true, includeVignetting: true };
+  for (const [label, strength, fits] of [['18 mm', 0.045, true], ['macro', 0.004, true], ['fisheye', 0.7, false]]) {
+    const maps = lensTestMaps(plan.outWidth, plan.outHeight, 8, { strength });
+    const extents = lensRowExtents(maps, modes);
+    const held = (y0, y1) => {
+      const window = lensSourceRows(maps, modes, y0, y1, plan.outHeight, extents);
+      const rect = geometrySourceRect(plan, window.y0, window.y1);
+      return rect.width * rect.height * 8 + (window.y1 - window.y0) * plan.outWidth * 8;
+    };
+    const bands = planDisplayLevelBands(plan, k, { workers: 6, maxBytes: budget, held, heldCopies: 2 });
+    assert.equal(bands.rows % k, 0);
+    let largest = 0;
+    let rendered = 0;
+    for (let y0 = 0; y0 < rows; y0 += bands.rows) {
+      const y1 = Math.min(rows, y0 + bands.rows);
+      largest = Math.max(largest, held(y0, y1));
+      const window = lensSourceRows(maps, modes, y0, y1, plan.outHeight, extents);
+      rendered += window.y1 - window.y0;
+    }
+    assert.equal(bands.inFlight * largest <= budget, fits, `${label}: ${bands.inFlight} x ${(largest / 2 ** 20).toFixed(0)} MiB, budget ${(budget / 2 ** 20).toFixed(0)} MiB`);
+    if (bands.inFlight > 1) assert.ok(largest <= 2 * bands.rows * plan.outWidth * 8 * 4 / 3, `${label}: a third over its own rows at most`);
+    if (fits) assert.ok(rendered <= 1.6 * rows, `${label}: the bands render ${(rendered / rows).toFixed(2)}x the output rows`);
+    if (label === 'macro') assert.ok(bands.inFlight > 1, 'a macro lens\'s bands run in parallel');
+  }
+  assert.deepEqual(planDisplayLevelBands(plan, k, { workers: 6, maxBytes: budget }), planDisplayLevelBands(plan, k, { workers: 6, maxBytes: budget, heldCopies: 1 }), 'no held: as before');
+}
+
 // Band counts: 4-6 for full-resolution outputs, fewer for small ones.
 assert.equal(geometryBandCount({ outWidth: 9000, outHeight: 6000 }, 6), 6);
 assert.equal(geometryBandCount({ outWidth: 9000, outHeight: 6000 }, 2), 4);
@@ -453,6 +614,15 @@ assert.equal(geometryBandCount({ outWidth: 4000, outHeight: 2000 }, 6), 6);
     const sharedLevel = await pool.renderDisplayLevel(sharedBig, plan, { k: 2 });
     assert.ok(bytes(sharedLevel.__image16.data).equals(bytes(expectedLevel)), `thread level of a shared base ${JSON.stringify(geometry)}`);
     assert.equal(pool.counters.copiedBytes, copiedBefore, 'a shared base is read through views');
+    // A lens-corrected level (#278): the bands' grid rows travel with them.
+    const { applyLensMapsToImage } = await import('./lensMaps.js');
+    const { lensTestMaps } = await import('./lensTestMaps.mjs');
+    const lens = { maps: lensTestMaps(plan.outWidth, plan.outHeight, 3), modes: { includeTca: true, includeVignetting: true } };
+    const expectedLens = buildDisplayLevel(applyLensMapsToImage(renderGeometry(big, plan), lens.maps, lens.modes), 2).__image16.data;
+    for (const image of [big, sharedBig]) {
+      const lensLevel = await pool.renderLensDisplayLevel(image, plan, lens, { k: 2, maxBytesInFlight: Infinity });
+      assert.ok(bytes(lensLevel.__image16.data).equals(bytes(expectedLens)), `thread lens level ${image === big ? '' : 'of a shared base '}${JSON.stringify(geometry)}`);
+    }
   }
   assert.equal(pool.counters.syncBands, 0, 'every band ran on a worker thread');
   pool.dispose();
