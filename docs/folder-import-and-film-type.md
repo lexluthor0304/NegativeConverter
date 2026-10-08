@@ -47,12 +47,19 @@ stronger evidence.
 Samples are block means. At 60 MP a camera scan resolves film grain, and
 demosaicing turns it into about 3 % per-pixel false colour, which failed the grey
 tests on single pixels. Each of the roughly 24 000 stride samples is the mean of
-the opaque pixels in a k×k box, `k = clamp(round(shortSide / 1500), 1, 8)`: 4 at
-6336 px, 3 at 24 MP, and a single pixel on the 2–4 MP preview planes and small
-scans, whose verdicts are unchanged. Both grey tests keep their thresholds and
-apply to the block mean. Gathering the blocks costs a few milliseconds (a 12 MP
-synthetic frame: +0–3 ms at k = 4 to 8 in Node on an M1 Pro), because the sample
-count does not depend on the resolution.
+the opaque pixels in a k×k box, `k = clamp(round(shortSide / 800), 1, 8)`: 8 at
+6336 px, 5 at 24 MP, 3 at 10.7 MP, 2 at 4 MP and a single pixel on small
+previews. Both grey tests keep their thresholds and apply to the block mean. The
+first rule (`shortSide / 1500`, 4 at 6336 px) left L1000619 of the 2026-09-23 B&W
+roll `positive`/`noMask` on its full-resolution decode; every frame of
+L1000618–628 is `monochrome` from k = 5 up. On full-resolution decodes with the
+app's LibRaw options, the colour, positive and warm-scene controls keep their
+verdicts at every k from 2 to 12 (`L1009967.dng`, `_DSC3111.NEF`, `_DSC5290.dng`,
+L1000617, L1000700), as do the HE NEFs' embedded previews and the repository's
+image fixtures under the new rule. Gathering the blocks costs a few milliseconds
+because the sample count does not depend on the resolution: on a 60 MP decode the
+whole detection takes about 15 ms at k = 8 (14–31 ms over 14 decodes) against
+about 30 ms at 1703835 (Node, M1 Pro).
 
 Borderless monochrome without a rebate is typed as a B&W negative at low
 confidence (`monochrome`), whatever the fallback. Film scans are more common here

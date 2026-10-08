@@ -68,12 +68,14 @@ class PixelSet {
 // Keep this bounded and independent of file names, camera metadata and format.
 // A 60 MP camera scan resolves film grain, which demosaicing turns into a few
 // percent of per-pixel false colour. Each sample is therefore the mean of the
-// opaque pixels in a small box: 1 px (unchanged) on previews and small scans,
-// 4 px at 6336 px, never more than 8 px unless a caller forces `blockSize`.
+// opaque pixels in a small box, about one box side per 800 px of the short
+// side: 1 px on previews and small scans up to about 1200 px, 5 px at 24 MP,
+// 8 px at 6336 px (4 px left L1000619 of the 60 MP B&W roll a positive), never
+// more than 8 px unless a caller forces `blockSize`.
 export function detectionBlockSize(width, height, blockSize = null) {
   const forced = Number(blockSize);
   if (blockSize != null && Number.isFinite(forced)) return Math.max(1, Math.min(16, Math.round(forced)));
-  return Math.max(1, Math.min(8, Math.round(Math.min(width, height) / 1500)));
+  return Math.max(1, Math.min(8, Math.round(Math.min(width, height) / 800)));
 }
 
 export function detectFilmType(image, { fallback = 'positive', filmEdge = null, blockSize = null } = {}) {
