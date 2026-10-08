@@ -49,8 +49,7 @@ function relocated(base, offset = 1 << 24) {
     getAvailableModifications: (handle, crop) => base.getAvailableModifications(back(handle), crop),
     buildCorrectionMaps: input => base.buildCorrectionMaps({ ...input, lensHandle: back(input.lensHandle) }),
     buildSubpixelGeometryMap: input => base.buildSubpixelGeometryMap({ ...input, lensHandle: back(input.lensHandle) }),
-    fns: { buildVignettingMap: (handle, ...args) => base.fns.buildVignettingMap(back(handle), ...args) },
-    runFloatMap: (size, fn, ...args) => base.runFloatMap(size, fn, ...args)
+    buildVignettingMap: input => base.buildVignettingMap({ ...input, lensHandle: back(input.lensHandle) })
   };
 }
 

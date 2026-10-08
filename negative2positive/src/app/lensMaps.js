@@ -1,14 +1,15 @@
 // Lens correction's remap (#278). lensfun builds grid maps for a frame of
 // a given size (the distortion's source positions, or per channel the
 // source positions with distortion and TCA corrected together, and
-// vignetting gains, one node every `step` pixels); every output pixel reads
-// its source positions and gains bilinearly from the grid and samples the
-// input there bilinearly (in place, without a geometry map, for a lens
-// without distortion calibration). main.js applies it to the whole working
-// image after the crop (applyLensCorrectionWithSettings); the display-proxy
-// fills apply it to row bands of that image in the geometry pool, with the
-// same arithmetic, so a band of rows is those rows of the whole image byte
-// for byte. This module also holds what decides the maps lensfun is asked
+// vignetting gains, one node every `step` pixels, the grid covering the
+// frame: lensGridNodes); every output pixel reads its source positions and
+// gains bilinearly from the grid and samples the input there bilinearly (in
+// place, without a geometry map, for a lens without distortion
+// calibration). main.js applies it to the whole working image after the
+// crop (applyLensCorrectionWithSettings); the display-proxy fills apply it
+// to row bands of that image in the geometry pool, with the same
+// arithmetic, so a band of rows is those rows of the whole image byte for
+// byte. This module also holds what decides the maps lensfun is asked
 // for (the lens a saved profile names in the running lensfun build:
 // findLensHandle; the grid step, the request and which maps are built:
 // buildLensMaps), so the store's code hash covers them.
@@ -244,25 +245,71 @@ function lensModifications(client, lensHandle, crop) {
   }
 }
 
-// lensfun-wasm's grid for a frame (toGrid): a node every `step` pixels.
+// lensfun-wasm's default grid for a frame (toGrid): a node every `step`
+// pixels from 0, the last at or before the last pixel.
 const gridNodes = (size, step) => Math.floor((size - 1) / step) + 1;
 
-// The vignetting gains of a lens without distortion calibration, or null.
-// lensfun-wasm builds the gains only after the distortion map
-// (buildCorrectionMaps), which such a lens fails (-4). Its client binds the
-// native builder all the same (`fns.buildVignettingMap`, which its own
-// buildCorrectionMaps runs through `runFloatMap`; 0.1.3 and 0.1.4): the same
-// gains for the same grid, without the distortion map. Neither is part of
-// lensfun-wasm's typed API, so a client without them gets no vignetting
-// correction for these lenses (lensMaps.lensfun.test.mjs checks the
-// installed release).
-function vignettingOnlyMap(client, { lensHandle, width, height, focal, crop, step, reverse }, aperture, distance) {
-  const native = client.fns?.buildVignettingMap;
-  if (typeof native !== 'function' || typeof client.runFloatMap !== 'function') return null;
+/**
+ * The nodes per axis of the grid the remap reads for a frame `size` pixels
+ * long: a node every `step` pixels from 0 (node i at pixel i * step) up to
+ * the first at or past the last pixel, so every pixel lies between two
+ * nodes (lensfun-wasm's `coverFrame` grid, 0.1.4 on). lensfun-wasm's
+ * default grid ends at or before the last pixel: its last (size - 1) % step
+ * columns and rows had no node to interpolate towards, and the remap held
+ * the last node's position there (up to 9.1 px off at the corner for the
+ * Canon EF 24-105mm f/4L IS USM at 24 mm on a 6000 x 4000 crop, step 8).
+ */
+export function lensGridNodes(size, step) {
+  return Math.ceil((size - 1) / step) + 1;
+}
+
+// `values` (a map with `stride` values per node, of `built`'s grid) on the
+// covering grid of a width x height frame (lensGridNodes), or null for a map
+// of another size. A map lensfun-wasm built with `coverFrame` is that grid
+// already; so is the default grid of a frame whose sides `step` divides. A
+// client that ignores `coverFrame` (lensfun-wasm before 0.1.4) ends at or
+// before the last pixel: the node past it is the linear continuation of the
+// two before it (the column, then the row), the last one's value when there
+// is no other.
+function coveringMap(values, stride, built, width, height, step) {
+  const columns = lensGridNodes(width, step);
+  const rows = lensGridNodes(height, step);
+  if (!(values instanceof Float32Array) || built?.step !== step) return null;
+  if (built.gridWidth === columns && built.gridHeight === rows) {
+    return values.length === columns * rows * stride ? values : null;
+  }
+  const builtColumns = gridNodes(width, step);
+  const builtRows = gridNodes(height, step);
+  if (built.gridWidth !== builtColumns || built.gridHeight !== builtRows || values.length !== builtColumns * builtRows * stride) return null;
+  const covering = new Float32Array(columns * rows * stride);
+  const continueFrom = (at, previous, before) => {
+    for (let k = 0; k < stride; k++) covering[at + k] = 2 * covering[previous + k] - covering[before + k];
+  };
+  for (let gy = 0; gy < builtRows; gy++) {
+    covering.set(values.subarray(gy * builtColumns * stride, (gy + 1) * builtColumns * stride), gy * columns * stride);
+    if (columns > builtColumns) {
+      const last = (gy * columns + builtColumns - 1) * stride;
+      continueFrom(last + stride, last, builtColumns > 1 ? last - stride : last);
+    }
+  }
+  if (rows > builtRows) {
+    const last = (builtRows - 1) * columns * stride;
+    const before = builtRows > 1 ? last - columns * stride : last;
+    for (let i = 0; i < columns * stride; i += stride) continueFrom(last + columns * stride + i, last + i, before + i);
+  }
+  return covering;
+}
+
+// The vignetting gains of a lens without distortion calibration, or null:
+// lensfun-wasm's buildVignettingMap (0.1.4 on), the gains alone, which its
+// buildCorrectionMaps builds only after the distortion map, which such a
+// lens fails (-4). A client without it (0.1.3, which builds no map at all)
+// gets no vignetting correction for these lenses.
+function vignettingOnlyMap(client, grid, aperture, distance) {
+  if (typeof client.buildVignettingMap !== 'function') return null;
   try {
-    const gains = client.runFloatMap(gridNodes(width, step) * gridNodes(height, step) * 3, native,
-      lensHandle, focal, crop, aperture, distance ?? 1000, width, height, reverse ? 1 : 0, step);
-    return gains instanceof Float32Array && gains.length === gridNodes(width, step) * gridNodes(height, step) * 3 ? gains : null;
+    const built = client.buildVignettingMap({ ...grid, aperture, distance });
+    return coveringMap(built?.gains, 3, built, grid.width, grid.height, grid.step);
   } catch {
     return null;
   }
@@ -274,6 +321,9 @@ function vignettingOnlyMap(client, { lensHandle, width, height, focal, crop, ste
  * correction); `tca`, per channel, the source x, y with distortion and TCA
  * corrected together; `vignetting`, the gains. Each is null where not
  * applied; without `geometry` and `tca` the remap reads every pixel in place.
+ * Every map covers the frame (lensGridNodes x lensGridNodes nodes): lensfun
+ * builds the node past the last pixel (`coverFrame`), or coveringMap
+ * continues a client's grid that ends before it.
  *
  * lensfun corrects distortion first and TCA at that distorted position
  * (lfModifier::ApplySubpixelGeometryDistortion, buildSubpixelGeometryMap,
@@ -290,15 +340,25 @@ function vignettingOnlyMap(client, { lensHandle, width, height, focal, crop, ste
  * of 0.1.4's 1558 entries, among them macro lenses such as the Nikkor AF-S
  * 60 mm f/2.8G ED Micro, vignetting only, and the Sigma 70mm f/2.8 EX DG
  * Macro, TCA only) gets its TCA (buildSubpixelGeometryMap gives TCA alone)
- * and its vignetting (vignettingOnlyMap) without a geometry map. Maps that
- * would correct nothing throw too: no calibration at this crop factor (an
- * image crop under 0.96 of the calibration's), or none for the modes on.
+ * and its vignetting (buildVignettingMap, vignettingOnlyMap) without a
+ * geometry map. Maps that would correct nothing throw too: no calibration
+ * at this crop factor (an image crop under 0.96 of the calibration's), or
+ * none for the modes on.
  */
 export function buildLensMaps(client, request) {
-  const { includeTca, includeVignetting, aperture, distance, ...grid } = request;
+  const { includeTca, includeVignetting, aperture, distance, ...rest } = request;
+  const grid = { ...rest, coverFrame: true };
+  const { width, height, step } = grid;
   const available = lensModifications(client, grid.lensHandle, grid.crop);
   const vignetting = Boolean(includeVignetting) && (available & LF_MODIFY_VIGNETTING) !== 0;
-  let maps;
+  const maps = {
+    gridWidth: lensGridNodes(width, step),
+    gridHeight: lensGridNodes(height, step),
+    step,
+    geometry: null,
+    tca: null,
+    vignetting: null
+  };
   if (available & LF_MODIFY_DISTORTION) {
     let built;
     try {
@@ -308,30 +368,16 @@ export function buildLensMaps(client, request) {
       // The calibration does not reach this aperture and distance.
       built = client.buildCorrectionMaps({ ...grid, includeTca: false, includeVignetting: false });
     }
-    maps = {
-      gridWidth: built.gridWidth,
-      gridHeight: built.gridHeight,
-      step: built.step,
-      geometry: built.geometry,
-      tca: null,
-      vignetting: (vignetting && built.vignetting) || null
-    };
-  } else {
-    maps = {
-      gridWidth: gridNodes(grid.width, grid.step),
-      gridHeight: gridNodes(grid.height, grid.step),
-      step: grid.step,
-      geometry: null,
-      tca: null,
-      vignetting: vignetting ? vignettingOnlyMap(client, grid, aperture, distance) : null
-    };
+    maps.geometry = coveringMap(built?.geometry, 2, built, width, height, step);
+    if (!maps.geometry) throw new Error(`lensfun built no geometry map of a ${width} x ${height} frame at step ${step}`);
+    maps.vignetting = (vignetting && coveringMap(built.vignetting, 3, built, width, height, step)) || null;
+  } else if (vignetting) {
+    maps.vignetting = vignettingOnlyMap(client, grid, aperture, distance);
   }
   if (includeTca && (available & LF_MODIFY_TCA) && typeof client.buildSubpixelGeometryMap === 'function') {
     try {
       const combined = client.buildSubpixelGeometryMap(grid);
-      if ((combined.modifications & LF_MODIFY_TCA) && combined.coords?.length === maps.gridWidth * maps.gridHeight * 6) {
-        maps.tca = combined.coords;
-      }
+      if (combined.modifications & LF_MODIFY_TCA) maps.tca = coveringMap(combined.coords, 6, combined, width, height, step);
     } catch {
       // The distortion alone.
     }

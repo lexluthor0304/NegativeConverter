@@ -13,9 +13,11 @@
 // calibration must still be corrected; nothing may throw.
 //
 // Lenses without distortion calibration get their TCA and vignetting alone,
-// read in place. Every entry of the database resolves from its saved
-// identity, and a recipe saved with one reopens with the same correction in
-// another build, whose handles differ.
+// read in place. Every pixel, at the right and bottom edges too, reads
+// lensfun's own source positions within 0.5 px (the maps cover the frame),
+// and the repair brush maps it where the remap reads it. Every entry of the
+// database resolves from its saved identity, and a recipe saved with one
+// reopens with the same correction in another build, whose handles differ.
 //
 // lensfun-wasm 0.1.3 builds no maps (its core exports no HEAPF32 view):
 // with it, buildLensMaps throws for every lens and the editor converts the
@@ -32,7 +34,11 @@ globalThis.ImageData = class ImageData {
     }
   }
 };
-const { applyLensMapsToImage, buildLensMaps, lensMapRequest, lensRowExtents, lensHandleFor, findLensHandle, lensProfileKey } = await import('./lensMaps.js');
+const {
+  applyLensMapsToImage, applyLensMapRows, buildLensMaps, lensGridNodes, lensMapRequest, lensMapsMovePixels, lensRowExtents, lensSourceRows,
+  sliceLensMaps, lensHandleFor, findLensHandle, lensProfileKey
+} = await import('./lensMaps.js');
+const { lensSourcePoint } = await import('./repairBrush.js');
 const { lensfunNodeClient, lensfunPackageVersion, lensfunDatabaseModels, versionAtLeast } = await import('./lensfunNodeClient.mjs');
 
 const version = lensfunPackageVersion();
@@ -128,8 +134,9 @@ function samePlane(a, b, channel) {
   return true;
 }
 
-// The pixel a grid node stands for (lensfun's nodes: index * step, clamped).
-const nodeAt = (index, step, size) => Math.min(index * step, size - 1);
+// The pixel a grid node stands for (lensfun-wasm's nodes: index * step; the
+// last node of a grid that covers the frame lies up to step - 1 past it).
+const nodeAt = (index, step) => index * step;
 
 function checkCase(label, spec, params, { width, height, expect }) {
   const lens = findLens(spec);
@@ -162,7 +169,7 @@ function checkCase(label, spec, params, { width, height, expect }) {
       for (const [planeX, planeY] of [[xOff, yOff], [xOn, yOn]]) {
         nodeError = Math.max(nodeError, Math.abs(sourceAt(planeX, i, 1) - sx), Math.abs(sourceAt(planeY, i, 1) - sy));
       }
-      mapMove = Math.max(mapMove, Math.hypot(sx - nodeAt(gx, step, width), sy - nodeAt(gy, step, height)));
+      mapMove = Math.max(mapMove, Math.hypot(sx - nodeAt(gx, step), sy - nodeAt(gy, step)));
       nodes++;
     }
   }
@@ -231,13 +238,13 @@ const results = [
   const extents = lensRowExtents(maps, { includeTca: true });
   let rowMove = 0;
   for (let gy = 0; gy < maps.gridHeight; gy++) {
-    const y = nodeAt(gy, maps.step, height);
+    const y = nodeAt(gy, maps.step);
     rowMove = Math.max(rowMove, Math.abs(extents.min[gy] - y), Math.abs(extents.max[gy] - y));
   }
-  const tcaOnly = client.buildCorrectionMaps({ ...request, includeTca: true, includeVignetting: false }).tca;
+  const tcaOnly = client.buildCorrectionMaps({ ...request, includeTca: true, includeVignetting: false, coverFrame: true }).tca;
   let tcaOnlyRowMove = 0, greenOff = 0;
   for (let gy = 0; gy < maps.gridHeight; gy++) {
-    const y = nodeAt(gy, maps.step, height);
+    const y = nodeAt(gy, maps.step);
     for (let gx = 0; gx < maps.gridWidth; gx++) {
       const node = gy * maps.gridWidth + gx;
       for (let c = 0; c < 3; c++) tcaOnlyRowMove = Math.max(tcaOnlyRowMove, Math.abs(tcaOnly[node * 6 + c * 2 + 1] - y));
@@ -284,14 +291,11 @@ function checkWithoutDistortion(label, spec, params, { width, height, expect }) 
   let shift = 0, greenOff = 0;
   if (expect.tca) {
     // TCA on: green stays (lensfun's own rounding, well under a pixel), red
-    // and blue move apart from it. Up to the grid's last node: the pixels
-    // past it (the last (width - 1) % step columns and rows) read that
-    // node's positions, as for every lens (docs/audit-backlog.md).
+    // and blue move apart from it, to the last column and row.
     const on = { includeTca: true, includeVignetting: false };
     const xOn = remap16(X, maps, on), yOn = remap16(Y, maps, on);
-    const lastX = (maps.gridWidth - 1) * maps.step, lastY = (maps.gridHeight - 1) * maps.step;
-    for (let y = 0; y <= lastY; y++) {
-      for (let x = 0; x <= lastX; x++) {
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
         const i = y * width + x;
         const gx = sourceAt(xOn, i, 1), gy = sourceAt(yOn, i, 1);
         if (gx === null || gy === null) continue;
@@ -329,6 +333,149 @@ results.push(
   checkWithoutDistortion('Nikkor 60 mm Micro at 60 mm (vignetting only)', NIKKOR_60_MICRO, { focal: 60, crop: 1, aperture: 4 }, { width: 900, height: 600, expect: { tca: false, vignetting: true } }),
   checkWithoutDistortion('Olympus 30mm Macro at 30 mm (TCA and vignetting)', OLYMPUS_30_MACRO, { focal: 30, crop: 2, aperture: 3.5 }, { width: 800, height: 600, expect: { tca: true, vignetting: true } })
 );
+
+// ---- Every pixel reads lensfun's own source positions, at the right and
+// bottom edges too: the maps cover the frame (lensGridNodes x
+// lensGridNodes nodes, the last up to step - 1 pixels past the last pixel:
+// lensfun-wasm's coverFrame grid, or a client's grid without it continued
+// past its last node), so the remap interpolates every pixel between nodes.
+// lensfun-wasm's default grid ends at or before the last pixel, and the
+// remap held the last node's position for its last (size - 1) % step
+// columns and rows. Per channel, with TCA on and off, against lensfun's
+// map at step 1 (its positions at every pixel): within 0.5 px at every
+// pixel. The repair brush maps an edge pixel where the remap reads green,
+// and a band of the last rows is those rows of the whole remap ----
+const edgeResults = [];
+{
+  // lensfun-wasm without coverFrame (the client ignores it, as one before
+  // 0.1.4 does): buildLensMaps continues its grid.
+  const withoutCover = {
+    searchLenses: input => client.searchLenses(input),
+    getAvailableModifications: (handle, crop) => client.getAvailableModifications(handle, crop),
+    buildCorrectionMaps: input => client.buildCorrectionMaps({ ...input, coverFrame: false }),
+    buildSubpixelGeometryMap: input => client.buildSubpixelGeometryMap({ ...input, coverFrame: false }),
+    buildVignettingMap: input => client.buildVignettingMap({ ...input, coverFrame: false })
+  };
+  const coversNatively = (() => {
+    try {
+      return client.buildCorrectionMaps({ lensHandle: findLens(CANON_24_105).handle, width: 10, height: 10, focal: 24, crop: 1, step: 4, coverFrame: true }).gridWidth === 4;
+    } catch {
+      return false;
+    }
+  })();
+  // The cases above at their auto step (2: one trailing column and row),
+  // the first at steps 5 and 8 too; `continued` also with a client without
+  // coverFrame.
+  const cases = [
+    ['Canon 24-105 at 24 mm', CANON_24_105, { focal: 24, crop: 1 }, 1200, 800],
+    ['Canon 24-105 at 24 mm, step 5', CANON_24_105, { focal: 24, crop: 1, stepMode: 'manual', step: 5 }, 1200, 800],
+    ['Canon 24-105 at 24 mm, step 8', CANON_24_105, { focal: 24, crop: 1, stepMode: 'manual', step: 8 }, 1200, 800, { continued: true }],
+    ['Canon 24-105 at 70 mm', CANON_24_105, { focal: 70, crop: 1 }, 900, 600],
+    ['Nikkor 18-55 DX at 18 mm', NIKKOR_18_55, { focal: 18, crop: 1.528, aperture: 5.6 }, 1200, 800, { continued: true }],
+    ['Canon 28-105 at 28 mm', CANON_28_105, { focal: 28, crop: 1 }, 800, 1200],
+    ['Sigma 70mm Macro at 70 mm (TCA only)', SIGMA_70_MACRO, { focal: 70, crop: 1.534 }, 900, 600],
+    ['Olympus 30mm Macro at 30 mm', OLYMPUS_30_MACRO, { focal: 30, crop: 2, aperture: 3.5 }, 800, 600, { continued: true }]
+  ];
+  for (const [label, spec, params, width, height, { continued = false } = {}] of cases) {
+    const block = lensBlock(savedProfile(findLens(spec), spec), params);
+    const { request } = mapRequest(block, width, height);
+    const { includeTca, includeVignetting, aperture, distance, ...grid } = request;
+    const step = request.step;
+    // The default grid's last node, past which its pixels had none.
+    const lastX = Math.floor((width - 1) / step) * step, lastY = Math.floor((height - 1) / step) * step;
+    const distortion = (client.getAvailableModifications(request.lensHandle, request.crop) & 0x8) !== 0;
+    const exactGeometry = distortion ? client.buildCorrectionMaps({ ...grid, step: 1 }).geometry : null;
+    let exactCombined = null;
+    try {
+      const combined = client.buildSubpixelGeometryMap({ ...grid, step: 1 });
+      if (combined.modifications & 0x1) exactCombined = combined.coords;
+    } catch {
+      // No distortion or TCA calibration.
+    }
+    // lensfun's source position of channel c at pixel (x, y), TCA on or off.
+    const exact = (x, y, c, tca) => {
+      const i = y * width + x;
+      if (tca && exactCombined) return [exactCombined[i * 6 + c * 2], exactCombined[i * 6 + c * 2 + 1]];
+      return exactGeometry ? [exactGeometry[i * 2], exactGeometry[i * 2 + 1]] : [x, y];
+    };
+    const X = coordinatePlane(width, height, 'x');
+    const Y = coordinatePlane(width, height, 'y');
+    const result = { label, width, height, step, trailing: [width - 1 - lastX, height - 1 - lastY], coversNatively };
+    for (const [variant, lensfun] of [['covering', client], ...(continued ? [['continued', withoutCover]] : [])]) {
+      const maps = buildLensMaps(lensfun, request);
+      assert.deepEqual([maps.gridWidth, maps.gridHeight], [lensGridNodes(width, step), lensGridNodes(height, step)], `${label} (${variant}): the grid covers the frame`);
+      assert.ok((maps.gridWidth - 1) * step >= width - 1 && (maps.gridHeight - 1) * step >= height - 1, `${label} (${variant}): a node at or past the last pixel`);
+      let worst = 0, worstEdge = 0, outside = 0, brushOff = 0;
+      for (const tca of [false, true]) {
+        if (tca && !maps.tca) continue;
+        const modes = { includeTca: tca, includeVignetting: false };
+        const xs = remap16(X, maps, modes), ys = remap16(Y, maps, modes);
+        for (let y = 0; y < height; y++) {
+          for (let x = 0; x < width; x++) {
+            const i = y * width + x;
+            const edge = x > lastX || y > lastY;
+            for (let c = 0; c < 3; c++) {
+              const [ex, ey] = exact(x, y, c, tca);
+              const rx = sourceAt(xs, i, c), ry = sourceAt(ys, i, c);
+              if (rx === null || ry === null) {
+                // Read outside the frame: so does lensfun, give or take 0.5 px.
+                assert.ok(ex < 0.5 || ey < 0.5 || ex > width - 1.5 || ey > height - 1.5,
+                  `${label} (${variant}): (${x}, ${y}) channel ${c} read outside the frame, lensfun reads (${ex}, ${ey})`);
+                outside++;
+                continue;
+              }
+              const error = Math.hypot(rx - ex, ry - ey);
+              if (error > worst) worst = error;
+              if (edge && error > worstEdge) worstEdge = error;
+            }
+            // The repair brush maps the pixel where the remap reads green
+            // (through maps that move pixels: in place it maps nothing).
+            if (edge && lensMapsMovePixels(maps, modes) && sourceAt(xs, i, 1) !== null && sourceAt(ys, i, 1) !== null) {
+              const point = lensSourcePoint({ x, y }, { maps, includeTca: tca });
+              brushOff = Math.max(brushOff, Math.abs(point.x - sourceAt(xs, i, 1)), Math.abs(point.y - sourceAt(ys, i, 1)));
+            }
+          }
+        }
+      }
+      assert.ok(worst <= 0.5, `${label} (${variant}): every pixel within 0.5 px of lensfun's position (${worst.toFixed(4)} px)`);
+      // To the planes' 1/32 px in x and in y.
+      assert.ok(brushOff <= 1 / 32 + 1e-9, `${label} (${variant}): the repair brush maps edge pixels where the remap reads green (${brushOff} px)`);
+      // The last rows as a band: from the rows lensSourceRows names and the
+      // grid rows sliceLensMaps keeps, those rows of the whole remap.
+      const modes = { includeTca: Boolean(maps.tca), includeVignetting: Boolean(maps.vignetting) };
+      const whole = remap16(X, maps, modes);
+      const y0 = height - 13, y1 = height;
+      const window = lensSourceRows(maps, modes, y0, y1, height);
+      const band = new Uint16Array((y1 - y0) * width * 4);
+      applyLensMapRows({ source: X.__image16.data.slice(window.y0 * width * 4, window.y1 * width * 4), sourceRow0: window.y0, width, height, maxValue: 65535 },
+        sliceLensMaps(maps, modes, y0, y1), modes, { out16: band }, y0, y1);
+      assert.ok(Buffer.from(band.buffer).equals(Buffer.from(whole.buffer, y0 * width * 8, (y1 - y0) * width * 8)), `${label} (${variant}): the last rows as a band`);
+      result[variant] = { worst: +worst.toFixed(4), edge: +worstEdge.toFixed(4), outside };
+    }
+    // lensfun-wasm's default grid as the remap read it before: held at the
+    // last node past it, more than a pixel off at the edges (where they read
+    // inside the frame: a pincushion's edges read outside it).
+    if (distortion) {
+      const plain = client.buildCorrectionMaps({ ...grid, coverFrame: false });
+      const maps = { gridWidth: plain.gridWidth, gridHeight: plain.gridHeight, step, geometry: plain.geometry, tca: null, vignetting: null };
+      const xs = remap16(X, maps, {}), ys = remap16(Y, maps, {});
+      let held = 0, inside = 0;
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          const i = y * width + x;
+          if (!(x > lastX || y > lastY) || sourceAt(xs, i, 1) === null || sourceAt(ys, i, 1) === null) continue;
+          const [ex, ey] = exact(x, y, 1, false);
+          held = Math.max(held, Math.hypot(sourceAt(xs, i, 1) - ex, sourceAt(ys, i, 1) - ey));
+          inside++;
+        }
+      }
+      if (inside) assert.ok(held > 1, `${label}: the default grid's remap is off at the edges (${held.toFixed(2)} px)`);
+      result.before = inside ? +held.toFixed(2) : 'reads outside the frame';
+    }
+    edgeResults.push(result);
+  }
+}
+results.push({ label: 'every pixel within 0.5 px of lensfun\'s positions, the edges too', cases: edgeResults });
 
 // ---- Every entry of the database resolves from the profile a recipe
 // keeps of it (its identity, without a camera) to itself, or to a twin with
@@ -371,8 +518,7 @@ results.push(
       getAvailableModifications: (handle, crop) => base.getAvailableModifications(back(handle), crop),
       buildCorrectionMaps: input => base.buildCorrectionMaps({ ...input, lensHandle: back(input.lensHandle) }),
       buildSubpixelGeometryMap: input => base.buildSubpixelGeometryMap({ ...input, lensHandle: back(input.lensHandle) }),
-      fns: { buildVignettingMap: (handle, ...args) => base.fns.buildVignettingMap(back(handle), ...args) },
-      runFloatMap: (size, fn, ...args) => base.runFloatMap(size, fn, ...args)
+      buildVignettingMap: input => base.buildVignettingMap({ ...input, lensHandle: back(input.lensHandle) })
     };
   };
   const restarted = (await lensfunNodeClient()).client;

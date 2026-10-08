@@ -5,6 +5,8 @@
 // cache key names the profile's identity where it named lensfun's handle),
 // and a band of rows remapped from only the input rows lensSourceRows names
 // and the grid rows sliceLensMaps keeps is those rows of the whole remap.
+// The maps cover the frame (lensGridNodes), so the last columns and rows
+// interpolate between nodes, in the remap and the repair brush alike.
 // Lenses without distortion calibration are remapped in place; a saved
 // profile resolves to the running build's handle by its identity.
 import assert from 'node:assert/strict';
@@ -19,9 +21,10 @@ globalThis.ImageData = class ImageData {
   }
 };
 const {
-  applyLensMapsToImage, applyLensMapRows, buildLensMaps, lensMapRequest, lensMapStep, lensRowExtents, lensSourceRows, sliceLensMaps, lensMapBuffers,
-  lensProfileIdentity, lensProfileKey, findLensHandle, lensHandleFor, rememberLensHandle, lensMapsMovePixels
+  applyLensMapsToImage, applyLensMapRows, buildLensMaps, lensGridNodes, lensMapRequest, lensMapStep, lensRowExtents, lensSourceRows, sliceLensMaps,
+  lensMapBuffers, lensProfileIdentity, lensProfileKey, findLensHandle, lensHandleFor, rememberLensHandle, lensMapsMovePixels
 } = await import('./lensMaps.js');
+const { lensSourcePoint } = await import('./repairBrush.js');
 const { allocPlane16, isSharedPlane, sharedPlanesAvailable } = await import('./crossOriginIsolation.js');
 const { lensTestMaps, lensTestClient } = await import('./lensTestMaps.mjs');
 
@@ -262,9 +265,12 @@ const MODES = [
   { includeTca: true, includeVignetting: true }, { includeTca: false, includeVignetting: true },
   { includeTca: true, includeVignetting: false }, { includeTca: false, includeVignetting: false }
 ];
+// Grids that cover the frame (buildLensMaps'), and one that ends at or
+// before the last pixel (lensfun-wasm's default grid: the remap holds the
+// last node past it).
 const MAPS = [
   ['lensfun-like', {}], ['strong', { strength: 0.3 }], ['outward', { strength: -0.08 }],
-  ['below the frame', { shift: 1e4 }], ['poisoned', { poison: true }]
+  ['below the frame', { shift: 1e4 }], ['poisoned', { poison: true }], ['default grid', { coverFrame: false }]
 ];
 // A lens without distortion calibration (#278): no geometry map; TCA alone
 // and vignetting, or vignetting alone. Read in place where TCA is off.
@@ -417,7 +423,8 @@ for (const [width, height] of [[64, 48], [23, 61]]) {
   assert.deepEqual([maps.gridWidth, maps.gridHeight, maps.step], [expected.gridWidth, expected.gridHeight, 4]);
   assert.deepEqual(full.requests.map(r => [r.includeTca, r.includeVignetting, r.aperture, r.distance]), [[false, true, 8, 1000]]);
   const { includeTca, includeVignetting, aperture, distance, ...grid } = request;
-  assert.deepEqual(full.subpixelRequests, [grid], 'the per-channel map is asked for the same grid');
+  assert.deepEqual(full.subpixelRequests, [{ ...grid, coverFrame: true }], 'the per-channel map is asked for the same grid');
+  assert.ok(full.requests.every(r => r.coverFrame === true), 'every map covers the frame');
 
   // Without TCA or vignetting calibration: neither is asked for.
   for (const [label, modifications, tca, vignetting] of [
@@ -550,9 +557,8 @@ let inPlaceCases = 0;
 
 // ---- Lenses without distortion calibration (#278: 39 of lensfun-wasm
 // 0.1.4's 1558 entries): no geometry map (lensfun fails it, -4), TCA from
-// buildSubpixelGeometryMap alone and vignetting from the client's bound
-// native builder; nothing to apply throws, and the frame converts
-// uncorrected ----
+// buildSubpixelGeometryMap alone and vignetting from buildVignettingMap
+// alone; nothing to apply throws, and the frame converts uncorrected ----
 {
   const LF_TCA = 0x1, LF_VIGNETTING = 0x2;
   const request = lensMapRequest({
@@ -576,10 +582,10 @@ let inPlaceCases = 0;
     else assert.equal(maps.tca, null, `${label}: no TCA`);
     if (vignetting) sameArray(maps.vignetting, expected.vignetting, `${label}: the gains alone`);
     else assert.equal(maps.vignetting, null, `${label}: no vignetting`);
-    assert.equal(client.vignettingRequests.length, vignetting ? 1 : 0, `${label}: the native vignetting builder asked`);
+    assert.equal(client.vignettingRequests.length, vignetting ? 1 : 0, `${label}: buildVignettingMap asked`);
     if (vignetting) {
-      const { lensHandle, focal, crop, aperture, distance, width, height, step } = request;
-      assert.deepEqual(client.vignettingRequests[0], { lensHandle, focal, crop, aperture, distance, width, height, reverse: 0, step }, `${label}: for the request`);
+      const { includeTca, includeVignetting, ...grid } = request;
+      assert.deepEqual(client.vignettingRequests[0], { ...grid, coverFrame: true }, `${label}: buildVignettingMap, for the request's grid`);
     }
     // TCA switched off: the gains alone, or nothing to correct.
     const off = lensTestClient({ modifications });
@@ -591,13 +597,159 @@ let inPlaceCases = 0;
   // No calibration at this crop factor (an image crop under 0.96 of the
   // calibration's): lensfun reports none.
   assert.throws(() => buildLensMaps(lensTestClient({ modifications: 0 }), request), /no calibration of this lens for crop factor 1/);
-  // A client without the bound builder, or whose builder cannot read its
-  // maps (lensfun-wasm 0.1.3): no vignetting, and here nothing to correct.
-  for (const patch of [{ fns: undefined }, { runFloatMap() { throw new TypeError("Cannot read properties of undefined (reading 'subarray')"); } }]) {
+  // A client without buildVignettingMap (before lensfun-wasm 0.1.4), or
+  // whose builder cannot read its maps (as 0.1.3's cannot): no vignetting,
+  // and here nothing to correct.
+  for (const patch of [{ buildVignettingMap: undefined }, { buildVignettingMap() { throw new TypeError("Cannot read properties of undefined (reading 'subarray')"); } }]) {
     const client = Object.assign(lensTestClient({ modifications: LF_TCA | LF_VIGNETTING }), patch);
     const maps = buildLensMaps(client, request);
     assert.ok(maps.tca && maps.vignetting === null, 'TCA still, without vignetting');
     assert.throws(() => buildLensMaps(Object.assign(lensTestClient({ modifications: LF_VIGNETTING }), patch), request), /nothing to correct/);
+  }
+}
+
+// ---- The maps cover the frame (#278): lensfun-wasm's default grid ends
+// on the last node at or before the last pixel, and the remap held that
+// node's position for the last (size - 1) % step columns and rows.
+// buildLensMaps asks for the grid that covers the frame (coverFrame:
+// lensGridNodes nodes, the last up to step - 1 pixels past the last pixel)
+// and continues the grid of a client that ignores it (before lensfun-wasm
+// 0.1.4) past its last node, linearly. Every pixel then reads the lens's
+// positions to within the grid's interpolation; the repair brush maps a
+// pixel where the remap reads green ----
+let coverCases = 0;
+const coverResults = [];
+{
+  const sameArray = (actual, wanted, label) => assert.ok(actual && bytes(actual).equals(bytes(wanted)), label);
+  assert.deepEqual([lensGridNodes(120, 4), lensGridNodes(121, 4), lensGridNodes(1, 4), lensGridNodes(4, 4), lensGridNodes(5, 4)], [31, 31, 1, 2, 2]);
+  const blockFor = (step, modes = { includeTca: true, includeVignetting: true }) => ({
+    enabled: true, selectedLens: { maker: 'Test', model: 'Test 24mm' },
+    params: { focal: 24, crop: 1, aperture: 8, distance: 1000, stepMode: 'manual', step }, modes
+  });
+  for (const [width, height, step] of [[120, 80, 4], [101, 67, 8], [121, 81, 4], [37, 23, 5], [3, 30, 8]]) {
+    const request = lensMapRequest(blockFor(step), width, height, 7).request;
+    const covering = lensTestMaps(width, height, step);
+    const plain = lensTestMaps(width, height, step, { coverFrame: false });
+    // A client with coverFrame: its maps as they are.
+    const maps = buildLensMaps(lensTestClient(), request);
+    assert.deepEqual([maps.gridWidth, maps.gridHeight, maps.step], [lensGridNodes(width, step), lensGridNodes(height, step), step], `${width}x${height} step ${step}: the covering grid`);
+    sameArray(maps.geometry, covering.geometry, `${width}x${height} step ${step}: the client's covering geometry map`);
+    sameArray(maps.tca, covering.tca, `${width}x${height} step ${step}: its per-channel map`);
+    sameArray(maps.vignetting, covering.vignetting, `${width}x${height} step ${step}: its gains`);
+    // A client without: its default grid continued, the nodes it has kept.
+    const old = lensTestClient({ coversFrame: false });
+    const continued = buildLensMaps(old, request);
+    assert.deepEqual([continued.gridWidth, continued.gridHeight], [maps.gridWidth, maps.gridHeight], `${width}x${height} step ${step}: continued to the covering grid`);
+    for (const [key, stride] of [['geometry', 2], ['tca', 6], ['vignetting', 3]]) {
+      const label = `${width}x${height} step ${step} ${key}`;
+      const at = (map, columns, gx, gy, k) => map[(gy * columns + gx) * stride + k];
+      for (let gy = 0; gy < continued.gridHeight; gy++) {
+        for (let gx = 0; gx < continued.gridWidth; gx++) {
+          for (let k = 0; k < stride; k++) {
+            const value = at(continued[key], continued.gridWidth, gx, gy, k);
+            let expected;
+            if (gx < plain.gridWidth && gy < plain.gridHeight) {
+              expected = at(plain[key], plain.gridWidth, gx, gy, k);
+            } else if (gy < plain.gridHeight) {
+              // The new column: the row's last two nodes continued.
+              const last = at(plain[key], plain.gridWidth, plain.gridWidth - 1, gy, k);
+              expected = Math.fround(2 * last - (plain.gridWidth > 1 ? at(plain[key], plain.gridWidth, plain.gridWidth - 2, gy, k) : last));
+            } else {
+              // The new row: the column's last two (continued) nodes continued.
+              const last = at(continued[key], continued.gridWidth, gx, gy - 1, k);
+              expected = Math.fround(2 * last - (plain.gridHeight > 1 ? at(continued[key], continued.gridWidth, gx, gy - 2, k) : last));
+            }
+            assert.equal(value, expected, `${label}: node ${gx},${gy}[${k}]`);
+          }
+        }
+      }
+    }
+    assert.ok(old.requests.every(r => r.coverFrame === true), 'it was asked for the covering grid');
+    coverCases++;
+  }
+  // A frame whose sides step divides: the default grid covers it already.
+  {
+    const request = lensMapRequest(blockFor(4), 121, 81, 7).request;
+    sameArray(buildLensMaps(lensTestClient({ coversFrame: false }), request).geometry, lensTestMaps(121, 81, 4, { coverFrame: false }).geometry, 'nothing to continue');
+  }
+  // Maps of another size: no geometry map (the frame converts uncorrected),
+  // no TCA or vignetting map.
+  {
+    const request = lensMapRequest(blockFor(4), 120, 80, 7).request;
+    const wrong = r => lensTestMaps(r.width + 8, r.height, r.step);
+    const odd = Object.assign(lensTestClient(), { buildCorrectionMaps: wrong });
+    assert.throws(() => buildLensMaps(odd, request), /no geometry map of a 120 x 80 frame at step 4/);
+    const oddTca = Object.assign(lensTestClient(), {
+      buildSubpixelGeometryMap: r => { const m = wrong(r); return { gridWidth: m.gridWidth, gridHeight: m.gridHeight, step: m.step, coords: m.tca, modifications: 0x9 }; }
+    });
+    const built = buildLensMaps(oddTca, request);
+    assert.ok(built.geometry && built.tca === null && built.vignetting, 'a per-channel map of another size is left out');
+    const oddGains = Object.assign(lensTestClient({ modifications: 0x2 }), {
+      buildVignettingMap: r => { const m = wrong(r); return { gridWidth: m.gridWidth, gridHeight: m.gridHeight, step: m.step, gains: m.vignetting }; }
+    });
+    assert.throws(() => buildLensMaps(oddGains, request), /nothing to correct/, 'gains of another size are left out');
+  }
+  // Every pixel reads the lens's positions (the stand-in's radial remap at
+  // the pixel itself): within the grid's interpolation on a covering grid,
+  // the last columns and rows too; held at the last node on the default
+  // grid. The repair brush maps every pixel where the remap reads green.
+  const coordinatePlane = (width, height, axis) => {
+    const data16 = new Uint16Array(width * height * 4);
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const v = ((axis === 'x' ? x : y) + 1) * 16;
+        data16.fill(v, (y * width + x) * 4, (y * width + x) * 4 + 3);
+        data16[(y * width + x) * 4 + 3] = 65535;
+      }
+    }
+    const result = new ImageData(Uint8ClampedArray.from(data16, v => v >>> 8), width, height);
+    result.__image16 = { width, height, data: data16 };
+    return result;
+  };
+  const strength = 0.12;
+  for (const [width, height, step] of [[101, 67, 8], [37, 23, 5], [120, 80, 4]]) {
+    const cx = (width - 1) / 2, cy = (height - 1) / 2, norm = cx * cx + cy * cy;
+    // lensTestMaps' geometry at any pixel.
+    const lens = (x, y) => {
+      const dx = x - cx, dy = y - cy, scale = 1 - strength * (dx * dx + dy * dy) / norm;
+      return [cx + dx * scale, cy + dy * scale];
+    };
+    const X = coordinatePlane(width, height, 'x'), Y = coordinatePlane(width, height, 'y');
+    const lastX = Math.floor((width - 1) / step) * step, lastY = Math.floor((height - 1) / step) * step;
+    const read = (maps, modes) => {
+      const xs = applyLensMapsToImage(X, maps, modes).__image16.data, ys = applyLensMapsToImage(Y, maps, modes).__image16.data;
+      let worst = 0, edge = 0, interior = 0, brush = 0;
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          const i = (y * width + x) * 4 + 1;
+          if (!xs[i] || !ys[i]) continue;
+          const rx = xs[i] / 16 - 1, ry = ys[i] / 16 - 1;
+          const [ex, ey] = lens(x, y);
+          const error = Math.hypot(rx - ex, ry - ey);
+          worst = Math.max(worst, error);
+          if (x > lastX || y > lastY) edge = Math.max(edge, error);
+          else interior = Math.max(interior, error);
+          const point = lensSourcePoint({ x, y }, { maps, includeTca: modes.includeTca });
+          brush = Math.max(brush, Math.abs(point.x - rx), Math.abs(point.y - ry));
+        }
+      }
+      return { worst, edge, interior, brush };
+    };
+    const label = `${width}x${height} step ${step}`;
+    const modes = { includeTca: false, includeVignetting: false };
+    const covered = read(lensTestMaps(width, height, step, { strength, tca: false, vignetting: false }), modes);
+    // A strong lens on a small frame: the grid's interpolation is a few
+    // tenths of a pixel off, no more at the edges than inside.
+    assert.ok(covered.worst < 0.5 && covered.edge <= covered.interior + 1 / 32,
+      `${label}: every pixel within the grid's interpolation of the lens (edges ${covered.edge.toFixed(3)} px, inside ${covered.interior.toFixed(3)} px)`);
+    assert.ok(covered.brush <= 1 / 32 + 1e-9, `${label}: the repair brush maps every pixel where the remap reads (${covered.brush} px)`);
+    const continued = read(buildLensMaps(lensTestClient({ coversFrame: false, strength, tca: false, vignetting: false, modifications: 0x8 }),
+      lensMapRequest(blockFor(step, modes), width, height, 7).request), modes);
+    assert.ok(continued.worst < 0.5, `${label}: continued, within ${continued.worst.toFixed(3)} px`);
+    const held = read(lensTestMaps(width, height, step, { strength, tca: false, vignetting: false, coverFrame: false }), modes);
+    assert.ok(held.edge > 1, `${label}: the default grid holds the last node's position (${held.edge.toFixed(2)} px off)`);
+    coverResults.push(`${label}: edges ${held.edge.toFixed(2)} -> ${covered.edge.toFixed(3)} px (continued ${continued.edge.toFixed(3)}, inside ${covered.interior.toFixed(3)})`);
+    coverCases++;
   }
 }
 
@@ -682,4 +834,4 @@ let inPlaceCases = 0;
   assert.equal(lensHandleFor(searchClient(entries), profile(41)), 40, 'another client resolves on its own');
 }
 
-console.log(`lensMaps: the remap equals main.js's of before (${cases} cases), the map requests too, ${bands} bands equal the rows of the whole remap, ${inPlaceCases} in-place remaps (lenses without distortion calibration), buildLensMaps builds distortion, TCA (with the distortion) and vignetting where the lens has them, and saved profiles resolve by their identity`);
+console.log(`lensMaps: the remap equals main.js's of before (${cases} cases), the map requests too, ${bands} bands equal the rows of the whole remap, ${inPlaceCases} in-place remaps (lenses without distortion calibration), buildLensMaps builds distortion, TCA (with the distortion) and vignetting where the lens has them, on grids that cover the frame (${coverCases} cases; ${coverResults.join('; ')}), and saved profiles resolve by their identity`);

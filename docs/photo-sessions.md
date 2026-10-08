@@ -276,11 +276,23 @@ carries no distortion, so it is never used); a vignetting map that fails is
 left out. A lens without distortion calibration (39 of 0.1.4's entries, the
 Nikkor AF-S 60 mm f/2.8G ED Micro and the Sigma 70mm f/2.8 EX DG Macro among
 them) has no geometry map: its TCA alone (`buildSubpixelGeometryMap`) and its
-gains alone (the client's bound native builder, which lensfun-wasm's
-`buildCorrectionMaps` runs only after a distortion map), and the remap reads
+gains alone (lensfun-wasm's `buildVignettingMap`, 0.1.4 on; its
+`buildCorrectionMaps` builds the gains only after a distortion map; without
+the method such a lens gets no vignetting correction), and the remap reads
 every pixel in place where TCA is off, its own value exactly; the repair
 brush maps strokes only through maps that move pixels
-(`lensMapsMovePixels`). A distortion map that cannot be built, or maps that
+(`lensMapsMovePixels`). Every map covers the frame (`lensGridNodes`): a node
+every `step` pixels from 0 up to the first at or past the last pixel
+(lensfun-wasm's `coverFrame`, 0.1.4 on; the grid of a client that ignores
+it is continued past its last node linearly), so the remap, the bands' row
+windows (`lensSourceRows`, `sliceLensMaps`) and the repair brush
+(`lensSourcePoint`) interpolate every pixel between nodes. lensfun-wasm's
+default grid ends at or before the last pixel, and the remap held the last
+node's position for the last `(size - 1) % step` columns and rows: on a
+6000 x 4000 crop at step 8, the Canon EF 24-105mm f/4L IS USM at 24 mm read
+up to 9.1 px from lensfun's own position at the corner; every pixel now
+reads within 0.002 px of it (`lensMaps.lensfun.test.mjs` checks every pixel
+of its cases within 0.5 px). A distortion map that cannot be built, or maps that
 would correct nothing (no calibration at the image's crop factor, or none
 for the modes on), leave the frame uncorrected ("Lens correction failed"),
 as every map did with lensfun-wasm 0.1.3, whose module exports no HEAPF32
