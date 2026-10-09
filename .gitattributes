@@ -1,3 +1,10 @@
 # Bundled into every desktop package as licenses/raw-decoder-notices.txt: keep
 # it byte-identical on Windows checkouts, where Git would otherwise write CRLF.
 negative2positive/public/licenses/*.txt text eol=lf
+# The OpenCV SIMD glue and build information are checked byte for byte at
+# build time (assertOpenCvSimdGlue, the build-info SHA-256 in the tests):
+# keep them LF on Windows checkouts, and the wasm untouched.
+negative2positive/public/codecs/opencv-simd-glue.js text eol=lf
+negative2positive/public/codecs/opencv-simd-build-info.txt text eol=lf
+negative2positive/public/codecs/opencv-LICENSE.txt text eol=lf
+negative2positive/public/codecs/*.wasm binary
