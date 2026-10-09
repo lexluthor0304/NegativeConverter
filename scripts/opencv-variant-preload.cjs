@@ -14,8 +14,12 @@ if (variant === 'simd') {
   const loaderUrl = pathToFileURL(path.join(__dirname, 'opencv-node.mjs')).href;
   let promise = null;
   const originalLoad = Module._load;
+  // The bare specifier, its dist path, or the resolved file (a worker thread
+  // given require.resolve's path, as benchmark-dust-performance.mjs does).
+  const isPackage = request => request === '@techstark/opencv-js' || request === '@techstark/opencv-js/dist/opencv.js'
+    || /[\\/]@techstark[\\/]opencv-js[\\/]dist[\\/]opencv\.js$/.test(request);
   Module._load = function (request, parent, isMain) {
-    if (request === '@techstark/opencv-js' || request === '@techstark/opencv-js/dist/opencv.js') {
+    if (isPackage(request)) {
       promise ||= import(loaderUrl).then(m => m.loadOpenCvSimd());
       return promise;
     }

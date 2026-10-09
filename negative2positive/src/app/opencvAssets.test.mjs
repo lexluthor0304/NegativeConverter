@@ -152,7 +152,9 @@ assert.deepEqual(lines(glued), lines(original), 'the glued realm computes what t
     '  }',
     '}(this, function () {',
     "  var cv = (() => { var _scriptName = typeof document != 'undefined' ? document.currentScript?.src : undefined;",
-    "  return async function(moduleArg = {}) { var Module = moduleArg; function findWasmBinary() { return locateFile('opencv_js.wasm'); } return Module; } })();",
+    "  return async function(moduleArg = {}) { var Module = moduleArg; function findWasmBinary() { return locateFile('opencv_js.wasm'); }",
+    '  var ___cxa_throw=(ptr,type,destructor)=>{var info=new ExceptionInfo(ptr);info.init(type,destructor);uncaughtExceptionCount++;abort()};var syscallGetVarargI=()=>1;',
+    '  return Module; } })();',
     "  if (typeof Module === 'undefined')",
     '    Module = {};',
     '  return cv(Module);',
@@ -164,13 +166,18 @@ assert.deepEqual(lines(glued), lines(original), 'the glued realm computes what t
   assert.ok(patched.trimEnd().endsWith('return cv(globalThis.__opencvModuleArg || {});\n}));'));
   assert.ok(patched.includes("locateFile('opencv-simd.wasm')") && !patched.includes('opencv_js.wasm'));
   assert.equal(patched.match(/Module = \{\};/g), null);
+  // Emscripten 6 aborts in __cxa_throw with exception catching off; the
+  // package's Emscripten 4.0.20 glue threw the pointer cv.exceptionFromPtr reads.
+  assert.ok(patched.includes('uncaughtExceptionCount++;throw ptr};var syscallGetVarargI') && !patched.includes('uncaughtExceptionCount++;abort()'));
   assertOpenCvSimdGlue(patched);
   assert.throws(() => patchOpenCvSimdGlue(built.replace('}(this, function () {', '}(window, function () {')), /UMD root call/);
   assert.throws(() => patchOpenCvSimdGlue(built.replace('return cv(Module);', 'return cv(Module2);')), /UMD tail/);
   assert.throws(() => patchOpenCvSimdGlue(built.replace("locateFile('opencv_js.wasm')", "binaryDecode('')")), /embedded/);
   assert.throws(() => patchOpenCvSimdGlue(built.replace("'opencv_js.wasm'", "'x.wasm'")), /opencv_js\.wasm/);
+  assert.throws(() => patchOpenCvSimdGlue(built.replace('uncaughtExceptionCount++;abort()', 'uncaughtExceptionCount++;abort("x")')), /__cxa_throw/);
   assert.throws(() => assertOpenCvSimdGlue(built), /globalThis/);
   assert.throws(() => assertOpenCvSimdGlue(patched.replace("locateFile('opencv-simd.wasm')", "locateFile('opencv_js.wasm')")), /opencv_js\.wasm/);
+  assert.throws(() => assertOpenCvSimdGlue(patched.replace('throw ptr}', 'abort()}')), /exception pointer/);
 }
 
 // The committed files: present, the glue in the shape the app relies on,
@@ -205,6 +212,19 @@ assert.deepEqual(lines(glued), lines(original), 'the glued realm computes what t
   assert.match(simd.getBuildInformation(), /-msimd128/);
   assert.doesNotMatch(original.getBuildInformation(), /-msimd128/);
   assert.match(simd.getBuildInformation(), /OpenCV 5\.0\.0/);
+  // A cv::Error reaches the caller as the exception pointer, readable with
+  // cv.exceptionFromPtr, in both builds (DustRemoval's heap fallback and the
+  // multi-shot error classification depend on it); the realm stays usable.
+  for (const [name, realm] of [['package', original], ['simd', simd]]) {
+    const mat = new realm.Mat(4, 4, realm.CV_8UC1), out = new realm.Mat();
+    let thrown = null;
+    try { realm.cvtColor(mat, out, realm.COLOR_BGR2GRAY); } catch (error) { thrown = error; } finally { mat.delete(); out.delete(); }
+    assert.equal(typeof thrown, 'number', `${name}: cv::Error is thrown as a pointer`);
+    assert.match(realm.exceptionFromPtr(thrown).msg, /Invalid number of channels|scn == 3 \|\| scn == 4/, `${name}: the message is readable`);
+    const again = new realm.Mat(2, 2, realm.CV_8UC1);
+    assert.equal(again.rows, 2, `${name}: the realm still works after the throw`);
+    again.delete();
+  }
   // The integer pipeline of the smoke check above (GaussianBlur, Canny,
   // HoughLines on 8-bit) gives the package's bytes; the wider parity runs are
   // in docs/auto-frame-regression.md and docs/dust-removal.md (#292).

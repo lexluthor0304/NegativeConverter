@@ -25,9 +25,12 @@ scalar build, split into `assets/opencv-<hash>.wasm` and
 `assets/opencv-glue-<hash>.js` at build time by `scripts/opencv-assets.mjs`):
 `platforms/js/build_js.py` with the default module whitelist and
 `-DCMAKE_CXX_STANDARD=17`, plus `--simd` and `--disable_single_file`, the
-package's two UMD patches on the glue and the app's hook tail
-(`return cv(globalThis.__opencvModuleArg || {})`). No threads: the macOS app
-has no SharedArrayBuffer. `opencv-simd-build-info.txt` records the OpenCV
+package's two UMD patches on the glue, the app's hook tail
+(`return cv(globalThis.__opencvModuleArg || {})`) and `__cxa_throw` throwing
+the C++ exception pointer as the package's Emscripten 4.0.20 glue did
+(Emscripten 6 aborts there with exception catching off), so `cv::Error`
+still reaches callers through `cv.exceptionFromPtr`. No threads: the macOS
+app has no SharedArrayBuffer. `opencv-simd-build-info.txt` records the OpenCV
 commit, the toolchain, the command, both files' SHA-256, how many functions
 use v128 instructions, and `cv.getBuildInformation()` of the module;
 `src/app/opencvAssets.test.mjs` holds the files to it.

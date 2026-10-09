@@ -73,12 +73,20 @@ const UMD_ROOT_CALL = '}(this, function () {';
 const UMD_ROOT_CALL_PATCHED = '}(globalThis, function () {';
 const BUILD_TAIL = /\n\s*if \(typeof Module === 'undefined'\)\n\s*Module = \{\};\n\s*return cv\(Module\);\n\}\)\);\s*$/;
 const BUILD_WASM_NAME = /(['"])opencv_js\.wasm\1/g;
+// Emscripten 6 ends `__cxa_throw` in abort() when exception catching is off
+// (makeThrow() in parseTools.mjs); the package's Emscripten 4.0.20 glue threw
+// the C++ exception pointer, which OpenCV.js callers read with
+// cv.exceptionFromPtr (DustRemoval's heap fallback, multi-shot's error
+// classification). The SIMD glue throws the pointer again.
+const BUILD_CXA_THROW = /(var ___cxa_throw=\(ptr,type,destructor\)=>\{var info=new ExceptionInfo\(ptr\);info\.init\(type,destructor\);uncaughtExceptionCount\+\+;)abort\(\)\}/;
+const CXA_THROW_PATCHED = '$1throw ptr}';
 
 /**
  * Patches a `--disable_single_file` build's `bin/opencv.js` (the UMD glue)
- * into the app's SIMD glue: the package's two UMD patches, the hook tail
- * and the committed wasm file name. Throws when the glue is not the shape
- * make_umd.py and Emscripten produced for this recipe.
+ * into the app's SIMD glue: the package's two UMD patches, the hook tail,
+ * the committed wasm file name and `__cxa_throw` throwing the pointer.
+ * Throws when the glue is not the shape make_umd.py and Emscripten produced
+ * for this recipe.
  */
 export function patchOpenCvSimdGlue(source, { wasmName = 'opencv-simd.wasm' } = {}) {
   const root = source.indexOf(UMD_ROOT_CALL);
@@ -87,18 +95,22 @@ export function patchOpenCvSimdGlue(source, { wasmName = 'opencv-simd.wasm' } = 
   if (/binaryDecode\(/.test(source)) throw new Error('opencv-simd glue: the wasm is embedded (built without --disable_single_file)');
   const names = source.match(BUILD_WASM_NAME);
   if (!names || names.length < 1) throw new Error('opencv-simd glue: the wasm file name opencv_js.wasm is not referenced');
+  const throws = source.match(new RegExp(BUILD_CXA_THROW.source, 'g'));
+  if (!throws || throws.length !== 1) throw new Error('opencv-simd glue: expected one aborting __cxa_throw');
   return source.slice(0, root) + UMD_ROOT_CALL_PATCHED + source.slice(root + UMD_ROOT_CALL.length)
     .replace(BUILD_TAIL, PATCHED_TAIL)
-    .replace(BUILD_WASM_NAME, `'${wasmName}'`);
+    .replace(BUILD_WASM_NAME, `'${wasmName}'`)
+    .replace(BUILD_CXA_THROW, CXA_THROW_PATCHED);
 }
 
-/** The SIMD glue's shape the app relies on (both patches and the hook tail). */
+/** The SIMD glue's shape the app relies on (the patches, the hook tail, the thrown pointer). */
 export function assertOpenCvSimdGlue(glue) {
   if (!glue.includes(UMD_ROOT_CALL_PATCHED)) throw new Error('opencv-simd glue: UMD root call not patched to globalThis');
   if (!glue.trimEnd().endsWith(PATCHED_TAIL.trim())) throw new Error('opencv-simd glue: hook tail missing');
   if (/\bvar Module = \{\};/.test(glue) || /\n\s*Module = \{\};/.test(glue)) throw new Error('opencv-simd glue: the shadowing Module is still there');
   if (BUILD_WASM_NAME.test(glue)) throw new Error('opencv-simd glue: still names opencv_js.wasm');
   BUILD_WASM_NAME.lastIndex = 0;
+  if (!/var ___cxa_throw=\(ptr,type,destructor\)=>\{[^}]*uncaughtExceptionCount\+\+;throw ptr\}/.test(glue)) throw new Error('opencv-simd glue: __cxa_throw does not throw the exception pointer');
 }
 
 // The end of the single-quoted literal that starts at `start` (its opening

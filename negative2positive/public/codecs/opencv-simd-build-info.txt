@@ -1,13 +1,13 @@
 OpenCV.js WASM SIMD build (NegativeConverter #292, scripts/build-opencv-js.sh)
-built: 2026-10-09T13:13:36.315Z on lexluthors-MacBook-Pro.local (Darwin 27.0.0 arm64), node v26.5.1
+built: 2026-10-09T13:20:52.068Z on lexluthors-MacBook-Pro.local (Darwin 27.0.0 arm64), node v26.5.1
 opencv: tag 5.0.0, commit 40738fb16ceddb5fb3fea747585f7ce6abb0605b, https://github.com/opencv/opencv
 emscripten: emcc (Emscripten gcc/clang-like replacement + linker emulating GNU ld) 6.0.4-git
 cmake: cmake version 4.4.0; python: Python 3.13.1
 configure: emcmake python3 platforms/js/build_js.py build_js --simd --disable_single_file --config_only --cmake_option=-DCMAKE_CXX_STANDARD=17 --cmake_option=-DCMAKE_POLICY_VERSION_MINIMUM=3.5
-build: make -j3 opencv.js
+build: make -j8 opencv.js
 recipe: TechStark/opencv-js build-opencv-js.yml for 5.0.0-release.1 (default module whitelist, no --threads) plus --simd; --disable_single_file because the app serves the wasm as its own file
-glue patches: UMD root call this -> globalThis and the hook tail `return cv(globalThis.__opencvModuleArg || {})` (dist/opencv.js.patch of the package and scripts/opencv-assets.mjs), wasm file name opencv-simd.wasm
-files: opencv-simd.wasm 14401252 bytes sha256 53b1da3efbf6a2f46bb8488ce9e3bd00dc08859d9adf8c62730bb351eccebe86; opencv-simd-glue.js 128760 bytes sha256 581cd362327cd0a68be4d37c273df0a61ded13749f8f5bb9163f8ea0a51f5943
+glue patches: UMD root call this -> globalThis and the hook tail `return cv(globalThis.__opencvModuleArg || {})` (dist/opencv.js.patch of the package and scripts/opencv-assets.mjs), wasm file name opencv-simd.wasm, __cxa_throw throws the exception pointer (as Emscripten 4.0.20 did; 6.x aborts with exception catching off) so cv.exceptionFromPtr reads cv::Error
+files: opencv-simd.wasm 14401252 bytes sha256 53b1da3efbf6a2f46bb8488ce9e3bd00dc08859d9adf8c62730bb351eccebe86; opencv-simd-glue.js 128762 bytes sha256 f005b4ff9f091a07512f76705678cadb51c3ba0b305fd95b0230765ec2bf775c
 simd: 5609 of 16837 functions use v128 instructions (251049 instructions, counted on wasm-dis -all output)
 scalar reference: @techstark/opencv-js 5.0.0-release.1: wasm 11958198 bytes, sha256 769a4c9a7b03cba7bf22229154c1208087035a533347364e6d9a4d47cad2dbed
 

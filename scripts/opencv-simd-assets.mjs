@@ -137,7 +137,7 @@ const info = [
   `configure: emcmake python3 platforms/js/build_js.py build_js --simd --disable_single_file --config_only ${provenance.cmakeOptions.split(/\s+/).filter(Boolean).map(option => `--cmake_option=${option}`).join(' ')}`,
   `build: make -j${provenance.jobs} opencv.js`,
   'recipe: TechStark/opencv-js build-opencv-js.yml for 5.0.0-release.1 (default module whitelist, no --threads) plus --simd; --disable_single_file because the app serves the wasm as its own file',
-  'glue patches: UMD root call this -> globalThis and the hook tail `return cv(globalThis.__opencvModuleArg || {})` (dist/opencv.js.patch of the package and scripts/opencv-assets.mjs), wasm file name opencv-simd.wasm',
+  'glue patches: UMD root call this -> globalThis and the hook tail `return cv(globalThis.__opencvModuleArg || {})` (dist/opencv.js.patch of the package and scripts/opencv-assets.mjs), wasm file name opencv-simd.wasm, __cxa_throw throws the exception pointer (as Emscripten 4.0.20 did; 6.x aborts with exception catching off) so cv.exceptionFromPtr reads cv::Error',
   `files: ${wasmName} ${wasm.length} bytes sha256 ${sha256(wasm)}; ${basename(outGlue)} ${glueBytes.length} bytes sha256 ${sha256(glueBytes)}`,
   simdStats
     ? `simd: ${simdStats.simdFunctions} of ${simdStats.functions} functions use v128 instructions (${simdStats.simdInstructions} instructions, counted on wasm-dis -all output)`
