@@ -276,6 +276,47 @@ and every count equals a full recount.
   (a new conversion, `clearDustState`) and with the photo
   (`invalidatePhotoActivation`: every switch, New session, a parked photo).
 
+## OpenCV build: SIMD and scalar (#292)
+
+Dust detection, TELEA and the brush refinement run on whichever OpenCV build
+the page chose (`docs/cross-origin-isolation.md`: the WASM SIMD build where
+the engine validates v128, the package's scalar build otherwise or with
+`?opencvSimd=0`). Both builds give the same masks and the same pixels; only
+the time differs. Measured 2026-10-09 (M1 Pro, Node 26.5.1, both builds in
+one process on the same planes, load average 35–180 from other agents, so
+the times carry noise; harness in `notes/292-harness/`, rows in
+`notes/results/measure-292.md`):
+
+- **Parity.** `detectDust` masks and particle counts, `inpaintMasked` in
+  8-bit and in the 16-bit plane (radius 3 and 5) and `refineMaskIntelligent`
+  (40 strokes each) are byte-identical on the synthetic frames at 640×480,
+  1500×1000 and 3000×2000 (60–400 specks) and `detectDust` at 24 MP
+  (6000×4000, 12 164 particles); `detectDust` masks on the 20 M11 frames
+  downsampled to 24 MP and on L1000617 at 60 MP are identical as well.
+  `DustRemoval.partition.test.mjs` (17 frames bit-identical to one
+  full-frame TELEA), `DustBrush.test.mjs` (200+ strokes against the
+  full-frame path), `DustRemoval.regional/inpaint`, `DustBrush.enclosure`,
+  `dustWorkerProcessor`, `dustWorkerMemoryResize`, `dustStrokeHistory` and
+  `dustWorkerClient.shared` pass on the SIMD build
+  (`NC_OPENCV_VARIANT=simd node -r ./scripts/opencv-variant-preload.cjs`).
+  So dust exports do not change with the build.
+- **Speed, scalar → SIMD (medians).** Detection at 24 MP: the dual top-hat
+  (Scharr, morphology, blur, threshold, contours) is where SIMD pays:
+  2324 → 433 ms on the synthetic 6000×4000 frame (harness, 3 runs);
+  `scripts/benchmark-dust-performance.mjs 6000 4000`: direct 2375 → 423 ms
+  (second pass 2438 → 431), in its worker thread 2315 → 453 ms; on the 12
+  frames of the M11 B&W roll (L1000617–628) downsampled to 24 MP, median
+  of the per-frame medians (3 runs) 1392 → 325 ms (−77 %; 1324–1437 →
+  252–511 ms); on the full 60 MP L1000617 14 464 → 2 909 ms. Detection at 3000×2000
+  513 → 100 ms, at 1500×1000 141 → 28 ms. TELEA itself is not vectorised:
+  `inpaintMasked` at 3000×2000 34 → 32 ms (radius 3) and 43 → 42 ms
+  (radius 5); `scripts/bench-dust-inpaint-60mp.mjs` (9504×6320, 400 specks)
+  199 → 193 ms in an idle pass and 596 → 278 ms in a pass at load average
+  180 (the scalar run then exceeded the bench's 400 ms bound; the earlier
+  pass did not). `refineMaskIntelligent` 27 → 21 ms at 640×480, unchanged
+  at 1500×1000 and 3000×2000 (the stroke cost is the crop and the
+  contour pass).
+
 ## Known limits
 
 - Batch export still re-detects dust per file and ignores brush edits
