@@ -28,6 +28,9 @@ jobs:
           ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
         run: |
           test -n "$ASC_API_KEY_ID" -a -n "$ASC_API_ISSUER_ID" -a -n "$ASC_API_KEY_P8" || { echo "ASC secrets missing"; exit 1; }
+          echo "=== cancel the 1.0.32 review submission (owner's decision 2026-10-09: submit 1.0.33 instead)"
+          CONFIRM_WRITE=yes ruby .github/scripts/asc-api.rb PATCH '/v1/reviewSubmissions/081902a3-b543-4dd1-8765-563de41d9104' '{"data":{"type":"reviewSubmissions","id":"081902a3-b543-4dd1-8765-563de41d9104","attributes":{"canceled":true}}}' || true
+          sleep 5
           echo "=== appStoreVersions"
           ruby .github/scripts/asc-api.rb GET '/v1/apps/6797694070/appStoreVersions?filter[platform]=MAC_OS&fields[appStoreVersions]=versionString,appVersionState,appStoreState,createdDate,releaseType&limit=6'
           echo "=== reviewSubmissions"
