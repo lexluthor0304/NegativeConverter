@@ -6,7 +6,12 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import vm from 'node:vm';
-import { extractOpenCvAssets, openCvAssetNames, openCvPackagePath, opencvAssetsPlugin, OPENCV_VIRTUAL_ID } from '../../../scripts/opencv-assets.mjs';
+import { existsSync } from 'node:fs';
+import {
+  assertOpenCvSimdGlue, extractOpenCvAssets, openCvAssetNames, openCvPackagePath, opencvAssetsPlugin, openCvSimdPaths, patchOpenCvSimdGlue,
+  OPENCV_SIMD_ASSETS, OPENCV_VIRTUAL_ID
+} from '../../../scripts/opencv-assets.mjs';
+import { loadOpenCvSimd } from '../../../scripts/opencv-node.mjs';
 
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 const packagePath = openCvPackagePath();
@@ -119,6 +124,92 @@ assert.deepEqual(lines(glued), lines(original), 'the glued realm computes what t
   assert.equal(glueReply.body, assets.glue);
   assert.equal((await serve('/@opencv-assets/opencv-00000000.wasm')).statusCode, 404);
   assert.equal((await serve('/src/app/main.js')).next, true);
+
+  // Both variants' URLs: the scalar files next to the chunks, the SIMD files
+  // in public/codecs one directory up; a build without the SIMD files fails.
+  assert.ok(code.includes('"../codecs/opencv-simd.wasm"') && code.includes('"../codecs/opencv-simd-glue.js"'));
+  assert.match(code, /export const opencvSimdWasmUrl = new URL\(simdWasmName, import\.meta\.url\)/);
+  assert.match(code, /export const opencvSimdGlueUrl = new URL\(simdGlueName, import\.meta\.url\)/);
+  assert.ok(devCode.includes('"/codecs/opencv-simd.wasm"') && devCode.includes('"/codecs/opencv-simd-glue.js"'));
+  const without = opencvAssetsPlugin({ packagePath, publicDir: '/nonexistent/public' });
+  without.configResolved({ command: 'build' });
+  assert.throws(() => without.load.call({ emitFile() {} }, resolved), /OpenCV SIMD asset missing/);
+}
+
+// ---- The SIMD variant (#292) ----
+// The glue patcher, on the shape make_umd.py and Emscripten emit for a
+// --disable_single_file build: the package's two UMD patches, the hook tail
+// and the committed wasm name; anything else fails loudly.
+{
+  const built = [
+    '(function (root, factory) {',
+    "  if (typeof define === 'function' && define.amd) {",
+    '    define(function () { return (root.cv = factory()); });',
+    "  } else if (typeof module === 'object' && module.exports) {",
+    '    module.exports = factory();',
+    '  } else {',
+    '    root.cv = factory();',
+    '  }',
+    '}(this, function () {',
+    "  var cv = (() => { var _scriptName = typeof document != 'undefined' ? document.currentScript?.src : undefined;",
+    "  return async function(moduleArg = {}) { var Module = moduleArg; function findWasmBinary() { return locateFile('opencv_js.wasm'); } return Module; } })();",
+    "  if (typeof Module === 'undefined')",
+    '    Module = {};',
+    '  return cv(Module);',
+    '}));',
+    ''
+  ].join('\n');
+  const patched = patchOpenCvSimdGlue(built);
+  assert.ok(patched.includes('}(globalThis, function () {'));
+  assert.ok(patched.trimEnd().endsWith('return cv(globalThis.__opencvModuleArg || {});\n}));'));
+  assert.ok(patched.includes("locateFile('opencv-simd.wasm')") && !patched.includes('opencv_js.wasm'));
+  assert.equal(patched.match(/Module = \{\};/g), null);
+  assertOpenCvSimdGlue(patched);
+  assert.throws(() => patchOpenCvSimdGlue(built.replace('}(this, function () {', '}(window, function () {')), /UMD root call/);
+  assert.throws(() => patchOpenCvSimdGlue(built.replace('return cv(Module);', 'return cv(Module2);')), /UMD tail/);
+  assert.throws(() => patchOpenCvSimdGlue(built.replace("locateFile('opencv_js.wasm')", "binaryDecode('')")), /embedded/);
+  assert.throws(() => patchOpenCvSimdGlue(built.replace("'opencv_js.wasm'", "'x.wasm'")), /opencv_js\.wasm/);
+  assert.throws(() => assertOpenCvSimdGlue(built), /globalThis/);
+  assert.throws(() => assertOpenCvSimdGlue(patched.replace("locateFile('opencv-simd.wasm')", "locateFile('opencv_js.wasm')")), /opencv_js\.wasm/);
+}
+
+// The committed files: present, the glue in the shape the app relies on,
+// the wasm and glue the build information describes (SHA-256), a SIMD build
+// of OpenCV 5.0.0 with Emscripten 6.0.4 whose functions use v128, loading
+// through the hook like the scalar glue.
+{
+  const paths = openCvSimdPaths();
+  for (const [key, path] of Object.entries(paths)) assert.ok(existsSync(path), `${OPENCV_SIMD_ASSETS[key]} is committed (scripts/build-opencv-js.sh)`);
+  const simdWasm = new Uint8Array(readFileSync(paths.wasm));
+  const simdGlue = readFileSync(paths.glue, 'utf8');
+  const info = readFileSync(paths.buildInfo, 'utf8');
+  assertOpenCvSimdGlue(simdGlue);
+  const simdGlueBytes = Buffer.byteLength(simdGlue);
+  assert.ok(simdGlueBytes <= 300 * 1024, `SIMD glue is ${simdGlueBytes} bytes`);
+  const files = /files: opencv-simd\.wasm (\d+) bytes sha256 ([0-9a-f]{64}); opencv-simd-glue\.js (\d+) bytes sha256 ([0-9a-f]{64})/.exec(info);
+  assert.ok(files, 'the build information lists both files');
+  assert.equal(simdWasm.length, Number(files[1]));
+  assert.equal(sha256(simdWasm), files[2], 'opencv-simd.wasm is the build the information describes');
+  assert.equal(simdGlueBytes, Number(files[3]));
+  assert.equal(sha256(Buffer.from(simdGlue, 'utf8')), files[4], 'opencv-simd-glue.js is the glue the information describes');
+  assert.match(info, /^opencv: tag 5\.0\.0, commit [0-9a-f]{40}/m);
+  assert.match(info, /^emscripten: .*\b6\.0\.4\b/m);
+  assert.match(info, /^simd: [1-9]\d* of \d+ functions use v128 instructions/m);
+  assert.match(info, /-msimd128/);
+  assert.notEqual(sha256(simdWasm), sha256(assets.wasm), 'another module than the package\'s');
+  assert.ok(WebAssembly.validate(simdWasm), 'this Node validates the SIMD module');
+  const simdStarted = performance.now();
+  const simd = await loadOpenCvSimd();
+  const simdReadyMs = performance.now() - simdStarted;
+  assert.ok(simd?.Mat && simd !== original && simd !== glued);
+  assert.match(simd.getBuildInformation(), /-msimd128/);
+  assert.doesNotMatch(original.getBuildInformation(), /-msimd128/);
+  assert.match(simd.getBuildInformation(), /OpenCV 5\.0\.0/);
+  // The integer pipeline of the smoke check above (GaussianBlur, Canny,
+  // HoughLines on 8-bit) gives the package's bytes; the wider parity runs are
+  // in docs/auto-frame-regression.md and docs/dust-removal.md (#292).
+  assert.deepEqual(lines(simd), lines(original), 'the SIMD realm computes the smoke pipeline like the package');
+  console.log(`opencvAssets: SIMD wasm ${simdWasm.length} bytes (${sha256(simdWasm).slice(0, 8)}), glue ${simdGlueBytes} bytes, realm ready in ${simdReadyMs.toFixed(0)} ms`);
 }
 
 console.log(`opencvAssets: wasm ${assets.wasm.length} bytes (${assets.wasmHash}), glue ${glueBytes} bytes, glued realm ready in ${readyMs.toFixed(0)} ms`);
