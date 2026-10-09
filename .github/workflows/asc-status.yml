@@ -1,0 +1,36 @@
+name: App Store Connect query
+
+# Read-only access to the App Store Connect API with the repository's ASC key,
+# for the cases deliver reports only as a one-line error ("You cannot create a
+# new version of the App in the current state"). Prints the JSON responses in
+# the run log; the key never leaves the runner. Runs on a pull request that
+# touches this file, because workflow_dispatch needs the file on main first and
+# a push to main releases the app.
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/asc-status.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  query:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: App Store versions and review submissions (macOS)
+        env:
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+        run: |
+          test -n "$ASC_API_KEY_ID" -a -n "$ASC_API_ISSUER_ID" -a -n "$ASC_API_KEY_P8" || { echo "ASC secrets missing"; exit 1; }
+          echo "=== appStoreVersions"
+          ruby .github/scripts/asc-api.rb GET '/v1/apps/6797694070/appStoreVersions?filter[platform]=MAC_OS&fields[appStoreVersions]=versionString,appVersionState,appStoreState,createdDate,releaseType&limit=6'
+          echo "=== reviewSubmissions"
+          ruby .github/scripts/asc-api.rb GET '/v1/apps/6797694070/reviewSubmissions?filter[platform]=MAC_OS&fields[reviewSubmissions]=state,submittedDate,platform&limit=6' || true
+          echo "=== builds"
+          ruby .github/scripts/asc-api.rb GET '/v1/builds?filter[app]=6797694070&sort=-uploadedDate&fields[builds]=version,processingState,uploadedDate,expired&limit=4' || true
