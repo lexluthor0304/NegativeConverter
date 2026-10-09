@@ -93,6 +93,44 @@ keeps the copy path it always had, with the same pixels.
   CDP. How this and the desktop's native decoder are chosen:
   `docs/raw-decoding.md`.
 
+## OpenCV build: WASM SIMD or scalar (#292)
+
+Two builds of the same OpenCV 5.0.0 ship, and the choice does **not** depend
+on isolation or on `SharedArrayBuffer`: it depends only on whether the engine
+runs WASM SIMD.
+
+- **The SIMD build**, `public/codecs/opencv-simd.wasm` + `opencv-simd-glue.js`
+  (`scripts/build-opencv-js.sh`: the package's recipe with `-msimd128`,
+  Emscripten 6.0.4 pinned; its provenance in `opencv-simd-build-info.txt`),
+  where `WebAssembly.validate` accepts a v128 module: Chrome and Edge,
+  WebView2, Safari and WKWebView 16.4+, WebKitGTK 2.40+.
+- **The scalar build**, the `@techstark/opencv-js` package split into
+  `assets/opencv-<hash>.wasm` + `assets/opencv-glue-<hash>.js`
+  (`scripts/opencv-assets.mjs`), elsewhere: macOS 10.15's WebKit has no WASM
+  SIMD. `?opencvSimd=0` forces it on any page (`?opencvSimd=1` asks for SIMD
+  where it validates); the kill switch `localStorage.nc_opencv_simd = '0'`
+  does the same without a URL. No threads in either build: `--threads` would
+  change the worker model and the macOS app has no shared memory.
+
+The page decides once, when `src/app/opencvModule.js` evaluates and before
+any OpenCV fetch (`chooseOpenCvVariant` in `src/app/opencvRuntime.js`),
+compiles that build's wasm once and answers each OpenCV worker's request with
+the compiled `WebAssembly.Module` **and the variant**; the worker imports the
+matching glue and instantiates the Module (a worker that gets no reply at all
+probes its own engine). Every realm of a session therefore runs the same
+bytes. `window.__ncIsolation.opencv()` names the choice
+(`{ variant, simdSupported, forced, source, wasmUrl, glueUrl, compiles }`),
+`window.__ncIsolation.report()` carries it as `report.opencv`, and the
+desktop's log line reads `opencv=simd` or `opencv=scalar` (`!` when a switch
+forced it). The roll-frame smoke step checks that the workers run the page's
+variant from the page's Module with one wasm fetch and nothing of the other
+variant; `NC_OPENCV_SIMD=0 npm run test:smoke` runs the whole smoke on the
+scalar build (every navigation gets `?opencvSimd=0`). In Node,
+`scripts/opencv-node.mjs` loads either build, and
+`NC_OPENCV_VARIANT=simd node -r ./scripts/opencv-variant-preload.cjs x.test.mjs`
+runs an unchanged test on the SIMD build. Parity and speed of the two builds:
+`docs/auto-frame-regression.md` and `docs/dust-removal.md`.
+
 ## Third-party loads under COEP
 
 | load | why it keeps working |

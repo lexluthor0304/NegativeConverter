@@ -94,11 +94,17 @@ export function probeWorker(factory, { timeoutMs = PROBE_TIMEOUT_MS } = {}) {
 
 /**
  * The whole report: `{ page, workers: { name: answer }, allIsolated,
- * planeGuard }`. `names` limits the workers probed (default: all, plus
- * LibRaw). Workers are probed a few at a time.
+ * planeGuard, opencv }`. `names` limits the workers probed (default: all,
+ * plus LibRaw). Workers are probed a few at a time. `describeOpenCv()`
+ * (opencvModule.js on the page) names the OpenCV build the session runs
+ * (#292); without it `opencv` is null.
  */
-export async function collectIsolationReport({ names = null, probes = WORKER_PROBES, concurrency = 3, libraw = true } = {}) {
+export async function collectIsolationReport({ names = null, probes = WORKER_PROBES, concurrency = 3, libraw = true, describeOpenCv = null } = {}) {
   const page = describeRealmIsolation(globalThis);
+  let opencv = null;
+  if (typeof describeOpenCv === 'function') {
+    try { opencv = describeOpenCv() || null; } catch (error) { opencv = { error: String(error?.message || error) }; }
+  }
   const wanted = (names || Object.keys(probes)).filter((name) => typeof probes[name] === 'function');
   const workers = {};
   let next = 0;
@@ -117,14 +123,16 @@ export async function collectIsolationReport({ names = null, probes = WORKER_PRO
     page,
     workers,
     allIsolated: page.crossOriginIsolated && answers.every((answer) => answer.crossOriginIsolated === true),
-    planeGuard: planeGuardReport()
+    planeGuard: planeGuardReport(),
+    opencv
   };
 }
 
 /**
  * One line for the desktop's terminal log (log_webview_diagnostics). Each
  * worker reads `<crossOriginIsolated>/<SharedArrayBuffer>`: macOS WKWebView
- * reports isolation without SharedArrayBuffer.
+ * reports isolation without SharedArrayBuffer. `opencv=` names the OpenCV
+ * build (simd or scalar; `!` when a switch forced it) when the report has it.
  */
 export function formatIsolationLine(report) {
   const flag = (answer) => (answer?.error ? `error(${answer.error})`
@@ -132,6 +140,7 @@ export function formatIsolationLine(report) {
   const workers = Object.entries(report?.workers || {})
     .map(([name, answer]) => `${name}=${flag(answer)}${answer?.inferred ? '~' : ''}`)
     .join(' ');
+  const opencv = report?.opencv?.variant ? ` opencv=${report.opencv.variant}${report.opencv.forced ? '!' : ''}` : '';
   return `isolation page=${report?.page?.crossOriginIsolated ? 1 : 0} sab=${report?.page?.sharedArrayBuffer ? 1 : 0}`
-    + ` secure=${report?.page?.secureContext ? 1 : 0} workers: ${workers}`;
+    + ` secure=${report?.page?.secureContext ? 1 : 0}${opencv} workers: ${workers}`;
 }

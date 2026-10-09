@@ -121,7 +121,7 @@ src-tauri/                      # Tauri desktop packaging
 - **Web Workers** for non-blocking RAW processing and export encoding
 - **UPNG.js** (npm: `upng-js`) for 16-bit PNG support
 - **UTIF.js** (npm: `utif`) for TIFF/DNG parsing (iPhone ProRaw)
-- **OpenCV.js** (npm: `@techstark/opencv-js`) for automatic border detection / auto crop / auto rotation
+- **OpenCV.js** (npm: `@techstark/opencv-js` 5.0.0) for automatic border detection / auto crop / auto rotation, crop-colour and expired-film analysis, dust inpainting, lab match and multi-shot alignment. Two builds ship (#292): the package's scalar module (split into wasm + glue at build time by `scripts/opencv-assets.mjs`) and a WASM SIMD build of the same OpenCV tag in `negative2positive/public/codecs/opencv-simd.*`, made by `scripts/build-opencv-js.sh` (OpenCV 5.0.0, Emscripten 6.0.4 pinned). The page picks one per session with a `WebAssembly.validate` v128 probe (`?opencvSimd=0` forces scalar), compiles it once and hands the module plus the variant to every OpenCV worker (`src/app/opencvRuntime.js`, `docs/cross-origin-isolation.md`).
 - **Fonts**: Fusion Pixel 12px proportional の WOFF2 を `src/assets/fonts/fusion-pixel/`（ハッシュ付き `/assets` で配信）、ライセンスを `public/fonts/fusion-pixel/` に同梱。UI は `scripts/build-ui-fonts.mjs`（Vite プラグイン、`subset-font`）が dev/build 開始時に生成する言語別サブセット（git 管理外の `src/assets/fonts/ui/`）で表示し、原字体はその後ろのフォールバック。英字・CJK 対応、CDN 不要、Tauri オフライン対応。
 
 ### UI Theme

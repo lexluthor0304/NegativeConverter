@@ -337,6 +337,13 @@ export async function runIsolationSmoke({ send, sendTo, onCdpEvent, evaluate, wa
     if (!page.isolated || !page.sab) fail(`the page is not cross-origin isolated on the Vite dev server: ${JSON.stringify(page)}`);
     const report = await evaluate(REPORT);
     console.log('isolation report:', JSON.stringify(report.workers));
+    // The OpenCV build of this session (#292): the SIMD build where the
+    // engine validates v128, the scalar one with ?opencvSimd=0 (NC_OPENCV_SIMD=0).
+    console.log('isolation report opencv:', JSON.stringify(report.opencv));
+    const expectedVariant = process.env.NC_OPENCV_SIMD === '0' ? 'scalar' : process.env.NC_OPENCV_SIMD === '1' ? 'simd' : (report.opencv?.simdSupported ? 'simd' : 'scalar');
+    if (!report.opencv?.variant) fail('the isolation report does not name the OpenCV build');
+    if (report.opencv.variant !== expectedVariant) fail(`the page runs the ${report.opencv.variant} OpenCV build, expected ${expectedVariant}: ${JSON.stringify(report.opencv)}`);
+    if (process.env.NC_OPENCV_SIMD === '0' && report.opencv.forced !== 'scalar') fail(`?opencvSimd=0 did not force the scalar build: ${JSON.stringify(report.opencv)}`);
     const notIsolated = Object.entries(report.workers).filter(([, answer]) => answer.crossOriginIsolated !== true);
     if (!report.allIsolated || notIsolated.length) fail(`workers not cross-origin isolated: ${JSON.stringify(notIsolated)}`);
     for (const name of ['conversion', 'conversionBand', 'geometry', 'rawPostDecode', 'autoFrame', 'dust', 'aiInpaint', 'semantic', 'scanDecode', 'multiShot', 'export',
