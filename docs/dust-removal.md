@@ -152,6 +152,58 @@ and every count equals a full recount.
   `dust-undo-smoke.mjs` (full run; alone `--dust-undo-only`) undoes an
   Exposure drag after a stroke and compares the PNG 8-bit and TIFF 16-bit
   exports with those made before the drag.
+- **Cold entries (#281).** History's budget (#244) strips its oldest entries
+  of their pixel references: after a later edit, an Undo or a Redo, and under
+  memory pressure. From about 30 MP that dropped the only copies of a step's
+  clean source and repaired image, and the entry's undo detected dust again,
+  losing the settled mask, the particle count and every brush refinement. A
+  stripped entry now keeps the dust state its snapshot settled
+  (`coldRefsFor`):
+  - by reference while live state, a restore in progress, a stroke entry or
+    an entry that keeps its pixels still holds its mask or repaired image.
+    Those bytes are held anyway, and strokes and their undo still write into
+    them, so only the history position their content matches may read them
+    (LIFO, as for hot entries);
+  - compacted once nothing else holds them (`compactColdDust`,
+    `dustColdState.js`): the mask's set pixels as runs of pixel indices with
+    their bytes, the pixels where the repaired image differs from the clean
+    source as runs with their RGBA8 and RGBA16 values, and the clean source's
+    digest (its size and the MurmurHash3 x86_128 of its 8- and 16-bit
+    planes). Every cold entry that names the same objects is compacted at
+    once and shares the pixel record (each keeps its own count, inpainter
+    and repair stamp), so nothing can write into the objects while the
+    record is filled. That runs off the edit's task in slices of about a
+    million pixels (`startColdDustJob`; the memory ledger counts what it
+    holds until it ends), stops when no entry wants the record any more, and
+    finishes at once before history goes into a photo session or the
+    parking archive.
+
+  A record costs a byte per masked pixel, 12 bytes per repaired pixel (4 +
+  8) and 8 bytes per run of consecutive pixels of each: 556 kB for a 60 MP
+  frame with 400 particles (37 399 masked pixels), where the planes it stands
+  for are 1.5 GB. Records count against history's budget; one over 96 MiB is
+  not kept, and only when history is still over budget after the strokes
+  went do the oldest records go. At 60 MP the edit that makes an entry cold
+  takes about 1 ms for it, and the compaction about 1 s of slices of at most
+  a few tens of ms (`scripts/dust-cold-undo-60mp.mjs`).
+
+  Undo or redo of a cold entry rebuilds its planes from the base and converts
+  them, as before (#244). The detection after that conversion
+  (`keepColdRestoredDust`) then puts the dust state back instead of
+  detecting, when nothing changed the dust state or its inputs since the
+  restore, the inpainter is the one recorded, and the converted frame proves
+  to be the clean source: compared byte for byte with a clean source kept by
+  reference, else by its digest. A compacted state's mask and repaired image
+  are rebuilt on that frame (a copy in 32 MB slices with the record's pixels
+  written back), which becomes their clean source; a committed repair's stamp
+  carries over when it had no lens mapping. A compaction still running is
+  waited for. Anything in doubt detects from scratch, as before.
+  `dustColdUndo.test.mjs` runs main.js's history, budget, conversion,
+  detection and keep steps with the budget scaled down so entries go cold at
+  12 MP and less; `scripts/dust-cold-undo-60mp.mjs` is the 60 MP run with the
+  real budget (too heavy for `npm test`); the dust-undo smoke makes the step
+  before its Exposure drag cold (`__ncMemory.pruneHistory(0)` with
+  `?debug=1`) and compares the exports after its undo.
 - **Display.** Only the preview pixels whose bilinear taps fall in R are
   recomputed (`updateDisplayPreviewRect`, exact), the WebGL source texture gets
   a `texSubImage2D` of that rect, the tint cells over the mask box are put on
@@ -169,7 +221,9 @@ and every count equals a full recount.
 - **Tint and brush feedback (#253, #254).** The mask is shown on
   `#displayOverlay`, a canvas in the transform wrapper at the display frame's
   size (at most the display-preview cap), so zoom and pan only move it and the
-  view stays on the GPU. A tint cell is set when any mask pixel inside it is
+  view stays on the GPU. It takes the photo canvas's box; with the border
+  preview its backing is the framed display size and the tint is put at the
+  photo's offset in it, so tint and photo share one pixel grid (#279). A tint cell is set when any mask pixel inside it is
   set (max-pooling, `dustTint.js`), so one-pixel specks show at fit. The dust
   worker pools it: `detect` (while the mask is shown) and `stroke` requests
   carry the overlay's size, and the replies carry the whole tint or the cells
@@ -181,7 +235,17 @@ and every count equals a full recount.
   pointer events (touch and pen paint too, `touch-action: none` on the view
   while a brush is active), coalesced samples at least a device pixel apart,
   one draw per animation frame of the new segments only, round-capped lines of
-  the brush's width. `#canvas` is not written while a stroke is painted.
+  the brush's width. `#canvas` is not written while a stroke is painted. The
+  brush stores the pointer rounded to a pixel, and `DustBrush` stamps each disc
+  around that pixel, centred on its centre; the live stroke is drawn through
+  those centres (`dustDiscCentre`), so the dab lies where the disc is committed
+  (#279 follow-up). It used to be drawn at the pixel's corner, half a pixel up
+  and to the left of the disc: in the display-modes smoke (1500 px fixture, DPR
+  1) 0.76 to 0.84 CSS px off the committed disc at 381 % with the border and
+  1.14 to 1.17 px without it; now within 0.1 px at 100 % and 381 %. The smoke
+  reads the disc back from the mask (`__ncBrush.maskWindow`) and measures the
+  dab and the tint against it. The stored points, the mask and exports are
+  unchanged.
 - **AI repair on, or repair strokes present.** The TELEA patch also overwrote
   MI-GAN pixels inside R. After a 200 ms debounce only the tiles over queued
   rects are inferred again, on a window of the repaired image, and only the
@@ -216,8 +280,13 @@ and every count equals a full recount.
 
 - Batch export still re-detects dust per file and ignores brush edits
   (`audit-backlog.md`).
-- A history entry the memory budget made cold (#244: after a later edit, an
-  Undo or a Redo, or under memory pressure, typically from about 30 MP, where
-  history holds the only copies of the step's clean source and repaired image)
-  keeps no dust state: its undo rebuilds the planes from the base and detects
-  dust again.
+- A stroke entry still holds the planes it patched, so once they are off
+  screen history's budget drops it with every older step (#259): at 60 MP
+  with dust removal on, strokes made before a conversion are dropped at the
+  next edit. The step before that conversion keeps their refinements in its
+  dust state.
+- A photo left in a session without its planes (#244's cold form,
+  `photo-sessions.md`; a 60 MP frame with dust removal does not fit with
+  them) keeps the dust states of its entries that were already cold, but not
+  its current one or a hot entry's: reopening the photo, or undoing such an
+  entry, detects dust again.

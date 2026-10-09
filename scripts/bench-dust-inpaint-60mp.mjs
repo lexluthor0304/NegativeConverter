@@ -55,7 +55,10 @@ for (let k = 0; k < specks; k++) {
     }
   }
 }
-const image16 = Uint16Array.from(rgba, (value) => value * 257);
+// A plain loop: `Uint16Array.from(rgba, mapFn)` builds a JS array of every mapped
+// value first, which at 9504×6320×4 exceeds V8's array-length limit.
+const image16 = new Uint16Array(rgba.length);
+for (let i = 0; i < rgba.length; i++) image16[i] = rgba[i] * 257;
 
 const processor = createDustWorkerProcessor();
 await processor({ type: 'plane', id: 1, kind: 'rgba', width, height, offset: 0, total: rgba.length, chunk: rgba, done: true });

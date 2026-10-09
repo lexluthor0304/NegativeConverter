@@ -76,12 +76,14 @@ assert.notEqual(detectFilmType(mutedColor).filmType, 'bw', 'muted colour alone i
 const clippedColorBorder = fixture((x, y) => x < 30 || x >= 130 ? [255, 255, 255] : orange(x, y));
 assert.equal(detectFilmType(clippedColorBorder).filmType, 'color', 'clipped margins must not dilute existing orange-mask evidence');
 
-// Block size follows the short side: 4 at 60 MP (6336 px), 3 at 24 MP, and
-// unchanged single pixels on preview planes and the fixtures above.
-assert.equal(detectionBlockSize(9536, 6336), 4);
-assert.equal(detectionBlockSize(6000, 4000), 3);
-assert.equal(detectionBlockSize(2448, 1630), 1);
-assert.equal(detectionBlockSize(1803, 1202), 1);
+// Block size follows the short side, about one box side per 800 px: 8 at 60 MP
+// (6336 px; 4 left one frame of the real B&W roll a positive), 5 at 24 MP, 2 at
+// 4 MP and single pixels on small previews and the fixtures above.
+assert.equal(detectionBlockSize(9536, 6336), 8);
+assert.equal(detectionBlockSize(6000, 4000), 5);
+assert.equal(detectionBlockSize(4000, 2672), 3);
+assert.equal(detectionBlockSize(2448, 1630), 2);
+assert.equal(detectionBlockSize(1000, 917), 1);
 assert.equal(detectionBlockSize(160, 120), 1);
 assert.equal(detectionBlockSize(20000, 15000), 8, 'automatic size is capped');
 assert.equal(detectionBlockSize(160, 120, 4), 4, 'tests and callers can force the size');

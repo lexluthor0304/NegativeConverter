@@ -51,9 +51,10 @@ for (const [width, height, budgetMiB] of [[1110, 700, 384], [1600, 1000, 512]]) 
   const view = { sourceWidth, sourceHeight, baseWidth: 1809, fit, zoom: 1.5, dpr: 2,
     panX: -(0.5 * sourceWidth * fit) / 2, panY: -(0.5 * sourceHeight * fit) / 2,
     baseX: (width - sourceWidth * fit) / 2, baseY: (height - sourceHeight * fit) / 2, containerWidth: width, containerHeight: height, levelFactor: 3 };
-  const plan = planDetailRegion(view), slot = detailSlotSize(width, height, 2);
-  const exact = estimateDetailRoiBytes(plan, slot, { exactFrame: true });
-  assert.ok(exact > estimateDetailRoiBytes(plan, slot), 'exact input accounting cannot assume the retained source level');
+  const plan = planDetailRegion(view);
+  assert.ok(detailSlotSize(width, height, 2), 'a supported viewport');
+  const exact = estimateDetailRoiBytes(plan, { exactFrame: true });
+  assert.ok(exact > estimateDetailRoiBytes(plan), 'exact input accounting cannot assume the retained source level');
   assert.ok(exact <= budgetMiB * 1024 * 1024, `${exact} bytes exceeds ${budgetMiB} MiB`);
   console.log(`exact detail ${width}x${height} descriptor allocation estimate: ${exact} bytes (not RSS)`);
 }

@@ -3,11 +3,13 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { planDetailRegion, detailRegionServes, detailSlotSize, estimateDetailRoiBytes, snapPanToDevicePixels, copyRegionRows,
   buildDetailFrameLevel, assertDetailAllocation, assertDetailRoiAllocation, detailSizeAllowed,
-  DETAIL_MAX_NATIVE_PIXELS, DETAIL_MAX_OUTPUT_PIXELS, DETAIL_MAX_DIMENSION, DETAIL_SETTLE_MS } from './detailLayer.js';
+  DETAIL_MAX_NATIVE_PIXELS, DETAIL_MAX_OUTPUT_PIXELS, DETAIL_MAX_DIMENSION, DETAIL_SETTLE_MS, DETAIL_STEP_SETTLE_MS,
+  planDetailBands, planDetailBandCount } from './detailLayer.js';
 import { displayTargetFor, displayLevelGeometry } from './displayPreview.js';
 import { computeZoomGeometry } from './zoomGeometry.js';
 import { displaySessionStubs, DISPLAY_SESSION_HELPERS } from './displaySessionHarness.mjs';
 import { regionFrame } from '../render/previewTables.js';
+import { frameRectTransform } from './displayCanvas.js';
 
 // #248 part 5 in main.js (extracted with vm): when the detail layer asks for a
 // region, from what, how it is placed, and that a stale region is never drawn.
@@ -27,7 +29,8 @@ function functionSource(name) {
 const settle = () => new Promise(setImmediate);
 
 const W = 2400, H = 1600;
-function fixture({ dpr = 2, container = { width: 600, height: 420 }, size = { width: W, height: H }, planningOnly = false, levelFactor = 1 } = {}) {
+function fixture({ dpr = 2, container = { width: 600, height: 420 }, size = { width: W, height: H }, planningOnly = false, levelFactor = 1, cores = 2,
+  levelPixels = !planningOnly } = {}) {
   const { width: W, height: H } = size;
   let nextId = 1;
   const timers = new Map();
@@ -37,6 +40,11 @@ function fixture({ dpr = 2, container = { width: 600, height: 420 }, size = { wi
     for (let i = 0; i < conversionSource.__image16.data.length; i += 97) conversionSource.__image16.data[i] = i & 0xffff;
   }
   const level = levelFactor > 1 ? { width: Math.floor(W / levelFactor), height: Math.floor(H / levelFactor) } : conversionSource;
+  if (levelFactor > 1 && levelPixels) {
+    const data = new Uint16Array(level.width * level.height * 4);
+    for (let i = 0; i < data.length; i += 89) data[i] = (i * 7) & 0xffff;
+    level.__image16 = { width: level.width, height: level.height, data };
+  }
   const levelGeometry = image => image === level ? { sourceWidth: W, sourceHeight: H, k: levelFactor } : displayLevelGeometry(image);
   const base = { width: 1160, height: 773 };
   const state = {
@@ -50,6 +58,14 @@ function fixture({ dpr = 2, container = { width: 600, height: 420 }, size = { wi
   };
   const roiCalls = [];
   const analyses = [];
+  // Band requests of the detail workers (#270), per worker index.
+  const bandCalls = [];
+  const disposed = [];
+  const detailWorker = index => ({
+    roi: (request) => new Promise((resolve, reject) => bandCalls.push({ worker: index, request, resolve, reject })),
+    dispose: () => disposed.push(index),
+  });
+  let workersMade = 0;
   // The preview worker keeps this photo's level unless a test says otherwise.
   const heldLevel = { image: level };
   const resamples = [];
@@ -67,10 +83,16 @@ function fixture({ dpr = 2, container = { width: 600, height: 420 }, size = { wi
     modesStatus: () => renderer.modes || 'linked'
   };
   const fit = Math.min((container.width - 20) / W, (container.height - 20) / H);
+  // The base's box, whole CSS pixels (#279), as adjustCanvasDisplay sets it.
+  const box = { width: Math.round(W * fit), height: Math.round(H * fit) };
   const context = vm.createContext({
     // #249: no photo here takes a display form.
     ...displaySessionStubs(),
     state, window: { devicePixelRatio: dpr, location: { search: '' } }, console, performance,
+    navigator: { hardwareConcurrency: cores }, Worker: function Worker() {}, lowMemoryPhotoDevice: () => false,
+    createConversionWorkerClient: () => detailWorker(++workersMade),
+    createPerfTrace: () => ({ mark() {}, end() {} }), yieldTask: () => new Promise(setImmediate),
+    planDetailBands, planDetailBandCount, DETAIL_STEP_SETTLE_MS,
     // The typed arrays of this realm, which the fixture's planes are made in.
     Uint16Array, Uint8ClampedArray, ImageData, AbortController,
     coreReprocessSettledListeners: new Set(),
@@ -80,8 +102,8 @@ function fixture({ dpr = 2, container = { width: 600, height: 420 }, size = { wi
     clearTimeout: id => timers.delete(id),
     glDetailCanvas, canvasTransformWrapper: wrapper,
     DETAIL_LAYER_ENABLED: true, DETAIL_SETTLE_MS, WORKER_ABORTED: 'WORKER_ABORTED',
-    detailLayer: { renderer, failed: false, timer: null, request: null, shown: null, visible: false, warmed: 'warm',
-      counters: { requests: 0, conversions: 0, crops: 0, shown: 0, dropped: 0, failures: 0, lastReadyMs: null } },
+    detailLayer: { renderer, failed: false, timer: null, request: null, shown: null, visible: false, warmed: 'warm', workers: [], bandsFailed: false,
+      counters: { requests: 0, conversions: 0, crops: 0, shown: 0, dropped: 0, failures: 0, lastReadyMs: null, banded: 0 } },
     planDetailRegion, detailRegionServes, detailSlotSize, snapPanToDevicePixels, copyRegionRows, buildDetailFrameLevel,
     assertDetailAllocation, assertDetailRoiAllocation, detailSizeAllowed, DETAIL_MAX_NATIVE_PIXELS, DETAIL_MAX_OUTPUT_PIXELS, DETAIL_MAX_DIMENSION,
     displayLevelGeometry: levelGeometry,
@@ -90,7 +112,8 @@ function fixture({ dpr = 2, container = { width: 600, height: 420 }, size = { wi
     isWebGLActive: () => true, canPaintAiBrush: () => false, usesSilverCoreConversion: () => true,
     hasSeparateConversionPreview: () => true, hasFrameRepairs: () => state.dustRemoval.enabled,
     getCanvasContainerSize: () => container,
-    getZoomGeometry: () => computeZoomGeometry({ wrapperW: W * fit, wrapperH: H * fit, containerW: container.width, containerH: container.height, zoom: state.zoomLevel }),
+    getZoomGeometry: () => computeZoomGeometry({ wrapperW: box.width, wrapperH: box.height, containerW: container.width, containerH: container.height, zoom: state.zoomLevel }),
+    frameRectTransform, conversionSourceSize: () => state.conversionSourceImageData || state.sourcePending || null,
     interimGeometryCss: () => '', webglStep3Values: () => ({ wb: [1, 1, 1], vib: 0, cmy: [0, 0, 0], stages: state.stages || null }),
     regionFrame, requestAnimationFrame: () => 1,
     gpuPreview: { lastDraw: 'step3' }, gpuPreviewScheduler: { isAhead: () => false },
@@ -103,16 +126,18 @@ function fixture({ dpr = 2, container = { width: 600, height: 420 }, size = { wi
     getColorAnalysisSample: () => null,
     convertPreviewFrameInWorker: {
       holds: (image) => image === heldLevel.image,
-      analyze: async (frame) => { analyses.push(frame); heldLevel.image = frame.imageData; return {}; },
-      roi: (request) => new Promise((resolve, reject) => roiCalls.push({ request, resolve, reject })),
+      analyze: async (frame) => { analyses.push(frame); heldLevel.image = frame.imageData; return { channelData: [1, 2, 3], positiveAnalysis: null }; },
+      roi: (request) => new Promise((resolve, reject) => (request.band ? bandCalls.push({ worker: 0, request, resolve, reject })
+        : roiCalls.push({ request, resolve, reject }))),
       resample: async (image, target) => { resamples.push({ image, target }); return new ImageData(target.width, target.height); },
     },
   });
   vm.runInContext([
     ...DISPLAY_SESSION_HELPERS,
-    'detailLayerAllowed', 'detailView', 'detailFullFrame', 'detailTag', 'detailTagCurrent', 'hideDetailLayer', 'dropDetailLayer',
+    'detailLayerAllowed', 'detailView', 'detailBoxScale', 'detailFullFrame', 'detailTag', 'detailTagCurrent', 'hideDetailLayer', 'dropDetailLayer',
     'positionDetailCanvas', 'drawDetailLayer', 'detailModesReady', 'syncDetailLayer', 'noteDetailViewChanged', 'scheduleDetailRequest',
     'scheduleDetailWarmUp', 'detailConversionBusy', 'wakeDetailAfterConversion', 'noteCoreReprocessSettled', 'requestDetailRegion', 'detailFromFrame', 'detailFromSource', 'showDetailRegion',
+    'detailBandCount', 'detailClients', 'retireDetailWorkers', 'detailBandsFor', 'detailRowsPlane', 'detailInBands',
   ].map(functionSource).join('\n'), context);
   const runTimers = async () => {
     for (let round = 0; round < 4; round++) {
@@ -131,8 +156,8 @@ function fixture({ dpr = 2, container = { width: 600, height: 420 }, size = { wi
     state.panX = cx - next.baseX - contentX * zoom;
     state.panY = cy - next.baseY - contentY * zoom;
   };
-  return { context, state, roiCalls, resamples, draws, uploads, glDetailCanvas, wrapper, timers, runTimers, zoomTo, fit, conversionSource, base, container,
-    analyses, heldLevel };
+  return { context, state, roiCalls, resamples, draws, uploads, glDetailCanvas, wrapper, timers, runTimers, zoomTo, fit, box, conversionSource, base, container,
+    analyses, heldLevel, bandCalls, disposed, level };
 }
 
 // At fit the base is sharp enough: no region, nothing asked.
@@ -162,17 +187,23 @@ function fixture({ dpr = 2, container = { width: 600, height: 420 }, size = { wi
   assert.equal(request.base.levelWidth, W);
   assert.equal(request.base.display.target.width, f.base.width, 'with the base display target, whose analysis it shares');
   assert.ok(request.region.slotWidth >= request.region.outWidth && request.region.slotWidth % 256 === 0);
-  // Snapped: the region's corner on a whole device pixel.
+  // Snapped: the region's corner on a whole device pixel, where the base's
+  // whole-pixel box puts it (#279 follow-up).
   const geometry = f.context.getZoomGeometry();
-  const device = (geometry.baseX + f.state.panX + zoom100 * request.region.x * f.fit) * 2;
+  const device = (geometry.baseX + f.state.panX + zoom100 * request.region.x * f.box.width / W) * 2;
   assert.ok(Math.abs(device - Math.round(device)) < 1e-6, 'the pan is snapped to device pixels');
   assert.ok(plan);
   f.roiCalls[0].resolve(new ImageData(request.region.outWidth, request.region.outHeight));
   await settle();
   assert.equal(f.context.detailLayer.visible, true);
   assert.equal(f.glDetailCanvas.width, request.region.outWidth);
-  assert.equal(f.glDetailCanvas.style.left, `${request.region.x * f.fit}px`);
-  assert.equal(f.glDetailCanvas.style.width, `${request.region.width * f.fit}px`);
+  // Laid over the region by a transform of the base's box, never a box of
+  // its own: the compositor rounded that box off the base's pixel grid.
+  assert.deepEqual([f.glDetailCanvas.style.left, f.glDetailCanvas.style.top, f.glDetailCanvas.style.width, f.glDetailCanvas.style.height],
+    [undefined, undefined, undefined, undefined]);
+  assert.equal(f.glDetailCanvas.style.transform, frameRectTransform(request.region, W, H));
+  assert.equal(f.glDetailCanvas.style.transform, `translate(${request.region.x / W * 100}%, ${request.region.y / H * 100}%) `
+    + `scale(${request.region.width / W}, ${request.region.height / H})`);
   assert.equal(f.draws.length, 1);
 
   // A small pan inside the margin keeps it; a base redraw (a Step-3 edit)
@@ -249,13 +280,14 @@ function fixture({ dpr = 2, container = { width: 600, height: 420 }, size = { wi
   f.state.fullResolutionPending = false;
   f.zoomTo(1.953125 / (f.fit * 1.76));
   const start = { panX: f.state.panX, panY: f.state.panY };
-  // A pan whose snap for its own region plans another one.
+  // A pan whose snap for its own region plans another one. The step is not
+  // near a third of a source row, so the search meets every phase of the rows.
   let crossing = null;
   for (let step = 0; step < 400 && !crossing; step++) {
-    const panY = start.panY - step * 0.37;
+    const panY = start.panY - step * 0.113;
     const view = { ...f.context.detailView(), panY };
     const plan = planDetailRegion(view);
-    const snapped = snapPanToDevicePixels(panY, view.baseY, f.state.zoomLevel, plan.y * view.fit, 1);
+    const snapped = snapPanToDevicePixels(panY, view.baseY, f.state.zoomLevel, plan.y * view.boxHeight / view.sourceHeight, 1);
     if (planDetailRegion({ ...view, panY: snapped }).y !== plan.y) crossing = panY;
   }
   assert.ok(crossing !== null, 'a pan whose snap crosses a source row');
@@ -471,7 +503,143 @@ for (const [container, zoom] of [[{ width: 1110, height: 700 }, 2], [{ width: 16
 for (const [width, height, boundMiB] of [[1110, 700, 384], [1600, 1000, 512]]) {
   const slot = detailSlotSize(width, height, 2);
   const worstNative = { width: 4000, height: 4000, outWidth: slot.width, outHeight: slot.height, fromLevel: false };
-  const estimate = estimateDetailRoiBytes(worstNative, slot);
+  const estimate = estimateDetailRoiBytes(worstNative);
   assert.ok(estimate <= boundMiB * 1024 * 1024, `${width}x${height} DPR 2: ${estimate} B`);
   console.log(`detail ROI allocation estimate ${width}x${height}: ${estimate} B <= ${boundMiB} MiB`);
 }
+
+// #270: a discrete zoom step asks for its region at once; continuous
+// gestures still settle first.
+{
+  const f = fixture();
+  f.zoomTo(1 / (f.fit * 2));
+  f.context.noteDetailViewChanged(DETAIL_STEP_SETTLE_MS);
+  assert.deepEqual([...f.timers.values()].map(timer => timer.delay), [0], 'a step: no settle');
+  f.context.noteDetailViewChanged();
+  assert.deepEqual([...f.timers.values()].map(timer => timer.delay), [DETAIL_SETTLE_MS], 'a wheel tick or pan: the settle');
+  assert.equal(DETAIL_STEP_SETTLE_MS, 0);
+}
+
+// #270: at or above true 100 %, a region below native density no longer
+// serves, so zooming on past 100 % still refines to one source pixel per
+// device pixel; below it, the 10 % density band still deduplicates.
+{
+  const shown = { x: 0, y: 0, width: 100, height: 100, density: 0.926, fromLevel: false, levelFactor: 1 };
+  const visible = { x: 10, y: 10, width: 50, height: 50 };
+  assert.equal(detailRegionServes(shown, { ...shown, density: 1, visible }), false);
+  assert.equal(detailRegionServes({ ...shown, density: 1 }, { ...shown, density: 1, visible }), true);
+  assert.equal(detailRegionServes(shown, { ...shown, density: 0.98, visible }), true);
+}
+
+// #270: with cores to spare, a region converts in row bands at once: the
+// preview worker takes the first, detail workers the rest; each gets its own
+// rows and the base's analysis (asked of the preview worker, which keeps
+// it), and the replies are assembled in place.
+{
+  const f = fixture({ cores: 8 });
+  f.zoomTo(1 / (f.fit * 2));
+  f.context.noteDetailViewChanged(DETAIL_STEP_SETTLE_MS);
+  await f.runTimers();
+  assert.equal(f.roiCalls.length, 0, 'no single-worker region');
+  assert.equal(f.analyses.length, 1, 'the base analysis is asked for once');
+  assert.equal(f.bandCalls.length, 4);
+  assert.deepEqual(f.bandCalls.map(call => call.worker), [0, 1, 2, 3], 'the preview worker and three detail workers');
+  const { region } = f.bandCalls[0].request;
+  assert.equal(region.outWidth, region.width, 'native density');
+  let next = 0;
+  for (const { request } of f.bandCalls) {
+    const { band } = request;
+    assert.equal(band.y0, next, 'bands tile the output rows');
+    next = band.y1;
+    assert.deepEqual(JSON.parse(JSON.stringify(request.analysis)), { channelData: [1, 2, 3], positiveAnalysis: null }, 'the base analysis');
+    assert.equal(request.rows.length, region.width * band.rows * 4);
+    const expected = copyRegionRows(f.conversionSource.__image16.data, W, { x: region.x, y: region.y + band.rowY, width: region.width, height: band.rows });
+    assert.deepEqual(request.rows, expected, 'the band carries its own native rows');
+  }
+  assert.equal(next, region.outHeight);
+  for (const [index, call] of f.bandCalls.entries()) {
+    const image = new ImageData(region.outWidth, call.request.band.y1 - call.request.band.y0);
+    image.data.fill(index + 1);
+    // Out of order: the assembly places each band by its rows.
+    if (index === 0) continue;
+    call.resolve(image);
+  }
+  await settle();
+  assert.equal(f.context.detailLayer.visible, false, 'nothing shows before every band');
+  const first = new ImageData(region.outWidth, f.bandCalls[0].request.band.y1);
+  first.data.fill(1);
+  f.bandCalls[0].resolve(first);
+  await settle();
+  assert.equal(f.context.detailLayer.visible, true);
+  assert.equal(f.context.detailLayer.counters.banded, 1);
+  const upload = f.uploads.at(-1);
+  assert.deepEqual([upload.width, upload.height], [region.outWidth, region.outHeight]);
+  for (const [index, { request: { band } }] of f.bandCalls.entries()) {
+    assert.equal(upload.data[band.y0 * region.outWidth * 4], index + 1);
+    assert.equal(upload.data[band.y1 * region.outWidth * 4 - 1], index + 1);
+  }
+  // A newer request aborts the bands in flight.
+  f.context.coreReprocessToken++;
+  f.context.syncDetailLayer(true);
+  await f.runTimers();
+  const signals = f.bandCalls.slice(4).map(call => call.request.signal);
+  assert.equal(signals.length, 4);
+  f.context.coreReprocessToken++;
+  f.context.syncDetailLayer(true);
+  await f.runTimers();
+  assert.ok(signals.every(signal => signal.aborted), 'superseded bands are aborted');
+}
+
+// #270: from the level, a band carries the level rows its resample's taps
+// read. The 60 MP descriptor plans; only the 3178 x 2112 level holds pixels.
+{
+  const f = fixture({ cores: 8, container: { width: 1110, height: 700 }, size: { width: 9536, height: 6336 }, planningOnly: true, levelFactor: 3, levelPixels: true });
+  f.zoomTo(2);
+  f.context.noteDetailViewChanged(DETAIL_STEP_SETTLE_MS);
+  await f.runTimers();
+  assert.equal(f.bandCalls.length, 4);
+  const { region } = f.bandCalls[0].request;
+  assert.equal(region.fromLevel, true);
+  for (const { request: { band, rows } } of f.bandCalls) {
+    assert.equal(band.input, 'level');
+    const expected = copyRegionRows(f.level.__image16.data, f.level.width,
+      { x: region.x / 3, y: region.y / 3 + band.rowY, width: region.width / 3, height: band.rows });
+    assert.deepEqual(rows, expected, 'the band carries the level rows of its taps');
+  }
+  assert.deepEqual(planDetailBands(region, 4), JSON.parse(JSON.stringify(f.bandCalls.map(call => call.request.band))));
+}
+
+// #270: a failed band retires the detail workers; the region converts in the
+// preview worker alone, now and later.
+{
+  const f = fixture({ cores: 8 });
+  f.zoomTo(1 / (f.fit * 2));
+  f.context.noteDetailViewChanged(DETAIL_STEP_SETTLE_MS);
+  await f.runTimers();
+  const warn = console.warn;
+  console.warn = () => {};
+  try {
+    f.bandCalls[2].reject(Object.assign(new Error('band worker crashed'), { code: 'WORKER_CRASHED' }));
+    await settle();
+  } finally {
+    console.warn = warn;
+  }
+  assert.equal(f.context.detailLayer.bandsFailed, true);
+  assert.deepEqual(f.disposed, [1, 2, 3], 'the detail workers are released');
+  assert.equal(f.roiCalls.length, 1, 'the same request converts in one worker');
+  assert.equal(f.roiCalls[0].request.band, undefined);
+  f.roiCalls[0].resolve(new ImageData(f.roiCalls[0].request.region.outWidth, f.roiCalls[0].request.region.outHeight));
+  await settle();
+  assert.equal(f.context.detailLayer.visible, true);
+  assert.equal(f.context.detailBandCount({}), 1, 'later regions too');
+}
+
+// #270: one worker for a stage that reads neighbours (sharpening), and for
+// few cores; at most two where memory is short.
+assert.equal(planDetailBandCount({ hardwareConcurrency: 8 }), 4);
+assert.equal(planDetailBandCount({ hardwareConcurrency: 6 }), 3);
+assert.equal(planDetailBandCount({ hardwareConcurrency: 4 }), 2);
+assert.equal(planDetailBandCount({ hardwareConcurrency: 2 }), 1);
+assert.equal(planDetailBandCount({ hardwareConcurrency: 8, lowMemory: true }), 2);
+assert.equal(planDetailBandCount({ hardwareConcurrency: 8, pointwise: false }), 1);
+console.log('detailLayerWiring: discrete steps ask at once, native density above 100 %, banded regions with their own rows, abort and fallback');

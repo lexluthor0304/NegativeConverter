@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import {
   pictures, dragMetrics, dragInputs, settledAt, importMetrics, switchMetrics, zoomStepMetrics, panMetrics,
   rafGapSummary, busyFromTimerTicks, timerGapSummary, eventTimingP95, overlayHiddenAt, nextOverlayHidden,
-  longTaskSummary, flattenMetrics, newestInputIndex, loafAttribution, workerTimingSummary
+  longTaskSummary, flattenMetrics, newestInputIndex, loafAttribution, workerTimingSummary,
+  provisionalPictures, firstProvisional, veilShownAt, nextViewerVisible
 } from './metrics.mjs';
 
 const sortT = events => events.sort((a, b) => a.t - b.t);
@@ -164,6 +165,69 @@ const sortT = events => events.sort((a, b) => a.t - b.t);
   assert.equal(nextOverlayHidden(events, 10074), 13300);
 }
 
+// ---- S1 import through the photo-switch veil (#235, #273) ----
+// A RAW import opens through the veil, not the full-screen overlay: the
+// embedded preview's bitmap is the provisional frame; the exact positive is
+// drawn under the veil and visible once it hides. The worker reports the
+// film-edge read and frame detection inside 'analyze-import'.
+{
+  const events = sortT([
+    { k: 'input', type: 'change', t: 1000, id: 'fileInput', files: 1 },
+    { k: 'veil', t: 1003, shown: true, kind: null, surface: null },
+    { k: 'vis', t: 1004, ov: false, ready: false, busy: true },
+    { k: 'bmp', t: 1090, fn: 'transfer', c: 'studioPhotoSwitchFeedback:bitmap', w: 1809, h: 1206 },
+    { k: 'veil', t: 1091, shown: true, kind: 'embedded', surface: 'bitmap' },
+    // Another canvas's bitmap and a release are no provisional pixels.
+    { k: 'bmp', t: 1095, fn: 'transfer', c: 'anon7', w: 64, h: 64 },
+    { k: 'req', t: 5200, wid: 4, cls: 'analyze-import', id: 1 },
+    { k: 'res', t: 6050, wid: 4, cls: 'analyze-import', id: 1, rt: 5200, frameMs: 642.04, filmEdgeMs: 151.36 },
+    { k: 'req', t: 6100, wid: 2, cls: 'convert', id: 5 },
+    { k: 'res', t: 6180, wid: 2, cls: 'convert', id: 5, rt: 6100, hash: 'pos' },
+    { k: 'gl.upload', t: 6200, c: 'glCanvas', w: 1809, h: 1202, hash: 'pos' },
+    { k: 'gl.draw', t: 6210, c: 'glCanvas', sig: 'p1' },
+    { k: 'bmp', t: 6490, fn: 'release', c: 'studioPhotoSwitchFeedback:bitmap', w: 0, h: 0 },
+    { k: 'veil', t: 6500, shown: false, kind: null, surface: null },
+    { k: 'vis', t: 6510, ov: false, ready: true, busy: false }
+  ]);
+  assert.deepEqual(provisionalPictures(events).map(pic => [pic.t, pic.kind]), [[1090, 'embedded']]);
+  const m = importMetrics(events, { changeT: 1000 });
+  assert.equal(m.firstProvisionalPixelsMs, 90, 'the provisional frame on the veil');
+  assert.equal(m.provisionalKind, 'embedded');
+  assert.equal(m.firstEmbeddedPreviewMs, 90);
+  assert.equal(m.firstPixelsDrawnMs, 5210, 'exact pixels are drawn under the veil');
+  assert.equal(m.firstPhotoVisibleMs, 5500, 'and visible once the veil hides');
+  assert.equal(m.firstPositiveVisibleMs, 5500);
+  assert.equal(veilShownAt(events, 6210), true);
+  assert.equal(nextViewerVisible(events, 6210), 6500);
+  const analyze = m.stages.find(stage => stage.cls === 'analyze-import');
+  assert.equal(analyze.ms, 850);
+  assert.equal(analyze.filmEdgeMs, 151.4, 'the read\'s own time in the worker');
+  assert.equal(analyze.frameMs, 642);
+  // Without 'veil' events (older refs, other browsers) visibility is the overlay's alone.
+  const noVeil = events.filter(event => event.k !== 'veil');
+  assert.equal(nextViewerVisible(noVeil, 6210), 6210);
+  assert.equal(importMetrics(noVeil, { changeT: 1000 }).firstPhotoVisibleMs, 5210);
+}
+
+// ---- provisional pictures: the three veil surfaces, overlay visibility ----
+{
+  const events = sortT([
+    { k: 'vis', t: 0, ov: true, ready: false, busy: true },
+    { k: 'c2d', t: 10, fn: 'putImageData', c: 'studioPhotoSwitchFeedback:image', w: 1200, h: 800, hash: 'h' },
+    { k: 'vis', t: 40, ov: false, ready: false, busy: true },
+    { k: 'veil.load', t: 50, surface: 'thumbnail', kind: 'thumbnail', shown: true, w: 320, h: 213 },
+    { k: 'veil.load', t: 55, surface: 'thumbnail', kind: 'cached', shown: false, w: 320, h: 213 },
+    { k: 'bmp', t: 70, fn: 'transfer', c: 'studioPhotoSwitchFeedback:bitmap', w: 2112, h: 1408 }
+  ]);
+  assert.deepEqual(provisionalPictures(events).map(pic => pic.kind), ['cached', 'thumbnail', 'embedded'], 'a load on a hidden veil is no picture');
+  const { first, embedded } = firstProvisional(events, { from: 0 });
+  assert.equal(first.kind, 'cached');
+  assert.equal(first.visibleAt, 40, 'under the full-screen overlay it shows when the overlay goes');
+  assert.equal(embedded.visibleAt, 70);
+  assert.equal(firstProvisional(events, { from: 45 }).first.kind, 'thumbnail');
+  assert.equal(firstProvisional(events, { from: 0, until: 30 }).first, null, 'not visible within the window');
+}
+
 // ---- S7 switch ----
 {
   const events = sortT([
@@ -184,6 +248,20 @@ const sortT = events => events.sort((a, b) => a.t - b.t);
   assert.equal(m.readyMs, 9490);
   assert.equal(m.librawDecodes, 1);
   assert.equal(m.staleResultsAfterShown, 1, 'a result requested before the switch arriving after it counts as stale');
+  assert.equal(m.firstProvisionalPixelsMs, null, 'no veil surface was drawn');
+  // The same switch at HEAD: the tile's thumbnail on the veil within the
+  // keypress's task, then the embedded preview at viewer size (#235).
+  const veiled = sortT([...events,
+    { k: 'veil', t: 512, shown: true, kind: 'thumbnail', surface: 'thumbnail' },
+    { k: 'veil.load', t: 534, surface: 'thumbnail', kind: 'thumbnail', shown: true, w: 320, h: 213 },
+    { k: 'bmp', t: 610, fn: 'transfer', c: 'studioPhotoSwitchFeedback:bitmap', w: 2112, h: 1408 },
+    { k: 'veil', t: 9985, shown: false, kind: null, surface: null }
+  ]);
+  const v = switchMetrics(veiled, { keyT: 500, target: 'L1000618.DNG', displaySize: { w: 1809, h: 1202 }, until: 13000 });
+  assert.equal(v.firstProvisionalPixelsMs, 34);
+  assert.equal(v.provisionalKind, 'thumbnail');
+  assert.equal(v.firstEmbeddedPreviewMs, 110);
+  assert.equal(v.firstPixelsMs, 9470, 'exact pixels are reported separately');
 }
 
 // ---- S7 warm switch: cached pixels, no new conversion ----

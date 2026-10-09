@@ -103,6 +103,43 @@ const summary = r => r && JSON.stringify([r.angle, r.cropRegion, r.confidence, r
   assert.equal(outcome.imageLost, false);
 }
 
+// The worker times each part of the request on its own (#273): the page's
+// round trip covers both, and the film-edge stage has its own budget (#236).
+// Timing only: the results are the ones without it.
+{
+  const source = frame(720, 480, 2.5);
+  const slowEdge = async image => { const until = performance.now() + 30; while (performance.now() < until) { /* the read */ } return readEdge(image); };
+  const message = { type: 'analyze-import', width: 720, height: 480, rgba: source.data.slice(), frame: options('none'), filmEdge: {} };
+  const { reply } = await runImportRequest(message, { loadCv: async () => {}, detect: detectFrameAndRotation, rotate: applyRotationToImageData, readEdge: slowEdge });
+  assert.ok(reply.filmEdgeMs >= 29 && reply.filmEdgeMs < 1000, `the read's own time: ${reply.filmEdgeMs} ms`);
+  assert.ok(Number.isFinite(reply.frameMs) && reply.frameMs >= 0);
+  assert.equal(Math.round(reply.filmEdgeMs * 10), reply.filmEdgeMs * 10, 'rounded to 0.1 ms');
+  const expected = detectFrameAndRotation(source, { ...options('none'), rotateImageData: applyRotationToImageData });
+  assert.equal(summary(reply.frame), summary(expected), 'the detection is unchanged');
+  assert.deepEqual(reply.filmEdge, await readEdge(source), 'the read is unchanged');
+  const frameOnly = await runImportRequest({ ...message, rgba: source.data.slice(), filmEdge: null }, { loadCv: async () => {}, detect: detectFrameAndRotation, rotate: applyRotationToImageData, readEdge });
+  assert.equal('filmEdgeMs' in frameOnly.reply, false, 'no read, no read time');
+  const failing = await runImportRequest({ ...message, rgba: source.data.slice(), frame: null }, { loadCv: async () => {}, detect: detectFrameAndRotation, rotate: applyRotationToImageData,
+    readEdge: async () => { throw new Error('no edge'); } });
+  assert.equal(failing.reply.filmEdgeError, 'no edge');
+  assert.ok(Number.isFinite(failing.reply.filmEdgeMs), 'a failed read is timed too');
+  // Through the client and runImportAnalyses: the trace's `readMs` source.
+  const { client } = channelWorker();
+  const outcome = await client.analyzeImport(frame(720, 480, 2.5), { frame: options('none'), filmEdge: {} });
+  assert.ok(Number.isFinite(outcome.filmEdgeMs), 'the client passes the read time on');
+  const analysed = await runImportAnalyses(frame(720, 480, 2.5), { frame: options('none'), filmEdge: true }, {
+    frameWorkerSupported: true, edgeWorkerSupported: true, analyzeImport: (image, config) => client.analyzeImport(image, config),
+    ensureOpenCvReady: async () => true, analyzeOnMainThread: async () => assert.fail('no fallback'), readOnMainThread: () => assert.fail('no fallback')
+  });
+  assert.ok(Number.isFinite(analysed.read.ms));
+  assert.equal(analysed.read.result.found, true);
+  const fallback = await runImportAnalyses(frame(720, 480, 2.5), { frame: null, filmEdge: true }, {
+    frameWorkerSupported: true, edgeWorkerSupported: false, analyzeImport: () => assert.fail('no worker'),
+    ensureOpenCvReady: async () => true, analyzeOnMainThread: async () => null, readOnMainThread: image => readEdge(image)
+  });
+  assert.ok(Number.isFinite(fallback.read.ms), 'a main-thread read is timed on this thread');
+}
+
 // A lane's own decode: transferred without a copy, handed back, rebuilt over
 // the same bytes with the same 16-bit plane and properties.
 {
@@ -193,4 +230,4 @@ for (const degrees of [2.5, 0]) {
   assert.equal(outcome.read.result.found, true);
 }
 
-console.log('autoFrameImport: one copy on screen, owned hand-over and rebuild, full-resolution retry, button frames, lost frames decoded again');
+console.log('autoFrameImport: one copy on screen, per-part worker times, owned hand-over and rebuild, full-resolution retry, button frames, lost frames decoded again');

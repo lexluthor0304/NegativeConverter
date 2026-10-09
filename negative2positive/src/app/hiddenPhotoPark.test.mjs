@@ -70,6 +70,8 @@ function fixture({ enabled = true, hidden = true, brush = true, geometry = null 
     // No export runs in these scenes (hiddenParkExportLock.test covers the locks).
     singleExportActive: false, isDesktopBatchExportLocked: () => false,
     parkedPhoto: null, parkingPhoto: false, manualEditRevision: 0, dustHistoryArchive: archive,
+    // No cold history entry's dust state is being compacted (#281).
+    finishColdDustJobs() {},
     memoryBudget: createMemoryBudget({ budgetBytes: 10000 }), loadGeneration: 4, processNegativeInFlight: null, coreReprocessTimer: null,
     dustDetectionTimer: null, pendingBrushRepairs: 0, dustDrawing: false,
     safeStorageGet: key => storage.get(key) ?? null,

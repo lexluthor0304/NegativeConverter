@@ -225,14 +225,16 @@ export function createAutoFrameWorkerClient({
    * full-resolution rotation after all (`needsFullResolution`) is retried
    * once with both planes (transferred when owned, else copied).
    *
-   * Resolves { image, imageLost, frame, frameError, filmEdge, filmEdgeError }.
-   * A failed request reports its error per analysis; `imageLost` says that
-   * the transferred planes did not come back (the frame must be decoded
-   * again before anything reads it). Only an abort rejects.
+   * Resolves { image, imageLost, frame, frameError, filmEdge, filmEdgeError,
+   * filmEdgeMs }. A failed request reports its error per analysis;
+   * `imageLost` says that the transferred planes did not come back (the
+   * frame must be decoded again before anything reads it). `filmEdgeMs`: the
+   * read's own time in the worker (timing only, #273), else null. Only an
+   * abort rejects.
    */
   request.analyzeImport = async (image, { frame = null, filmEdge = null, owned = false, signal = null } = {}) => {
     const has16 = Boolean(image.__image16?.data);
-    const outcome = { image, imageLost: false, frame: null, frameError: null, filmEdge: null, filmEdgeError: null };
+    const outcome = { image, imageLost: false, frame: null, frameError: null, filmEdge: null, filmEdgeError: null, filmEdgeMs: null };
     const send = async (withImage16, askFrame, askEdge) => {
       if (signal?.aborted) throw abortError();
       const current = outcome.image;
@@ -266,6 +268,7 @@ export function createAutoFrameWorkerClient({
     }
     outcome.filmEdge = reply.filmEdge ?? null;
     outcome.filmEdgeError = reply.filmEdgeError ? new Error(reply.filmEdgeError) : null;
+    if (Number.isFinite(reply.filmEdgeMs)) outcome.filmEdgeMs = reply.filmEdgeMs;
     let frameReply = reply;
     if (frame && reply.frame?.needsFullResolution) {
       try { frameReply = await send(true, frame, null); }

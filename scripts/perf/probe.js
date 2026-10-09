@@ -7,7 +7,11 @@
  *
  * - WebGL 1 and 2: texture uploads (sparse pixel hash), draws (state
  *   signature), readPixels/getError calls made by the app.
- * - 2D canvas putImageData/drawImage, toDataURL/toBlob/convertToBlob.
+ * - 2D canvas putImageData/drawImage, toDataURL/toBlob/convertToBlob;
+ *   ImageBitmapRenderingContext transfers.
+ * - The photo-switch veil (#235): its visibility, its provisional kind and
+ *   the target's own pixels on its surfaces (the embedded preview's bitmap,
+ *   the retained copy's 2D put, the thumbnail <img> load).
  * - Workers: creation/termination, requests and results classified by
  *   type/fn with timestamps (conversion results hashed like uploads).
  * - File/Blob reads, Tauri invoke calls, trusted input events.
@@ -15,7 +19,8 @@
  *   mark and measure (the app's ?perf=1 hook).
  * - Visibility: loading overlay and studio-ready/busy; transform, file name,
  *   crop overlay and thumbnail mutations.
- * - Measurement windows: rAF-gap and 5 ms timer-gap recorders.
+ * - Measurement windows: rAF-gap and (unless a caller turns it off) 5 ms
+ *   timer-gap recorders.
  *
  * It never calls readPixels, getError or getImageData itself (GPU / raster
  * sync points); "visible" is decided from upload hashes. Its own time is
@@ -32,22 +37,32 @@
   var selfMs = 0;
   var seq = 0;
   var log = [];
+  // The ring keeps the last ringMs (at least 4096 events). Old events are
+  // dropped by advancing ringHead and compacted only when half the array is
+  // dead: a splice per push moved the whole ring every time once it was full
+  // (O(n) per event in busy scenarios, #273).
   var ring = [];
+  var ringHead = 0;
+  var RING_MIN = 4096;
   var dropped = 0;
   var counters = {};
   var windowState = null;
+  // The photo-switch veil (#235) and its presentation surfaces.
+  var VEIL_ID = 'studioPhotoSwitchFeedback';
 
   function count(name, n) { counters[name] = (counters[name] || 0) + (n || 1); }
 
   function push(record) {
     if (log.length < config.logLimit) log.push(record); else dropped++;
     ring.push(record);
-    if (ring.length > 4096 && ring[0].t < record.t - config.ringMs) {
-      var cut = 0;
-      while (cut < ring.length && ring[cut].t < record.t - config.ringMs) cut++;
-      ring.splice(0, cut);
+    var cutoff = record.t - config.ringMs;
+    while (ring.length - ringHead > RING_MIN && ring[ringHead].t < cutoff) ring[ringHead++] = undefined;
+    if (ringHead >= RING_MIN && ringHead * 2 >= ring.length) {
+      ring = ring.slice(ringHead);
+      ringHead = 0;
     }
   }
+  function ringEvents() { return ring.slice(ringHead); }
 
   // ---- hashing ----
   // Sparse FNV-1a over at most maxHashSamples samples. The stride depends only
@@ -62,16 +77,30 @@
     hash = Math.imul(hash ^ len, 16777619);
     return (hash >>> 0).toString(16);
   }
-  function stringHash(text) {
-    var hash = 2166136261;
+  function stringHashNum(text, seed) {
+    var hash = seed === undefined ? 2166136261 : seed;
     for (var i = 0; i < text.length; i++) hash = Math.imul(hash ^ text.charCodeAt(i), 16777619);
-    return (hash >>> 0).toString(16);
+    return hash;
   }
+  function stringHash(text) { return (stringHashNum(text) >>> 0).toString(16); }
   function viewBytes(value) {
     if (!value) return null;
     if (value instanceof ArrayBuffer) return new Uint8Array(value);
     if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
     return null;
+  }
+
+  // FNV-1a over the exact bits of a uniform's numbers (no string building).
+  var floatScratch = new Float64Array(1);
+  var wordScratch = new Uint32Array(floatScratch.buffer);
+  function valuesHash(values, seed) {
+    var hash = Math.imul(2166136261 ^ seed, 16777619);
+    for (var i = 0; i < values.length; i++) {
+      floatScratch[0] = values[i];
+      hash = Math.imul(hash ^ wordScratch[0], 16777619);
+      hash = Math.imul(hash ^ wordScratch[1], 16777619);
+    }
+    return hash | 0;
   }
 
   var ids = new WeakMap();
@@ -81,23 +110,50 @@
     if (!id) { id = ++seq; ids.set(object, id); }
     return id;
   }
+  // A canvas without an id is named once: the veil's presentation surfaces
+  // (#235) by their data-surface ('studioPhotoSwitchFeedback:bitmap'), other
+  // ones 'offscreen' or 'anon<n>'. An id is read on every call, as before.
+  var canvasNames = new WeakMap();
   function canvasName(canvas) {
     if (!canvas) return 'none';
     if (canvas.id) return canvas.id;
-    if (typeof OffscreenCanvas !== 'undefined' && canvas instanceof OffscreenCanvas) return 'offscreen';
-    return 'anon' + objectId(canvas);
+    var name = canvasNames.get(canvas);
+    if (name !== undefined) return name;
+    if (typeof OffscreenCanvas !== 'undefined' && canvas instanceof OffscreenCanvas) name = 'offscreen';
+    else {
+      var surface = typeof canvas.getAttribute === 'function' ? canvas.getAttribute('data-surface') : null;
+      var owner = surface && typeof canvas.closest === 'function' ? canvas.closest('#' + VEIL_ID) : null;
+      name = owner ? VEIL_ID + ':' + surface : 'anon' + objectId(canvas);
+    }
+    canvasNames.set(canvas, name);
+    return name;
   }
 
   // ---- WebGL 1 and 2 ----
   var TEXTURE_2D = 0x0DE1;
   var glStates = new WeakMap();
+  // `uh`: the context's uniform state as an XOR of one hash per location
+  // (values and location), updated only when a value changes. `texKey`: a
+  // hash of the bound textures and their contents, rebuilt only after a
+  // binding or an upload changed them. A draw's signature mixes both with
+  // the program and backing size, without walking every uniform and texture
+  // or building text per draw (#273). `name`: the canvas's id, once it has one.
   function glState(ctx) {
     var state = glStates.get(ctx);
     if (!state) {
-      state = { unit: 0, bound: new Map(), texHash: new Map(), uniforms: new Map(), program: 0, ut: null };
+      state = { unit: 0, bound: new Map(), texHash: new Map(), texKey: null, uh: 0, program: 0, ut: null, name: null };
       glStates.set(ctx, state);
     }
     return state;
+  }
+  // Per uniform location: its last values and their hash.
+  var uniformSlots = new WeakMap();
+  function glCanvasName(ctx, state) {
+    if (state.name) return state.name;
+    var canvas = ctx.canvas;
+    var name = canvasName(canvas);
+    if (canvas && canvas.id) state.name = name;
+    return name;
   }
   function sourceSize(source) {
     if (!source) return [0, 0];
@@ -120,7 +176,11 @@
     });
     wrapMethod(proto, 'bindTexture', function (original) {
       return function (target, texture) {
-        if (target === TEXTURE_2D) { var s = glState(this); s.bound.set(s.unit, objectId(texture)); }
+        if (target === TEXTURE_2D) {
+          var s = glState(this);
+          var id = objectId(texture);
+          if (s.bound.get(s.unit) !== id) { s.bound.set(s.unit, id); s.texKey = null; }
+        }
         return original.apply(this, arguments);
       };
     });
@@ -128,6 +188,7 @@
       return function (program) { glState(this).program = objectId(program); return original.apply(this, arguments); };
     });
     function upload(fnName, original, sub) {
+      var counter = label + '.' + fnName;
       return function () {
         var result = original.apply(this, arguments);
         var t0 = now();
@@ -145,49 +206,82 @@
           var tex = state.bound.get(state.unit) || 0;
           var contentHash = sub ? stringHash((state.texHash.get(tex) || '') + ':' + hash) : hash;
           state.texHash.set(tex, contentHash);
-          count(label + '.' + fnName);
+          state.texKey = null;
+          count(counter);
           var format = !sub ? (args.length >= 9 ? args[6] : args[3]) : (args.length >= 9 ? args[6] : args[4]);
           var type = !sub ? (args.length >= 9 ? args[7] : args[4]) : (args.length >= 9 ? args[7] : args[5]);
-          push({ k: 'gl.upload', t: t0, c: canvasName(this.canvas), ctx: label, fn: fnName, w: w, h: h, format: format, type: type, hash: contentHash, tex: tex });
+          push({ k: 'gl.upload', t: t0, c: glCanvasName(this, state), ctx: label, fn: fnName, w: w, h: h, format: format, type: type, hash: contentHash, tex: tex });
         } finally { selfMs += now() - t0; }
         return result;
       };
     }
     wrapMethod(proto, 'texImage2D', function (original) { return upload('texImage2D', original, false); });
     wrapMethod(proto, 'texSubImage2D', function (original) { return upload('texSubImage2D', original, true); });
+    // Compares the call's numbers with the location's last ones in place;
+    // only a change rehashes the location and moves the context's `uh`.
+    // A null location is a no-op in GL and here.
     Object.getOwnPropertyNames(proto).forEach(function (name) {
       if (!/^uniform(Matrix)?[1-4]/.test(name)) return;
       wrapMethod(proto, name, function (original) {
         return function (location) {
           var t0 = now();
           try {
-            var parts = [];
-            for (var i = 1; i < arguments.length; i++) {
-              var value = arguments[i];
-              parts.push(ArrayBuffer.isView(value) || Array.isArray(value) ? Array.prototype.join.call(value, ',') : String(value));
+            if (location) {
+              var slot = uniformSlots.get(location);
+              if (!slot) { slot = { values: [], hash: 0 }; uniformSlots.set(location, slot); }
+              var values = slot.values;
+              var n = 0;
+              var changed = false;
+              for (var i = 1; i < arguments.length; i++) {
+                var value = arguments[i];
+                if (value !== null && typeof value === 'object' && typeof value.length === 'number') {
+                  for (var j = 0; j < value.length; j++) {
+                    var element = +value[j];
+                    if (values[n] !== element && (element === element || values[n] === values[n])) { values[n] = element; changed = true; }
+                    n++;
+                  }
+                } else {
+                  var scalar = +value;
+                  if (values[n] !== scalar && (scalar === scalar || values[n] === values[n])) { values[n] = scalar; changed = true; }
+                  n++;
+                }
+              }
+              if (values.length !== n) { values.length = n; changed = true; }
+              if (changed) {
+                var state = glState(this);
+                var next = valuesHash(values, objectId(location));
+                state.uh ^= slot.hash ^ next;
+                slot.hash = next;
+                state.ut = t0;
+              }
             }
-            var state = glState(this);
-            var key = objectId(location);
-            var text = parts.join('|');
-            if (state.uniforms.get(key) !== text) { state.uniforms.set(key, text); state.ut = t0; }
           } finally { selfMs += now() - t0; }
           return original.apply(this, arguments);
         };
       });
     });
     function drawWrapper(fnName) {
+      var counter = label + '.' + fnName;
       return function (original) {
         return function () {
           var result = original.apply(this, arguments);
           var t0 = now();
           try {
             var state = glState(this);
-            var parts = ['p' + state.program, this.drawingBufferWidth + 'x' + this.drawingBufferHeight];
-            state.bound.forEach(function (tex, unit) { parts.push(unit + ':' + (state.texHash.get(tex) || tex)); });
-            state.uniforms.forEach(function (value, key) { parts.push(key + '=' + value); });
-            count(label + '.' + fnName);
-            push({ k: 'gl.draw', t: t0, c: canvasName(this.canvas), ctx: label, fn: fnName, sig: stringHash(parts.join(';')),
-              w: this.drawingBufferWidth, h: this.drawingBufferHeight, ut: state.ut });
+            if (state.texKey === null) {
+              var key = 2166136261;
+              state.bound.forEach(function (tex, unit) { key = stringHashNum(unit + ':' + (state.texHash.get(tex) || tex) + ';', key); });
+              state.texKey = key;
+            }
+            var w = this.drawingBufferWidth, h = this.drawingBufferHeight;
+            var sig = Math.imul(2166136261 ^ state.program, 16777619);
+            sig = Math.imul(sig ^ w, 16777619);
+            sig = Math.imul(sig ^ h, 16777619);
+            sig = Math.imul(sig ^ state.uh, 16777619);
+            sig = Math.imul(sig ^ state.texKey, 16777619);
+            count(counter);
+            push({ k: 'gl.draw', t: t0, c: glCanvasName(this, state), ctx: label, fn: fnName, sig: (sig >>> 0).toString(16),
+              w: w, h: h, ut: state.ut });
           } finally { selfMs += now() - t0; }
           return result;
         };
@@ -197,11 +291,12 @@
       wrapMethod(proto, name, drawWrapper(name));
     });
     ['readPixels', 'getError'].forEach(function (name) {
+      var counter = label + '.' + name;
       wrapMethod(proto, name, function (original) {
         return function () {
           var t0 = now();
-          count(label + '.' + name);
-          push({ k: 'gl.sync', t: t0, c: canvasName(this.canvas), ctx: label, fn: name });
+          count(counter);
+          push({ k: 'gl.sync', t: t0, c: glCanvasName(this, glState(this)), ctx: label, fn: name });
           selfMs += now() - t0;
           return original.apply(this, arguments);
         };
@@ -256,6 +351,29 @@
   }
   wrap2d(global.CanvasRenderingContext2D);
   wrap2d(global.OffscreenCanvasRenderingContext2D);
+  // ImageBitmapRenderingContext: the veil's provisional embedded-preview
+  // frame (#235) arrives through transferFromImageBitmap. A null bitmap
+  // releases the canvas's bitmap when the veil hides.
+  function wrapBitmapRenderer(Ctor) {
+    if (typeof Ctor !== 'function') return;
+    wrapMethod(Ctor.prototype, 'transferFromImageBitmap', function (original) {
+      return function (bitmap) {
+        var t0 = now();
+        // Read before the transfer: it detaches the bitmap (0×0 afterwards).
+        var w = bitmap ? bitmap.width : 0;
+        var h = bitmap ? bitmap.height : 0;
+        var before = now() - t0;
+        var result = original.apply(this, arguments);
+        var t1 = now();
+        try {
+          count(bitmap ? 'bmp.transfer' : 'bmp.release');
+          push({ k: 'bmp', t: t1, fn: bitmap ? 'transfer' : 'release', c: canvasName(this.canvas), w: w, h: h });
+        } finally { selfMs += before + now() - t1; }
+        return result;
+      };
+    });
+  }
+  wrapBitmapRenderer(global.ImageBitmapRenderingContext);
   function wrapEncoder(Ctor, name) {
     if (typeof Ctor !== 'function') return;
     wrapMethod(Ctor.prototype, name, function (original) {
@@ -361,12 +479,17 @@
       } else if (data && data.width) {
         record.w = data.width; record.h = data.height;
       }
-      // 'analyze-import' (#251): frame detection and film edge in one reply.
+      // 'analyze-import' (#251): frame detection and film edge in one reply,
+      // with each part's own time in the worker (#273).
       var frameResult = request.cls === 'analyze-frame' ? data && data.result
         : request.cls === 'analyze-import' ? data && data.result && data.result.frame : null;
       if (frameResult) {
         record.crop = frameResult.cropRegion ? { w: frameResult.cropRegion.width, h: frameResult.cropRegion.height } : null;
         record.angle = frameResult.angle;
+      }
+      if (request.cls === 'analyze-import' && data && data.result) {
+        if (typeof data.result.frameMs === 'number') record.frameMs = data.result.frameMs;
+        if (typeof data.result.filmEdgeMs === 'number') record.filmEdgeMs = data.result.filmEdgeMs;
       }
       push(record);
     } finally { selfMs += now() - t0; }
@@ -478,28 +601,45 @@
   wrapTauri();
 
   // ---- input ----
+  // The id of an event's target (or its nearest ancestor with one). A drag
+  // sends every move and input to one element: the last answer is reused.
+  var lastTarget = null;
+  var lastTargetId = '';
   function targetId(target) {
-    if (!target || target.nodeType !== 1) return '';
-    if (target.id) return target.id;
-    var withId = target.closest && target.closest('[id]');
-    return withId ? withId.id : '';
+    if (target === lastTarget) return lastTargetId;
+    var id = '';
+    if (target && target.nodeType === 1) {
+      id = target.id;
+      if (!id) { var withId = target.closest && target.closest('[id]'); id = withId ? withId.id : ''; }
+    }
+    lastTarget = target;
+    lastTargetId = id;
+    return id;
   }
-  ['mousedown', 'mouseup', 'mousemove', 'pointerdown', 'pointerup', 'pointermove', 'wheel', 'keydown', 'keyup',
-    'input', 'change', 'click', 'dblclick'].forEach(function (type) {
+  // No pointer* listeners: every pointer event the harness causes (CDP mouse
+  // input, WebDriver mouse actions) is a mouse one and is recorded once, as
+  // its mouse event, and a capturing pointermove listener only doubled the
+  // probe's cost per move (#273). Mouse moves record no modifiers.
+  ['mousedown', 'mouseup', 'mousemove', 'wheel', 'keydown', 'keyup', 'input', 'change', 'click', 'dblclick'].forEach(function (type) {
+    var value = type === 'input' || type === 'change';
+    var key = type === 'keydown' || type === 'keyup';
+    var mouse = !value && !key;
     global.addEventListener(type, function (event) {
       var t0 = now();
       try {
-        if (/^pointer/.test(type) && event.pointerType === 'mouse') return;
-        var record = { k: 'input', t: event.timeStamp, h: t0, type: type, id: targetId(event.target), tr: event.isTrusted };
-        if (type === 'input' || type === 'change') {
-          var target = event.target;
-          if (target && 'value' in target && target.type !== 'file') record.v = target.value;
-          if (target && target.type === 'file') record.files = target.files ? target.files.length : 0;
+        var target = event.target;
+        var record = { k: 'input', t: event.timeStamp, h: t0, type: type, id: targetId(target), tr: event.isTrusted };
+        if (value) {
+          var file = target && target.type === 'file';
+          if (file) record.files = target.files ? target.files.length : 0;
+          else if (target && 'value' in target) record.v = target.value;
+        } else if (mouse) {
+          record.x = Math.round(event.clientX); record.y = Math.round(event.clientY); record.b = event.buttons;
+          if (type === 'wheel') record.dy = event.deltaY;
+          else if (type === 'mousedown') record.mod = (event.metaKey ? 'M' : '') + (event.ctrlKey ? 'C' : '');
+        } else {
+          record.key = event.key; record.mod = (event.metaKey ? 'M' : '') + (event.ctrlKey ? 'C' : '') + (event.shiftKey ? 'S' : '') + (event.altKey ? 'A' : '');
         }
-        if ('clientX' in event) { record.x = Math.round(event.clientX); record.y = Math.round(event.clientY); record.b = event.buttons; }
-        if (type === 'wheel') record.dy = event.deltaY;
-        if (type === 'keydown' || type === 'keyup') { record.key = event.key; record.mod = (event.metaKey ? 'M' : '') + (event.ctrlKey ? 'C' : '') + (event.shiftKey ? 'S' : '') + (event.altKey ? 'A' : ''); }
-        if (type === 'mousedown' || type === 'mousemove') record.mod = (event.metaKey ? 'M' : '') + (event.ctrlKey ? 'C' : '');
         push(record);
       } finally { selfMs += now() - t0; }
     }, { capture: true, passive: true });
@@ -564,12 +704,46 @@
   }
   var observers = {};
   function watch(name, element, options, handler) {
-    if (!element || observers[name] || typeof MutationObserver !== 'function') return;
+    if (!element || observers[name] || typeof MutationObserver !== 'function') return false;
     observers[name] = new MutationObserver(function (records) {
       var t0 = now();
       try { handler(records, t0); } finally { selfMs += now() - t0; }
     });
     observers[name].observe(element, options);
+    return true;
+  }
+  // The photo-switch veil (#235): shown or hidden, its provisional kind
+  // (cached, thumbnail, embedded) and the surface on show. It covers the
+  // viewer, so exact pixels drawn under it are not visible yet.
+  var lastVeil = '';
+  function readVeil(veil, t) {
+    var shown = !veil.hidden;
+    var kind = veil.getAttribute('data-provisional') || null;
+    var surface = null;
+    if (shown && kind) {
+      var nodes = veil.querySelectorAll('[data-surface]');
+      for (var i = 0; i < nodes.length; i++) if (!nodes[i].hidden) { surface = nodes[i].getAttribute('data-surface'); break; }
+    }
+    var key = shown + ':' + kind + ':' + surface;
+    if (key === lastVeil) return;
+    lastVeil = key;
+    push({ k: 'veil', t: t, shown: shown, kind: kind, surface: surface });
+  }
+  // A thumbnail shown on the veil is visible once its <img> has loaded.
+  // Load events do not bubble; a capturing listener on the document sees
+  // them (the window is not on a load event's path).
+  if (typeof document !== 'undefined' && document && typeof document.addEventListener === 'function') {
+    document.addEventListener('load', function (event) {
+      var target = event.target;
+      if (!target || target.tagName !== 'IMG' || typeof target.hasAttribute !== 'function' || !target.hasAttribute('data-surface')) return;
+      var t0 = now();
+      try {
+        var veil = target.closest('#' + VEIL_ID);
+        if (!veil) return;
+        push({ k: 'veil.load', t: t0, surface: target.getAttribute('data-surface'), kind: veil.getAttribute('data-provisional') || null,
+          shown: !veil.hidden && !target.hidden, w: target.naturalWidth, h: target.naturalHeight });
+      } finally { selfMs += now() - t0; }
+    }, true);
   }
   function findOverlay() {
     if (overlay) return;
@@ -604,6 +778,10 @@
           idx: row ? row.dataset.index : null, v: record.attributeName === 'src' ? null : target.dataset.previewState });
       });
     });
+    var veil = document.getElementById(VEIL_ID);
+    if (watch('veil', veil, { attributes: true, subtree: true, attributeFilter: ['hidden', 'data-provisional', 'src'] }, function (records, t0) {
+      readVeil(veil, t0);
+    })) readVeil(veil, now());
     wrapTauri();
   }
   if (typeof document !== 'undefined') {
@@ -611,15 +789,20 @@
     else attachObservers();
     var attachTimer = setInterval(function () {
       attachObservers();
-      if (observers.body && observers.transform && observers.filename && observers.crop && observers.thumbs) clearInterval(attachTimer);
+      if (observers.body && observers.transform && observers.filename && observers.crop && observers.thumbs && observers.veil) clearInterval(attachTimer);
     }, 1000);
   }
 
   // ---- measurement windows: rAF and timer gaps ----
-  function beginWindow(label) {
+  // `options.ticks: false` skips the 5 ms heartbeat: it is WebKit's long-task
+  // proxy, Chrome has the Long Tasks API, and its 200 timer tasks a second
+  // were main-thread time no selfMs counted (#273). WebKit callers keep the
+  // default. The heartbeat's own callback time counts as probe time.
+  function beginWindow(label, options) {
     if (windowState) endWindow();
     attachObservers();
-    var state = { label: label || '', start: now(), frames: [], ticks: [], active: true };
+    var ticks = !(options && options.ticks === false);
+    var state = { label: label || '', start: now(), frames: [], ticks: ticks ? [] : null, active: true };
     windowState = state;
     function frame(time) {
       if (!state.active) return;
@@ -630,7 +813,7 @@
       requestAnimationFrame(frame);
     }
     requestAnimationFrame(frame);
-    state.timer = setInterval(function () { state.ticks.push(now()); }, 5);
+    if (ticks) state.timer = setInterval(function () { var t0 = now(); state.ticks.push(t0); selfMs += now() - t0; }, 5);
     readVis();
     return state.start;
   }
@@ -638,9 +821,11 @@
     var state = windowState;
     if (!state) return null;
     state.active = false;
-    clearInterval(state.timer);
+    if (state.timer) clearInterval(state.timer);
     windowState = null;
-    return { label: state.label, start: state.start, end: now(), frames: state.frames, ticks: state.ticks };
+    var out = { label: state.label, start: state.start, end: now(), frames: state.frames };
+    if (state.ticks) out.ticks = state.ticks;
+    return out;
   }
 
   // ---- export capture (S9) ----
@@ -885,8 +1070,12 @@
       // Tauri retains its real save dialog. A native writer completion is
       // required; dismissing the dialog cannot silently count as an export.
       return waitUntil(function () {
-        return ring.some(function (event) { return event.k === 'invoke.end' && event.t >= part.start
-          && (event.cmd === 'finish_export_write' || event.cmd === 'abort_export_write'); });
+        for (var i = ringHead; i < ring.length; i++) {
+          var event = ring[i];
+          if (event.k === 'invoke.end' && event.t >= part.start
+            && (event.cmd === 'finish_export_write' || event.cmd === 'abort_export_write')) return true;
+        }
+        return false;
       }, 1800000);
     }).then(function () {
       part.window = endWindow();
@@ -1023,7 +1212,7 @@
   global.__ncPerf = {
     version: 1,
     drain: drain,
-    dump: function () { return { ring: ring.slice(), counters: counters, selfMs: selfMs, window: windowState && { label: windowState.label, start: windowState.start } }; },
+    dump: function () { return { ring: ringEvents(), counters: counters, selfMs: selfMs, window: windowState && { label: windowState.label, start: windowState.start } }; },
     beginWindow: beginWindow,
     endWindow: endWindow,
     snapshot: snapshot,

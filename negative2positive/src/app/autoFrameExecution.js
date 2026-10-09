@@ -31,8 +31,10 @@ export async function detectFrameWithFallback(image, options, {
  *   owned, else the input); `reloaded` when it is a new decode;
  * - detection: undefined when not asked, else { result } or { error } (the
  *   main-thread analysis threw, or the frame could not be reloaded);
- * - read: undefined when not asked, else { result } or null when the reader
- *   failed.
+ * - read: undefined when not asked, else { result, ms } or null when the
+ *   reader failed; `ms` is the read's own time (in the worker, or on this
+ *   thread for the fallback; null when the worker did not report it), for
+ *   the perf trace only (#273).
  * Only an abort rejects.
  */
 export async function runImportAnalyses(image, { frame = null, filmEdge = false, owned = false, signal = null } = {}, {
@@ -74,13 +76,16 @@ export async function runImportAnalyses(image, { frame = null, filmEdge = false,
     }
   }
   if (filmEdge) {
-    if (inWorker.edge && !outcome.filmEdgeError) result.read = { result: outcome.filmEdge };
+    if (inWorker.edge && !outcome.filmEdgeError) result.read = { result: outcome.filmEdge, ms: outcome.filmEdgeMs ?? null };
     else {
       if (inWorker.edge) onReadError(outcome.filmEdgeError);
       if (reloadError) result.read = null;
       else {
-        try { result.read = { result: await readOnMainThread(current) }; }
-        catch (error) {
+        try {
+          const started = performance.now();
+          const read = await readOnMainThread(current);
+          result.read = { result: read, ms: Math.round((performance.now() - started) * 10) / 10 };
+        } catch (error) {
           onReadError(error);
           result.read = null;
         }

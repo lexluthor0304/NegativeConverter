@@ -15,7 +15,7 @@ await import('./conversionWorker.js');
 const { convertFrameWithRouter, resolveConversionMode } = await import('../pipeline/conversionRouter.js');
 const { analyzeSilverCorePreview, invalidateSilverCoreCache } = await import('../pipeline/silverAdapter.js');
 const { resampleDisplayLevel } = await import('../app/displayPreview.js');
-const { copyRegionRows, planDetailRegion, detailRegionServes, detailSlotSize, snapPanToDevicePixels } = await import('../app/detailLayer.js');
+const { copyRegionRows, planDetailRegion, detailRegionServes, detailSlotSize, snapPanToDevicePixels, planDetailBands } = await import('../app/detailLayer.js');
 
 const W = 160, H = 120;
 function source(seed) {
@@ -119,7 +119,7 @@ assert.equal(checked, cases.length * rects.length);
     region: { ...rect, frameWidth: W, frameHeight: H, outWidth: 100, outHeight: 80, fromLevel: false, levelFactor: 1, slotWidth: 128, slotHeight: 128 },
     image16: copyRegionRows(base.data, W, rect).buffer });
   assert.equal(stale.type, 'error');
-  // Warm-up converts a blank slot and answers.
+  // Warm-up converts a small patterned plane at idle and answers.
   const warm = await send({ type: 'roi', id: ++id, settings, warm: true, region: { slotWidth: 64, slotHeight: 64 } });
   assert.equal(warm.warm, true);
 }
@@ -158,6 +158,115 @@ assert.equal(checked, cases.length * rects.length);
 }
 
 console.log('conversionWorker.roi: detail regions equal the frame (sample) or meet the base (no sample) byte for byte with strokes, flat field, positive and edges; planning, slot and pan snap');
+
+// #270: a region converted in row bands, each from its own rows and with the
+// base's analysis as main passes it, equals the whole region byte for byte:
+// native rows at full density, a bilinear and a box + resample reduction of
+// native rows, and level blocks; colour with strokes and a flat field, B&W and
+// positive; with and without an analysis sample; 2 to 5 bands.
+{
+  const { resampleDisplayLevel: resample, buildDisplayLevel } = await import('../app/displayPreview.js');
+  const k = 2;
+  const cases = [];
+  for (const filmType of ['color', 'bw', 'positive']) {
+    for (const withReference of [false, true]) cases.push({ filmType, withReference });
+  }
+  let bandsChecked = 0;
+  for (const { filmType, withReference } of cases) {
+    invalidateSilverCoreCache();
+    const base = source(filmType.length + 5);
+    const reference = withReference ? source(11) : null;
+    const settings = { filmType, colorModel: 'standard', exposure: 9, contrast: 12, preSaturation: 104,
+      localExposure: strokes, localExposureGeometry: frameGeometry, flatField, flatFieldGeometry: frameGeometry };
+    if (filmType === 'color') settings.filmBase = { r: 205, g: 150, b: 95 };
+    // Two caches: the source itself (k 1), and a level of it (k 2).
+    const level = buildDisplayLevel({ width: W, height: H, __image16: { width: W, height: H, data: base.data } }, k);
+    const levelPlane = level.__image16;
+    for (const cached of ['source', 'level']) {
+      const geometry = cached === 'level' ? { sourceWidth: W, sourceHeight: H, k } : { sourceWidth: W, sourceHeight: H, k: 1 };
+      const held = cached === 'level' ? levelPlane : base;
+      const display = { target, geometry };
+      const baseMessage = { type: 'convert', id: ++id, cacheInput: true, reuseSource: false, reuseAnalysis: false, width: held.width, height: held.height,
+        settings, options: { preview: true, includeAnalysisPreview: false, analysisImageData: reference }, display, image16: held.data.buffer.slice(0) };
+      assert.equal((await send(baseMessage)).type, 'result');
+      // Main's analysis request: the preview worker answers with the base's.
+      const analyzed = await send({ ...baseMessage, type: 'analyze', id: ++id, reuseSource: true, reuseAnalysis: true, image16: undefined,
+        options: { preview: true, analysisImageData: null } });
+      assert.equal(analyzed.type, 'analyzed', analyzed.message);
+      const analysis = { channelData: analyzed.channelData, positiveAnalysis: analyzed.positiveAnalysis };
+      const regions = cached === 'level'
+        ? [{ x: 20, y: 10, width: 120, height: 96, outWidth: 70, outHeight: 57, fromLevel: true, levelFactor: k },
+          { x: 0, y: 24, width: 160, height: 96, outWidth: 101, outHeight: 61, fromLevel: true, levelFactor: k }]
+        : [{ x: 30, y: 20, width: 50, height: 40, outWidth: 50, outHeight: 40, fromLevel: false, levelFactor: 1 },
+          { x: 13, y: 7, width: 101, height: 83, outWidth: 71, outHeight: 58, fromLevel: false, levelFactor: 1 },
+          { x: 2, y: 9, width: 150, height: 104, outWidth: 47, outHeight: 33, fromLevel: false, levelFactor: 1 }];
+      for (const rect of regions) {
+        const region = { ...rect, frameWidth: W, frameHeight: H, slotWidth: 256, slotHeight: 256 };
+        const whole = await send({ type: 'roi', id: ++id, settings, region, base: { levelWidth: held.width, levelHeight: held.height, display },
+          image16: region.fromLevel ? undefined : copyRegionRows(base.data, W, region).buffer });
+        assert.equal(whole.type, 'roi', whole.message);
+        const expected = Buffer.from(new Uint8Array(whole.rgba));
+        for (const count of [2, 3, 5]) {
+          const bands = planDetailBands(region, count, { minRows: 1 });
+          assert.equal(bands.length, count);
+          const out = new Uint8Array(region.outWidth * region.outHeight * 4);
+          for (const band of bands) {
+            const rows = band.input === 'level'
+              ? copyRegionRows(levelPlane.data, levelPlane.width, { x: region.x / k, y: region.y / k + band.rowY, width: region.width / k, height: band.rows })
+              : copyRegionRows(base.data, W, { x: region.x, y: region.y + band.rowY, width: region.width, height: band.rows });
+            const reply = await send({ type: 'roi', id: ++id, settings, region, band, analysis, image16: rows.buffer }, [rows.buffer]);
+            assert.equal(reply.type, 'roi', reply.message);
+            assert.deepEqual([reply.width, reply.height], [region.outWidth, band.y1 - band.y0]);
+            out.set(new Uint8Array(reply.rgba), band.y0 * region.outWidth * 4);
+          }
+          const label = `${filmType}/${withReference ? 'sample' : 'no sample'}/${cached}/${rect.width}x${rect.height}->${rect.outWidth}x${rect.outHeight}/${count} bands`;
+          assert.ok(Buffer.compare(Buffer.from(out), expected) === 0, `${label}: the bands equal the whole region`);
+          bandsChecked++;
+        }
+      }
+    }
+  }
+  assert.equal(bandsChecked, cases.length * 5 * 3);
+  // An 8-bit source (a JPEG or PNG): bands of 8-bit native rows.
+  {
+    invalidateSilverCoreCache();
+    const eight = new Uint8ClampedArray(W * H * 4);
+    for (let i = 0; i < eight.length; i += 4) {
+      const p = i / 4, x = p % W, y = Math.floor(p / W);
+      eight.set([60 + ((x * 7 + y * 3) % 180), 50 + ((x * 3 + y * 5) % 160), 40 + ((x + y * 11) % 140), 255], i);
+    }
+    const settings = { filmType: 'color', colorModel: 'standard', exposure: 6, filmBase: { r: 205, g: 150, b: 95 },
+      localExposure: strokes, localExposureGeometry: frameGeometry };
+    const display = { target, geometry: { sourceWidth: W, sourceHeight: H, k: 1 } };
+    const baseMessage = { type: 'convert', id: ++id, cacheInput: true, reuseSource: false, reuseAnalysis: false, width: W, height: H,
+      settings, options: { preview: true, includeAnalysisPreview: false }, display, rgba: eight.buffer.slice(0) };
+    assert.equal((await send(baseMessage)).type, 'result');
+    const analyzed = await send({ ...baseMessage, type: 'analyze', id: ++id, reuseSource: true, reuseAnalysis: true, rgba: undefined,
+      options: { preview: true, analysisImageData: null } });
+    const analysis = { channelData: analyzed.channelData, positiveAnalysis: analyzed.positiveAnalysis };
+    for (const rect of [{ x: 30, y: 20, width: 50, height: 40, outWidth: 50, outHeight: 40 }, { x: 2, y: 9, width: 150, height: 104, outWidth: 47, outHeight: 33 }]) {
+      const region = { ...rect, fromLevel: false, levelFactor: 1, frameWidth: W, frameHeight: H, slotWidth: 256, slotHeight: 256 };
+      const whole = await send({ type: 'roi', id: ++id, settings, region, base: { levelWidth: W, levelHeight: H, display },
+        rgba: copyRegionRows(eight, W, region).buffer });
+      assert.equal(whole.type, 'roi', whole.message);
+      const out = new Uint8Array(region.outWidth * region.outHeight * 4);
+      for (const band of planDetailBands(region, 3, { minRows: 1 })) {
+        const rows = copyRegionRows(eight, W, { x: region.x, y: region.y + band.rowY, width: region.width, height: band.rows });
+        const reply = await send({ type: 'roi', id: ++id, settings, region, band, analysis, rgba: rows.buffer }, [rows.buffer]);
+        assert.equal(reply.type, 'roi', reply.message);
+        out.set(new Uint8Array(reply.rgba), band.y0 * region.outWidth * 4);
+      }
+      assert.ok(Buffer.compare(Buffer.from(out), Buffer.from(new Uint8Array(whole.rgba))) === 0, `8-bit ${rect.width}x${rect.height}: bands equal the whole region`);
+      bandsChecked++;
+    }
+  }
+  // A band without its rows or the analysis is an error, not a guess.
+  const region = { x: 0, y: 0, width: 50, height: 40, outWidth: 50, outHeight: 40, fromLevel: false, levelFactor: 1, frameWidth: W, frameHeight: H, slotWidth: 64, slotHeight: 64 };
+  const missing = await send({ type: 'roi', id: ++id, settings: { filmType: 'color' }, region, band: { y0: 0, y1: 20, rowY: 0, rows: 20, input: 'native' },
+    image16: new Uint16Array(50 * 20 * 4).buffer });
+  assert.equal(missing.type, 'error');
+  console.log(`conversionWorker.roi: ${bandsChecked} banded regions equal the whole region byte for byte`);
+}
 
 // Cancelled queued work must release its rows and never run behind a newer
 // conversion. No timer or large fixture is needed to hold the serial queue.

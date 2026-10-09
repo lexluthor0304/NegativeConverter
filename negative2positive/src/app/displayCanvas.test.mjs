@@ -2,7 +2,7 @@
 // node negative2positive/src/app/displayCanvas.test.mjs
 import assert from 'node:assert/strict';
 import {
-  SETTLED_DISPLAY_WORKER_MIN_PIXELS, settledDisplayRoute, step3FrameReference, upscaleReference, photoRectPercent
+  SETTLED_DISPLAY_WORKER_MIN_PIXELS, settledDisplayRoute, step3FrameReference, upscaleReference, frameRectTransform
 } from './displayCanvas.js';
 import { composeSprocketFrame, getSprocketFrameLayout, getSprocketFrameMetrics } from './sprocketFrame.js';
 
@@ -36,8 +36,36 @@ assert.equal(upscaleReference({ width: 2000, height: 1202 }, 1809, 1202), null, 
 assert.equal(upscaleReference(null, 10, 10), null);
 assert.equal(upscaleReference({ width: 0, height: 20 }, 10, 10), null);
 
-assert.deepEqual(photoRectPercent({ frameWidth: 200, frameHeight: 100, x: 10, y: 25, width: 180, height: 50 }),
-  { left: '5%', top: '25%', width: '90%', height: '50%' });
+// A sub-rectangle of the frame on the photo canvas's box: translated by
+// percentages of that box and scaled to the rectangle (#279 follow-up). A
+// point of the element's box lands where the photo canvas shows that point of
+// the frame, whatever whole-pixel box the frame is fitted to.
+{
+  assert.equal(frameRectTransform({ x: 10, y: 25, width: 180, height: 50 }, 200, 100), 'translate(5%, 25%) scale(0.9, 0.5)');
+  assert.equal(frameRectTransform({ x: 0, y: 0, width: 640, height: 480 }, 640, 480), 'translate(0%, 0%) scale(1, 1)');
+  const apply = (transform, box, u, v) => {
+    const [, tx, ty, sx, sy] = /^translate\(([-\d.e]+)%, ([-\d.e]+)%\) scale\(([-\d.e]+), ([-\d.e]+)\)$/.exec(transform).map(Number);
+    return { x: (tx / 100) * box.width + u * sx, y: (ty / 100) * box.height + v * sy };
+  };
+  const layout = { frameWidth: 1119, frameHeight: 1031, x: 29, y: 162, width: 1061, height: 707 };
+  for (const box of [{ width: 745, height: 686 }, { width: 1088, height: 1002 }]) {
+    const transform = frameRectTransform(layout, layout.frameWidth, layout.frameHeight);
+    // The element's box is the canvas's: its point (u, v) is the photo's
+    // pixel (u, v) scaled by width / photo width.
+    for (const [px, py] of [[0, 0], [530.5, 353.5], [1061, 707]]) {
+      const shown = apply(transform, box, px * box.width / layout.width, py * box.height / layout.height);
+      const want = { x: (layout.x + px) / layout.frameWidth * box.width, y: (layout.y + py) / layout.frameHeight * box.height };
+      assert.ok(Math.abs(shown.x - want.x) < 1e-9 && Math.abs(shown.y - want.y) < 1e-9, `${box.width}: photo point ${px},${py}`);
+    }
+  }
+  // A detail region of a 9536 x 6336 source.
+  const region = { x: 3137, y: 2083, width: 2731, height: 1611 };
+  const transform = frameRectTransform(region, 9536, 6336);
+  const box = { width: 1090, height: 724 };
+  const corner = apply(transform, box, box.width, box.height);
+  assert.ok(Math.abs(corner.x - (region.x + region.width) / 9536 * box.width) < 1e-9);
+  assert.ok(Math.abs(corner.y - (region.y + region.height) / 6336 * box.height) < 1e-9);
+}
 
 // The layout is where composeSprocketFrame puts the photo, landscape and
 // portrait, with and without edge markings.

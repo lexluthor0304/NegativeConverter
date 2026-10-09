@@ -159,6 +159,19 @@ function noiseImage(width, height, wide) {
       if (wide) assert.deepEqual(banded.__image16.data, expected.__image16.data);
     }
   }
+  // #270: planes that do not start on a 4-byte boundary take the per-channel
+  // stores instead of the word stores; the bytes are the same.
+  {
+    const image = noiseImage(301, 199, true);
+    image.__image16.data[7] = 1234; // one pixel with a translucent alpha
+    const expected = headResizeDisplayPreview(image, { width: 173, height: 111 });
+    const preview = new ImageData(173, 111);
+    preview.data = new Uint8ClampedArray(new ArrayBuffer(preview.data.length + 1), 1, preview.data.length);
+    preview.__image16 = { width: 173, height: 111, data: new Uint16Array(new ArrayBuffer(preview.data.length * 2 + 2), 2, preview.data.length) };
+    updateDisplayPreviewRect(image, preview, { x: 0, y: 0, width: 301, height: 199 });
+    assert.deepEqual([...preview.data], [...expected.data], 'unaligned 8-bit plane');
+    assert.deepEqual([...preview.__image16.data], [...expected.__image16.data], 'unaligned 16-bit plane');
+  }
   let current = true;
   const aborted = await resizeDisplayPreviewInBands(noiseImage(400, 300, true), { width: 100, height: 75 }, {
     budgetMs: 0.001, pause: async () => { current = false; }, isCurrent: () => current
@@ -167,7 +180,8 @@ function noiseImage(width, height, wide) {
 
   // Speed at the cap size (60 MP in the issue; 12 MP here, the most a Node
   // test may allocate on this machine). Interleaved medians; the issue's bar is
-  // 1.5x, measured 1.55-1.57x here. The assertion leaves room for a loaded CI.
+  // 1.5x at 60 MP, measured there in a scratch script (#270: word stores and
+  // the 8-bit table). The assertion leaves room for a loaded CI.
   const big = new ImageData(4242, 2828);
   big.__image16 = { width: 4242, height: 2828, data: new Uint16Array(4242 * 2828 * 4) };
   for (let i = 0; i < big.__image16.data.length; i += 7) big.__image16.data[i] = (i * 2654435761) >>> 16;
@@ -230,6 +244,66 @@ function noiseImage(width, height, wide) {
   }
   assert.equal(displayResampleMode({ sourceWidth: 9536, sourceHeight: 6336, k: 3 }, { width: 1809, height: 1202 }), 'bilinear');
   assert.equal(displayResampleMode({ sourceWidth: 4000, sourceHeight: 2672, k: 1 }, { width: 1809, height: 1202 }), 'area');
+
+  // #270: the bilinear resample from a level (k 1 and k > 1, up and down
+  // to 2x, 16- and 8-bit levels) against a direct per-pixel reference with
+  // the same expressions, its 8-bit plane, and row bands of it
+  // (resampleDisplayLevelRows over the rows displayResampleRows names).
+  {
+    const { resampleDisplayLevelRows, displayResampleRows } = await import('./displayPreview.js');
+    const reference = (plane, levelWidth, levelHeight, { sourceWidth, sourceHeight, k }, { width, height }) => {
+      const out = new (plane instanceof Uint16Array ? Uint16Array : Uint8ClampedArray)(width * height * 4);
+      const tap = (t, count, source, levelCount) => {
+        const s = source / count;
+        const f = k === 1 ? Math.max(0, (t + 0.5) * s - 0.5) : Math.min(levelCount - 1, Math.max(0, ((t + 0.5) * s) / k - 0.5));
+        const a = Math.floor(f);
+        return [a, Math.min(levelCount - 1, a + 1), f - a];
+      };
+      for (let ty = 0; ty < height; ty++) {
+        const [y0, y1, dy] = tap(ty, height, sourceHeight, levelHeight);
+        for (let tx = 0; tx < width; tx++) {
+          const [x0, x1, dx] = tap(tx, width, sourceWidth, levelWidth);
+          for (let c = 0; c < 4; c++) {
+            const at = (x, y) => plane[(y * levelWidth + x) * 4 + c];
+            const top = at(x0, y0) + (at(x1, y0) - at(x0, y0)) * dx;
+            const bottom = at(x0, y1) + (at(x1, y1) - at(x0, y1)) * dx;
+            out[(ty * width + tx) * 4 + c] = Math.round(top + (bottom - top) * dy);
+          }
+        }
+      }
+      return out;
+    };
+    for (const [w, h, k, tw, th] of [[97, 61, 1, 60, 40], [120, 90, 3, 41, 30], [120, 90, 3, 47, 37], [64, 48, 2, 70, 51], [33, 21, 3, 29, 17]]) {
+      for (const wide of [true, false]) {
+        const image = noiseImage(w, h, wide);
+        if (wide) for (let i = 3; i < image.__image16.data.length; i += 44) image.__image16.data[i] = 31000;
+        const level = k > 1 ? buildDisplayLevel(image, k) : (wide ? { width: w, height: h, __image16: image.__image16 } : image);
+        const geometry = { sourceWidth: w, sourceHeight: h, k };
+        const target = { width: tw, height: th };
+        assert.equal(displayResampleMode(geometry, target), 'bilinear');
+        const plane = level.__image16?.data || level.data;
+        const expected = reference(plane, level.width, level.height, geometry, target);
+        const actual = resampleDisplayLevel(level, geometry, target);
+        assert.deepEqual(actual.data, expected, `bilinear ${w}x${h}/k${k} -> ${tw}x${th} (${wide ? 16 : 8}-bit)`);
+        if (tw < w && th < h) {
+          // The display filter of a whole image (it never enlarges).
+          const filtered = filterDisplayImage(image, target, { k });
+          if (filtered.__image16) {
+            assert.deepEqual(filtered.__image16.data, expected, '16-bit plane of the display filter');
+            assert.deepEqual([...filtered.data], [...expected].map(v => Math.round(v / 257)), 'its 8-bit plane');
+          }
+        }
+        if (plane instanceof Uint16Array) {
+          for (const [ty0, ty1] of [[0, 7], [7, Math.floor(th / 2)], [Math.floor(th / 2), th]]) {
+            const [lo, hi] = displayResampleRows(geometry, target, level.height, ty0, ty1);
+            const block = plane.slice(lo * level.width * 4, hi * level.width * 4);
+            const band = resampleDisplayLevelRows(block, lo, level.width, level.height, geometry, target, ty0, ty1);
+            assert.deepEqual(band.data, expected.subarray(ty0 * tw * 4, ty1 * tw * 4), `rows ${ty0}-${ty1} from their own block`);
+          }
+        }
+      }
+    }
+  }
 
   // Area mode against a direct fractional-coverage average of the level.
   for (const [w, h, k, tw, th] of [[97, 61, 1, 20, 13], [120, 90, 2, 21, 16], [130, 87, 3, 9, 7]]) {
@@ -329,4 +403,64 @@ function noiseImage(width, height, wide) {
   assert.deepEqual(bands.flat().filter((_, i) => i % 2 === 0)[0], 0);
   assert.equal(bands.at(-1)[1], 10);
   console.log('displayPreview: level box, area/bilinear resample, checkerboard and grain, region updates');
+}
+
+// #254 follow-up: the display pixels a change of a frame's rect reaches, made
+// from the frame's pixels of the footprint's source region alone, equal the
+// whole-frame filter there (both planes); nothing outside that display rect
+// moves; and with k = 1 a bilinear-mode filter is resizeDisplayPreview's frame.
+{
+  const { displayFootprint, filterDisplayRegion } = await import('./displayPreview.js');
+  const crop = (image, rect) => {
+    const data = new Uint16Array(rect.width * rect.height * 4);
+    for (let y = 0; y < rect.height; y++) {
+      const from = ((rect.y + y) * image.width + rect.x) * 4;
+      data.set(image.__image16.data.subarray(from, from + rect.width * 4), y * rect.width * 4);
+    }
+    return { width: rect.width, height: rect.height, data };
+  };
+  let checked = 0;
+  for (const [w, h, k, tw, th] of [[97, 61, 1, 70, 44], [97, 61, 1, 30, 19], [300, 200, 3, 80, 53], [300, 200, 2, 140, 93], [211, 143, 2, 101, 68], [64, 48, 1, 64, 47]]) {
+    const image = noiseImage(w, h, true);
+    const target = { width: tw, height: th };
+    for (let n = 0; n < 12; n++) {
+      const rect = { x: Math.floor(random() * w), y: Math.floor(random() * h), width: 1 + Math.floor(random() * 30), height: 1 + Math.floor(random() * 30) };
+      rect.width = Math.min(rect.width, w - rect.x); rect.height = Math.min(rect.height, h - rect.y);
+      const footprint = displayFootprint(image, target, k, rect);
+      if (!footprint) continue;
+      const { display, source } = footprint;
+      assert.ok(source.x % k === 0 && source.y % k === 0 && source.width % k === 0 && source.height % k === 0, 'whole level boxes');
+      assert.ok(source.x >= 0 && source.y >= 0 && source.x + source.width <= w && source.y + source.height <= h, 'inside the frame');
+      const before = filterDisplayImage(image, target, { k });
+      // Change the rect: only `display` may move.
+      for (let y = rect.y; y < rect.y + rect.height; y++) for (let x = rect.x; x < rect.x + rect.width; x++) {
+        const i = (y * w + x) * 4;
+        for (let c = 0; c < 3; c++) image.__image16.data[i + c] = Math.floor(random() * 65536);
+      }
+      const after = filterDisplayImage(image, target, { k });
+      for (let y = 0; y < th; y++) for (let x = 0; x < tw; x++) {
+        if (x >= display.x && x < display.x + display.width && y >= display.y && y < display.y + display.height) continue;
+        const i = (y * tw + x) * 4;
+        for (let c = 0; c < 4; c++) assert.equal(after.__image16.data[i + c], before.__image16.data[i + c], `nothing moves outside the footprint ${w}x${h} k${k}`);
+      }
+      const region = filterDisplayRegion(crop(image, source), source, image, target, k, display);
+      for (let y = 0; y < display.height; y++) {
+        const from = ((display.y + y) * tw + display.x) * 4;
+        assert.deepEqual(region.image16.subarray(y * display.width * 4, (y + 1) * display.width * 4),
+          after.__image16.data.subarray(from, from + display.width * 4), `16-bit rows of the region filter ${w}x${h} k${k} ${tw}x${th}`);
+        assert.deepEqual(region.data.subarray(y * display.width * 4, (y + 1) * display.width * 4),
+          after.data.subarray(from, from + display.width * 4), `8-bit rows of the region filter ${w}x${h} k${k} ${tw}x${th}`);
+      }
+      checked++;
+    }
+    if (k === 1 && displayResampleMode({ sourceWidth: w, sourceHeight: h, k: 1 }, target) === 'bilinear') {
+      const filtered = filterDisplayImage(image, target, { k: 1 });
+      const resized = resizeDisplayPreview(image, target);
+      assert.deepEqual(filtered.__image16.data, resized.__image16.data, 'k 1 bilinear filter = resizeDisplayPreview (16-bit)');
+      assert.deepEqual(filtered.data, resized.data, 'k 1 bilinear filter = resizeDisplayPreview (8-bit)');
+    }
+  }
+  assert.ok(checked > 40, `${checked} footprints checked`);
+  assert.throws(() => filterDisplayRegion({ width: 2, height: 2, data: new Uint8ClampedArray(16) }, { x: 0, y: 0, width: 2, height: 2 }, { width: 9, height: 9 }, { width: 3, height: 3 }, 1, { x: 0, y: 0, width: 1, height: 1 }), TypeError);
+  console.log(`displayPreview: ${checked} display footprints of frame rects filtered from their source regions alone, equal to the whole-frame filter`);
 }

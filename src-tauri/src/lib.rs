@@ -1227,8 +1227,8 @@ fn open_external_url(url: String) -> Result<(), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let webview_compositing = apply_linux_appimage_compat_env();
-    // Before the first webview: what WebKitGTK's memory pressure runs with (#258).
-    memory_info::log_linux_memory_pressure_plan();
+    // Before the first webview: WebKitGTK's memory-pressure settings (#258, #282).
+    memory_info::apply_linux_memory_pressure_settings();
     let builder = tauri::Builder::default()
         .manage(webview_compositing)
         .manage(ExportGrants::default())

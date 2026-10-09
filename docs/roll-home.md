@@ -74,8 +74,10 @@ batch exports are unchanged.
 `<roll>.ncroll.json`: a version field, the photo list (name, size, content
 hash over the first megabyte plus the size, path where the platform gives
 one), each frame's sanitised settings and colour copy, selection, roll
-order, the roll reference, the roll analysis, the lens parameters and the
-roll metadata (`rollProject.js`). Reopen by dropping the project file
+order, the roll reference, the roll analysis, the lens parameters (the lens
+profile by lensfun's name for it, never a handle, which another lensfun
+build does not share: #278, `docs/photo-sessions.md`) and the roll metadata
+(`rollProject.js`). Reopen by dropping the project file
 together with the originals (or through **Open project…**, which accepts
 both): files are matched by hash, then by name and size, then by name alone
 and reported as changed; missing originals are listed. Curve LUTs and

@@ -206,7 +206,7 @@ const recipes = {
   plain: { filmType: 'color', coreExposure: 5, autoFrameMeta: { imageArea: [{ x: 0.1, y: 0.1 }] }, filmEdge: { checked: true },
     rotationAngle: 0, mirrored: false, cropRegion: null, repairStrokes: [], lensCorrection: { enabled: false } },
   geometry: { filmType: 'color', coreExposure: -3, autoFrameMeta: {}, filmEdge: { checked: true }, rotationAngle: 1.7, mirrored: true,
-    cropRegion: { left: 6, top: 4, width: 48, height: 30 }, repairStrokes: [{ size: 1, points: [] }], lensCorrection: { enabled: true, selectedLens: { handle: 3 } } },
+    cropRegion: { left: 6, top: 4, width: 48, height: 30 }, repairStrokes: [{ size: 1, points: [] }], lensCorrection: { enabled: true, selectedLens: { maker: 'Test', model: 'Test 50mm' } } },
   expired: { filmType: 'color', expiredEnabled: true, autoFrameMeta: {}, filmEdge: { checked: true }, rotationAngle: 90, mirrored: false,
     cropRegion: null, repairStrokes: [], lensCorrection: { enabled: false } },
   bw: { filmType: 'bw', autoFrameMeta: null, filmEdge: null, rotationAngle: 0, cropRegion: null, repairStrokes: [], lensCorrection: { enabled: false } }

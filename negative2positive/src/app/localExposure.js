@@ -8,7 +8,13 @@
 // would have been held back or added.
 
 const MAX_STROKES = 200;
-const MAX_POINTS = 400;
+// Points a stored stroke keeps. A dodge-and-burn stroke keeps every point up
+// to 400 as recorded; past 400 a mouse or touch stroke is resampled to 400 and
+// a pen stroke keeps one point per eighth of its brush radius, up to this cap
+// (brushFeedback.js createStrokeRecorder, #280). Repair strokes are resampled
+// to 400 (repairBrush.js). The cap was 400 before #280, so every stroke stored
+// until then has at most 400 points and sanitises as it did.
+export const MAX_STROKE_POINTS = 1000;
 
 function clamp(value, min, max) {
   return value < min ? min : value > max ? max : value;
@@ -56,7 +62,7 @@ export function sanitizeLocalExposureStrokes(input) {
     const size = Number(stroke.size);
     if (!Number.isFinite(stops) || !Number.isFinite(size)) continue;
     const points = [];
-    for (const point of stroke.points.slice(0, MAX_POINTS)) {
+    for (const point of stroke.points.slice(0, MAX_STROKE_POINTS)) {
       const clean = sanitizeStrokePoint(point);
       if (clean) points.push(clean);
     }

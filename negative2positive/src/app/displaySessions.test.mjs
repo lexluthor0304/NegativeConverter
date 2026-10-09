@@ -102,6 +102,41 @@ function wireSwitching(h, items) {
   return c;
 }
 
+// ---- Lens correction (#278) in a harness: the editor's
+// applyLensCorrectionWithSettings and the fills' remap, over a lensfun
+// client whose maps are lensTestMaps ----
+const lensMaps = await import('./lensMaps.js');
+const { lensTestClient, lensTestMaps } = await import('./lensTestMaps.mjs');
+const { displayPlaneHash } = await import('./displayProxy.js');
+// A resolved lens block (sanitizeLensCorrection's form), with a manual grid
+// step of 3, so these small crops have several grid rows.
+const LENS = {
+  enabled: true,
+  selectedLens: { handle: 2741040, maker: 'Test', model: 'Test 18-55mm', score: 90, minFocal: 18, maxFocal: 55, minAperture: 3.5, maxAperture: 22, cropFactor: 1.5 },
+  params: { focal: 18, crop: 1.5, aperture: 5.6, distance: 1000, stepMode: 'manual', step: 3 },
+  modes: { includeTca: true, includeVignetting: true }, lastError: ''
+};
+const NO_LENS = { ...structuredClone(LENS), enabled: false, selectedLens: null };
+function withLens(h, { client = lensTestClient(), fail = null } = {}) {
+  Object.assign(h.target, {
+    // What resolveLensCorrection resolves (sanitised in the app): a
+    // frame's own block, the editor's for `state`.
+    resolveLensCorrection: settings => structuredClone((settings === h.state ? h.state.lensCorrection : settings?.lensCorrection) || NO_LENS),
+    sanitizeLensCorrection: (input, fallback) => structuredClone(input || fallback),
+    ensureLensfunClient: async () => { if (fail) throw new Error(fail); return { client, source: 'local' }; },
+    applyLensMapsToImage: lensMaps.applyLensMapsToImage, lensMapRequest: lensMaps.lensMapRequest,
+    buildLensMaps: lensMaps.buildLensMaps, lensMapBuffers: lensMaps.lensMapBuffers,
+    lensHandleFor: lensMaps.lensHandleFor, lensProfileKey: lensMaps.lensProfileKey, lensMapsMovePixels: lensMaps.lensMapsMovePixels,
+    sanitizeLensRuntimeError: error => String(error?.message || error), lensMapCache: new Map()
+  });
+  vm.runInContext(['lensCorrectionActive', 'lensProfileMissingError', 'formatLensLabel', 'applyLensCorrectionWithSettings'].map(functionSource).join('\n'), h.context);
+  // These small frames stand in for large ones: 2 bytes per base pixel of
+  // them holds no band (a 16 MP frame's holds hundreds of rows).
+  const render = h.pool.renderLensDisplayLevel;
+  h.pool.renderLensDisplayLevel = (source, plan, lens, options) => render(source, plan, lens, { ...options, maxBytesInFlight: Infinity });
+  return client;
+}
+
 // ---- Tier A: the source without the base; back without a decode ----
 {
   // Full: base + crop + proxy + preview; Tier A: crop + proxy + preview.
@@ -542,7 +577,7 @@ for (const tier of ['A', 'B']) {
 // ---- Fill parity: a proxy filled from a lane's or roll analysis' decode is
 // the display level a cold open's processNegative builds (tilted, mirrored,
 // right-angle and plain crops), with getColorAnalysisSample's sample; the
-// first open finds its key. Lens-corrected frames are skipped ----
+// first open finds its key (lens-corrected frames: #278, below) ----
 {
   const { sampleAnalysisArea } = await import('./analysisRegion.js');
   const geometries = [
@@ -595,7 +630,7 @@ for (const tier of ['A', 'B']) {
     assert.equal(h.state.geometryPending, false, 'the recipe geometry is the proxy geometry');
     assert.equal(c.displayProxyMatches(item), true, `the open finds the proxy ${JSON.stringify(geometry)}`);
   }
-  // Lens correction and repairs are not filled; nor is an 8-bit fallback decode.
+  // Repairs are not filled; nor is an 8-bit fallback decode.
   const base = makeBase(120, 80, 21);
   const h = createHarness(base, { sessionBudget: 1 << 30 }), c = h.context;
   h.target.displayProxySpill = createDisplayProxySpill({ port: createDisplayProxyPort({ core: createDisplayProxyWorkerCore({ backend: { async put() {}, async get() { return null; }, async delete() {}, async clear() {} } }) }) });
@@ -603,11 +638,6 @@ for (const tier of ['A', 'B']) {
   h.target.displayLevelFactor = () => 2;
   const item = { id: 8, file: { name: 'x.dng' }, settings: { ...geometries[0], autoFrameMeta: { imageArea: AREA }, filmEdge: { checked: true } } };
   h.state.fileQueue = [item];
-  h.target.lensCorrectionActive = () => true;
-  assert.equal(await c.fillDisplayProxy(item, base, item.settings), false, 'lens-corrected frames are skipped');
-  assert.equal((await c.displayProxyFillPlan(item, { width: 120, height: 80, has16: true, route: 'libraw16' }, item.settings)).skip, true,
-    'and planned as skipped');
-  h.target.lensCorrectionActive = () => false;
   assert.equal(await c.fillDisplayProxy(item, base, { ...item.settings, repairStrokes: [{}] }), false, 'repaired frames are skipped');
   const eight = makeBase(120, 80, 21);
   delete eight.__image16;
@@ -700,47 +730,65 @@ for (const tier of ['A', 'B']) {
   }
 }
 
-// ---- A lens-corrected photo's display proxy is not stored (R2-006): a cold
-// open looks a stored proxy up without lens correction
-// (expectedStoredProxyKey), so its record could never be read back and would
-// only push readable ones out of the store's budget. Its Tier B form still
-// spills, and opens again from the spill ----
-for (const lens of [true, false]) {
+// ---- A display proxy whose key names a lens is stored when its level
+// carries that lens correction (#278; R2-006 kept every lens-corrected one
+// out while a cold open looked them up without a lens): under the key a
+// cold open of the recipe builds (expectedStoredProxyKey), with the lens its
+// level carries. A level that does not carry the recipe's lens (a lens
+// runtime that failed, a lens chosen after the conversion, a corrected level
+// whose recipe has switched the lens off since) is not stored; lens-free
+// levels are stored as before, whatever made them. Each still spills, and
+// opens again from the spill, as the photo was left ----
+for (const [label, recipeLens, carried, stored] of [
+  ['no lens', NO_LENS, 'none', 'none'],
+  ['no lens, from a record', NO_LENS, 'unknown', 'none'],
+  ['a corrected level', LENS, 'lens', 'lens'],
+  ['a lens that did not apply', LENS, 'none', null],
+  ['a lens chosen after the conversion', LENS, 'unknown', null],
+  ['a lens switched off after the conversion', NO_LENS, 'lens', null]
+]) {
   const records = new Map();
   const backend = {
     async put(key, value) { records.set(key, value); }, async get(key) { return records.get(key) || null; },
     async delete(key) { records.delete(key); }, async clear() { records.clear(); }
   };
   const { h, c, proxy, item } = await convertedPhoto({ sessionBudget: 1024 });
-  vm.runInContext(functionSource('lensSignature'), h.context);
+  withLens(h);
+  const signature = c.lensSignatureOf(LENS);
+  h.state.lensCorrection = structuredClone(recipeLens);
+  item.settings = { ...item.settings, lensCorrection: structuredClone(recipeLens) };
+  if (carried !== 'unknown') h.target.displayLevelLenses.set(proxy, carried === 'lens' ? signature : null);
   const persisted = [];
   const painted = [];
   Object.assign(h.target, {
     displayProxySpill: createDisplayProxySpill({ port: createDisplayProxyPort({ core: createDisplayProxyWorkerCore({ backend }) }) }),
     displayProxyStore: { load: async () => {}, hasCandidate: () => false },
     persistDisplayProxy: async (target, entry) => { persisted.push({ target, entry }); return true; },
-    schedulePostPaintTask: task => { painted.push(task); },
-    lensCorrectionActive: () => lens,
-    resolveLensCorrection: () => ({ enabled: lens, selectedLens: { handle: 1, name: 'Lens 50mm' }, params: { distortion: 1 }, modes: { distortion: true } })
+    schedulePostPaintTask: task => { painted.push(task); }
   });
   const itemB = { id: 2, file: { name: 'b.dng' }, settings: null };
   wireSwitching(h, [item, itemB]);
   await c.switchToFile(1);
   for (const task of painted.splice(0)) task();
   await h.target.displayProxySpill.settled();
-  assert.equal(h.target.displaySessionDiagnostics.spillWrites, 1, `lens ${lens}: the Tier B form spills`);
-  if (lens) {
-    assert.deepEqual(persisted, [], 'no display proxy of a lens-corrected photo is stored');
+  assert.equal(h.target.displaySessionDiagnostics.spillWrites, 1, `${label}: the Tier B form spills`);
+  if (!stored) {
+    assert.deepEqual(persisted, [], `${label}: not stored`);
   } else {
-    assert.equal(persisted.length, 1, 'without lens correction its proxy is stored');
+    assert.equal(persisted.length, 1, `${label}: stored`);
     assert.equal(persisted[0].target, item);
-    assert.equal(JSON.parse(persisted[0].entry.proxyKey)[7], null, 'under a key without a lens part');
+    const { proxyKey, meta } = persisted[0].entry;
+    assert.equal(JSON.parse(proxyKey)[7], stored === 'lens' ? signature : null, `${label}: under a key whose lens part is the recipe's`);
+    assert.equal(proxyKey, c.expectedStoredProxyKey(item, meta), `${label}: the key a cold open of the recipe looks up`);
+    assert.equal(meta.levelLens, stored === 'lens' ? signature : undefined, `${label}: with the lens its level carries (none: no field)`);
   }
   h.target.prepareStudioPhoto = async () => {};
   await c.switchToFile(0);
-  assert.equal(h.target.displaySessionDiagnostics.spillHits, 1, `lens ${lens}: back from the spill`);
-  assert.equal(h.target.baseDecodes, undefined, `lens ${lens}: without a decode`);
-  sameLevel(h.state.displayLevelImageData, proxy, `lens ${lens}: the spilled level`);
+  assert.equal(h.target.displaySessionDiagnostics.spillHits, 1, `${label}: back from the spill`);
+  assert.equal(h.target.baseDecodes, undefined, `${label}: without a decode`);
+  sameLevel(h.state.displayLevelImageData, proxy, `${label}: the spilled level`);
+  assert.equal(h.target.displayLevelLenses.get(h.state.displayLevelImageData), carried === 'lens' ? signature : undefined,
+    `${label}: the spill brings back the lens its level carries`);
 }
 
 // ---- A proxy the persistent store already holds is not filled again
@@ -1136,6 +1184,301 @@ for (const [tier, area, decodes] of [['A', AREA, 0], ['A', AREA3, 1], ['B', AREA
     const entry = await next.c.readStoredDisplaySession(item);
     assert.ok(entry?.stored, 'the next session finds the filled proxy in the store');
     sameRequest(await openFilled(next.h, next.c, item, entry), 'a filled proxy from the store');
+  }
+}
+
+// ---- Lens correction (#278): a lens-corrected frame's display proxy is the
+// level of its crop corrected as the editor corrects it (lensfun's maps,
+// then the remap). Every fill site makes the level processNegative converts
+// on a cold open (its conversionPreviewImageData's level), plane hash for
+// plane hash: a lane's decode and a roll frame (planned while its worker
+// holds it, filled once its planes are back) through fillDisplayProxy, and
+// a photo the user leaves (its display form, spilled, demoted or stored).
+// The cold open's lookup keys the lens as the recipe resolves it, so the
+// first open converts that level without a decode: from the spill, and
+// after a restart from the store, whose self-check then rebuilds the
+// corrected source and keeps it. Another lens is another key; a lens
+// runtime that fails leaves a level that is neither filled nor stored ----
+{
+  const geometry = { rotationAngle: 1.3, mirrored: false, cropRegion: { left: 9, top: 7, width: 96, height: 60 } };
+  const base = makeBase(120, 80, 21);
+  const settings = { ...geometry, autoFrameMeta: { imageArea: AREA }, filmEdge: { checked: true }, lensCorrection: LENS };
+  // The lens part of the key: the profile's identity (never lensfun's handle), its parameters and modes.
+  const signature = JSON.stringify([lensMaps.lensProfileKey(LENS.selectedLens), LENS.params, LENS.modes]);
+  assert.ok(!signature.includes(String(LENS.selectedLens.handle)), 'the key names no lensfun handle');
+  const harness = ({ fail = null, client: lensClient } = {}) => {
+    const h = createHarness(base, { sessionBudget: 1 << 30, realProcessNegative: true, displayLevels: true, conversionRequests: true });
+    Object.assign(h.target, { largeImagePixels: 1000, displayLevelFactor: () => 2, getCanvasContainerSize: () => ({ width: 40, height: 32 }),
+      previewTierMaxPixels: () => 600, usesSilverCoreConversion: () => true,
+      restoreAutoFrameDiagnostics: meta => { h.state.autoFrame.lastDiagnostics = meta ? structuredClone(meta) : null; } });
+    const client = withLens(h, { fail, client: lensClient });
+    return { h, c: h.context, client };
+  };
+  const memoryBackend = () => {
+    const records = new Map();
+    return { async put(key, value) { records.set(key, value); }, async get(key) { return records.get(key) || null; },
+      async delete(key) { records.delete(key); }, async clear() { records.clear(); } };
+  };
+  const spillOf = () => createDisplayProxySpill({ port: createDisplayProxyPort({ core: createDisplayProxyWorkerCore({ backend: memoryBackend() }) }) });
+  const records = new Map();
+  const memoryRecords = {
+    async write(name, record) { records.set(name, new Uint8Array(record instanceof ArrayBuffer ? record : record.buffer).slice()); },
+    async read(name) { return records.has(name) ? records.get(name).slice().buffer : null; },
+    async delete(name) { records.delete(name); }, async clear() { records.clear(); },
+    async list() { return [...records].map(([name, bytes]) => ({ name, bytes: bytes.byteLength, modifiedMs: 0 })); }
+  };
+  const bytes = new Uint8Array(300_000).map((_, i) => (i * 7) & 255);
+  const storeFor = () => ({
+    hashFileForProject: async blob => sha256Hex(new Uint8Array(await blob.slice(0, 1 << 20).arrayBuffer())), displayProxyFileKey, sha256Hex,
+    displayProxyStore: createDisplayProxyStore({
+      port: createDisplayProxyPort({ core: createDisplayProxyWorkerCore({ backend: null }) }), records: memoryRecords,
+      availableBytes: async () => 64 * 1024 ** 3
+    })
+  });
+  const file = () => Object.assign(new Blob([bytes]), { name: 'roll-07.dng', lastModified: 1234 });
+
+  // The cold open: the decoded base, the recipe restored, processNegative,
+  // which corrects the crop with lensfun's maps before it builds the level.
+  const cold = harness();
+  cold.c.restoreSettings(settings);
+  await cold.h.state.geometryReady;
+  await cold.c.processNegative({ quiet: true });
+  const coldLevel = cold.h.state.conversionPreviewImageData.__displayOf;
+  assert.equal(coldLevel, cold.h.state.displayLevelImageData, 'the cold open converts a display target on its level');
+  assert.ok(cold.h.state.conversionSourceImageData.__lensMapping, 'its source is lens-corrected');
+  assert.deepEqual(cold.client.requests.map(request => [request.width, request.height, request.step]), [[96, 60, 3]], 'lensfun is asked for the crop\'s maps');
+  const corrected = lensMaps.applyLensMapsToImage(exportChain(base, geometry), lensTestMaps(96, 60, 3), LENS.modes);
+  sameLevel(coldLevel, buildDisplayLevel(corrected, 2), 'the level of the export chain\'s crop, corrected');
+  const coldHash = displayPlaneHash(coldLevel);
+  assert.notEqual(coldHash, displayPlaneHash(buildDisplayLevel(exportChain(base, geometry), 2)), 'which the lens changed');
+  assert.equal(cold.h.target.displayLevelLenses.get(coldLevel), signature, 'the level carries the lens it was corrected with');
+  const coldRequest = cold.h.requests.at(-1);
+  const sameRequest = (request, label) => {
+    assert.equal(displayPlaneHash(request.imageData), coldHash, `${label}: the cold open's plane hash`);
+    sameLevel(request.imageData, coldRequest.imageData, `${label}: the display level`);
+    assert.deepEqual({ ...request.display.target }, { ...coldRequest.display.target }, `${label}: the display target`);
+    assert.deepEqual({ ...request.display.geometry }, { ...coldRequest.display.geometry }, `${label}: the level geometry`);
+    sameSample(request.options.analysisImageData, coldRequest.options.analysisImageData, `${label}: the colour-analysis sample`);
+    assert.deepEqual(JSON.parse(JSON.stringify(request.wbSample)), JSON.parse(JSON.stringify(coldRequest.wbSample)), `${label}: the auto-WB sample request`);
+  };
+  const openEntry = async (h, c, item, entry) => {
+    h.target.getCurrentQueueItem = () => item;
+    h.state.currentFileIndex = 1;
+    h.target.prepareStudioPhoto = async () => { await c.processNegative({ quiet: true }); };
+    const before = h.requests.length;
+    await c.activateDisplaySession(item, entry, h.target.loadGeneration);
+    assert.equal(h.requests.length, before + 1, 'the first open converted once');
+    assert.equal(h.target.baseDecodes, undefined, 'without a decode');
+    assert.equal(h.state.conversionSourceImageData, null, 'from the proxy');
+    assert.equal(c.displayProxyMatches(item), true, 'whose key the recipe names');
+    return h.requests.at(-1);
+  };
+
+  // A lane's decode, or a roll frame back on the page, while another photo
+  // (without a lens) is open. The roll frame is planned first from its size,
+  // as while its worker holds it: its planes come back for the fill.
+  const fill = async ({ store = null } = {}) => {
+    const { h, c, client } = harness();
+    h.target.displayProxySpill = spillOf();
+    if (store) Object.assign(h.target, store);
+    const item = { id: 'roll-07::1', file: store ? file() : { name: 'roll-07.dng' }, settings };
+    h.state.fileQueue = [{ id: 'open', file: { name: 'open.dng' } }, item];
+    h.state.currentFileIndex = 0;
+    h.state.loadedFile = h.state.fileQueue[0].file;
+    const planned = await c.displayProxyFillPlan(item, { width: 120, height: 80, has16: true, route: 'libraw16' }, settings);
+    assert.ok(planned && !planned.skip && !planned.kept, 'a lens-corrected roll frame is planned for a fill: its planes come back');
+    assert.equal(JSON.parse(planned.proxyKey)[7], signature, 'keyed by its lens');
+    assert.equal(await c.fillDisplayProxy(item, base, settings), true, 'filled');
+    assert.equal(h.target.displaySessionDiagnostics.fills, 1);
+    assert.deepEqual(client.requests.map(request => [request.width, request.height, request.step]), [[96, 60, 3]], 'from the crop\'s maps');
+    assert.equal(h.target.lensMapCache.size, 0, 'a fill does not grow the editor\'s map cache');
+    return { h, c, item, planned };
+  };
+  {
+    const { h, c, item, planned } = await fill();
+    assert.equal(h.target.displayProxySpill.proxyKey(item.id), planned.proxyKey, 'the planned key is the one the fill kept');
+    assert.equal((await c.displayProxyFillPlan(item, { width: 120, height: 80, has16: true, route: 'libraw16' }, settings)).kept, true, 'then kept');
+    const entry = await c.readSpilledDisplaySession(item);
+    assert.equal(displayPlaneHash(entry.planes.level), coldHash, 'fill (lane decode, roll frame): the cold open\'s plane hash');
+    sameRequest(await openEntry(h, c, item, entry), 'a filled lens-corrected proxy from the spill');
+  }
+  // A fill reads the editor's map cache: maps the editor built for this
+  // crop serve it without asking lensfun again, and the fill adds none.
+  {
+    const { h, c, client } = harness();
+    h.target.displayProxySpill = spillOf();
+    const item = { id: 'roll-07::1', file: { name: 'roll-07.dng' }, settings };
+    h.state.fileQueue = [{ id: 'open', file: { name: 'open.dng' } }, item];
+    h.target.lensMapCache.set(lensMaps.lensMapRequest(LENS, 96, 60, LENS.selectedLens.handle).key, lensTestMaps(96, 60, 3));
+    assert.equal(await c.fillDisplayProxy(item, base, settings), true, 'filled from cached maps');
+    assert.equal(client.requests.length, 0, 'lensfun is not asked again');
+    assert.equal(h.target.lensMapCache.size, 1);
+    const entry = await c.readSpilledDisplaySession(item);
+    assert.equal(displayPlaneHash(entry.planes.level), coldHash, 'the same level');
+  }
+  // The photo the user leaves: its display form (Tier B), spilled.
+  {
+    const { h, c } = cold;
+    const item = { id: 'roll-07::1', file: { name: 'roll-07.dng' }, settings };
+    h.state.loadedFile = item.file;
+    h.target.displayProxySpill = spillOf();
+    const other = { id: 'b', file: { name: 'b.dng' }, settings: null };
+    wireSwitching(h, [item, other]);
+    h.target.displaySessionDiagnostics.force = 'spill';
+    await c.switchToFile(1);
+    await h.target.displayProxySpill.settled();
+    assert.equal(h.target.displaySessionDiagnostics.spillWrites, 1, 'left: spilled');
+    const entry = await c.readSpilledDisplaySession(item);
+    assert.equal(displayPlaneHash(entry.planes.level), coldHash, 'demotion: the cold open\'s plane hash');
+    assert.equal(h.target.displayLevelLenses.get(entry.planes.level), signature, 'with the lens it carries');
+  }
+  // A Tier A session demoted to its display form when evicted (no room for
+  // that either: spilled).
+  {
+    const { h, c } = harness();
+    c.restoreSettings(settings);
+    await h.state.geometryReady;
+    await c.processNegative({ quiet: true });
+    const item = { id: 'roll-07::1', file: { name: 'roll-07.dng' }, settings };
+    const other = { id: 'z', file: { name: 'z.dng' } };
+    h.state.loadedFile = item.file;
+    h.state.fileQueue = [item, other];
+    const budget = 1 << 24;
+    h.target.photoSessions = createPhotoSessionCache({ maxBytes: budget, onEvict: (target, value) => c.demoteDisplaySession(target, value) });
+    h.target.displayProxySpill = spillOf();
+    h.target.displaySessionDiagnostics.force = 'A';
+    assert.equal(c.rememberPhotoSession(item), true);
+    assert.equal(h.target.photoSessions.get(item)?.tier, 'A', 'kept as Tier A');
+    h.target.displaySessionDiagnostics.force = null;
+    h.target.photoSessions.put(other, { base: new Uint8Array(budget - 1024) });
+    await h.target.displayProxySpill.settled();
+    assert.equal(h.target.displaySessionDiagnostics.demotions, 1, 'demoted');
+    const entry = await c.readSpilledDisplaySession(item);
+    assert.equal(displayPlaneHash(entry.planes.level), coldHash, 'a demoted Tier A session: the cold open\'s plane hash');
+  }
+  // The store: a fill in one session, the photo left in another; after a
+  // restart each opens from the store without a decode, converting the cold
+  // open's level. The self-check rebuilds the corrected source and keeps it.
+  const restartHit = async label => {
+    const { h, c } = harness();
+    Object.assign(h.target, storeFor());
+    const item = { id: 'roll-07::1', file: file(), settings };
+    h.state.fileQueue = [{ id: 'open', file: { name: 'open.dng' } }, item];
+    h.state.loadedFile = h.state.fileQueue[0].file;
+    const entry = await c.readStoredDisplaySession(item);
+    assert.ok(entry?.stored, `${label}: the next session finds it in the store`);
+    assert.equal(displayPlaneHash(entry.planes.level), coldHash, `${label}: the cold open's plane hash`);
+    // The record says which lens its level carries: left again before its
+    // source is back, it is stored again (the same record).
+    assert.equal(h.target.displayLevelLenses.get(entry.planes.level), signature, `${label}: the record brings the lens its level carries`);
+    sameRequest(await openEntry(h, c, item, entry), `${label}: from the store`);
+    assert.equal(c.storableDisplayLevel(h.state.displayLevelImageData), true, `${label}: storable again`);
+    // The self-check, which compares the level with the rebuilt corrected
+    // source's, says which lens it carries whatever else did.
+    h.target.displayLevelLenses.delete(h.state.displayLevelImageData);
+    h.target.decodeBase = () => base;
+    assert.equal(await c.ensureSource(), true, 'the source is rebuilt');
+    for (let i = 0; i < 40 && !h.target.displaySessionDiagnostics.selfChecks; i++) await settle();
+    assert.equal(h.target.displaySessionDiagnostics.selfChecks, 1, 'the self-check ran');
+    assert.equal(h.target.displaySessionDiagnostics.selfCheckMismatches, 0, `${label}: the stored level is the corrected source's`);
+    samePixels(h.state.conversionSourceImageData, corrected, `${label}: the rebuilt source is the corrected crop`);
+    assert.equal(h.target.displayLevelLenses.get(h.state.displayLevelImageData), signature, `${label}: the self-check witnesses the lens`);
+    return { h, c, item };
+  };
+  {
+    const first = await fill({ store: storeFor() });
+    await first.h.target.displayProxyStore.settled();
+    assert.equal(first.h.target.displayProxySpill.has(first.item.id), false, 'the store took it');
+    await restartHit('a filled lens-corrected proxy');
+  }
+  records.clear();
+  {
+    const { h, c } = harness();
+    Object.assign(h.target, storeFor());
+    c.restoreSettings(settings);
+    await h.state.geometryReady;
+    await c.processNegative({ quiet: true });
+    const item = { id: 'roll-07::1', file: file(), settings };
+    h.state.loadedFile = item.file;
+    const painted = [];
+    h.target.schedulePostPaintTask = task => { painted.push(task); };
+    const persist = h.target.persistDisplayProxy;
+    const puts = [];
+    h.target.persistDisplayProxy = (...args) => { const put = persist(...args); puts.push(put); return put; };
+    wireSwitching(h, [item, { id: 'b', file: { name: 'b.dng' }, settings: null }]);
+    await c.switchToFile(1);
+    for (const task of painted.splice(0)) task();
+    assert.deepEqual(await Promise.all(puts), [true], 'the photo left is stored');
+    await h.target.displayProxyStore.settled();
+    assert.equal(h.target.displayProxyStore.stats.writes, 1);
+    await restartHit('a lens-corrected photo left');
+  }
+  // Another lens (another focal length) is another key: no store hit.
+  {
+    const { h, c } = harness();
+    Object.assign(h.target, storeFor());
+    const other = { ...settings, lensCorrection: { ...structuredClone(LENS), params: { ...LENS.params, focal: 24 } } };
+    const item = { id: 'roll-07::1', file: file(), settings: other };
+    h.state.fileQueue = [item];
+    assert.equal(await c.readStoredDisplaySession(item), null, 'another lens misses');
+    const noLens = { id: 'roll-07::1', file: file(), settings: { ...settings, lensCorrection: NO_LENS } };
+    h.state.fileQueue = [noLens];
+    assert.equal(await c.readStoredDisplaySession(noLens), null, 'and so does the frame without its lens');
+  }
+  // A lens runtime that fails leaves the crop uncorrected, a level no key
+  // names: the photo left is not stored, and no fill is made; a frame with
+  // that lens is then planned as skipped (a roll frame's planes stay in its
+  // worker). Both ways it fails: maps that throw as lensfun-wasm 0.1.3's do
+  // (it exports no HEAPF32 view, so buildCorrectionMaps reads undefined),
+  // and a runtime that does not load.
+  const broken = { buildCorrectionMaps() { throw new TypeError("Cannot read properties of undefined (reading 'subarray')"); } };
+  for (const [label, options] of [['maps that throw', { client: broken }], ['a runtime that does not load', { fail: 'lensfun unavailable' }]]) {
+    const { h, c } = harness(options);
+    Object.assign(h.target, storeFor());
+    records.clear();
+    c.restoreSettings(settings);
+    await h.state.geometryReady;
+    await c.processNegative({ quiet: true });
+    assert.equal(h.state.conversionSourceImageData.__lensMapping, undefined, `${label}: uncorrected`);
+    assert.equal(c.storableDisplayLevel(h.state.displayLevelImageData), false, `${label}: its level does not carry the lens its key names`);
+    const item = { id: 'roll-07::1', file: file(), settings };
+    h.state.loadedFile = item.file;
+    const painted = [];
+    h.target.schedulePostPaintTask = task => { painted.push(task); };
+    const puts = [];
+    const persist = h.target.persistDisplayProxy;
+    h.target.persistDisplayProxy = (...args) => { const put = persist(...args); puts.push(put); return put; };
+    wireSwitching(h, [item, { id: 'b', file: { name: 'b.dng' }, settings: null }]);
+    await c.switchToFile(1);
+    for (const task of painted.splice(0)) task();
+    assert.equal(puts.length, 0, `${label}: not stored`);
+    await h.target.displayProxyStore.settled();
+    assert.equal(h.target.displayProxyStore.stats.writes, 0);
+    h.state.fileQueue = [{ id: 'open', file: { name: 'open.dng' } }, item];
+    const skips = h.target.displaySessionDiagnostics.fillSkips;
+    assert.equal(await c.fillDisplayProxy(item, base, settings), false, `${label}: not filled`);
+    assert.equal(h.target.displaySessionDiagnostics.fillSkips, skips + 1, `${label}: skipped`);
+    assert.equal(h.target.displayProxyStore.stats.writes, 0);
+    assert.equal((await c.displayProxyFillPlan(item, { width: 120, height: 80, has16: true, route: 'libraw16' }, settings)).skip, true,
+      `${label}: the next frame with that lens is planned as skipped`);
+    const unlensed = { ...settings, lensCorrection: NO_LENS };
+    assert.equal((await c.displayProxyFillPlan(item, { width: 120, height: 80, has16: true, route: 'libraw16' }, unlensed)).skip, undefined,
+      `${label}: a frame without it is not`);
+    // Once the runtime has loaded, a lens it had not loaded for is filled
+    // again; lensfun's refusal of a lens holds for the session.
+    h.target.lensfunRuntime = { client: lensTestClient() };
+    h.target.ensureLensfunClient = async () => ({ client: h.target.lensfunRuntime.client, source: 'local' });
+    const again = await c.displayProxyFillPlan(item, { width: 120, height: 80, has16: true, route: 'libraw16' }, settings);
+    assert.equal(Boolean(again.skip), options.client === broken, `${label}: ${options.client === broken ? 'still skipped' : 'planned again once the runtime loads'}`);
+  }
+  // An 8-bit frame is not filled with a lens (the remap of a fill reads the
+  // 16-bit plane).
+  {
+    const { h, c } = harness();
+    h.target.displayProxySpill = spillOf();
+    const item = { id: 'roll-07::1', file: { name: 'roll-07.png' }, settings };
+    h.state.fileQueue = [{ id: 'open', file: { name: 'open.dng' } }, item];
+    assert.equal((await c.displayProxyFillPlan(item, { width: 120, height: 80, has16: false, route: 'png8' }, settings)).skip, true, 'an 8-bit frame with a lens is not planned');
   }
 }
 
@@ -1664,4 +2007,4 @@ for (const tier of ['A', 'B']) {
   }
 }
 
-console.log('displaySessions: Tier A, Tier B, demotion, spill, ensureBase/ensureSource, invalidation, the proxy invariant, the colour-analysis sample across Undo, Redo and recipe changes (export parity), the settled-view parity of filled proxies, no second fill of a stored proxy and the sample check of stored proxies (export parity), failed geometry builds and decodes, and sessions left before they settled (settled-view parity) passed');
+console.log('displaySessions: Tier A, Tier B, demotion, spill, ensureBase/ensureSource, invalidation, the proxy invariant, the colour-analysis sample across Undo, Redo and recipe changes (export parity), the settled-view parity of filled proxies, lens-corrected fills, spills and stores (#278: a cold open\'s plane hash at every fill site, store hits after a restart without a decode), no second fill of a stored proxy and the sample check of stored proxies (export parity), failed geometry builds and decodes, and sessions left before they settled (settled-view parity) passed');

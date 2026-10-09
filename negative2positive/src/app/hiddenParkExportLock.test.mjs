@@ -70,6 +70,8 @@ function fixture({ enabled = true, hidden = true, brush = true, geometry = null 
     state, undoStack, redoStack, SNAPSHOT_REF_KEYS: vm.runInNewContext(refKeys),
     document: { visibilityState: hidden ? 'hidden' : 'visible', body: { dataset: {} } },
     singleExportActive: false, batchLocked: false, isDesktopBatchExportLocked: () => c.batchLocked, parkedPhoto: null, parkingPhoto: false, manualEditRevision: 0, dustHistoryArchive: archive,
+    // No cold history entry's dust state is being compacted (#281).
+    finishColdDustJobs() {},
     memoryBudget: createMemoryBudget({ budgetBytes: 10000 }), loadGeneration: 4, processNegativeInFlight: null, coreReprocessTimer: null,
     dustDetectionTimer: null, pendingBrushRepairs: 0, dustDrawing: false,
     safeStorageGet: key => storage.get(key) ?? null,

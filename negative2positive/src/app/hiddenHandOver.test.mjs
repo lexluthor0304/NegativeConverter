@@ -57,6 +57,8 @@ function hiddenWindow(f, { budgetBytes = 1e15, itemBytes = 0, park = false } = {
   const workers = { exportAlive: false, exportBytes: 0, terminated: 0 };
   Object.assign(c, {
     activeLongJobs: 0, automaticRollAnalysisRunning: false, hiddenJobSeen: false, parkedPhoto: null, parkingPhoto: false, manualEditRevision: 0,
+    // No cold history entry's dust state is being compacted (#281).
+    finishColdDustJobs() {},
     dustHistoryArchive: createDustHistoryArchive({ indexedDB: archiveDatabaseFixture().indexedDB }),
     repairStamps: { recipeOf: () => null }, clearRepairedPreview() {}, previewRepairWorker: { dispose() {} },
     convertPreviewFrameInWorker: { dispose() {} },

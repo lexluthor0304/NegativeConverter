@@ -41,9 +41,14 @@ export async function runPaced(count, fire, {
     while (now() < due) { remaining = due - now(); if (remaining > spinMs) await sleep(remaining - spinMs); }
     firedAt.push(now());
     // Fired synchronously (the CDP message leaves now) but never awaited here.
+    // Handled at once: a browser killed mid-drag (a guard stop) rejects every
+    // command still in flight, and a rejection left for the allSettled below
+    // is unhandled while the loop sleeps, which ends the whole process (#273).
     let result;
     try { result = fire(i, due); } catch (error) { result = Promise.reject(error); }
-    pending.push(Promise.resolve(result));
+    const settled = Promise.resolve(result);
+    settled.catch(() => {});
+    pending.push(settled);
   }
   const results = await Promise.allSettled(pending);
   return { start, firedAt, results, lateness: firedAt.map((t, i) => t - (start + i * periodMs)) };

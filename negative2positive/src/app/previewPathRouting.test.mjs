@@ -721,6 +721,7 @@ function clearFixture(options) {
     unpinDustWorker: noop, disposeDustWorker: noop, updateDustStatusUI: noop, getLocalizedText: (key, text) => text,
     dustRefreshRepairMask: null, pushUndo: noop, markCurrentFileDirty: noop,
     hiddenJobs: { safeMode: false }, geometryDiagnostics: { coldSessions: false }, dustAiRefresh: { rects: [] },
+    finishColdDustJobs() {},
     dustDrawing: false, undoStack: [], redoStack: [], photoSettingsKey: () => 'key',
     captureSnapshot: () => ({ refs: { processedImageData: f.state.processedImageData } }),
     photoSessions: { put: (key, entry) => { stored.push(entry); return true; } },

@@ -61,6 +61,27 @@ function previewTap(x, scale) {
   return Math.max(0, (x + 0.5) * scale - 0.5);
 }
 
+// Math.round(v / 257) for every 16-bit v: the 8-bit plane of a 16-bit value,
+// read from a table instead of a division per channel (#270). Built once.
+let eightBitOf = null;
+function eightBitTable() {
+  if (!eightBitOf) {
+    eightBitOf = new Uint8Array(65536);
+    for (let v = 0; v < 65536; v++) eightBitOf[v] = Math.round(v / 257);
+  }
+  return eightBitOf;
+}
+
+// A pixel's channels stored as one or two 32-bit words (#270) put the same
+// bytes in memory as four stores, on a little-endian platform (every one the
+// app runs on). A view of a plane that does not start on a 4-byte boundary
+// takes the per-channel stores.
+const LITTLE_ENDIAN = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1;
+function wordsOf(plane) {
+  if (!LITTLE_ENDIAN || plane.byteOffset % 4 || plane.byteLength % 4) return null;
+  return new Uint32Array(plane.buffer, plane.byteOffset, plane.byteLength >> 2);
+}
+
 function resamplePreview(image, output, px0, px1, py0, py1) {
   const { width } = output;
   const sourceWidth = image.width;
@@ -81,6 +102,9 @@ function resamplePreview(image, output, px0, px1, py0, py1) {
     weight[i] = fx - x0;
   }
   const rowStride = sourceWidth * 4;
+  const to8 = source16 ? eightBitTable() : null;
+  const words16 = source16 ? wordsOf(data) : null;
+  const words8 = source16 ? wordsOf(data8) : null;
   for (let y = py0; y < py1; y++) {
     const fy = previewTap(y, sy);
     const y0 = Math.floor(fy);
@@ -89,30 +113,71 @@ function resamplePreview(image, output, px0, px1, py0, py1) {
     const row0 = y0 * rowStride;
     const row1 = y1 * rowStride;
     let dest = (y * width + px0) * 4;
-    if (source16) {
+    if (source16 && words16 && words8) {
+      // Each tap is read once into a local (a store to another typed array
+      // would make the engine read it again). The 8-bit value comes from the
+      // table: v is an integer in [0, 65535], a convex mix of 16-bit samples.
+      // Alpha with four equal taps (an opaque frame) is that value exactly:
+      // a + (a - a) * dx is a, and so is the row mix and its rounding. Both
+      // planes are written a pixel at a time, as words.
+      let pixel = y * width + px0;
+      for (let i = 0; i < span; i++, pixel++) {
+        const dx = weight[i];
+        const a = row0 + left[i], b = row0 + right[i], c = row1 + left[i], d = row1 + right[i];
+        let p = source[a], q = source[b], r = source[c], s = source[d];
+        let top = p + (q - p) * dx;
+        let bottom = r + (s - r) * dx;
+        const v0 = Math.round(top + (bottom - top) * dy);
+        p = source[a + 1]; q = source[b + 1]; r = source[c + 1]; s = source[d + 1];
+        top = p + (q - p) * dx;
+        bottom = r + (s - r) * dx;
+        const v1 = Math.round(top + (bottom - top) * dy);
+        p = source[a + 2]; q = source[b + 2]; r = source[c + 2]; s = source[d + 2];
+        top = p + (q - p) * dx;
+        bottom = r + (s - r) * dx;
+        const v2 = Math.round(top + (bottom - top) * dy);
+        p = source[a + 3]; q = source[b + 3]; r = source[c + 3]; s = source[d + 3];
+        let v3 = p;
+        if (p !== q || p !== r || p !== s) {
+          top = p + (q - p) * dx;
+          bottom = r + (s - r) * dx;
+          v3 = Math.round(top + (bottom - top) * dy);
+        }
+        words16[pixel * 2] = v0 | (v1 << 16);
+        words16[pixel * 2 + 1] = v2 | (v3 << 16);
+        words8[pixel] = to8[v0] | (to8[v1] << 8) | (to8[v2] << 16) | (to8[v3] << 24);
+      }
+    } else if (source16) {
       for (let i = 0; i < span; i++, dest += 4) {
         const dx = weight[i];
         const a = row0 + left[i], b = row0 + right[i], c = row1 + left[i], d = row1 + right[i];
-        let top = source[a] + (source[b] - source[a]) * dx;
-        let bottom = source[c] + (source[d] - source[c]) * dx;
+        let p = source[a], q = source[b], r = source[c], s = source[d];
+        let top = p + (q - p) * dx;
+        let bottom = r + (s - r) * dx;
         let v = Math.round(top + (bottom - top) * dy);
         data[dest] = v;
-        data8[dest] = Math.round(v / 257);
-        top = source[a + 1] + (source[b + 1] - source[a + 1]) * dx;
-        bottom = source[c + 1] + (source[d + 1] - source[c + 1]) * dx;
+        data8[dest] = to8[v];
+        p = source[a + 1]; q = source[b + 1]; r = source[c + 1]; s = source[d + 1];
+        top = p + (q - p) * dx;
+        bottom = r + (s - r) * dx;
         v = Math.round(top + (bottom - top) * dy);
         data[dest + 1] = v;
-        data8[dest + 1] = Math.round(v / 257);
-        top = source[a + 2] + (source[b + 2] - source[a + 2]) * dx;
-        bottom = source[c + 2] + (source[d + 2] - source[c + 2]) * dx;
+        data8[dest + 1] = to8[v];
+        p = source[a + 2]; q = source[b + 2]; r = source[c + 2]; s = source[d + 2];
+        top = p + (q - p) * dx;
+        bottom = r + (s - r) * dx;
         v = Math.round(top + (bottom - top) * dy);
         data[dest + 2] = v;
-        data8[dest + 2] = Math.round(v / 257);
-        top = source[a + 3] + (source[b + 3] - source[a + 3]) * dx;
-        bottom = source[c + 3] + (source[d + 3] - source[c + 3]) * dx;
-        v = Math.round(top + (bottom - top) * dy);
+        data8[dest + 2] = to8[v];
+        p = source[a + 3]; q = source[b + 3]; r = source[c + 3]; s = source[d + 3];
+        if (p === q && p === r && p === s) v = p;
+        else {
+          top = p + (q - p) * dx;
+          bottom = r + (s - r) * dx;
+          v = Math.round(top + (bottom - top) * dy);
+        }
         data[dest + 3] = v;
-        data8[dest + 3] = Math.round(v / 257);
+        data8[dest + 3] = to8[v];
       }
     } else {
       for (let i = 0; i < span; i++, dest += 4) {
@@ -352,6 +417,12 @@ function resampleTaps(src, blockWidth, offX, offY, colTaps, rowTaps, tx0, ty0, o
       right[j] = (colTaps.i1[j] - offX) * 4;
     }
     const w = colTaps.w;
+    // As resamplePreview (#270): the same expressions per channel, unrolled,
+    // each tap read once, alpha of four equal taps taken as it is, and a
+    // 16-bit pixel written as two words (an 8-bit one, from the table, as one).
+    const to8 = wide && out8 ? eightBitTable() : null;
+    const words = wide ? wordsOf(out) : null;
+    const words8 = to8 ? wordsOf(out8) : null;
     for (let r = 0; r < rows; r++) {
       const row0 = (rowTaps.i0[r] - offY) * blockWidth * 4;
       const row1 = (rowTaps.i1[r] - offY) * blockWidth * 4;
@@ -360,12 +431,34 @@ function resampleTaps(src, blockWidth, offX, offY, colTaps, rowTaps, tx0, ty0, o
       for (let j = 0; j < cols; j++, dest += 4) {
         const dx = w[j];
         const a = row0 + left[j], b = row0 + right[j], c = row1 + left[j], d = row1 + right[j];
-        for (let ch = 0; ch < 4; ch++) {
-          const top = src[a + ch] + (src[b + ch] - src[a + ch]) * dx;
-          const bottom = src[c + ch] + (src[d + ch] - src[c + ch]) * dx;
-          const v = Math.round(top + (bottom - top) * dy);
-          out[dest + ch] = v;
-          if (wide && out8) out8[dest + ch] = Math.round(v / 257);
+        let p = src[a], q = src[b], u = src[c], v = src[d];
+        let top = p + (q - p) * dx;
+        let bottom = u + (v - u) * dx;
+        const v0 = Math.round(top + (bottom - top) * dy);
+        p = src[a + 1]; q = src[b + 1]; u = src[c + 1]; v = src[d + 1];
+        top = p + (q - p) * dx;
+        bottom = u + (v - u) * dx;
+        const v1 = Math.round(top + (bottom - top) * dy);
+        p = src[a + 2]; q = src[b + 2]; u = src[c + 2]; v = src[d + 2];
+        top = p + (q - p) * dx;
+        bottom = u + (v - u) * dx;
+        const v2 = Math.round(top + (bottom - top) * dy);
+        p = src[a + 3]; q = src[b + 3]; u = src[c + 3]; v = src[d + 3];
+        let v3 = p;
+        if (p !== q || p !== u || p !== v) {
+          top = p + (q - p) * dx;
+          bottom = u + (v - u) * dx;
+          v3 = Math.round(top + (bottom - top) * dy);
+        }
+        if (words) {
+          words[dest >> 1] = v0 | (v1 << 16);
+          words[(dest >> 1) + 1] = v2 | (v3 << 16);
+        } else {
+          out[dest] = v0; out[dest + 1] = v1; out[dest + 2] = v2; out[dest + 3] = v3;
+        }
+        if (words8) words8[dest >> 2] = to8[v0] | (to8[v1] << 8) | (to8[v2] << 16) | (to8[v3] << 24);
+        else if (to8) {
+          out8[dest] = to8[v0]; out8[dest + 1] = to8[v1]; out8[dest + 2] = to8[v2]; out8[dest + 3] = to8[v3];
         }
       }
     }
@@ -426,6 +519,39 @@ export function resampleDisplayLevel(level, geometry, target, out = null) {
 }
 
 /**
+ * Rows [lo, hi) of a level of `levelHeight` rows that the target rows [ty0,
+ * ty1) of resampleDisplayLevel read (#270: a band of a detail region gets only
+ * these rows).
+ */
+export function displayResampleRows(geometry, target, levelHeight, ty0, ty1) {
+  const mode = displayResampleMode(geometry, target);
+  const rows = axisTaps(mode, target.height, geometry.sourceHeight, geometry.k, levelHeight, ty0, ty1);
+  let lo = levelHeight, hi = 0;
+  for (let j = 0; j < rows.n; j++) {
+    const [a, b] = tapRange(rows, j);
+    if (a < lo) lo = a;
+    if (b > hi) hi = b;
+  }
+  return lo < hi ? [lo, hi] : [0, 0];
+}
+
+/**
+ * Target rows [ty0, ty1) of resampleDisplayLevel(level, geometry, target), the
+ * same values, from `block`: rows [offY, offY + block rows) of a level of
+ * levelWidth x levelHeight (an Image16 or a plane). 16-bit planes only.
+ */
+export function resampleDisplayLevelRows(block, offY, levelWidth, levelHeight, geometry, target, ty0, ty1) {
+  const src = block instanceof Uint16Array ? block : levelPlane(block);
+  if (!(src instanceof Uint16Array)) throw new TypeError('A 16-bit level block is needed');
+  const mode = displayResampleMode(geometry, target);
+  const cols = axisTaps(mode, target.width, geometry.sourceWidth, geometry.k, levelWidth, 0, target.width);
+  const rows = axisTaps(mode, target.height, geometry.sourceHeight, geometry.k, levelHeight, ty0, ty1);
+  const plane = new Uint16Array(target.width * (ty1 - ty0) * 4);
+  resampleTaps(src, levelWidth, 0, offY, cols, rows, 0, 0, plane, null, target.width);
+  return { width: target.width, height: ty1 - ty0, data: plane };
+}
+
+/**
  * The part-3 display filter of a whole image (a full-resolution positive, #248
  * part 4): its level, then the resample, with both planes. 8-bit images keep
  * an 8-bit result only. Returns `image` itself when it is not larger than the
@@ -478,22 +604,81 @@ function sliceTaps(taps, first, last) {
   return { mode: 'area', n: last - first, start, index: taps.index.subarray(base, taps.start[last]), weight: taps.weight.subarray(base, taps.start[last]) };
 }
 
-function updateFilteredRect(image, preview, rect, k) {
-  const levelWidth = Math.floor(image.width / k);
-  const levelHeight = Math.floor(image.height / k);
-  const geometry = { sourceWidth: image.width, sourceHeight: image.height, k };
-  const mode = displayResampleMode(geometry, preview);
-  const allCols = axisTaps(mode, preview.width, image.width, k, levelWidth, 0, preview.width);
-  const allRows = axisTaps(mode, preview.height, image.height, k, levelHeight, 0, preview.height);
+// The display pixels of filterDisplayImage(frame, target, { k }) whose
+// footprint meets source rect `rect`: their taps, their target spans and the
+// level block [minX, maxX) x [minY, maxY) the taps read. Null when none.
+function filterFootprint(frame, target, k, rect) {
+  const levelWidth = Math.floor(frame.width / k);
+  const levelHeight = Math.floor(frame.height / k);
+  const geometry = { sourceWidth: frame.width, sourceHeight: frame.height, k };
+  const mode = displayResampleMode(geometry, target);
+  const allCols = axisTaps(mode, target.width, frame.width, k, levelWidth, 0, target.width);
+  const allRows = axisTaps(mode, target.height, frame.height, k, levelHeight, 0, target.height);
   const columns = footprintSpan(allCols, rect.x, rect.x + rect.width, k, levelWidth);
   const rows = footprintSpan(allRows, rect.y, rect.y + rect.height, k, levelHeight);
   if (!columns || !rows) return null;
-  const cols = sliceTaps(allCols, columns[0], columns[1]);
-  const rowTaps = sliceTaps(allRows, rows[0], rows[1]);
   // The level block those taps read (taps are monotonic, but take the extremes anyway).
   let minX = Infinity, maxX = 0, minY = Infinity, maxY = 0;
   for (let j = columns[0]; j < columns[1]; j++) { const [a, b] = tapRange(allCols, j); minX = Math.min(minX, a); maxX = Math.max(maxX, b); }
   for (let j = rows[0]; j < rows[1]; j++) { const [a, b] = tapRange(allRows, j); minY = Math.min(minY, a); maxY = Math.max(maxY, b); }
+  return {
+    cols: sliceTaps(allCols, columns[0], columns[1]), rowTaps: sliceTaps(allRows, rows[0], rows[1]),
+    columns, rows, minX, maxX, minY, maxY,
+  };
+}
+
+/**
+ * Where a change of a frame inside source rect `rect` shows in its display
+ * image filterDisplayImage(frame, target, { k }) (#254 follow-up): `display`,
+ * the display pixels whose footprint meets the rect, and `source`, the frame
+ * pixels those display pixels read (whole level boxes, inside the frame).
+ * Null when the rect reaches no display pixel. filterDisplayRegion makes the
+ * pixels of `display` from the frame's pixels inside `source` alone.
+ */
+export function displayFootprint(frame, target, k, rect) {
+  const footprint = filterFootprint(frame, target, k, rect);
+  if (!footprint) return null;
+  const { columns, rows, minX, maxX, minY, maxY } = footprint;
+  return {
+    display: { x: columns[0], y: rows[0], width: columns[1] - columns[0], height: rows[1] - rows[0] },
+    source: { x: minX * k, y: minY * k, width: (maxX - minX) * k, height: (maxY - minY) * k },
+  };
+}
+
+/**
+ * The pixels filterDisplayImage(frame, target, { k }) gives over `display` (a
+ * displayFootprint result's), made from `plane`: the frame's 16-bit RGBA
+ * pixels inside `source` ({ width, height, data } of the source rect's size).
+ * Returns { width, height, data, image16 }: the 8-bit and 16-bit values the
+ * whole-frame filter gives there.
+ */
+export function filterDisplayRegion(plane, source, frame, target, k, display) {
+  if (!(plane?.data instanceof Uint16Array) || plane.width !== source.width || plane.height !== source.height) {
+    throw new TypeError('A 16-bit plane of the source region is needed');
+  }
+  if (source.x % k || source.y % k || source.width % k || source.height % k) throw new RangeError('The source region must hold whole level boxes');
+  const levelWidth = Math.floor(frame.width / k);
+  const levelHeight = Math.floor(frame.height / k);
+  const mode = displayResampleMode({ sourceWidth: frame.width, sourceHeight: frame.height, k }, target);
+  const cols = axisTaps(mode, target.width, frame.width, k, levelWidth, display.x, display.x + display.width);
+  const rows = axisTaps(mode, target.height, frame.height, k, levelHeight, display.y, display.y + display.height);
+  let block = plane.data;
+  let blockWidth = source.width;
+  if (k > 1) {
+    blockWidth = source.width / k;
+    block = new Uint16Array(blockWidth * (source.height / k) * 4);
+    boxLevelRows(plane, k, 0, blockWidth, 0, source.height / k, block, blockWidth);
+  }
+  const image16 = new Uint16Array(display.width * display.height * 4);
+  const data = new Uint8ClampedArray(image16.length);
+  resampleTaps(block, blockWidth, source.x / k, source.y / k, cols, rows, 0, 0, image16, data, display.width);
+  return { width: display.width, height: display.height, data, image16 };
+}
+
+function updateFilteredRect(image, preview, rect, k) {
+  const footprint = filterFootprint(image, preview, k, rect);
+  if (!footprint) return null;
+  const { cols, rowTaps, columns, rows, minX, maxX, minY, maxY } = footprint;
   let block;
   let blockWidth;
   let offX = minX;

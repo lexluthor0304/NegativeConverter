@@ -6,7 +6,8 @@ Issues: [#220](https://github.com/lexluthor0304/NegativeConverter/issues/220),
 [#224](https://github.com/lexluthor0304/NegativeConverter/issues/224),
 [#234](https://github.com/lexluthor0304/NegativeConverter/issues/234),
 [#243](https://github.com/lexluthor0304/NegativeConverter/issues/243),
-[#249](https://github.com/lexluthor0304/NegativeConverter/issues/249).
+[#249](https://github.com/lexluthor0304/NegativeConverter/issues/249),
+[#278](https://github.com/lexluthor0304/NegativeConverter/issues/278).
 
 ## Ownership and invalidation
 
@@ -100,8 +101,10 @@ every area its recipe and its kept undo/redo entries name, taken from the
 base when the photo is left (`analysisSamplesFor`, a few ms per area besides
 the one in use), so Undo and Redo across Confirm image area convert with the
 sample a decoded base gives. The proxy's key is the base
-(size, depth, decode route), the geometry, lens correction and the analysis
-area; no viewport, since the level serves any window.
+(size, depth, decode route), the geometry, lens correction (`lensSignature`:
+the selected lens's identity, never lensfun's handle, its parameters and
+modes as `resolveLensCorrection` gives them, null without correction; #278
+below) and the analysis area; no viewport, since the level serves any window.
 
 - **Return.** A Tier A or in-RAM Tier B entry whose recipe key matches restores
   in the click's task like a warm switch: no veil, no read, no decode, the same
@@ -227,16 +230,111 @@ while it copies each row at most twice, and a steeper angle takes one band
 that reads the window once. A band's rows are copied 32 MiB per main-thread
 task at most, so no copy is a long task. At 60 MP a fill copies 357 MiB
 untilted and 469-491 MiB at 0.6-1.3°, where bands of 16 level rows copied 535
-MiB to 1.9 GiB (`__ncGeometry.pool.copiedBytes` counts them). Frames with lens
-correction, repairs, an undecided recipe, an 8-bit RAW fallback or no level
-smaller than themselves (k = 1) are skipped, and so is a frame whose proxy the
+MiB to 1.9 GiB (`__ncGeometry.pool.copiedBytes` counts them). Frames with
+repairs, an undecided recipe, an 8-bit RAW fallback or no level smaller than
+themselves (k = 1) are skipped, and so is a frame whose proxy the
 spill or the persistent store already holds (`displayProxyStore.has`, which
 marks it used): after a restart or a project reopen a roll pass, lane or
 prefetch decode of a stored frame renders nothing. A roll frame measured in
 its lane's roll-frame worker (#252) stays there, so `displayProxyFillPlan`
 decides from its size alone (and those lookups) whether it has a proxy to
 fill; only then do its planes come back to the page with its roll sample for
-the fill.
+the fill. Lens-corrected frames are filled too (below).
+
+**Lens correction** (#278). The editor corrects the working image after the
+crop: lensfun's maps for the crop's size (`lensCorrectionMaps`, cached by
+`lensMapRequest` within 128 MB, at most 12 sets), then the remap of
+`lensMaps.js` (`applyLensMapsToImage`, moved out of `main.js` byte for
+byte), and builds the level from the corrected source. A recipe (and a
+project, the roll reference) names its lens profile by its identity
+(`sanitizeLensSelection`, `lensProfileIdentity`): lensfun's maker and model,
+the crop factor its calibration was measured at, its focal and aperture
+ranges and the camera the panel's search was narrowed to; never lensfun's
+handle, the lens's address in one lensfun-wasm build's memory, which
+another build or database lays out elsewhere (none of 0.1.3's handles names
+a lens in 0.1.4). `lensHandleFor` looks the identity up in the running
+build once a session (`findLensHandle`: the exact model, then its words
+without digits, which lensfun cannot rule out by a focal length its name
+parses to, without and then with the camera; among the entries of that
+name the nearest calibration crop factor, the same ranges, the camera's
+mount, then lensfun's database order). Over 0.1.4's 1558 entries every
+identity resolves to its entry, but 8 to a twin with the same name, crop
+factor and ranges (`lensMaps.lensfun.test.mjs`). An older recipe's handle
+is dropped and its name looked up; a handle alone, or a name the running
+build lacks, leaves the frame uncorrected with the panel asking for the
+profile again ("select a lens profile", a console warning). `buildLensMaps`
+decides the maps: the distortion map where the lens has distortion
+calibration; with TCA on and TCA calibration for the lens, lensfun's
+per-channel map of distortion and TCA corrected together
+(`buildSubpixelGeometryMap`, lensfun-wasm 0.1.4 on: lensfun's own order, the
+distortion first and TCA at the distorted position; green stays where the
+distortion puts it); with vignetting on and vignetting calibration, the
+gains. A lens without TCA calibration, a TCA map that fails and a
+lensfun-wasm without `buildSubpixelGeometryMap` get the distortion alone (the
+TCA map of `buildCorrectionMaps` is built with TCA correction alone and
+carries no distortion, so it is never used); a vignetting map that fails is
+left out. A lens without distortion calibration (39 of 0.1.4's entries, the
+Nikkor AF-S 60 mm f/2.8G ED Micro and the Sigma 70mm f/2.8 EX DG Macro among
+them) has no geometry map: its TCA alone (`buildSubpixelGeometryMap`) and its
+gains alone (lensfun-wasm's `buildVignettingMap`, 0.1.4 on; its
+`buildCorrectionMaps` builds the gains only after a distortion map; without
+the method such a lens gets no vignetting correction), and the remap reads
+every pixel in place where TCA is off, its own value exactly; the repair
+brush maps strokes only through maps that move pixels
+(`lensMapsMovePixels`). Every map covers the frame (`lensGridNodes`): a node
+every `step` pixels from 0 up to the first at or past the last pixel
+(lensfun-wasm's `coverFrame`, 0.1.4 on; the grid of a client that ignores
+it is continued past its last node linearly), so the remap, the bands' row
+windows (`lensSourceRows`, `sliceLensMaps`) and the repair brush
+(`lensSourcePoint`) interpolate every pixel between nodes. lensfun-wasm's
+default grid ends at or before the last pixel, and the remap held the last
+node's position for the last `(size - 1) % step` columns and rows: on a
+6000 x 4000 crop at step 8, the Canon EF 24-105mm f/4L IS USM at 24 mm read
+up to 9.1 px from lensfun's own position at the corner; every pixel now
+reads within 0.002 px of it (`lensMaps.lensfun.test.mjs` checks every pixel
+of its cases within 0.5 px). A distortion map that cannot be built, or maps that
+would correct nothing (no calibration at the image's crop factor, or none
+for the modes on), leave the frame uncorrected ("Lens correction failed"),
+as every map did with lensfun-wasm 0.1.3, whose module exports no HEAPF32
+view. The focal length and aperture are the photo's (`params.focalSource`,
+`apertureSource`): what its file's metadata gives (`rememberShotMetadata`,
+from every RAW decode; a manual lens's zero is unknown), unless the user
+typed them for the photo. A new photo's recipe takes them from its file
+over values carried from the photo before; choosing a profile sets the lens
+only (a focal length nothing gave is guessed from it, a prime's own; the
+aperture never); a copy (apply to selected, the roll reference) keeps the
+receiving photo's own; a lens-corrected photo's restore and its exports put
+its file's values over others the user did not type. The editor, exports,
+batch lanes and fills all build their maps this way. A fill does the
+same in the pool (`renderLensDisplayLevel`): each band renders the crop rows
+its corrected rows read, which `lensSourceRows` bounds by the least and
+greatest source row of the grid nodes those rows interpolate (their own rows
+when the remap reads in place; a row of margin each way), remaps its rows
+with the grid rows `sliceLensMaps` posts with it, and box-averages them as
+`renderDisplayLevel`'s bands do, so its level is the editor's byte for byte
+(`displayPlaneHash` of every fill site equals that of a cold open's
+`conversionPreviewImageData`, `displaySessions.test.mjs`). A band
+holds its copied base rows and the rows it renders: the bands are planned by those
+bytes within the same 2 bytes per base pixel (the maps, about 0.7 bytes per
+pixel at 60 MP, come beside them as the level does), each at most a third over
+twice its own rows when several run at once. Planned for a 60 MP frame at
+0.7° (88 % crop) with test maps shaped like lensfun's of an 18 mm zoom (which
+move rows by up to 135 at 6000), the fill takes 8 bands of 783 rows, one at a
+time, rendering 1.06× the crop's rows; with a macro lens's, 27 bands run 3 at
+a time (`geometryPool.test.mjs`). With lensfun's own maps of that zoom (built
+in Node with the heap view lensfun-wasm 0.1.3 does not export, below), the
+remap is most of the cost: on 4 worker threads a 60 MP fill took 5.2 s (24 MP:
+2.2 s), against 0.46 s for the plain level and 6.3 s for the editor's crop,
+remap and level on one thread, the same level byte for byte. A lens that
+moves rows too far for one band in the budget (a fisheye) is not filled, nor
+is an 8-bit frame (the remap of a fill reads the 16-bit plane). The maps come
+from the editor's cache without growing it; fills give up on a lens whose maps
+they could not build (for the session when lensfun refused them, until the
+runtime loads when it did not load), so its frames are planned as skipped and
+a roll frame's planes stay in its worker. A fill, the spill, the store and a
+cold open key the lens alike (the recipe's block as `restoreSettings` resolves
+it), so the first open converts the filled or stored level without a decode,
+and `ensureSource()` rebuilds the corrected source for the self-check.
 
 **The store** (across restarts and project reopens). The same records, keyed by
 the file's content (size, date, SHA-256 of the first MiB plus the size, SHA-256
@@ -246,9 +344,12 @@ by `vite.config.js`) and the proxy's key. The decoder hash covers libraw-wasm
 (#264's decoders count too: the decoder choice, the desktop's native plane and
 its transfer, libraw-wasm's threaded build, and on the dev server the
 `LIBRAW_WASM_DIST` package it resolves), the pinned scan decoders (utif for
-TIFF scans, upng-js for 16-bit PNGs) and the HEIF codec in `public/codecs`.
+TIFF scans, upng-js for 16-bit PNGs), the HEIF codec in `public/codecs` and
+the lens database and runtime (lensfun-wasm's module, core, wasm and data,
+and the IIFE its CDN fallback loads at the same version, #278).
 The code hash covers the modules that shape a stored proxy and its
-colour-analysis sample: the decode, geometry, display-level, record and
+colour-analysis sample: the decode, geometry, display-level, lens remap
+(`lensMaps.js`, with the map step and request), record and
 sample modules (`analysisRegion.js`) and their whole relative-import closure,
 which `displayProxyHashes.test.mjs` computes (static, dynamic and worker
 imports) and fails on when a module is missing. Decoders the browser runs
@@ -256,9 +357,23 @@ imports) and fails on when a module is missing. Decoders the browser runs
 hashed: the checks of `ensureBase()` and `ensureSource()` above catch their
 drift once the original is decoded again. Only reproducible decode routes are
 stored, never a recipe; a record carries its full key and checksum, verified
-on read. A frame with active lens correction is not stored, whether filled or
-left (R2-006): a cold open looks its proxy up without lens correction, so
-the record could never be read back. The desktop app keeps records in
+on read. A proxy whose key names a lens is stored only when its level carries
+that very correction (#278, `storableDisplayLevel`; R2-006 kept every
+lens-corrected proxy out while a cold open looked them up without a lens):
+`displayLevelLenses` records the lens a level carries: built from a source
+that lens correction actually corrected (`lensCorrectedSources`), by a fill,
+by the self-check, or read with a record's `levelLens` (written only for a
+lens). A lens
+runtime that failed, or lens settings changed without a conversion since
+(the lens panel converts nothing until the next open), leave a level that a
+cold open of the recipe would not show: it is not stored, nor a corrected
+level whose recipe has switched the lens off since; the session and its
+spill keep it, as they keep what the photo was left showing. Lens-free
+levels are stored as before. With lensfun-wasm 0.1.3, which the app still
+pins, lens correction never applies (it builds no maps,
+`docs/audit-backlog.md`), so lens-active photos get no lens-keyed proxy and
+reopen through a decode; with 0.1.4 they are corrected and stored like any
+other photo. The desktop app keeps records in
 `app_cache_dir()/display-proxies` through `src-tauri/src/display_proxy_store.rs`
 (chunked atomic writes and reads, the volume's free space, `CACHEDIR.TAG` and
 Time Machine's exclusion; the spill of an earlier run is removed at start,
@@ -778,11 +893,26 @@ against a cold open's conversion request. It also opens a stored frame whose
 record carries another build's colour-analysis sample: the record is purged,
 the photo converts and exports with the base's own sample (with real
 SilverCore, the export equals a cold open's), and an auto-WB estimate taken
-from the record is taken again. Last, it nudges the exposure of a Tier A and
+from the record is taken again. It nudges the exposure of a Tier A and
 a Tier B return and clicks another photo in the same task (inside the
 reprocess debounce): the frame must come back without a read or decode, with
 the nudge and its history, showing what a cold open of the nudged recipe
-shows (GPU sample hash, white balance, saved settings).
+shows (GPU sample hash, white balance, saved settings). Last, it gives the
+colour frame a lens (#278): the app's own lens runtime is tried first and
+must correct the frame from lensfun-wasm 0.1.4 on (the Nikkor 18-55mm DX
+VR II it picks has distortion and TCA calibration, no vignetting; 0.1.3
+leaves the frame uncorrected, which is reported), then a lensfun client of
+test maps (`lensTestMaps.mjs`, through
+`window.__ncDisplaySessions.lensRuntime` with `?debug=1`) corrects a cold
+open; left, the frame is stored under its lens, and after a restart (its
+session and spill dropped, the store kept) it opens from the store without a
+read or decode, settles within 400 ms (from the click to the first frame with
+the cold open's pixels), shows what the cold open shows and exports what it
+exports. Its fills are of levels smaller than their frame, so
+`displaySessions.test.mjs` checks them: every fill site's plane hash (a
+lane's decode, a roll frame, a photo left, spilled or demoted) equals a cold
+open's, and a filled or left lens-corrected frame opens from the store after
+a restart without a decode.
 `displaySessions.test.mjs` covers the failure paths: a geometry edit whose
 original cannot be decoded again (rejected, or the `raw-fallback` embedded
 preview) keeps the session and rolls the edit back; an original that decodes

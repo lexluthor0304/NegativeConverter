@@ -14,6 +14,7 @@ if (!globalThis.ImageData) {
 }
 const geometry = await import('./imageGeometry.js');
 const imageDataOps = await import('./imageDataOps.js');
+const displayPreviewModule = await import('./displayPreview.js');
 const { createGeometryPool, yieldToEventLoop } = await import('./geometryPool.js');
 const { backingBuffers, createPhotoSessionCache } = await import('./photoSessionCache.js');
 const { planGeometryBandsInFlight } = await import('./batchExportScheduler.js');
@@ -22,6 +23,8 @@ const displayProxy = await import('./displayProxy.js');
 const displayPreview = await import('./displayPreview.js');
 const analysisRegion = await import('./analysisRegion.js');
 const { DISPLAY_SESSION_HELPERS, displaySessionDiagnosticsStub, emptyDisplayProxySpill } = await import('./displaySessionHarness.mjs');
+const { createRepairStamps } = await import('./repairReuse.js');
+const { compactDustSteps, runSteps } = await import('./dustColdState.js');
 
 export { geometry, imageDataOps, backingBuffers, createPhotoSessionCache };
 
@@ -88,6 +91,8 @@ const FUNCTIONS = [
   'mapCropRegionAfterRotation', 'sanitizeCropRegionForImage', 'restoreSettings', 'offerAutoFrameRotation',
   'isCurrentLoad', 'applyZoomPanTransform', 'resetZoomPan', 'captureSnapshot', 'restoreSnapshot',
   'restoreColdSnapshotPixels', 'liveHistoryRoots', 'hotGeometrySnapshot', 'historyExclusiveBytes',
+  // Cold entries' dust states (#281).
+  'coldRefsFor', 'heldDustObjects', 'compactColdDust', 'startColdDustJob', 'endColdDustJob', 'coldDustWanted', 'finishColdDustJobs',
   'pushHistoryEntry', 'pruneHistoryForMemory', 'trimHistorySnapshot', 'commitUndoSnapshot', 'pushUndo', 'performUndo', 'performRedo',
   'rememberPhotoSession', 'rememberUnsettledDisplaySession', 'releaseOutgoingPhotoPlanes', 'photoSettingsKey', 'switchToFile',
   'reactivateReleasedPhoto', 'resumeDeferredPhotoReactivation', 'reopenLivePhoto', 'invalidatePhotoActivation', 'getCropDraftTotalAngle', 'scaleCropRect',
@@ -107,7 +112,11 @@ const FUNCTIONS = [
   'sameDescriptorSamples', 'displaySessionMismatch',
   'hasSeparateConversionPreview', 'displayProxyShape', 'displayProxyFillPlan', 'storedDisplayProxyKept', 'fillDisplayProxy', 'readStoredDisplaySession',
   'expectedStoredProxyKey', 'persistDisplayProxy', 'displayProxyFileKeyFor', 'persistPresentationPreview',
-  'presentStoredPreview', 'encodePresentationJpeg'
+  'presentStoredPreview', 'encodePresentationJpeg',
+  // #278: the lens part of a proxy's key (null unless a test resolves a lens),
+  // and a photo's focal length and aperture from its file's metadata.
+  'lensSignature', 'lensSignatureOf', 'lensRemapFor', 'lensRemapFailed', 'lensCorrectionMaps', 'storableDisplayLevel',
+  'rememberShotMetadata', 'shotMetadataFor', 'applyShotMetadata', 'withReceivingShot'
 ];
 
 // The Apply Crop click handler, as a named function.
@@ -156,6 +165,10 @@ export function createHarness(base, { historyBudget = 768 * 1024 * 1024, session
     importDetectionAbort: null,
     // No learned-repair refresh of dust-brush rects is pending (#259).
     dustAiRefresh: { rects: [], timer: null },
+    // No dust state is being restored or compacted (#259, #281).
+    restoredDust: null, coldRestoredDust: null, coldDustJobs: new Map(), cleanSourceDigests: new WeakMap(),
+    coldDustDiagnostics: { compacted: 0, failed: 0, kept: 0 }, heldJobFrames: new Set(), memoryBudget: { poke() {} },
+    repairStamps: createRepairStamps(), compactDustSteps, runSteps, yieldTaskForJob: yieldToEventLoop,
     // #263: no reduced preview-tier session is open.
     previewTier: 'normal', previewTierKept: null, reducedDisplayImages: new WeakSet(), displayIsReduced: () => false,
     // No GPU preview frame is ahead of its exact frame (#239).
@@ -217,6 +230,10 @@ export function createHarness(base, { historyBudget = 768 * 1024 * 1024, session
     // No persistent store unless a test gives one (part 3).
     displayProxyStore: null, displayProxyFileKeys: new WeakMap(), DISPLAY_PROXY_HASHES: { decoder: 'wasm', code: 'code' },
     colorAnalysisSamples: new WeakMap(), colorAnalysisSampleMisses: new WeakSet(), autoWbFromRecords: new WeakSet(),
+    // #278: the lens each corrected source and each display level carries,
+    // and the photos' focal lengths and apertures from their files.
+    lensCorrectedSources: new WeakMap(), displayLevelLenses: new WeakMap(), lensRemapFailures: new Map(),
+    shotMetadataByFile: new WeakMap(), missingLensProfilesWarned: new Set(),
     displayProxyKey: displayProxy.displayProxyKey,
     displayPlaneHash: displayProxy.displayPlaneHash, checksum32: displayProxy.checksum32,
     displayPreviewSize: displayPreview.displayPreviewSize, resizeDisplayPreview: displayPreview.resizeDisplayPreview,
@@ -260,6 +277,9 @@ export function createHarness(base, { historyBudget = 768 * 1024 * 1024, session
     },
     applyLensCorrectionWithSettings: async source => source,
     sampleAnalysisArea: analysisRegion.sampleAnalysisArea,
+    // #254 follow-up: exact displays and live dodge composites (no stroke here).
+    exactFrames: new WeakMap(), exactDisplays: new WeakMap(), liveComposites: new WeakMap(), convertedPixelsRevision: 0,
+    displayFilterOf: displayPreviewModule.displayFilterOf, displayResampleMode: displayPreviewModule.displayResampleMode,
   };
   const context = vm.createContext(new Proxy(target, {
     has: () => true,
@@ -270,7 +290,7 @@ export function createHarness(base, { historyBudget = 768 * 1024 * 1024, session
       return undefined;
     }
   }));
-  vm.runInContext(['SNAPSHOT_SCALAR_KEYS', 'SNAPSHOT_REF_KEYS', 'GEOMETRY_UNDO_LABELS'].map(constSource).join('\n'), context);
+  vm.runInContext(['SNAPSHOT_SCALAR_KEYS', 'SNAPSHOT_REF_KEYS', 'GEOMETRY_UNDO_LABELS', 'COLD_DUST_MAX_BYTES'].map(constSource).join('\n'), context);
   if (realProcessNegative) {
     delete target.processNegative;
     Object.assign(target, {

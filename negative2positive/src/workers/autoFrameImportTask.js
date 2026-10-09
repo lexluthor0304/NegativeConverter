@@ -39,12 +39,18 @@ export function detectFrameForRequest(image, message, options, { detect, rotate 
   return detect(image, { ...options, rotateImageData: rotate, deferFullResolution: Boolean(message.image16Omitted) });
 }
 
+const clock = () => (typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now());
+const elapsedMs = started => Math.round((clock() - started) * 10) / 10;
+
 /**
  * 'analyze-import': one frame, both analyses, on the same buffer: the frame
  * detection (`message.frame`: analyzer options), then the film-edge read
  * (`message.filmEdge`: reader options). Each reports its own error, so one
  * failing does not lose the other. With `returnPlanes` the page's own planes
  * (transferred here, never copied) go back with the result.
+ * Each part's own time in this worker goes back too (`frameMs`,
+ * `filmEdgeMs`, #273): the page's round trip covers both parts, and the
+ * film-edge stage has a budget of its own (#236). Timing only.
  * Resolves { reply, transfers }.
  */
 export async function runImportRequest(message, { loadCv, detect, rotate, readEdge }) {
@@ -53,15 +59,19 @@ export async function runImportRequest(message, { loadCv, detect, rotate, readEd
   const reply = {};
   const transfers = [];
   if (message.frame) {
+    const started = clock();
     try {
       await loadCv();
       // `detect` may resolve later (the parallel detector, #252).
       reply.frame = packFrameResult(await detectFrameForRequest(image, message, message.frame, { detect, rotate }), transfers);
     } catch (error) { reply.frameError = String(error?.message || error); }
+    reply.frameMs = elapsedMs(started);
   }
   if (message.filmEdge) {
+    const started = clock();
     try { reply.filmEdge = await readEdge(image, message.filmEdge); }
     catch (error) { reply.filmEdgeError = String(error?.message || error); }
+    reply.filmEdgeMs = elapsedMs(started);
   }
   if (message.returnPlanes) {
     if (message.rgba) {

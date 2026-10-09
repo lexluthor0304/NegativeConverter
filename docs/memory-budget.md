@@ -151,8 +151,9 @@ consumer that holds it:
    Storage failure keeps the real buffers and their ledger charge;
 4. **stores**: the prefetch slot, tile sources, watch-folder roll samples and
    the roll-analysis sample stores in use;
-5. **jobs**: frames a job keeps between its items, and an Export All frame
-   decoded ahead until a lane takes it (#256);
+5. **jobs**: frames a job keeps between its items, an Export All frame
+   decoded ahead until a lane takes it (#256), and the planes a cold history
+   entry's dust compaction reads until it ends (#281);
 6. **workers**: long-lived worker residents: the default export bridge (the
    planes of its last request until it is terminated), the auto-frame
    worker's OpenCV heap (`cv.HEAPU8`, reported with each reply) and a warmed
@@ -220,7 +221,8 @@ the shortfall is freed, then `poke()`:
    while no export, repair or full-resolution render needs it; the next export
    converts it again;
 4. history: the oldest snapshots lose their pixel references (their steps
-   stay; a cold step restores its scalars and rebuilds from the base).
+   stay; a cold step restores its scalars and rebuilds from the base, and
+   keeps its dust state, #281).
 
 ## Lane planning
 
@@ -265,12 +267,25 @@ there after exports and roll analysis.
 
 **Linux.** WebKitGTK accepts memory-pressure settings (`memory-limit`, which
 moves Strict) only as the construct-only `memory-pressure-settings` property
-of a `WebKitWebContext`, and wry 0.55 builds that context without it; the one
-static setter, `webkit_website_data_manager_set_memory_pressure_settings`,
-covers the network process. Until wry exposes the property, WebKitGTK keeps
-its defaults and the app logs one startup line with the limit it would set
-(half of `MemTotal`):
-`[memory] WebKitGTK memory pressure: WebKit defaults (Strict from 1.5 GiB); planned memory-limit … MB …`.
+of a `WebKitWebContext`, which Tauri's wry builds itself when the main window
+is created; the one static setter,
+`webkit_website_data_manager_set_memory_pressure_settings`, covers the
+network process. Since #282 the Linux build pins a fork of wry 0.55.1
+(`[patch.crates-io]` in `src-tauri/Cargo.toml`, branch
+`nc/0.55.1-memory-pressure` of lexluthor0304/wry) that adds
+`wry::set_default_memory_pressure_settings`, a process-wide default every
+`WebContext::new` applies. `run()` sets it from `MemTotal` before
+`tauri::Builder` creates the window
+(`memory_info::apply_linux_memory_pressure_settings`), so the one shared
+context gets a `memory-limit` of half of RAM: Strict starts at a quarter of
+RAM instead of 1.5 GiB (3980 MB on 16 GB). The conservative and strict
+thresholds (0.33 and 0.5 of the limit), the 30 s poll and the kill threshold
+(unset: never) stay WebKitGTK's. The startup log shows what was applied:
+`[memory] WebKitGTK memory-limit 7960 MB of 15921 MB (Strict from 3980 MB); kill threshold unset`,
+or `[memory] WebKitGTK memory pressure: WebKit defaults (…)` when
+`/proc/meminfo` is unreadable. The fork must be re-based on the new wry tag
+whenever Tauri bumps wry, and goes away once wry or Tauri expose the settings
+(`docs/audit-backlog.md`, "Build and release").
 
 ## Instrumentation and measurement
 

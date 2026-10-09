@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
+import { createScreenEdges } from './screen-edges.mjs';
 
 const UPNG = createRequire(import.meta.url)('upng-js');
 
@@ -16,8 +17,16 @@ const UPNG = createRequire(import.meta.url)('upng-js');
 // 5. The detail layer at 100 %: native density, hidden while a SilverCore drag
 //    is ahead of it and back after the settle, hidden in before/after and crop
 //    mode, and exports unchanged by any of it. ?detailLayer=0 turns it off.
+// 6. The detail layer on the base's pixel grid (#279 follow-up): it keeps the
+//    base canvas's box (no box of its own) and a transform lays it over its
+//    region; it draws the sides of a patch within 1 CSS px of where the base
+//    under it draws them, and the base within 1 CSS px of where its box puts
+//    them (it fills the box), at true 100 % and at about 400 % zoom.
 const ready = `document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy`;
 const SOURCE = { width: 3000, height: 2000 };
+// A uniform patch of the fixture, clear of the fine lines, in view at true
+// 100 % and at about 400 % zoom: its sides are the edges part 6 measures.
+const PATCH = { left: 1460, top: 1020, right: 1580, bottom: 1120 };
 
 function installZoomDetailProbe() {
   const original = { post: Worker.prototype.postMessage, terminate: Worker.prototype.terminate,
@@ -189,7 +198,9 @@ export async function runZoomDetailSmoke({ send, evaluate, waitFor, fail, instal
       gradient.addColorStop(0, 'rgb(190,125,80)'); gradient.addColorStop(1, 'rgb(110,70,45)');
       context.fillStyle = gradient; context.fillRect(120, 120, surface.width - 240, surface.height - 240);
       context.fillStyle = 'rgb(60,40,25)';
-      for (let x = 900; x < 2100; x += 2) context.fillRect(x, 700, 1, 600);
+      for (let x = 900; x < 2100; x += 2) context.fillRect(x, 700, 1, 260);
+      context.fillStyle = 'rgb(95,62,38)';
+      context.fillRect(${PATCH.left}, ${PATCH.top}, ${PATCH.right - PATCH.left}, ${PATCH.bottom - PATCH.top});
       const blob = await new Promise(resolve => surface.toBlob(resolve, 'image/png'));
       const transfer = new DataTransfer();
       transfer.items.add(new File([blob], ${JSON.stringify(fileName)}, { type: 'image/png' }));
@@ -204,6 +215,58 @@ export async function runZoomDetailSmoke({ send, evaluate, waitFor, fail, instal
       const gl = document.getElementById('coreUseWebGL'); if (!gl.checked) gl.click();
     })()`);
     await quiet(`${fileName} idle`, 3000);
+  };
+
+  // Part 6: the patch's left side (along a row) and top side (along a column),
+  // drawn by the detail layer and, with it hidden, by the base under it.
+  const edges = createScreenEdges({ send, evaluate });
+  const detailAlignment = async (label) => {
+    const layer = await detail();
+    const shown = await display();
+    const geometry = await evaluate(`(() => {
+      const rect = (id) => { const r = document.getElementById(id).getBoundingClientRect(); return { left: r.left, top: r.top, width: r.width, height: r.height, right: r.right, bottom: r.bottom }; };
+      const style = document.getElementById('glDetailCanvas').style;
+      return { photo: rect('glCanvas'), view: rect('canvasContainer'), box: [style.left, style.top, style.width, style.height] };
+    })()`);
+    const W = shown.source.width, H = shown.source.height;
+    const toClient = (x, y) => ({ x: geometry.photo.left + x / W * geometry.photo.width, y: geometry.photo.top + y / H * geometry.photo.height });
+    // A base pixel on screen: the base's edge is blurred over a few of them.
+    const texel = geometry.photo.width / shown.shown.width;
+    const reach = Math.max(10, 6 * texel);
+    const sides = [
+      { axis: 'x', point: toClient(PATCH.left, (PATCH.top + PATCH.bottom) / 2), band: Math.min(60, 0.5 * (PATCH.bottom - PATCH.top) / H * geometry.photo.height) },
+      { axis: 'y', point: toClient((PATCH.left + PATCH.right) / 2, PATCH.top), band: Math.min(60, 0.5 * (PATCH.right - PATCH.left) / W * geometry.photo.width) },
+    ];
+    const region = layer.region;
+    const reachSource = reach / geometry.photo.width * W;
+    expect(layer.visible && layer.current && region && geometry.box.every(value => value === '')
+      && /^translate\(/.test(layer.placement?.transform || '') && region.x < PATCH.left - reachSource && region.y < PATCH.top - reachSource
+      && region.x + region.width > PATCH.left + reachSource && region.y + region.height > PATCH.top + reachSource,
+    `${label}: the detail layer is not shown over the patch in the base's box: ` + JSON.stringify({ layer, geometry }));
+    for (const side of sides) {
+      expect(side.point.x - reach > geometry.view.left && side.point.x + reach < geometry.view.right
+        && side.point.y - reach > geometry.view.top && side.point.y + reach < geometry.view.bottom,
+      `${label}: the patch side is out of view: ` + JSON.stringify({ side, view: geometry.view }));
+    }
+    const measured = [];
+    for (const side of sides) {
+      measured.push(await edges.layerEdges('glDetailCanvas', { axis: side.axis, reach, band: side.band,
+        at: side.axis === 'x' ? side.point.x : side.point.y, across: side.axis === 'x' ? side.point.y : side.point.x }));
+    }
+    const [x, y] = measured;
+    expect([x.shown, x.under, y.shown, y.under].every(edge => !edge.error && edge.contrast >= 8),
+      `${label}: the patch side was not found on screen: ` + JSON.stringify(measured));
+    // The base fills its box (object-fit, #279 follow-up): it draws the sides
+    // where the box puts them, as the detail layer laid on the box does.
+    const bx = x.under.position - sides[0].point.x, by = y.under.position - sides[1].point.y;
+    expect(Math.abs(bx) <= 1 && Math.abs(by) <= 1,
+      `${label}: the base is drawn more than 1 CSS px off its box: ` + JSON.stringify({ bx, by, measured, sides }));
+    const dx = x.shown.position - x.under.position, dy = y.shown.position - y.under.position;
+    expect(Math.abs(dx) <= 1 && Math.abs(dy) <= 1,
+      `${label}: the detail layer draws the patch more than 1 CSS px off the base: ` + JSON.stringify({ dx, dy, measured, sides, region }));
+    const round = value => Math.round(value * 100) / 100;
+    return { zoom: round(await zoomLevel()), indicator: await zoomIndicator(), dx: round(dx), dy: round(dy),
+      base: [round(bx), round(by)], density: region.density };
   };
 
   let failure;
@@ -259,9 +322,19 @@ export async function runZoomDetailSmoke({ send, evaluate, waitFor, fail, instal
       }
       slider.dispatchEvent(new Event('change', { bubbles: true }));
       window.dispatchEvent(new Event('pointerup'));
+      // Release -> a current region on screen again (#229 review R1-086, #270):
+      // polled every frame here, logged (timing is not asserted in a smoke).
+      const released = performance.now();
+      let releaseToDetailMs = null;
+      while (performance.now() - released < 10000) {
+        await new Promise(resolve => requestAnimationFrame(() => resolve()));
+        const state = window.__ncDetailLayer.state();
+        seen.push(state);
+        if (state.visible && state.current) { releaseToDetailMs = Math.round(performance.now() - released); break; }
+      }
       // A region of older settings than the base frame on screen is never drawn.
       return { staleShown: seen.filter(entry => entry.visible && entry.roiToken < entry.baseToken).length,
-        hidden: seen.filter(entry => !entry.visible).length };
+        hidden: seen.filter(entry => !entry.visible).length, releaseToDetailMs };
     })()`);
     expect(drag.staleShown === 0, 'a stale detail region was drawn during a drag: ' + JSON.stringify(drag));
     const conversionsBefore = atActual.counters.conversions;
@@ -272,6 +345,7 @@ export async function runZoomDetailSmoke({ send, evaluate, waitFor, fail, instal
     expect(afterDrag.counters.conversions > conversionsBefore && (await counts(mark)).roi >= 1,
       'the detail layer after a drag was not converted from the source: ' + JSON.stringify(afterDrag));
     console.log('ok: the detail layer never shows a stale region during a drag and returns after it ' + JSON.stringify({ drag, ready: (await detail()).counters.lastReadyMs }));
+
     await quiet('drag at 100 % settled', 3000);
 
     // Exports ignore zoom and the layer.
@@ -360,6 +434,19 @@ export async function runZoomDetailSmoke({ send, evaluate, waitFor, fail, instal
     const exactParity = await evaluate('window.__ncDetailLayer.parity()');
     expect(exactParity.exact && exactParity.cropEqual && exactParity.ok,
       'settled detail is not a crop of the exact frame: ' + JSON.stringify(exactParity));
+
+    // ---- Part 6: the detail layer on the base's pixel grid ----
+    const alignedAtActual = await detailAlignment('true 100 %');
+    await evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key: '0', bubbles: true }))`);
+    await quiet('fit before about 400 %');
+    for (let i = 0; i < 12 && await zoomLevel() < 3.8; i++) {
+      await evaluate(`document.getElementById('zoomInBtn').click()`);
+      await new Promise(resolve => setTimeout(resolve, 80));
+    }
+    await until('detail layer at about 400 %', `window.__ncDetailLayer.state().visible && window.__ncDetailLayer.state().current`, 20_000);
+    await quiet('about 400 % settled');
+    const alignedAt400 = await detailAlignment('about 400 %');
+    console.log('ok: the detail layer draws the image within 1 CSS px of the base under it ' + JSON.stringify({ alignedAtActual, alignedAt400 }));
     await evaluate('window.__zoomDetailProbe.restore()');
 
     // Drive the large-image/export route with the same 6 MP fixture. A 60 MP
@@ -369,6 +456,14 @@ export async function runZoomDetailSmoke({ send, evaluate, waitFor, fail, instal
     expect(!(await display()).full, 'the large fixture unexpectedly settled a whole frame before export');
     await evaluate(`document.getElementById('zoomResetBtn').click(); document.getElementById('zoomInBtn').click()`);
     await until('large source ROI', 'window.__ncDetailLayer.state().current && window.__ncDetailLayer.state().visible');
+    // #270: with cores to spare the region converts in row bands in several
+    // workers at once; the bands equal one worker's conversion byte for byte.
+    // (No settle render replaces a large source's region here.)
+    const cores = await evaluate('navigator.hardwareConcurrency || 0');
+    const bandParity = await evaluate('window.__ncDetailLayer.bandParity()');
+    expect(!bandParity.error && bandParity.sameSize && bandParity.differing === 0 && (cores < 4 || bandParity.bands > 1),
+      'the banded detail region differs from one worker\'s: ' + JSON.stringify({ cores, bandParity }));
+    console.log('ok: banded detail region equals the single-worker conversion ' + JSON.stringify({ cores, bandParity }));
     const beforeExport = await display();
     await exportPng('large zoomed export');
     await until('export exact region replaces source ROI', 'window.__ncDetailLayer.state().current && window.__ncDetailLayer.state().exact');

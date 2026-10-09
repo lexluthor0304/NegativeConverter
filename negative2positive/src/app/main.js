@@ -15,7 +15,7 @@ import { learnedDefaultsKey, learnedDelta, recordLearnedObservation, applyLearne
 import { readLearnedDefaults, writeLearnedDefaults, resetLearnedDefaults } from './learnedDefaultsStore.js';
 import { exportNameStem } from './exportFileName.js';
 import { frameNeedsReview } from './reviewQueue.js';
-import { yieldForJob, yieldToPaint, yieldTaskForJob } from './yieldToPaint.js';
+import { yieldForJob, yieldToPaint, yieldTaskForJob, yieldTask } from './yieldToPaint.js';
 import { createHiddenJobGate, hiddenJobLimitsApply, estimateHiddenJobBytes, HIDDEN_BUDGET_BYTES } from './hiddenJobGate.js';
 import { createMemoryBudget, createRetainedLedger, createMemoryClaim, createIdleCheck, relievePressure, budgetFor, resolveMemoryRam, memoryEngine, hasPeriodicMemoryPurge, DECODED_BYTES_PER_PIXEL, IDLE_RETAINED_TARGET_BYTES, RAM_OVERRIDE_KEY } from './memoryBudget.js';
 import { createBackgroundGate, BACKGROUND_STEP_WAIT_CAP_MS, BACKGROUND_INPUT_QUIET_MS, BACKGROUND_BUSY_POLL_MS } from './backgroundGate.js';
@@ -64,8 +64,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     import { loadDxFilmTable, describeDxFilm, shortFilmName } from './dxFilmDatabase.js';
     import { groupAutomaticRollFrames, aggregateRollAnalysis, measureNegativeMean, sanitizeRollFrameForSettings, rollFrameExposureUnits } from './rollAnalysis.js';
     import { filtrationFromSliders, slidersFromFiltration, stopsFromExposureUnits, exposureUnitsFromStops, contrastForGradeValue, gradeValueForContrast, gradeLabelForValue, TEST_STRIP_AXES, formatAxisValue, testStripValues } from './enlarger.js';
-    import { sanitizeLocalExposureForSettings, sanitizeLocalExposureStrokes, sanitizeStrokePoint, workingPointToBase, basePointToWorking, strokeBrush } from './localExposure.js';
-    import { createBrushFeedback, BRUSH_FEEDBACK_STYLES, pointerSamples, movedEnough, resampleStrokePoints } from './brushFeedback.js';
+    import { sanitizeLocalExposureForSettings, sanitizeLocalExposureStrokes, sanitizeStrokePoint, workingPointToBase, basePointToWorking, strokeBrush, MAX_STROKE_POINTS } from './localExposure.js';
+    import { createBrushFeedback, BRUSH_FEEDBACK_STYLES, pointerSamples, movedEnough, resampleStrokePoints, createStrokeRecorder, DENSE_STROKE_POINTS } from './brushFeedback.js';
     import { buildDustTintRect, buildDustTintInBands } from './dustTint.js';
     import { sanitizeRepairStrokes, buildRepairMask, pointerToRepairPoint, lensSourcePoint } from './repairBrush.js';
     import { createRepairStamps, sameRepairStrokes, captureDustPass, dustPassMatches, restoreDustPass } from './repairReuse.js';
@@ -98,9 +98,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     import {
       displayPreviewSize, resizeDisplayPreview, resizeDisplayPreviewInBands, updateDisplayPreviewRect, noteDisplayFilter,
       displayLevelFactor, displayLevelGeometry, buildDisplayLevelInBands, resampleDisplayLevel, displayTargetFor, isDisplayTarget,
-      displaySizeServes, displayFilterOf, adoptDisplayLevel
+      displaySizeServes, displayFilterOf, adoptDisplayLevel, displayResampleMode
     } from './displayPreview.js';
-    import { settledDisplayRoute, step3FrameReference, upscaleReference, photoRectPercent } from './displayCanvas.js';
+    import { settledDisplayRoute, step3FrameReference, upscaleReference, frameRectTransform } from './displayCanvas.js';
     import { createCoreReprocessGates, previewDispatchAction, CORE_FULL_REPROCESS_DELAY_MS } from './coreReprocessDispatcher.js';
     import { createPreviewTierController, previewTierMaxPixels, capBackingSize, parsePreviewTierOverride } from './previewTier.js';
     import { describeWebglRenderer, startsReducedReason, formatRenderEnvironmentLine, formatPreviewSessionLine } from './renderEnvironment.js';
@@ -113,7 +113,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     import { VERTEX_SHADER_100, STEP3_FRAGMENT_SHADER_100 } from '../render/previewShader.js';
     import { createGpuPreviewRenderer, webgl2PrecisionOk } from '../render/gpuPreviewRenderer.js';
     import { planDetailRegion, detailRegionServes, detailSlotSize, snapPanToDevicePixels, copyRegionRows, buildDetailFrameLevel,
-      assertDetailAllocation, assertDetailRoiAllocation, detailSizeAllowed, DETAIL_MAX_NATIVE_PIXELS, DETAIL_MAX_OUTPUT_PIXELS, DETAIL_MAX_DIMENSION, DETAIL_SETTLE_MS } from './detailLayer.js';
+      assertDetailAllocation, assertDetailRoiAllocation, detailSizeAllowed, DETAIL_MAX_NATIVE_PIXELS, DETAIL_MAX_OUTPUT_PIXELS, DETAIL_MAX_DIMENSION, DETAIL_SETTLE_MS,
+      DETAIL_STEP_SETTLE_MS, planDetailBands, planDetailBandCount } from './detailLayer.js';
     import { applyPreviewChain, displayStageUniforms, displayModesSupported, regionFrame } from '../render/previewTables.js';
     import { buildSelfTestCases, buildDisplayModesCases, displayParity } from '../render/gpuPreviewSelfTest.js';
     import { createBorderUnderlay, photoViewport } from '../render/borderUnderlay.js';
@@ -164,8 +165,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       pinDustWorker, unpinDustWorker, disposeDustWorker, dustWorker, dustMaskInfo, forgetDustMaskInfo
     } from './dustWorkerClient.js';
     import { applyStrokePatch, applyDustDelta, amendDustDelta, copyImageRect, pasteImageRect, sameFramePixels } from './dustStrokeHistory.js';
+    import { compactDustSteps, rebuildDustSteps, frameDigestSteps, coldDustRecordBytes, runSteps, runStepsInSlices } from './dustColdState.js';
     import { createDustHistoryArchive } from './dustHistoryArchive.js';
     import { loadLocalLensfunAssets } from './lensfunLoader.js';
+    import {
+      applyLensMapsToImage, buildLensMaps, lensHandleFor, lensMapBuffers, lensMapRequest, lensMapsMovePixels, lensProfileKey,
+      rememberLensHandle
+    } from './lensMaps.js';
     import { createOpenCvLoader } from './opencvLoader.js';
     import {
       sampleFilmBase as sampleFilmBaseRobust,
@@ -328,6 +334,14 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     const LENSFUN_CDN_BASE = `https://cdn.jsdelivr.net/npm/@neoanaloglabkk/lensfun-wasm@${LENSFUN_PACKAGE_VERSION}/dist`;
     const lensScriptLoadPromises = new Map();
     const lensMapCache = new Map();
+    // The lens (lensSignatureOf) a source was corrected with, when lens
+    // correction did correct it, and the lens each display level carries
+    // (null: none). A display proxy whose key names a lens is stored only
+    // when its level carries that lens (#278, storableDisplayLevel): a lens
+    // runtime that failed, or lens settings changed since the conversion,
+    // leave a level its key does not describe.
+    const lensCorrectedSources = new WeakMap();
+    const displayLevelLenses = new WeakMap();
     const lensfunRuntime = {
       initPromise: null,
       client: null,
@@ -1412,187 +1426,6 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (stateReady) updateLensCorrectionUI();
     }
 
-    function getAutoLensMapStep(width, height) {
-      const maxSide = Math.max(width, height);
-      if (maxSide >= 5200) return 8;
-      if (maxSide >= 3600) return 6;
-      if (maxSide >= 2400) return 4;
-      if (maxSide >= 1500) return 3;
-      return 2;
-    }
-
-    function resolveLensMapStep(params, width, height) {
-      if (params.stepMode === 'manual') {
-        return Math.round(clampBetween(params.step || 2, 1, 16));
-      }
-      return getAutoLensMapStep(width, height);
-    }
-
-    function buildLensMapCacheKey(lensHandle, width, height, params, modes) {
-      return [
-        lensHandle,
-        width,
-        height,
-        params.focal.toFixed(4),
-        params.crop.toFixed(4),
-        params.aperture.toFixed(4),
-        params.distance.toFixed(4),
-        params.step,
-        params.stepMode,
-        modes.includeTca ? 1 : 0,
-        modes.includeVignetting ? 1 : 0
-      ].join('|');
-    }
-
-    function bilerp(a00, a10, a01, a11, fx, fy) {
-      const x0 = a00 + (a10 - a00) * fx;
-      const x1 = a01 + (a11 - a01) * fx;
-      return x0 + (x1 - x0) * fy;
-    }
-
-    function sampleImageChannelBilinear(data, width, height, x, y, channel) {
-      if (x < 0 || y < 0 || x > width - 1 || y > height - 1) return 0;
-      const x0 = Math.floor(x);
-      const y0 = Math.floor(y);
-      const x1 = Math.min(x0 + 1, width - 1);
-      const y1 = Math.min(y0 + 1, height - 1);
-      const fx = x - x0;
-      const fy = y - y0;
-
-      const i00 = (y0 * width + x0) * 4 + channel;
-      const i10 = (y0 * width + x1) * 4 + channel;
-      const i01 = (y1 * width + x0) * 4 + channel;
-      const i11 = (y1 * width + x1) * 4 + channel;
-
-      return bilerp(data[i00], data[i10], data[i01], data[i11], fx, fy);
-    }
-
-    function sampleGridPair(grid, gridWidth, x0, x1, y0, y1, fx, fy) {
-      const p00 = (y0 * gridWidth + x0) * 2;
-      const p10 = (y0 * gridWidth + x1) * 2;
-      const p01 = (y1 * gridWidth + x0) * 2;
-      const p11 = (y1 * gridWidth + x1) * 2;
-      return {
-        x: bilerp(grid[p00], grid[p10], grid[p01], grid[p11], fx, fy),
-        y: bilerp(grid[p00 + 1], grid[p10 + 1], grid[p01 + 1], grid[p11 + 1], fx, fy)
-      };
-    }
-
-    function sampleGridTriple(grid, gridWidth, x0, x1, y0, y1, fx, fy) {
-      const p00 = (y0 * gridWidth + x0) * 3;
-      const p10 = (y0 * gridWidth + x1) * 3;
-      const p01 = (y1 * gridWidth + x0) * 3;
-      const p11 = (y1 * gridWidth + x1) * 3;
-      return {
-        r: bilerp(grid[p00], grid[p10], grid[p01], grid[p11], fx, fy),
-        g: bilerp(grid[p00 + 1], grid[p10 + 1], grid[p01 + 1], grid[p11 + 1], fx, fy),
-        b: bilerp(grid[p00 + 2], grid[p10 + 2], grid[p01 + 2], grid[p11 + 2], fx, fy)
-      };
-    }
-
-    function sampleGridTca(grid, gridWidth, x0, x1, y0, y1, fx, fy) {
-      const p00 = (y0 * gridWidth + x0) * 6;
-      const p10 = (y0 * gridWidth + x1) * 6;
-      const p01 = (y1 * gridWidth + x0) * 6;
-      const p11 = (y1 * gridWidth + x1) * 6;
-      return {
-        rx: bilerp(grid[p00], grid[p10], grid[p01], grid[p11], fx, fy),
-        ry: bilerp(grid[p00 + 1], grid[p10 + 1], grid[p01 + 1], grid[p11 + 1], fx, fy),
-        gx: bilerp(grid[p00 + 2], grid[p10 + 2], grid[p01 + 2], grid[p11 + 2], fx, fy),
-        gy: bilerp(grid[p00 + 3], grid[p10 + 3], grid[p01 + 3], grid[p11 + 3], fx, fy),
-        bx: bilerp(grid[p00 + 4], grid[p10 + 4], grid[p01 + 4], grid[p11 + 4], fx, fy),
-        by: bilerp(grid[p00 + 5], grid[p10 + 5], grid[p01 + 5], grid[p11 + 5], fx, fy)
-      };
-    }
-
-    function applyLensMapsToImage(imageData, maps, modes) {
-      const { width, height, data } = imageData;
-      const output = new ImageData(new Uint8ClampedArray(data.length), width, height);
-      const outData = output.data;
-      // Resample the 16-bit plane when the loader attached one, otherwise every
-      // RAW or 16-bit PNG converted with lens correction on would reach the
-      // engine as 8-bit data upcast back to 16.
-      const plane16 = imageData.__image16;
-      const use16 = Boolean(
-        plane16
-        && plane16.data instanceof Uint16Array
-        && plane16.width === width
-        && plane16.height === height
-        && plane16.data.length === data.length
-      );
-      const source = use16 ? plane16.data : data;
-      const maxValue = use16 ? 65535 : 255;
-      const out16 = use16 ? allocPlane16(data.length, { shared: isSharedPlane(plane16.data) && sharedPlanesAvailable() }) : null;
-      const gridWidth = maps.gridWidth;
-      const gridHeight = maps.gridHeight;
-      const step = Math.max(1, maps.step || 1);
-      const geometry = maps.geometry;
-      const tca = (modes.includeTca && maps.tca) ? maps.tca : null;
-      const vignetting = (modes.includeVignetting && maps.vignetting) ? maps.vignetting : null;
-
-      for (let y = 0; y < height; y++) {
-        const gyRaw = y / step;
-        const y0 = clampBetween(Math.floor(gyRaw), 0, gridHeight - 1);
-        const y1 = clampBetween(y0 + 1, 0, gridHeight - 1);
-        const fy = clampBetween(gyRaw - y0, 0, 1);
-
-        for (let x = 0; x < width; x++) {
-          const gxRaw = x / step;
-          const x0 = clampBetween(Math.floor(gxRaw), 0, gridWidth - 1);
-          const x1 = clampBetween(x0 + 1, 0, gridWidth - 1);
-          const fx = clampBetween(gxRaw - x0, 0, 1);
-
-          let rX, rY, gX, gY, bX, bY;
-          if (tca) {
-            const tcaCoords = sampleGridTca(tca, gridWidth, x0, x1, y0, y1, fx, fy);
-            rX = tcaCoords.rx; rY = tcaCoords.ry;
-            gX = tcaCoords.gx; gY = tcaCoords.gy;
-            bX = tcaCoords.bx; bY = tcaCoords.by;
-          } else {
-            const geometryCoords = sampleGridPair(geometry, gridWidth, x0, x1, y0, y1, fx, fy);
-            rX = geometryCoords.x; rY = geometryCoords.y;
-            gX = geometryCoords.x; gY = geometryCoords.y;
-            bX = geometryCoords.x; bY = geometryCoords.y;
-          }
-
-          let r = sampleImageChannelBilinear(source, width, height, rX, rY, 0);
-          let g = sampleImageChannelBilinear(source, width, height, gX, gY, 1);
-          let b = sampleImageChannelBilinear(source, width, height, bX, bY, 2);
-
-          if (vignetting) {
-            const gains = sampleGridTriple(vignetting, gridWidth, x0, x1, y0, y1, fx, fy);
-            r *= gains.r;
-            g *= gains.g;
-            b *= gains.b;
-          }
-
-          const outIdx = (y * width + x) * 4;
-          const rv = clampBetween(Math.round(r), 0, maxValue);
-          const gv = clampBetween(Math.round(g), 0, maxValue);
-          const bv = clampBetween(Math.round(b), 0, maxValue);
-          if (out16) {
-            out16[outIdx] = rv;
-            out16[outIdx + 1] = gv;
-            out16[outIdx + 2] = bv;
-            out16[outIdx + 3] = 65535;
-            // Keep the 8-bit view exactly consistent with the 16-bit plane.
-            outData[outIdx] = rv >>> 8;
-            outData[outIdx + 1] = gv >>> 8;
-            outData[outIdx + 2] = bv >>> 8;
-          } else {
-            outData[outIdx] = rv;
-            outData[outIdx + 1] = gv;
-            outData[outIdx + 2] = bv;
-          }
-          outData[outIdx + 3] = 255;
-        }
-      }
-      if (out16) {
-        output.__image16 = { width, height, data: out16 };
-      }
-      return output;
-    }
-
     // The lens block a frame converts with: its own, or the global one when it
     // has none (sanitised with `state` as fallback).
     function resolveLensCorrection(settings) {
@@ -1607,11 +1440,55 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // a selected lens. Such frames keep their native-resolution tile path (#247).
     function lensCorrectionActive(settings) {
       const lensCorrection = resolveLensCorrection(settings);
-      return Boolean(lensCorrection.enabled && lensCorrection.selectedLens?.handle);
+      return Boolean(lensCorrection.enabled && lensCorrection.selectedLens);
     }
 
+    // The error lensCorrectionMaps throws for a saved lens profile the running
+    // lensfun build has no entry for (#278): the frame converts uncorrected
+    // and the lens panel asks for the profile again.
+    function lensProfileMissingError(profile) {
+      const error = new Error(`lensfun has no profile ${formatLensLabel(profile) || 'for this lens'}`);
+      error.code = 'lens-profile-missing';
+      return error;
+    }
+    // The missing profiles already reported: once each a session.
+    const missingLensProfilesWarned = new Set();
+
+    // lensfun's maps for a frame of this size under a resolved lens block
+    // (buildLensMaps: distortion, with TCA and vignetting where the lens has
+    // them), for the lens its saved profile names in the running lensfun
+    // build (lensHandleFor, looked up once a session), cached by what they
+    // are built from (lensMapRequest). `remember: false` (a display-proxy
+    // fill, #278) reads the cache without growing it. The cache keeps the
+    // newest sets within 128 MB (a 60 MP crop's distortion, TCA and
+    // vignetting maps take about 41 MB at step 8), at most 12.
+    function lensCorrectionMaps(runtime, lensCorrection, width, height, { remember = true } = {}) {
+      const lensHandle = lensHandleFor(runtime.client, lensCorrection.selectedLens);
+      if (!lensHandle) throw lensProfileMissingError(lensCorrection.selectedLens);
+      const { key, request } = lensMapRequest(lensCorrection, width, height, lensHandle);
+      let maps = lensMapCache.get(key);
+      if (!maps) {
+        maps = buildLensMaps(runtime.client, request);
+        if (remember) {
+          lensMapCache.set(key, maps);
+          const bytesOf = entry => lensMapBuffers(entry).reduce((sum, buffer) => sum + buffer.byteLength, 0);
+          let bytes = 0;
+          for (const entry of lensMapCache.values()) bytes += bytesOf(entry);
+          for (const [oldestKey, oldest] of lensMapCache) {
+            if (lensMapCache.size <= 1 || (lensMapCache.size <= 12 && bytes <= 128 * 1024 * 1024)) break;
+            lensMapCache.delete(oldestKey);
+            bytes -= bytesOf(oldest);
+          }
+        }
+      }
+      return maps;
+    }
+
+    // `file` (an export's): the photo's own focal length and aperture from its
+    // file's metadata replace values the user did not type (#278), as
+    // restoreSettings does for the editor's photo.
     async function applyLensCorrectionWithSettings(imageData, settings, options = {}) {
-      const { updateUi = false } = options;
+      const { updateUi = false, file = null } = options;
       const lensCorrection = resolveLensCorrection(settings);
       const selectedLens = lensCorrection.selectedLens;
 
@@ -1620,10 +1497,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         return imageData;
       }
 
-      if (!selectedLens || !selectedLens.handle) {
+      if (!selectedLens) {
         if (updateUi) setLensStatus('lensStatusNeedProfile');
         return imageData;
       }
+      if (file) applyShotMetadata(lensCorrection.params, shotMetadataFor(file));
 
       if (updateUi) setLensStatus('lensStatusLoading');
 
@@ -1645,47 +1523,20 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       }
 
       try {
-        const params = {
-          focal: lensCorrection.params.focal,
-          crop: lensCorrection.params.crop,
-          aperture: lensCorrection.params.aperture,
-          distance: lensCorrection.params.distance,
-          stepMode: lensCorrection.params.stepMode,
-          step: resolveLensMapStep(lensCorrection.params, imageData.width, imageData.height)
-        };
-        const cacheKey = buildLensMapCacheKey(
-          selectedLens.handle,
-          imageData.width,
-          imageData.height,
-          params,
-          lensCorrection.modes
-        );
-        let maps = lensMapCache.get(cacheKey);
-        if (!maps) {
-          maps = runtime.client.buildCorrectionMaps({
-            lensHandle: selectedLens.handle,
-            width: imageData.width,
-            height: imageData.height,
-            focal: params.focal,
-            crop: params.crop,
-            step: params.step,
-            reverse: false,
-            includeTca: lensCorrection.modes.includeTca,
-            includeVignetting: lensCorrection.modes.includeVignetting,
-            aperture: params.aperture,
-            distance: params.distance
-          });
-          lensMapCache.set(cacheKey, maps);
-          if (lensMapCache.size > 12) {
-            const oldestKey = lensMapCache.keys().next().value;
-            if (oldestKey) lensMapCache.delete(oldestKey);
-          }
-        }
-
+        const maps = lensCorrectionMaps(runtime, lensCorrection, imageData.width, imageData.height);
         const corrected = applyLensMapsToImage(imageData, maps, lensCorrection.modes);
-        // Keep the display-to-source map for brush coordinates. Non-enumerable
-        // metadata avoids copying the grid into conversion worker messages.
-        Object.defineProperty(corrected, '__lensMapping', { value: { maps, includeTca: lensCorrection.modes.includeTca } });
+        // Keep the display-to-source map for brush coordinates, when the remap
+        // moves pixels (not for vignetting alone). Non-enumerable metadata
+        // avoids copying the grid into conversion worker messages.
+        if (lensMapsMovePixels(maps, lensCorrection.modes)) {
+          Object.defineProperty(corrected, '__lensMapping', { value: { maps, includeTca: lensCorrection.modes.includeTca } });
+        }
+        Object.defineProperty(corrected, '__lensCorrections', { value: {
+          distortion: Boolean(maps.geometry), tca: Boolean(lensCorrection.modes.includeTca && maps.tca),
+          vignetting: Boolean(lensCorrection.modes.includeVignetting && maps.vignetting)
+        } });
+        // The lens it carries, which a display proxy of it names (#278).
+        lensCorrectedSources.set(corrected, lensSignatureOf(lensCorrection));
         if (updateUi) {
           state.lensCorrection.lastError = '';
           setLensStatus('lensStatusApplied');
@@ -1693,12 +1544,78 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         return corrected;
       } catch (err) {
         const reason = sanitizeLensRuntimeError(err);
+        if (err?.code === 'lens-profile-missing') {
+          // A profile saved with another lensfun build (or database) that this
+          // one does not have: choose it again (#278).
+          if (!missingLensProfilesWarned.has(reason)) {
+            missingLensProfilesWarned.add(reason);
+            console.warn('Lens correction skipped:', reason);
+          }
+          if (updateUi) {
+            state.lensCorrection.lastError = reason;
+            setLensStatus('lensStatusNeedProfile');
+          }
+          return imageData;
+        }
         if (updateUi) {
           state.lensCorrection.lastError = reason;
           setLensStatus('lensStatusApplyFailed', { reason });
         }
         return imageData;
       }
+    }
+
+    // A photo's shot data for lens correction (#278): the focal length and
+    // aperture its file's metadata gives (a RAW file's, extractRawLensMetadata),
+    // by file, recorded by every decode that reads it. Zero or missing values
+    // (a manual lens reports none) are unknown.
+    const shotMetadataByFile = new WeakMap();
+    function rememberShotMetadata(file, metadata) {
+      if (!file || typeof file !== 'object' || !metadata || typeof metadata !== 'object') return;
+      const known = value => (Number.isFinite(Number(value)) && Number(value) > 0 ? Number(value) : null);
+      const shot = { focal: known(metadata.focal), aperture: known(metadata.aperture) };
+      if (shot.focal !== null || shot.aperture !== null) shotMetadataByFile.set(file, shot);
+    }
+    function shotMetadataFor(file) {
+      return (file && typeof file === 'object' && shotMetadataByFile.get(file)) || null;
+    }
+
+    // A lens block's focal length and aperture are the photo's: what its file's
+    // metadata gives (`shot`, source 'metadata'), unless the user typed the
+    // value for the photo (source 'user'). `replaceUser`: for a new photo's
+    // block taken over from another photo, whose typed values were typed for
+    // that one. Mutates `params`; returns whether anything changed.
+    function applyShotMetadata(params, shot, { replaceUser = false } = {}) {
+      if (!params || !shot) return false;
+      let changed = false;
+      for (const [key, min, max] of [['focal', 1, 10_000], ['aperture', 0.5, 512]]) {
+        const sourceKey = `${key}Source`;
+        if (!Number.isFinite(shot[key]) || shot[key] <= 0 || (params[sourceKey] === 'user' && !replaceUser)) continue;
+        const value = clampBetween(shot[key], min, max);
+        if (params[key] !== value || params[sourceKey] !== 'metadata') changed = true;
+        params[key] = value;
+        params[sourceKey] = 'metadata';
+      }
+      return changed;
+    }
+
+    // A photo's lens block after a copy from another (apply to selected, the
+    // roll reference): its own focal length and aperture stay, from its
+    // file's metadata or as it had them, unless the copied ones were typed.
+    function withReceivingShot(copied, previous, shot) {
+      if (!copied?.params) return copied;
+      const params = { ...copied.params };
+      for (const key of ['focal', 'aperture']) {
+        const sourceKey = `${key}Source`;
+        if (params[sourceKey] === 'user') continue;
+        const own = previous?.params && (previous.params[sourceKey] === 'metadata' || previous.params[sourceKey] === 'user');
+        if (own && Number.isFinite(Number(previous.params[key]))) {
+          params[key] = Number(previous.params[key]);
+          params[sourceKey] = previous.params[sourceKey];
+        }
+      }
+      applyShotMetadata(params, shot);
+      return { ...copied, params };
     }
 
     function applyLensMetadataPrefill(metadata) {
@@ -1708,14 +1625,6 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (!search.lensMaker && metadata.lensMaker) search.lensMaker = metadata.lensMaker;
       if (!search.cameraModel && metadata.cameraModel) search.cameraModel = metadata.cameraModel;
       if (!search.cameraMaker && metadata.cameraMaker) search.cameraMaker = metadata.cameraMaker;
-
-      if (!state.lensCorrection.paramTouched.focal && Number.isFinite(metadata.focal)) {
-        state.lensCorrection.params.focal = clampBetween(metadata.focal, 1, 10_000);
-      }
-      if (!state.lensCorrection.paramTouched.aperture && Number.isFinite(metadata.aperture)) {
-        state.lensCorrection.params.aperture = clampBetween(metadata.aperture, 0.5, 512);
-      }
-
       updateLensCorrectionUI();
     }
 
@@ -1745,7 +1654,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const results = Array.isArray(state.lensCorrection.searchResults)
         ? state.lensCorrection.searchResults
         : [];
-      const selectedHandle = state.lensCorrection.selectedLens?.handle || null;
+      // The selected profile's entry, by its identity without the camera (#278).
+      const entryKey = lens => lensProfileKey(lens ? { ...lens, camera: null } : null);
+      const selectedKey = entryKey(state.lensCorrection.selectedLens);
 
       select.innerHTML = '';
       if (!results.length) {
@@ -1778,7 +1689,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           minFocal,
           maxFocal
         }).trim();
-        if (selectedHandle && lens.handle === selectedHandle) {
+        if (selectedKey && entryKey(lens) === selectedKey) {
           option.selected = true;
         }
         select.appendChild(option);
@@ -1834,7 +1745,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (selectedLens) {
         selectedText.textContent = applyTemplate(
           getLocalizedText('lensSelectedPrefix', 'Selected profile: {lens}'),
-          { lens: formatLensLabel(selectedLens) || `#${selectedLens.handle}` }
+          { lens: formatLensLabel(selectedLens) }
         );
       } else {
         selectedText.textContent = getLocalizedText('lensSelectedNone', 'Selected profile: none');
@@ -2314,13 +2225,17 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           cameraMaker: ''
         },
         searchResults: [],
+        // The camera the search of `searchResults` was narrowed to, which a
+        // profile chosen from them keeps (sanitizeLensSelection).
+        searchCamera: null,
         statusKey: 'lensStatusIdle',
         statusVars: {},
         source: null,
+        // Session-wide: a crop factor, distance or grid step the user typed
+        // is kept when a profile is chosen. A typed focal length or aperture
+        // is the photo's own (params.focalSource / apertureSource 'user').
         paramTouched: {
-          focal: false,
           crop: false,
-          aperture: false,
           distance: false,
           stepMode: false,
           step: false
@@ -2328,23 +2243,44 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       };
     }
 
+    // A lens profile as recipes and projects store it (#278): lensfun's maker
+    // and model for the lens, the crop factor its calibration was measured
+    // at, its focal and aperture ranges, and the camera the search that found
+    // it was narrowed to (lensProfileIdentity in lensMaps.js). The running
+    // lensfun build's handle for it is looked up when maps are built
+    // (lensHandleFor): a handle is an address in one build's memory. Recipes
+    // saved before kept the handle besides the name: the name is read, the
+    // handle and the search score dropped. A record without a maker or model
+    // (a handle alone) names no lens: enabled lens correction then asks for a
+    // profile.
     function sanitizeLensSelection(input, fallback = null) {
       const source = (input && typeof input === 'object') ? input : fallback;
       if (!source || typeof source !== 'object') return null;
-      const handleRaw = Number(source.handle);
-      const handle = Number.isFinite(handleRaw) ? Math.trunc(handleRaw) : NaN;
-      if (!Number.isFinite(handle) || handle < 1) return null;
+      const maker = String(source.maker || '').trim();
+      const model = String(source.model || '').trim();
+      if (!maker && !model) return null;
+      const cameraModel = String(source.camera?.model || '').trim();
       return {
-        handle,
-        maker: String(source.maker || '').trim(),
-        model: String(source.model || '').trim(),
-        score: sanitizeNumeric(source.score, 0, 0, 1_000_000),
+        maker,
+        model,
         minFocal: sanitizeNumeric(source.minFocal, 0, 0, 10_000),
         maxFocal: sanitizeNumeric(source.maxFocal, 0, 0, 10_000),
         minAperture: sanitizeNumeric(source.minAperture, 0, 0, 512),
         maxAperture: sanitizeNumeric(source.maxAperture, 0, 0, 512),
-        cropFactor: sanitizeNumeric(source.cropFactor, 1, 0.1, 10)
+        cropFactor: sanitizeNumeric(source.cropFactor, 1, 0.1, 10),
+        camera: cameraModel ? { maker: String(source.camera.maker || '').trim(), model: cameraModel } : null
       };
+    }
+
+    // Where a lens block's focal length or aperture came from (#278): the
+    // photo's file metadata ('metadata') or the user ('user'); null for a
+    // default, a guess or a value of unknown origin. Kept with its value: a
+    // value taken from the fallback brings the fallback's source.
+    function sanitizeLensShotSource(key, sourceParams, fallbackParams) {
+      const value = Number(sourceParams[key]);
+      const from = Number.isFinite(value) ? sourceParams : fallbackParams;
+      const source = from?.[`${key}Source`];
+      return source === 'metadata' || source === 'user' ? source : null;
     }
 
     function sanitizeLensCorrection(input, fallback = null) {
@@ -2367,6 +2303,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         : createDefaultLensCorrectionSettings().modes;
       const sourceModes = (source.modes && typeof source.modes === 'object') ? source.modes : {};
 
+      const focalSource = sanitizeLensShotSource('focal', sourceParams, fallbackParams);
+      const apertureSource = sanitizeLensShotSource('aperture', sourceParams, fallbackParams);
+
       return {
         enabled: Boolean(source.enabled ?? fallbackValue.enabled),
         selectedLens,
@@ -2376,7 +2315,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           aperture: sanitizeNumeric(sourceParams.aperture, fallbackParams.aperture ?? 8, 0.5, 512),
           distance: sanitizeNumeric(sourceParams.distance, fallbackParams.distance ?? 1000, 0.1, 100_000),
           stepMode,
-          step: Math.round(sanitizeNumeric(sourceParams.step, fallbackParams.step ?? 2, 1, 16))
+          step: Math.round(sanitizeNumeric(sourceParams.step, fallbackParams.step ?? 2, 1, 16)),
+          ...(focalSource ? { focalSource } : {}),
+          ...(apertureSource ? { apertureSource } : {})
         },
         modes: {
           includeTca: (sourceModes.includeTca ?? fallbackModes.includeTca) !== false,
@@ -2689,6 +2630,21 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // goes whenever the dust state is replaced (noteDustReplaced) and with
     // the photo.
     let restoredDust = null;
+    // The same for a cold history entry (#281): the dust state it kept,
+    // compacted or by reference, from its undo or redo until the detection
+    // after the conversion that rebuilds its clean source
+    // (keepColdRestoredDust). That conversion replaces the dust state itself,
+    // so only a history move, clearDustState and the photo let it go.
+    let coldRestoredDust = null;
+    // Compactions of cold entries' dust states in progress, by the pixel
+    // record they fill (startColdDustJob), and the digests of clean sources.
+    const coldDustJobs = new Map();
+    const cleanSourceDigests = new WeakMap();
+    // A record larger than this is not kept: that entry detects again.
+    const COLD_DUST_MAX_BYTES = 96 * 1024 * 1024;
+    // Compactions that filled a record or ended without one, and cold undos
+    // or redos that kept their dust state (?debug=1: __ncMemory.coldDust()).
+    const coldDustDiagnostics = { compacted: 0, failed: 0, kept: 0 };
 
     let fullResolutionRenderTimer = null;
     // The exact render above 16 MP in flight: { controller, token, generation }
@@ -3143,6 +3099,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // it resolves once the planes are rebuilt and converted.
     function restoreSnapshot(snapshot, { reprocess = true, previewOnly } = {}) {
       cancelPendingTimers();
+      coldRestoredDust = null;
       coreReprocessToken += 1;
       abortSupersededFullResolutionConversion();
       // A pending geometry build belongs to the state being replaced, and so
@@ -3257,7 +3214,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
       // Restore Category B refs
       const r = snapshot.refs;
-      if (r.cold) return restoreColdSnapshotPixels(s);
+      if (r.cold) return restoreColdSnapshotPixels(s, r.dust || null);
       for (const key of SNAPSHOT_REF_KEYS) {
         state[key] = r[key];
       }
@@ -3328,8 +3285,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // A cold history entry keeps its scalars only: rotationAngle, mirrored and
     // cropRegion are exact, so its planes are rebuilt from the base in the
     // pool while the current frame stays on screen, then converted without
-    // new automatic measurements. It never falls back to the negative.
-    function restoreColdSnapshotPixels(s) {
+    // new automatic measurements. It never falls back to the negative. The
+    // dust state it kept (`dust`, #281) comes back once that conversion has
+    // landed and the detection after it has compared the frame
+    // (keepColdRestoredDust).
+    function restoreColdSnapshotPixels(s, dust = null) {
       geometryDiagnostics.coldRestores++;
       invalidateProcessedPipelineState();
       const base = state.loadedBaseImageData;
@@ -3346,6 +3306,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       state.dustRemoval.cleanSource = null;
       state.dustRemoval._state = null;
       noteDustReplaced();
+      const kept = dust?.kind === 'objects' || (dust?.kind === 'compact' && (dust.pixels.pending || dust.pixels.record));
+      coldRestoredDust = kept && s.currentStep >= 3 && hasFrameRepairs() ? {
+        dust, token: coreReprocessToken, generation: loadGeneration, strokes: state.repairStrokes,
+        enabled: state.dustRemoval.enabled, strength: state.dustRemoval.strength, maxParticleSize: state.dustRemoval.maxParticleSize
+      } : null;
       updateFilmModeUI();
       updateSlidersFromState();
       renderCurve();
@@ -3462,11 +3427,15 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // (redoStack[0]; the next redo is its last entry).
       for (const snapshot of [...undoStack, ...redoStack]) {
         if (historyExclusiveBytes(hot) <= limit) return;
-        if (snapshot === hot || snapshot.dustDelta || snapshot.refs.cold) continue;
-        if (![...backingBuffers(snapshot.refs)].some(buffer => !owned.has(buffer))) continue;
-        // Only references are dropped; buffers are never detached, so the
-        // session cache and live state keep theirs.
-        snapshot.refs = { cold: true };
+        if (snapshot === hot || snapshot.dustDelta) continue;
+        if (!snapshot.refs.cold) {
+          if (![...backingBuffers(snapshot.refs)].some(buffer => !owned.has(buffer))) continue;
+          // Only references are dropped; buffers are never detached, so the
+          // session cache and live state keep theirs. The dust state the
+          // entry settled stays with it (#281).
+          snapshot.refs = coldRefsFor(snapshot.refs);
+        }
+        compactColdDust(snapshot);
       }
       if (stripOnly) return;
       // A dust-stroke entry (#259) patches the objects it holds and cannot go
@@ -3479,6 +3448,134 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           stack.splice(0, i + 1);
           i = -1;
         }
+      }
+      // The strokes that held a cold entry's mask and repaired image may be
+      // gone now: compact them. Past that, the oldest records go, and their
+      // entries detect dust again as before.
+      for (const snapshot of [...undoStack, ...redoStack]) {
+        if (historyExclusiveBytes(hot) <= limit) return;
+        if (snapshot.refs?.cold) compactColdDust(snapshot);
+      }
+      for (const snapshot of [...undoStack, ...redoStack]) {
+        if (historyExclusiveBytes(hot) <= limit) return;
+        if (snapshot.refs?.cold && snapshot.refs.dust?.pixels?.record) snapshot.refs = { cold: true };
+      }
+    }
+
+    // What a stripped entry keeps (#281): its scalars, and the dust state it
+    // had settled (refs.dustSettled), first by reference. compactColdDust
+    // compacts that once nothing else holds its mask and repaired image.
+    // `stamp` is the committed repair's recipe (#246) without identities, so
+    // the rebuilt image can carry it as a session restore's does; only one
+    // without a lens mapping, whose object a rebuild does not bring back.
+    function coldRefsFor(refs) {
+      if (!refs?.dustSettled || !refs.dustCleanSource || !refs.dustMask) return { cold: true };
+      const recipe = repairStamps.recipeOf(refs.dustInpaintedImageData);
+      const stamp = recipe && recipe.source === refs.dustCleanSource && recipe.lensMapping === null
+        && (!recipe.dustEnabled || recipe.dustMask === refs.dustMask)
+        ? { dustEnabled: recipe.dustEnabled, dustUsedAi: recipe.dustUsedAi, revision: recipe.revision, strokes: recipe.strokes } : null;
+      return { cold: true, dust: { kind: 'objects', cleanSource: refs.dustCleanSource, mask: refs.dustMask,
+        inpaintedImageData: refs.dustInpaintedImageData || null, maskTag: refs.dustMaskTag ?? null,
+        particleCount: refs.dustParticleCount, settled: refs.dustSettled, stamp } };
+    }
+
+    // The masks and repaired images held outside cold entries: by live state,
+    // a restore in progress, a stroke entry or an entry that keeps its
+    // pixels. A cold entry's dust state that names one stays by reference:
+    // its bytes are held anyway, and only the history position that matches
+    // their content (LIFO, as for hot entries) may read them, since strokes
+    // and their undo write into them.
+    function heldDustObjects() {
+      const dust = state.dustRemoval;
+      const held = new Set([dust.mask, dust.inpaintedImageData, state.processedImageData,
+        restoredDust?.mask, restoredDust?.inpaintedImageData]);
+      const restoring = coldRestoredDust?.dust;
+      if (restoring?.kind === 'objects') held.add(restoring.mask).add(restoring.inpaintedImageData);
+      for (const entry of [...undoStack, ...redoStack]) {
+        if (entry.dustDelta) held.add(entry.dustDelta.target).add(entry.dustDelta.mask);
+        else if (!entry.refs?.cold) held.add(entry.refs.dustMask).add(entry.refs.dustInpaintedImageData).add(entry.refs.processedImageData);
+      }
+      held.delete(null);
+      held.delete(undefined);
+      return held;
+    }
+
+    // A cold entry's dust state kept by reference is compacted (#281) once
+    // nothing else holds its mask or repaired image. Then nothing can write
+    // into them any more: every cold entry that names them is compacted here
+    // too (each keeps its own count and inpainter, all share one pixel
+    // record), no stroke or hot entry names them, and only live state can
+    // give them to a stroke. So their content is these entries' and stays so
+    // while the record is filled, off the edit's task.
+    function compactColdDust(entry) {
+      const dust = entry.refs?.dust;
+      if (dust?.kind !== 'objects') return;
+      const held = heldDustObjects();
+      if (held.has(dust.mask) || held.has(dust.inpaintedImageData)) return;
+      const pixels = { pending: true, record: null };
+      for (const other of [...undoStack, ...redoStack]) {
+        const kept = other.refs?.dust;
+        if (kept?.kind === 'objects' && kept.mask === dust.mask && kept.inpaintedImageData === dust.inpaintedImageData
+          && kept.cleanSource === dust.cleanSource) {
+          other.refs.dust = { kind: 'compact', particleCount: kept.particleCount, settled: kept.settled, stamp: kept.stamp, pixels };
+        }
+      }
+      startColdDustJob(pixels, dust);
+    }
+
+    // Fills `pixels.record` from `objects` across tasks (dustColdState.js):
+    // the clean source's digest (once per source), the mask's runs and bytes,
+    // the repaired pixels that differ from the clean source. About 0.5 s of
+    // slices of a few ms at 60 MP; the ledger counts what it holds until it
+    // ends. It stops when no entry (nor a restore in progress) wants the
+    // record any more, or with the photo: `record` stays null, and an undo of
+    // such an entry detects dust again.
+    function startColdDustJob(pixels, { cleanSource, mask, inpaintedImageData }) {
+      const objects = { cleanSource, mask, inpaintedImageData };
+      const job = { pixels, objects, generation: loadGeneration,
+        steps: compactDustSteps(objects, { digest: cleanSourceDigests.get(cleanSource) || null, maxBytes: COLD_DUST_MAX_BYTES }) };
+      coldDustJobs.set(pixels, job);
+      heldJobFrames.add(objects);
+      job.done = (async () => {
+        try {
+          for (;;) {
+            await yieldTaskForJob();
+            if (coldDustJobs.get(pixels) !== job) return;
+            if (!isCurrentLoad(job.generation) || !coldDustWanted(pixels)) { endColdDustJob(job, null); return; }
+            const { done, value } = job.steps.next();
+            if (done) { endColdDustJob(job, value); return; }
+          }
+        } catch (error) {
+          console.warn('Compacting the dust state of a history step failed:', error);
+          endColdDustJob(job, null);
+        }
+      })();
+    }
+
+    function endColdDustJob(job, record) {
+      if (coldDustJobs.get(job.pixels) !== job) return;
+      coldDustJobs.delete(job.pixels);
+      if (heldJobFrames.delete(job.objects)) memoryBudget.poke();
+      if (record) cleanSourceDigests.set(job.objects.cleanSource, record.digest);
+      coldDustDiagnostics[record ? 'compacted' : 'failed']++;
+      job.pixels.pending = false;
+      job.pixels.record = record || null;
+      job.objects = job.steps = null;
+    }
+
+    function coldDustWanted(pixels) {
+      const wants = entry => entry.refs?.dust?.pixels === pixels;
+      return coldRestoredDust?.dust?.pixels === pixels || undoStack.some(wants) || redoStack.some(wants);
+    }
+
+    // Runs compactions to their end in this task, before history goes into a
+    // photo session or the parking archive (which end them with the photo).
+    function finishColdDustJobs() {
+      for (const job of [...coldDustJobs.values()]) {
+        let record = null;
+        try { record = runSteps(job.steps); }
+        catch (error) { console.warn('Compacting the dust state of a history step failed:', error); }
+        endColdDustJob(job, record);
       }
     }
 
@@ -3665,17 +3762,21 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // and its state (see the Detail layer section). Declared this early: zoom
     // resets and fits reach it from anywhere.
     const glDetailCanvas = document.getElementById('glDetailCanvas');
-    // The dust tint and dodge-and-burn strokes over the photo (#253 C).
+    // The dust tint and dodge-and-burn strokes over the photo (#253 C), in the
+    // photo canvas's box (#279).
     const displayOverlay = document.getElementById('displayOverlay');
     // `plan` and `tint`: what the last paint drew (a stroke's tint patch is put
     // straight onto an overlay that shows the tint alone).
-    const displayOverlayState = { key: null, placed: '', plan: null, tint: null,
+    const displayOverlayState = { key: null, plan: null, tint: null,
       counters: { tintRects: 0, bandedBuilds: 0, workerTints: 0 } };
     const DETAIL_LAYER_ENABLED = new URLSearchParams(window.location.search).get('detailLayer') !== '0';
     const detailLayer = {
       renderer: null, failed: false, timer: null, request: null, shown: null, visible: false, warmed: null, modesPoll: 0,
       probe: new URLSearchParams(window.location.search).get('detailProbe') === '1',
-      counters: { requests: 0, conversions: 0, crops: 0, shown: 0, dropped: 0, failures: 0, lastReadyMs: null }
+      // Detail workers (#270): with the preview worker, they convert a
+      // region's row bands at once. Made at idle; off after a failure.
+      workers: [], bandsFailed: false,
+      counters: { requests: 0, conversions: 0, crops: 0, shown: 0, dropped: 0, failures: 0, lastReadyMs: null, banded: 0 }
     };
     // The settings token of the conversion frame on screen: a region is never
     // drawn over a base of newer settings (read by the smoke tests).
@@ -3759,6 +3860,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // on the same photo only show it again.
     const beforeAfterCanvas = document.getElementById('beforeAfterCanvas');
     let beforeAfterCanvasSource = null;
+    // The transform that lays it over the photo inside the film border ('' for
+    // the whole box), as placeBeforeAfterCanvas last set it.
+    let beforeAfterCanvasPlaced = '';
     // The display negative made for a display target (#248), with the preview
     // or source it stands for: { key, image }.
     let beforeAfterBuiltReference = null;
@@ -3782,6 +3886,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     const dustTint = { mask: null, tag: null, width: 0, height: 0, image: null, building: null };
     // Live dodge and burn (see its section).
     const LIVE_DODGE_ENABLED = new URLSearchParams(window.location.search).get('liveDodge') !== '0';
+    // Exact rectangles over a full-resolution display (#254 follow-up);
+    // ?liveDodgeExact=0, or the smoke's __ncBrush.setExactDisplays(false),
+    // paints those strokes by delta instead.
+    let liveDodgeExactDisplays = new URLSearchParams(window.location.search).get('liveDodgeExact') !== '0';
     // The preview worker's newest interactive frame: { frame: { seq, slot },
     // token, generation, width, height }.
     let lastLiveFrame = null;
@@ -3794,8 +3902,19 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // present, an exact-texture upload), which drops live rectangles.
     let liveDisplaySerial = 0;
     // `box`: the union of the rectangles drawn since the counters were reset.
-    const liveDodgeCounters = { strokes: 0, requests: 0, rects: 0, deltaRects: 0, stale: 0, warmups: 0,
-      uploads: 0, puts: 0, maxRectPixels: 0, restored: 0, lastRect: null, box: null };
+    const liveDodgeCounters = { strokes: 0, requests: 0, rects: 0, deltaRects: 0, exactRects: 0, stale: 0, warmups: 0,
+      uploads: 0, puts: 0, maxRectPixels: 0, restored: 0, adopted: 0, kept: 0, lastRect: null, box: null };
+    // Full-resolution frames of a known conversion (#254 follow-up): processed
+    // -> { token, generation, analysis }. The display previews that are exactly
+    // the display filter of one, or what a stroke painted exactly over one left
+    // on screen: preview -> { token, generation, analysis, k, revision }. A
+    // stroke over such a display gets exact rectangles (exposureExact).
+    const exactFrames = new WeakMap();
+    const exactDisplays = new WeakMap();
+    // Display previews that are what a stroke's live rectangles left on screen,
+    // installed as the display at its pen-up: preview -> { token (the
+    // pen-up's), adjusted (a CPU display's adjusted frame, or null) }.
+    const liveComposites = new WeakMap();
     const brushFeedback = createBrushFeedback({
       canvas: brushFeedbackCanvas,
       measure: () => {
@@ -4127,17 +4246,27 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       return hasBeforeAfterReference();
     }
 
-    // Over the photo, not the film border drawn around it.
+    // The photo's rectangle in the frame the photo canvas shows: inside the
+    // film border, or null without it (the whole frame).
+    function comparisonPhotoLayout() {
+      if (!state.sprocketPreviewEnabled) return null;
+      return canvas.style.display !== 'none' ? mainCanvasPhoto
+        : glCanvas.style.display === 'block' ? glBorder.photo : null;
+    }
+
+    // Over the photo, not the film border drawn around it. The comparison
+    // keeps the photo canvas's box (the stylesheet's); with the border a
+    // transform lays it over the photo's rectangle. A box of its own there
+    // was fractional, which left its place on screen to how the compositor
+    // rounds a canvas's box before the zoom scales it (#279; the detail
+    // layer's box of its own was 2.4 screen px off at 381 %). The transform
+    // puts it where the photo canvas's box puts the photo.
     function placeBeforeAfterCanvas() {
-      const style = beforeAfterCanvas.style;
-      const photo = !state.sprocketPreviewEnabled ? null
-        : canvas.style.display !== 'none' ? mainCanvasPhoto
-          : glCanvas.style.display === 'block' ? glBorder.photo : null;
-      const box = photo ? photoRectPercent(photo) : { left: '', top: '', width: '', height: '' };
-      style.left = box.left;
-      style.top = box.top;
-      style.width = box.width;
-      style.height = box.height;
+      const photo = comparisonPhotoLayout();
+      const transform = photo ? frameRectTransform(photo, photo.frameWidth, photo.frameHeight) : '';
+      if (beforeAfterCanvasPlaced === transform) return;
+      beforeAfterCanvas.style.transform = transform;
+      beforeAfterCanvasPlaced = transform;
     }
 
     // One put per reference; the same photo's next press is a style flip.
@@ -4417,6 +4546,30 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (canvas.width !== nextWidth) canvas.width = nextWidth;
       if (canvas.height !== nextHeight) canvas.height = nextHeight;
       setMainCanvasBox(nextWidth, nextHeight, reference);
+      fitPhotoCanvasContent(canvas);
+    }
+
+    // The photo fills its canvas's box (#279 follow-up). The backing and the
+    // whole-pixel box come from separate roundings (the display size is
+    // floored at fit x DPR, the box rounded from the full frame; a reduced
+    // tier caps the backing), so they can differ by a pixel, and the
+    // stylesheet's `object-fit: contain` letterboxed the photo inside its own
+    // box, which Chrome then snapped a whole CSS pixel off one side: a 901 px
+    // backing in a 902 px box was drawn from x = 1, 1.7 to 2.2 screen px at
+    // 381 % from where the box, and every layer laid on it (the overlay, the
+    // comparison, the detail layer, the brush mapping), put it. `fill`
+    // stretches that pixel away. A backing of another shape, as when the box
+    // already fits new planes whose frame is not drawn yet, keeps `contain`:
+    // the old frame is shown letterboxed rather than stretched. The shapes
+    // agree when letterboxing would leave at most 2 CSS px.
+    function fitPhotoCanvasContent(surface) {
+      const boxWidth = parseFloat(surface.style.width), boxHeight = parseFloat(surface.style.height);
+      let fit = 'contain';
+      if (boxWidth > 0 && boxHeight > 0 && surface.width > 0 && surface.height > 0) {
+        const scale = Math.min(boxWidth / surface.width, boxHeight / surface.height);
+        if (boxWidth - surface.width * scale <= 2 && boxHeight - surface.height * scale <= 2) fit = 'fill';
+      }
+      if (surface.style.objectFit !== fit) surface.style.objectFit = fit;
     }
 
     function refitMainCanvasBox() {
@@ -5179,6 +5332,34 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       state.histogramSourceImageData = histogram || histogramSourceFor(processed);
       state.webglSourceImageData = preview;
       if (webglState.gl) webglState.sourceDirty = true;
+      noteExactDisplay(processed, preview);
+    }
+
+    // A full-resolution frame of `token`'s settings that came with the
+    // analysis it was converted with (#254 follow-up): its display previews
+    // show those settings exactly (noteExactDisplay).
+    function noteExactFrame(processed, token, generation) {
+      if (processed?.__analysis) exactFrames.set(processed, { token, generation, analysis: processed.__analysis });
+    }
+
+    // A display preview made of a full-resolution frame whose conversion main
+    // knows, by a filter filterDisplayRegion reproduces (#254 follow-up): a
+    // dodge stroke over it is painted with that frame's exact pixels.
+    function noteExactDisplay(processed, preview) {
+      const frame = exactFrames.get(processed);
+      if (!frame || !preview || preview === processed) return;
+      const k = exactDisplayFilterK(preview, processed);
+      if (k !== null) exactDisplays.set(preview, { ...frame, k, revision: convertedPixelsRevision });
+    }
+
+    // The box size of the filter that made `preview` of `frame`: the area
+    // filter's, or 1 for the main thread's bilinear resize where it is the
+    // area filter's bilinear resample at k = 1. Null for anything else.
+    function exactDisplayFilterK(preview, frame) {
+      const filter = displayFilterOf(preview);
+      if (filter.kind === 'area') return Number.isInteger(filter.k) && filter.k >= 1 ? filter.k : null;
+      if (filter.kind !== 'bilinear') return null;
+      return displayResampleMode({ sourceWidth: frame.width, sourceHeight: frame.height, k: 1 }, preview) === 'bilinear' ? 1 : null;
     }
 
     // A display preview being rebuilt off the input path (#248 part 4): the
@@ -6261,6 +6442,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (previewTier === 'reduced') ({ width, height } = capBackingSize(width, height, previewTierMaxPixels('reduced')));
       if (glCanvas.width !== width) glCanvas.width = width;
       if (glCanvas.height !== height) glCanvas.height = height;
+      fitPhotoCanvasContent(glCanvas);
     }
 
     function getWebglSourceImageData() {
@@ -6747,9 +6929,20 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         baseWidth: webglState.sourceSize.w || state.webglSourceImageData?.width || 0,
         fit: canvasDisplayFit.scale, zoom: state.zoomLevel, dpr: window.devicePixelRatio || 1,
         panX: state.panX, panY: state.panY, baseX: geometry.baseX, baseY: geometry.baseY,
+        // The base's box (whole CSS px, #279), where the region is laid.
+        boxWidth: geometry.wrapperW, boxHeight: geometry.wrapperH,
         containerWidth: container.width, containerHeight: container.height,
         levelFactor: displayLevelGeometry(state.displayLevelImageData).k
       };
+    }
+
+    // CSS pixels per source pixel of the base's box at zoom 1: where the
+    // region's rectangle lies in the wrapper (positionDetailCanvas). Within
+    // half a CSS pixel across the frame of the exact fit scale, which plans
+    // the region's density.
+    function detailBoxScale(view) {
+      return { x: view.boxWidth > 0 ? view.boxWidth / view.sourceWidth : view.fit,
+        y: view.boxHeight > 0 ? view.boxHeight / view.sourceHeight : view.fit };
     }
 
     // A full-resolution frame current for the settings, to crop from: it
@@ -6799,21 +6992,24 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       hideDetailLayer();
     }
 
-    // The canvas at the region's pre-transform CSS rect in the wrapper. Pans
-    // and base redraws call this often; the rect only changes with the region
-    // or the fit.
+    // The canvas over the region's rectangle of the base: it keeps the photo
+    // canvas's box (the stylesheet's) and a transform lays it over the
+    // region, in percentages of that box, so a new fit moves it with the base.
+    // A box of its own at the region's rect (fractional CSS pixels at the fit
+    // scale) was rounded to whole pixels by the compositor before the zoom
+    // scaled it, at the exact fit rather than the base's whole-pixel box: 2.4
+    // screen px from where the base's box puts the region at 381 % in the
+    // zoom-detail smoke (#279 follow-up). Pans and base redraws call this
+    // often; the transform changes only with the region.
     function positionDetailCanvas() {
       const shown = detailLayer.shown;
-      const fit = canvasDisplayFit.scale;
-      if (!shown || !(fit > 0)) return;
+      const source = conversionSourceSize();
+      if (!shown || !source) return;
       const { plan } = shown;
-      const key = `${plan.x}|${plan.y}|${plan.width}|${plan.height}|${fit}`;
+      const key = `${plan.x}|${plan.y}|${plan.width}|${plan.height}|${source.width}|${source.height}`;
       if (detailLayer.placed === key) return;
       detailLayer.placed = key;
-      glDetailCanvas.style.left = `${plan.x * fit}px`;
-      glDetailCanvas.style.top = `${plan.y * fit}px`;
-      glDetailCanvas.style.width = `${plan.width * fit}px`;
-      glDetailCanvas.style.height = `${plan.height * fit}px`;
+      glDetailCanvas.style.transform = frameRectTransform(plan, source.width, source.height);
     }
 
     // Draws the region with the Step-3 uniforms and curves the base just used,
@@ -6877,11 +7073,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     // Zoom, pan and fit changes: the transform moves the region with the base
-    // at once; a new region is planned once the view settles.
-    function noteDetailViewChanged() {
+    // at once; a new region is planned once the view settles. A discrete zoom
+    // step settles at once (`delay` DETAIL_STEP_SETTLE_MS, #270).
+    function noteDetailViewChanged(delay = DETAIL_SETTLE_MS) {
       if (!detailLayer.shown && !detailLayerAllowed()) return;
       positionDetailCanvas();
-      scheduleDetailRequest(DETAIL_SETTLE_MS);
+      scheduleDetailRequest(delay);
     }
 
     function scheduleDetailRequest(delay) {
@@ -6892,7 +7089,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       }, delay);
     }
 
-    // The roi slot's engine is set up at idle: its first conversion costs more.
+    // Set up at idle what the first region needs (#270): the layer's WebGL2
+    // context and Step-3 program (compiled with the first region, they made a
+    // long task in the zoom window) and, in the preview worker and the detail
+    // workers, the conversion's modules, profile and compiled code.
     function scheduleDetailWarmUp() {
       const container = getCanvasContainerSize();
       const slot = detailSlotSize(container.width, container.height, window.devicePixelRatio || 1);
@@ -6905,9 +7105,44 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           detailLayer.warmed = null;
           return;
         }
-        convertPreviewFrameInWorker.roi({ settings: buildRouterSettings(state), region: { slotWidth: slot.width, slotHeight: slot.height }, warm: true })
+        const settings = buildRouterSettings(state);
+        const region = { slotWidth: slot.width, slotHeight: slot.height };
+        Promise.all(detailClients(detailBandCount(settings)).map(client => client.roi({ settings, region, warm: true })))
           .catch(() => { detailLayer.warmed = null; });
+        // The context and program in an idle slot of their own: with the
+        // workers' start they made one task of 45-60 ms (S4, 60 MP).
+        runWhenIdle(() => {
+          if (detailLayerAllowed()) detailRenderer();
+        });
       });
+    }
+
+    // How many workers convert one region (#270): planDetailBandCount, one
+    // after a band failure or where workers cannot start.
+    function detailBandCount(settings) {
+      if (detailLayer.bandsFailed || typeof Worker !== 'function') return 1;
+      return planDetailBandCount({ hardwareConcurrency: navigator.hardwareConcurrency, lowMemory: lowMemoryPhotoDevice(),
+        pointwise: !(settings?.sharpenAmount > 0) });
+    }
+
+    // The clients of `count` bands: the preview worker (it keeps the base's
+    // level and analysis), then detail workers, made on first use and kept.
+    // Their requests never touch a cached source.
+    function detailClients(count) {
+      const clients = [convertPreviewFrameInWorker];
+      for (let i = 0; i < count - 1; i++) {
+        if (!detailLayer.workers[i]) detailLayer.workers[i] = createConversionWorkerClient({ retainWorker: true });
+        clients.push(detailLayer.workers[i]);
+      }
+      return clients;
+    }
+
+    // A band failed: later regions convert in the preview worker alone.
+    function retireDetailWorkers(err) {
+      detailLayer.bandsFailed = true;
+      for (const client of detailLayer.workers) client.dispose();
+      detailLayer.workers = [];
+      console.warn('Detail bands failed, converting regions in one worker:', err?.message || err);
     }
 
     // A retained 16-bit preview and its commit do not change ROI analysis.
@@ -6959,9 +7194,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // return) plans the same region and keeps its pan.
       if (state.zoomLevel > 1) {
         let { panX, panY } = state;
+        const scale = detailBoxScale(view);
         for (let pass = 0; pass < 4; pass++) {
-          const snapX = snapPanToDevicePixels(panX, view.baseX, state.zoomLevel, plan.x * view.fit, view.dpr);
-          const snapY = snapPanToDevicePixels(panY, view.baseY, state.zoomLevel, plan.y * view.fit, view.dpr);
+          const snapX = snapPanToDevicePixels(panX, view.baseX, state.zoomLevel, plan.x * scale.x, view.dpr);
+          const snapY = snapPanToDevicePixels(panY, view.baseY, state.zoomLevel, plan.y * scale.y, view.dpr);
           if (snapX === panX && snapY === panY) break;
           panX = snapX;
           panY = snapY;
@@ -6982,12 +7218,18 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const job = { tag, plan, controller: new AbortController(), started: performance.now() };
       detailLayer.request = job;
       detailLayer.counters.requests += 1;
+      // Stage timings under ?perf=1 (#270): the benchmark's S4 reads them.
+      const trace = createPerfTrace('detailRegion', { fromLevel: plan.fromLevel, exact: Boolean(full),
+        density: Math.round(plan.density * 1000) / 1000, outWidth: plan.outWidth, outHeight: plan.outHeight });
       try {
         const image = full ? await detailFromFrame(full, plan, job.controller.signal) : await detailFromSource(plan, job.controller.signal);
+        trace.mark('converted');
         if (detailLayer.request !== job) return;
         detailLayer.request = null;
         if (!image || !detailTagCurrent(tag) || !detailLayerAllowed()) return;
         showDetailRegion(image, plan, tag);
+        trace.mark('shown');
+        trace.end({ bands: image.__detailStats?.bands || 1, worker: image.__detailStats?.timings || image.__timings || null });
         detailLayer.counters.lastReadyMs = Math.round(performance.now() - job.started);
       } catch (err) {
         if (detailLayer.request === job) detailLayer.request = null;
@@ -7036,6 +7278,20 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       assertDetailRoiAllocation(region);
       const settings = buildRouterSettings(state);
       const analysisImageData = getColorAnalysisSample(state);
+      const bands = detailBandsFor(region, settings, base);
+      if (bands) {
+        try {
+          // The base's analysis (and, on a warm photo switch, this photo's
+          // level back in the preview worker), then the bands at once.
+          const analysis = await convertPreviewFrameInWorker.analyze({ ...base, settings, options: { preview: true, analysisImageData } });
+          if (signal?.aborted) return null;
+          return await detailInBands(region, bands, analysis, settings, base, signal);
+        } catch (err) {
+          if (err?.code === WORKER_ABORTED || signal?.aborted) throw err;
+          retireDetailWorkers(err);
+          if (signal?.aborted) return null;
+        }
+      }
       // The worker may keep another photo's level (a warm photo switch converts
       // nothing): the base's analysis request puts this one back first.
       if (!convertPreviewFrameInWorker.holds(base.imageData, analysisImageData)) {
@@ -7050,6 +7306,60 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       });
     }
 
+    // The row bands of a region (#270), or null for one conversion: one
+    // worker, a stage that reads neighbours, or rows main cannot cut (an
+    // 8-bit source, a level without its 16-bit plane).
+    function detailBandsFor(region, settings, base) {
+      const count = detailBandCount(settings);
+      if (count < 2) return null;
+      if (!detailRowsPlane(region.fromLevel ? base.imageData : state.conversionSourceImageData)) return null;
+      const bands = planDetailBands(region, count);
+      return bands.length > 1 ? bands : null;
+    }
+
+    // The samples a band's rows are cut from: the 16-bit plane of a source or
+    // level, else an 8-bit source's own (the worker promotes those rows as it
+    // promotes a whole region's).
+    function detailRowsPlane(image) {
+      if (image?.__image16?.data instanceof Uint16Array) return image.__image16.data;
+      return image?.data instanceof Uint16Array || image?.data instanceof Uint8ClampedArray ? image.data : null;
+    }
+
+    // A region converted by several workers at once (#270): each band's rows
+    // are cut and posted in a task of their own (native rows of a 3.9x view
+    // are about 54 MB to copy), so the first worker starts while main cuts
+    // the next, and the replies are assembled in place.
+    async function detailInBands(region, bands, analysis, settings, base, signal) {
+      const shared = { channelData: analysis.channelData, positiveAnalysis: analysis.positiveAnalysis };
+      const clients = detailClients(bands.length);
+      const k = region.levelFactor;
+      const level = region.fromLevel ? base.imageData : null;
+      const source = state.conversionSourceImageData;
+      const plane = detailRowsPlane(level || source);
+      const out = new ImageData(region.outWidth, region.outHeight);
+      const timings = [];
+      const jobs = [];
+      for (const [index, band] of bands.entries()) {
+        if (index) await yieldTask();
+        if (signal?.aborted) break;
+        const rows = level
+          ? copyRegionRows(plane, level.width, { x: region.x / k, y: region.y / k + band.rowY, width: region.width / k, height: band.rows })
+          : copyRegionRows(plane, source.width, { x: region.x, y: region.y + band.rowY, width: region.width, height: band.rows });
+        const job = clients[index].roi({ settings, region, band, rows, analysis: shared, signal }).then((image) => {
+          out.data.set(image.data, band.y0 * region.outWidth * 4);
+          timings.push(image.__timings || null);
+        });
+        // Observed now: a band may fail while the next is still being cut.
+        job.catch(() => {});
+        jobs.push(job);
+      }
+      await Promise.all(jobs);
+      if (signal?.aborted) return null;
+      detailLayer.counters.banded += 1;
+      out.__detailStats = { bands: bands.length, timings };
+      return out;
+    }
+
     function showDetailRegion(image, plan, tag) {
       if (!detailSizeAllowed(image.width, image.height, DETAIL_MAX_OUTPUT_PIXELS, DETAIL_MAX_DIMENSION)) return;
       const renderer = detailRenderer();
@@ -7059,7 +7369,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (!renderer.uploadExact(image, true)) return;
       if (glDetailCanvas.width !== image.width) glDetailCanvas.width = image.width;
       if (glDetailCanvas.height !== image.height) glDetailCanvas.height = image.height;
-      detailLayer.shown = { plan, tag, width: image.width, height: image.height, image: detailLayer.probe ? image : null };
+      detailLayer.shown = { plan, tag, width: image.width, height: image.height, image: detailLayer.probe ? image : null,
+        bands: image.__detailStats?.bands || 1 };
       detailLayer.counters.shown += 1;
       drawDetailLayer();
     }
@@ -7085,6 +7396,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         const shown = state.previewSourceImageData;
         return {
           token: coreReprocessToken,
+          // The token of the frame on screen: a request's frame has landed once it reaches that request's token.
+          displayed: displayedFrameToken,
           level: level ? { width: level.width, height: level.height, k: displayLevelGeometry(level).k,
             isSource: level === state.conversionSourceImageData } : null,
           target: preview ? { width: preview.width, height: preview.height, displayTarget: isDisplayTarget(preview) } : null,
@@ -7123,21 +7436,48 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         return { ...displayParity(expected.data, data), exact: Boolean(tag.full), cropEqual, fromLevel: plan.fromLevel,
           fog: Boolean(webglStep3Values().stages?.fogOn), source: [source.width, source.height] };
       },
+      // Explicit test opt-in (#270): the region on screen, converted in row
+      // bands, converted again by the preview worker alone; the bytes match.
+      bandParity: async () => {
+        const shown = detailLayer.shown;
+        if (!shown?.image || shown.tag.full || !detailTagCurrent(shown.tag)) return { error: 'no current converted probe region' };
+        const bands = shown.bands;
+        const failed = detailLayer.bandsFailed;
+        detailLayer.bandsFailed = true;
+        let single;
+        try { single = await detailFromSource(shown.plan, null); }
+        finally { detailLayer.bandsFailed = failed; }
+        if (!single || detailLayer.shown !== shown) return { error: 'the region changed meanwhile' };
+        const a = shown.image.data, b = single.data;
+        let differing = 0;
+        for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) differing++;
+        return { bands, width: single.width, height: single.height, sameSize: a.length === b.length, differing };
+      },
       state: () => {
         const shown = detailLayer.shown;
         const fit = canvasDisplayFit.scale;
         const dpr = window.devicePixelRatio || 1;
+        const source = conversionSourceSize();
+        // CSS px per source px of the base's (whole-pixel) box, which the
+        // region is laid on (#279 follow-up).
+        const boxScale = source && glCanvas.style.width ? parseFloat(glCanvas.style.width) / source.width : fit;
         return {
           enabled: DETAIL_LAYER_ENABLED, visible: detailLayer.visible, allowed: detailLayerAllowed(),
           pending: Boolean(detailLayer.request || detailLayer.timer), counters: { ...detailLayer.counters },
           region: shown ? { ...shown.plan, visible: undefined } : null,
+          // Where the region lies on the base: its transform and the frame
+          // its rectangle is a part of.
+          placement: shown ? { transform: glDetailCanvas.style.transform, frame: source ? [source.width, source.height] : null } : null,
           // Source pixels per device pixel on screen: the layer's own density
           // while it covers the view, the base's otherwise.
           sourcePxPerDevicePx: detailLayer.visible && shown
-            ? shown.width / (shown.plan.width * fit * state.zoomLevel * dpr)
-            : (webglState.sourceSize.w || 0) / Math.max(1e-9, (state.conversionSourceImageData?.width || 1) * fit * state.zoomLevel * dpr),
+            ? shown.width / (shown.plan.width * boxScale * state.zoomLevel * dpr)
+            : (webglState.sourceSize.w || 0) / Math.max(1e-9, (state.conversionSourceImageData?.width || 1) * boxScale * state.zoomLevel * dpr),
           current: shown ? detailTagCurrent(shown.tag) : false, exact: Boolean(shown?.tag.full),
-          roiToken: shown ? shown.tag.token : null, baseToken: displayedFrameToken
+          roiToken: shown ? shown.tag.token : null, baseToken: displayedFrameToken,
+          // Workers of a region (#270): the bands of the one on screen.
+          bands: shown ? shown.bands : null, detailWorkers: detailLayer.workers.length,
+          bandsFailed: detailLayer.bandsFailed
         };
       }
     };
@@ -7407,13 +7747,20 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           overlay: displayOverlay && displayOverlay.style.display === 'block' ? size(displayOverlay) : null,
           glBorder: webglState.borderUnderlay ? size(webglState.borderUnderlay.size()) : null
         },
-        overlayBox: displayOverlay ? ['left', 'top', 'width', 'height'].map(key => displayOverlay.style[key]) : null,
+        // Where the photo lies in the overlay's backing (#279: the overlay
+        // keeps the photo canvas's box, framed with the border).
+        overlayPhoto: displayOverlayState.plan ? { ...displayOverlayState.plan.photo } : null,
         glPhoto: glBorder.photo ? { ...glBorder.photo } : null,
         comparison: {
           ready: Boolean(beforeAfterBuiltReference?.image && beforeAfterBuiltReference.key === (state.conversionPreviewImageData || state.conversionSourceImageData)),
           shown: Boolean(beforeAfterCanvas && beforeAfterCanvas.style.display === 'block'),
           cached: Boolean(beforeAfterCanvasSource),
-          box: beforeAfterCanvas ? ['left', 'top', 'width', 'height'].map(key => beforeAfterCanvas.style[key]) : null
+          // Its inline box (none: the photo canvas's, the stylesheet's) and,
+          // with the border, the transform over the photo's rectangle and
+          // that rectangle in the shown frame (#279 follow-up).
+          box: beforeAfterCanvas ? ['left', 'top', 'width', 'height'].map(key => beforeAfterCanvas.style[key]) : null,
+          transform: beforeAfterCanvasPlaced,
+          photo: comparisonPhotoLayout() ? { ...comparisonPhotoLayout() } : null
         }
       };
     }
@@ -7545,9 +7892,47 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
             strokes: geometry ? (state.localExposure?.strokes || []).map(stroke => stroke.points.map(p => basePointToWorking(p, geometry))) : [],
             overlay: displayOverlay.style.display === 'block' ? rect(displayOverlay) : null,
             overlayBacking: [displayOverlay.width, displayOverlay.height],
-            surface: surface === glCanvas ? 'gl' : 'cpu', surfaceRect: box, photo,
+            overlayPhoto: displayOverlayState.plan ? { ...displayOverlayState.plan.photo } : null,
+            surface: surface === glCanvas ? 'gl' : 'cpu', surfaceRect: box, surfaceBacking: [surface.width, surface.height], photo,
             tint: dustTint.image ? [dustTint.width, dustTint.height] : null
           };
+        },
+        // #279: the overlay's plan drawn as it is shown (in the photo's
+        // rectangle of a framed backing) against the same plan drawn into a
+        // backing of the photo's size, as the overlay held it before it took
+        // the canvas's box: the photo's pixels must be identical and the
+        // margins empty.
+        overlayParity: () => {
+          const plan = displayOverlayState.plan;
+          if (!plan) return { error: 'no overlay' };
+          const { photo } = plan;
+          const draw = (target) => {
+            const surface = document.createElement('canvas');
+            surface.width = target.width;
+            surface.height = target.height;
+            const context = surface.getContext('2d');
+            drawDisplayOverlay(context, target);
+            return context.getImageData(0, 0, target.width, target.height).data;
+          };
+          const shown = draw(plan);
+          const alone = draw({ ...plan, width: photo.width, height: photo.height, photo: { x: 0, y: 0, width: photo.width, height: photo.height } });
+          let differing = 0, max = 0, margin = 0, drawn = 0;
+          for (let y = 0; y < plan.height; y++) {
+            for (let x = 0; x < plan.width; x++) {
+              const i = (y * plan.width + x) * 4;
+              if (x < photo.x || x >= photo.x + photo.width || y < photo.y || y >= photo.y + photo.height) {
+                if (shown[i + 3]) margin++;
+                continue;
+              }
+              const j = ((y - photo.y) * photo.width + x - photo.x) * 4;
+              let d = 0;
+              for (let c = 0; c < 4; c++) d = Math.max(d, Math.abs(shown[i + c] - alone[j + c]));
+              if (shown[i + 3]) drawn++;
+              if (d) differing++;
+              if (d > max) max = d;
+            }
+          }
+          return { size: [plan.width, plan.height], photo: { ...photo }, tint: Boolean(plan.tint), strokes: Boolean(plan.strokes), drawn, differing, max, margin };
         },
         modes: () => ({
           status: displayModes.status, reason: displayModes.reason, ready: webglState.modesReady,
@@ -7991,7 +8376,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           // A full-resolution render brings its display preview (#248 part 4),
           // made for the normal tier's display size at request time.
           ...(fullRender && state.conversionSourceImageData ? {
-            displayTarget: getDisplayPreviewSize(fullSource, undefined, 'normal'), histogramSamples: HISTOGRAM_MAX_SAMPLES
+            displayTarget: getDisplayPreviewSize(fullSource, undefined, 'normal'), histogramSamples: HISTOGRAM_MAX_SAMPLES,
+            // The analysis the frame is converted with: a live dodge stroke
+            // over its display converts regions of it exactly (#254 follow-up).
+            returnAnalysis: true
           } : {})
         }
       };
@@ -8586,6 +8974,20 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       fitStep3CanvasBox();
     }
 
+    // A display-size frame of `token`'s settings (null: superseded ones): its
+    // planes are applied, but the pen-up frame of a stroke painted over
+    // another frame than this worker's leaves what the stroke's rectangles
+    // left on screen (#254 follow-up), which stands for these settings until
+    // their exact frame lands. True when it kept that composite.
+    function applyPreviewFrame(processed, { previewOnly = false, token = null } = {}) {
+      const composite = token === null ? null : liveCompositeOf(token);
+      const sourceDirty = webglState.sourceDirty;
+      if (previewOnly) applyProcessedImageToState(processed, { previewOnly: true });
+      else applyPreviewProcessedImageToState(processed);
+      if (composite) keepLiveComposite(composite, sourceDirty);
+      return Boolean(composite);
+    }
+
     let _coreReprocessFullInFlight = false;
     // The running preview flight's own token object, or false. A follow-up
     // posted early (postPendingPreviewEarly) takes the lane over while its
@@ -9033,6 +9435,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           if (sourceRef && state.conversionSourceImageData !== sourceRef) return false;
           gpuPreviewScheduler.exactApplied(token);
           displayedFrameToken = token;
+          // Its display preview shows these settings exactly (#254 follow-up).
+          noteExactFrame(processed, token, generation);
           if (repairedPreviewShown && repairedPreviewShown === state.previewSourceImageData
             && repairedPreviewMatches(repairedPreviewMasks)) {
             // The repaired preview stays on screen until detection repairs
@@ -9118,16 +9522,16 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
             // Preview source is smaller — update preview display path only.
             // A downgraded request (>16 MP) drops a full-resolution plane it
             // would leave stale, unless a brush paints on that plane.
-            if (downgraded && !keepsFullPlaneOnDowngrade({ repairs, aiBrush: isAiBrushEnabled() })) {
-              applyProcessedImageToState(previewProcessed, { previewOnly: true });
-            } else {
-              applyPreviewProcessedImageToState(previewProcessed);
-            }
+            const kept = applyPreviewFrame(previewProcessed, {
+              previewOnly: downgraded && !keepsFullPlaneOnDowngrade({ repairs, aiBrush: isAiBrushEnabled() }),
+              token: superseded ? null : token
+            });
             carryStudioThumbnailSource(replacedSource);
             // Export owes this frame an exact render.
             if (downgraded) state.fullResolutionPending = true;
             repairedPreviewShown = repairedSource ? state.previewSourceImageData : null;
-            updatePreview();
+            // A CPU display shows the composite's adjusted frame already.
+            if (!kept || isWebGLActive()) updatePreview();
             if (repairs) {
               // The exact conversion, detection and inpainting run once, after
               // input has been idle; every tick cancels the timer again.
@@ -9300,7 +9704,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
             processed.__image16 = { width: processed.width, height: processed.height, data: plane };
             delete processed.__retained16;
             // A display preview resampled from this frame was built from 8 bits.
-            if (retained.derived !== processed && state.previewSourceImageData === retained.derived) {
+            // A live composite on screen (#254 follow-up) is not made of it.
+            if (retained.derived !== processed && state.previewSourceImageData === retained.derived
+              && !liveComposites.has(retained.derived)) {
               state.previewSourceImageData = buildPreviewSourceImageData(processed);
               state.histogramSourceImageData = histogramSourceFor(processed);
               state.webglSourceImageData = state.previewSourceImageData;
@@ -9792,6 +10198,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
             const level = prebuiltLevel && displayLevelGeometry(prebuiltLevel).k === levelFactor ? prebuiltLevel
               : await buildDisplayLevelInBands(correctedSourceData, levelFactor, { isCurrent: isCurrentConversion });
             if (!level || !isCurrentConversion()) return;
+            // The lens this level carries (#278): the one its source was corrected with.
+            displayLevelLenses.set(level, lensCorrectedSources.get(correctedSourceData) || null);
             trace.mark('displayLevel', { outputPixels: getImageDataPixelCount(level) });
             invalidateSilverCoreCache();
             // A GPU frame of the previous source has nothing left to settle.
@@ -10192,7 +10600,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
         // An undo or redo across a conversion (#259): the dust state it
         // restored, once this frame proves to have its clean source's pixels.
+        // A cold entry's (#281) is rebuilt on this frame from what it kept.
         if (await keepRestoredDust(source, isCurrent)) return;
+        if (await keepColdRestoredDust(source, isCurrent)) return;
         if (!isCurrent() || source !== getDustSource()) return;
 
         const prevState = state.dustRemoval._state;
@@ -10302,6 +10712,90 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       return true;
     }
 
+    // The detection after the conversion a cold entry's undo or redo started
+    // (#281): the dust state the entry kept comes back, mask, repaired image
+    // and count bit for bit, when nothing changed the dust state or its inputs
+    // since the restore, the inpainter is the one recorded, and the converted
+    // frame `source` has the clean source's pixels. A state kept by reference
+    // is compared with its clean source in slices and comes back as those
+    // objects; a compacted one is compared by the digest of the 8- and
+    // 16-bit planes, and its mask and repaired image are rebuilt on `source`,
+    // which becomes their clean source. A compaction still running finishes
+    // first. False: detect from scratch, as before.
+    async function keepColdRestoredDust(source, isCurrent) {
+      const kept = coldRestoredDust;
+      if (!kept) return false;
+      // Held until this step ends: the compaction it may wait for goes on
+      // only while someone wants its record (coldDustWanted).
+      try {
+        return await keepColdDust(kept, source, isCurrent);
+      } finally {
+        if (coldRestoredDust === kept) coldRestoredDust = null;
+      }
+    }
+
+    async function keepColdDust(kept, source, isCurrent) {
+      const dust = state.dustRemoval;
+      const revision = dust.revision;
+      const untouched = () => isCurrent() && coldRestoredDust === kept && isCurrentLoad(kept.generation)
+        && coreReprocessToken === kept.token && dust.revision === revision && dust.cleanSource === source && !dust.mask
+        && restoredDustInputsHold(kept);
+      if (!untouched()) return false;
+      const cold = kept.dust;
+      if (cold.kind === 'compact' && cold.pixels.pending) await coldDustJobs.get(cold.pixels)?.done;
+      if (!untouched() || (cold.kind === 'compact' && !cold.pixels.record)) return false;
+      if (dust.ai && aiRepair.status === 'loading') await settleAiRepairModel({ load: false, isCurrent });
+      if (!untouched() || dustPassUsesAi() !== cold.settled.usedAi || aiRepair.revision !== cold.settled.revision) return false;
+      let restored;
+      if (cold.kind === 'compact') {
+        let digest = cleanSourceDigests.get(source);
+        if (!digest) {
+          digest = await runStepsInSlices(frameDigestSteps(source), { pause: yieldTaskForJob, isCurrent: untouched });
+          if (!digest || !untouched()) return false;
+          cleanSourceDigests.set(source, digest);
+        }
+        if (digest !== cold.pixels.record.digest) return false;
+        const rebuilt = await runStepsInSlices(rebuildDustSteps(cold.pixels.record, source), { pause: yieldTaskForJob, isCurrent: untouched });
+        if (!rebuilt || !untouched()) return false;
+        restored = { cleanSource: source, mask: rebuilt.mask, inpaintedImageData: rebuilt.inpaintedImageData, maskTag: nextDustMaskTag() };
+        dustMaskSources.set(rebuilt.mask, source);
+      } else {
+        if (!(await sameFramePixels(cold.cleanSource, source, { isCurrent: untouched, pause: yieldTaskForJob })) || !untouched()) return false;
+        restored = { cleanSource: cold.cleanSource, mask: cold.mask, inpaintedImageData: cold.inpaintedImageData,
+          maskTag: cold.maskTag ?? nextDustMaskTag() };
+      }
+      dust.cleanSource = restored.cleanSource;
+      dust.mask = restored.mask;
+      dust.maskTag = restored.maskTag;
+      dust._state = null;
+      dust.particleCount = cold.particleCount;
+      dust.inpaintedImageData = restored.inpaintedImageData;
+      noteDustReplaced();
+      if (cold.kind === 'compact') stampColdRestoredRepair(cold.stamp);
+      else carryRestoredRepairStamp();
+      coldDustDiagnostics.kept++;
+      if (dust.particleCount > 0 || state.repairStrokes.length) showDustParticleCount();
+      else updateDustStatusUI(getLocalizedText('dustStatusNone', 'No dust detected'));
+      cancelFullUpdate();
+      applyDustResultToState();
+      updatePreview();
+      rememberRepairMasks(restored.cleanSource);
+      return true;
+    }
+
+    // A compacted state's committed repair (#246) carries its stamp over to
+    // the rebuilt image, as carryRestoredRepairStamp does for restored
+    // objects, so export takes it as it would have before the step.
+    function stampColdRestoredRepair(stamp) {
+      const dust = state.dustRemoval;
+      if (!stamp || !dust.inpaintedImageData || dust.inpaintedImageData === dust.cleanSource
+        || !sameRepairStrokes(stamp.strokes, state.repairStrokes) || state.conversionSourceImageData?.__lensMapping) return;
+      repairStamps.stamp(dust.inpaintedImageData, { source: dust.cleanSource, token: coreReprocessToken,
+        dustEnabled: stamp.dustEnabled, dustMask: stamp.dustEnabled ? dust.mask : null,
+        dustRevision: stamp.dustEnabled ? dust.revision : null, strokes: state.repairStrokes,
+        lensMapping: null, revision: stamp.revision, dustUsedAi: stamp.dustUsedAi });
+    }
+
     // Whether the dust state is a finished repair of its clean source: a mask
     // of that source, and a repaired image that no detection, brush repair or
     // learned refresh still owes anything, from a known inpainter. A state an
@@ -10332,6 +10826,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
     function clearDustState() {
       dustDetectionRevision += 1;
+      coldRestoredDust = null;
       dustPassCache = null;
       dustRefreshRepairMask = null;
       unpinDustWorker();
@@ -10358,10 +10853,15 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // shows the photo (#glCanvas and the detail layer, or #canvas), never into
     // the photo's context, so a shown mask or the dodge tool no longer takes the
     // display off the GPU. The backing is the display photo's size (at most the
-    // display-preview cap), never the image's; with the film border it covers
-    // the photo's rectangle. It is repainted only when the tint, the strokes,
-    // the geometry, the size or the box change: never for a photo frame or a
-    // pointer move. The stroke being painted is on #brushFeedback
+    // display-preview cap), never the image's. Its box is always the photo
+    // canvas's box (#279): with the film border the backing is the framed
+    // display size, as the canvas's is, and the tint and the strokes are drawn
+    // into the photo's rectangle inside it. A box of its own over that
+    // rectangle (fractional in the wrapper) was placed by the compositor on its
+    // own pixel grid, which the zoom magnified: 1.3 screen px at 381 %. Sharing
+    // the box puts both layers on one grid. It is repainted only when the
+    // tint, the strokes, the geometry or the size change: never for a photo
+    // frame or a pointer move. The stroke being painted is on #brushFeedback
     // (brushFeedback.js, see the brush section).
     //
     // The tint is max-pooled (dustTint.js): a cell is tinted when any mask pixel
@@ -10427,7 +10927,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       displayOverlayState.counters.tintRects++;
       const shown = displayOverlayState.plan;
       if (shown && shown.tint && !shown.strokes && displayOverlayState.tint === dustTint.image) {
-        displayOverlay.getContext('2d').putImageData(dustTint.image, 0, 0, patch.x, patch.y, patch.width, patch.height);
+        displayOverlay.getContext('2d').putImageData(dustTint.image, shown.photo.x, shown.photo.y, patch.x, patch.y, patch.width, patch.height);
         displayOverlayState.key = displayOverlayKey(shown);
       }
     }
@@ -10457,8 +10957,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         }, (error) => console.warn('Dust tint failed:', error?.message || error));
     }
 
-    // The overlay's backing and CSS box for the photo on screen, or null when it
-    // has nothing to show. A tint that is not pooled yet is asked for here.
+    // The overlay's backing and the photo's rectangle in it, or null when it has
+    // nothing to show. A tint that is not pooled yet is asked for here. The
+    // overlay keeps the photo canvas's box (the stylesheet's), so the backing
+    // is the canvas's: the display photo, framed with the border preview
+    // (getSprocketFrameLayout of the display size, as both display paths frame
+    // it) with the photo at its integer offset.
     function displayOverlayPlan() {
       if (!displayOverlay || state.cropping || state.beforeAfterActive || state.currentStep < 3 || !state.processedImageData) return null;
       const size = displayOverlaySize();
@@ -10468,11 +10972,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const tint = tintWanted && dustTintCurrent(size);
       const strokes = dodgeStrokesWanted();
       if (!tint && !strokes) return null;
-      const shown = displaySourceImageData();
-      const layout = state.sprocketPreviewEnabled ? getSprocketFrameLayout(shown.width, shown.height, getSprocketFrameComposeOptions()) : null;
+      const layout = state.sprocketPreviewEnabled ? getSprocketFrameLayout(size.width, size.height, getSprocketFrameComposeOptions()) : null;
       return {
-        width: size.width, height: size.height, tint, strokes,
-        box: layout ? photoRectPercent(layout) : { left: '0px', top: '0px', width: '100%', height: '100%' }
+        width: layout ? layout.frameWidth : size.width, height: layout ? layout.frameHeight : size.height,
+        photo: { x: layout ? layout.x : 0, y: layout ? layout.y : 0, width: size.width, height: size.height },
+        tint, strokes
       };
     }
 
@@ -10481,9 +10985,29 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     function displayOverlayKey(plan) {
       if (!plan) return 'none';
       const geometry = plan.strokes ? dodgeBurnGeometry() : null;
-      return [plan.width, plan.height, plan.box.left, plan.box.top, plan.box.width, plan.box.height,
+      return [plan.width, plan.height, plan.photo.x, plan.photo.y, plan.photo.width, plan.photo.height,
         plan.tint ? `${gpuObjectId(dustTint.image)}:${dustTint.tag}` : '',
         plan.strokes ? `${gpuObjectId(state.localExposure)}:${JSON.stringify(geometry)}` : ''].join('|');
+    }
+
+    // The tint and the strokes in the photo's rectangle of `plan`'s backing:
+    // the pixels a backing of the photo's size holds, at the photo's offset
+    // (the strokes clipped to the rectangle, as that backing's edges clipped
+    // them).
+    function drawDisplayOverlay(context, plan) {
+      const { photo } = plan;
+      if (plan.tint) context.putImageData(dustTint.image, photo.x, photo.y);
+      if (!plan.strokes) return;
+      const framed = photo.x !== 0 || photo.y !== 0 || photo.width !== plan.width || photo.height !== plan.height;
+      if (framed) {
+        context.save();
+        context.beginPath();
+        context.rect(photo.x, photo.y, photo.width, photo.height);
+        context.clip();
+        context.translate(photo.x, photo.y);
+      }
+      renderDodgeBurnOverlay(context, photo.width, photo.height);
+      if (framed) context.restore();
     }
 
     function paintDisplayOverlay(plan = displayOverlayPlan()) {
@@ -10498,15 +11022,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         displayOverlay.width = plan.width;
         displayOverlay.height = plan.height;
       }
-      const placed = `${plan.box.left}|${plan.box.top}|${plan.box.width}|${plan.box.height}`;
-      if (displayOverlayState.placed !== placed) {
-        Object.assign(displayOverlay.style, plan.box);
-        displayOverlayState.placed = placed;
-      }
       const context = displayOverlay.getContext('2d');
       context.clearRect(0, 0, plan.width, plan.height);
-      if (plan.tint) context.putImageData(dustTint.image, 0, 0);
-      if (plan.strokes) renderDodgeBurnOverlay(context, plan.width, plan.height);
+      drawDisplayOverlay(context, plan);
       displayOverlay.style.display = 'block';
       displayDebugCounters.overlayPaints++;
     }
@@ -10810,7 +11328,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
     // Records the samples at least a device pixel apart; the overlay draws
     // them at the next frame. The committed stroke is discs of the brush along
-    // them, which the round-capped line of width 2r shows.
+    // them, which the round-capped line of width 2r shows. A recorded point is
+    // a pixel (the pointer rounded, as the brush has always stored it), and
+    // DustBrush stamps each disc around that pixel: its centre is the pixel's
+    // centre, half a pixel right of and below the point taken as a position.
+    // The overlay draws the dab there, where the disc is committed (#279
+    // follow-up); the stored points are unchanged.
     function addDustBrushSamples(samples) {
       const dpr = window.devicePixelRatio || 1;
       const added = [];
@@ -10820,9 +11343,15 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         if (!point) continue;
         dustBrushLastSample = { clientX: sample.clientX, clientY: sample.clientY };
         dustBrushPoints.push(point);
-        added.push(point);
+        added.push(dustDiscCentre(point));
       }
       if (added.length) brushFeedback.add(added);
+    }
+
+    // Where the disc DustBrush stamps around a recorded pixel is centred, in
+    // working-frame pixels: the pixel's centre.
+    function dustDiscCentre(point) {
+      return { x: point.x + 0.5, y: point.y + 0.5 };
     }
 
     function onDustBrushMove(e) {
@@ -10982,6 +11511,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     function restoreDustDelta(delta, direction) {
       dustDetectionRevision += 1;
       if (dustDetectionTimer) { clearTimeout(dustDetectionTimer); dustDetectionTimer = null; }
+      coldRestoredDust = null;
       const dust = state.dustRemoval;
       repairStamps.forget(delta.target);
       forgetDustMaskInfo(delta.mask);
@@ -11149,12 +11679,21 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const scale = Math.min(maxWidth / fitW, maxHeight / fitH, 1);
       // CSS pixels per image pixel at zoom 1: what "100 %" is measured from.
       fit.scale = scale > 0 && Number.isFinite(scale) ? scale : 0;
-      const cssW = (fitW * scale) + 'px';
-      const cssH = (fitH * scale) + 'px';
+      // Whole CSS pixels (#279). The compositor shows a canvas layer at its
+      // box rounded to whole pixels in the wrapper's space, before the zoom
+      // scales it: a box 746.5 px wide is shown 747 px wide, which at 381 %
+      // puts a point 60 % across the photo 1.1 screen px from where its client
+      // rect says. A whole-pixel box is shown where its client rect says, so
+      // the brush mappings and #brushFeedback, which work from that rect, stay
+      // on the photo shown. The fit scale above stays the exact one.
+      const cssW = Math.round(fitW * scale) + 'px';
+      const cssH = Math.round(fitH * scale) + 'px';
       canvas.style.width = cssW;
       canvas.style.height = cssH;
       glCanvas.style.width = cssW;
       glCanvas.style.height = cssH;
+      fitPhotoCanvasContent(canvas);
+      fitPhotoCanvasContent(glCanvas);
       cropCanvas.style.width = cssW;
       cropCanvas.style.height = cssH;
       canvasTransformWrapper.style.width = cssW;
@@ -11196,7 +11735,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       return Math.round(percent) + '%';
     }
 
-    function applyZoomPanTransform() {
+    // `detailDelay`: how long the detail layer waits for the view to settle
+    // before it plans its region (a discrete zoom step: none, #270).
+    function applyZoomPanTransform(detailDelay = DETAIL_SETTLE_MS) {
       const z = state.zoomLevel;
       canvasTransformWrapper.style.transform = `matrix(${z}, 0, 0, ${z}, ${state.panX}, ${state.panY}) ${interimGeometryCss()}`.trim();
       // A stroke being painted follows the image it is painted on (#254).
@@ -11210,7 +11751,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         canvasContainer.classList.remove('zoom-pan-active');
       }
       // The detail layer moves with the transform; its region follows the settle.
-      noteDetailViewChanged();
+      noteDetailViewChanged(detailDelay);
     }
 
     function getZoomGeometry(zoom = state.zoomLevel) {
@@ -11261,6 +11802,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     // "1:1": fit -> actual pixels, centred on the view; any zoom -> fit.
+    // A discrete step: the detail layer asks for its region at once.
     function toggleActualPixels(clientX = null, clientY = null) {
       if (state.zoomLevel > ZOOM_MIN) {
         resetUserZoom();
@@ -11273,10 +11815,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         clientX = containerRect.left + containerRect.width / 2;
         clientY = containerRect.top + containerRect.height / 2;
       }
-      zoomAtPoint(target, clientX, clientY);
+      zoomAtPoint(target, clientX, clientY, { step: true });
     }
 
-    function zoomAtPoint(newZoom, clientX, clientY) {
+    // `step`: a discrete zoom (a button, a key, a double-click, 1:1) ends its
+    // own gesture, so the detail layer asks for its region at once (#270);
+    // wheel and pinch ticks wait for the view to settle.
+    function zoomAtPoint(newZoom, clientX, clientY, { step = false } = {}) {
       const oldZoom = state.zoomLevel;
       newZoom = Math.max(ZOOM_MIN, Math.min(zoomMax(), newZoom));
       if (newZoom <= ZOOM_MIN + 0.01) newZoom = ZOOM_MIN;
@@ -11297,7 +11842,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       state.panY = cursorY - newGeometry.baseY - contentY * newZoom;
 
       clampPan();
-      applyZoomPanTransform();
+      applyZoomPanTransform(step ? DETAIL_STEP_SETTLE_MS : DETAIL_SETTLE_MS);
       // Zoom changes no pixels until the display preview settles at the new
       // size, so a tick is a compositor transform only. It still keeps a
       // full render of a <=16 MP image from landing mid-gesture.
@@ -11636,7 +12181,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       persistCurrentFileSettings({ silent: true, force: true });
       const entries = [...undoStack, ...redoStack];
       let dustHistoryKey = null;
-      const hasDust = entries.some(entry => entry.dustDelta) || state.dustRemoval.mask;
+      // Cold entries' dust states (#281) are archived finished.
+      finishColdDustJobs();
+      const hasDust = entries.some(entry => entry.dustDelta || entry.refs?.dust) || state.dustRemoval.mask;
       if (hasDust) {
         parkingPhoto = true;
         const generation = loadGeneration, editRevision = manualEditRevision, dustRevision = state.dustRemoval.revision;
@@ -11683,7 +12230,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // neither the full mutable planes nor their patch bytes remain live.
       for (const entry of entries) {
         if (entry.dustDelta) entry.dustDelta = { cold: true, patches: [] };
-        else if (!entry.refs?.cold) entry.refs = { cold: true };
+        else if (!entry.refs?.cold || entry.refs.dust?.kind === 'objects') entry.refs = { cold: true };
       }
       parkedPhoto = {
         item, file: item.file, base: state.loadedBaseImageData, rawMetadata: state.rawMetadata,
@@ -12258,6 +12805,17 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         log: () => memoryEvents.slice(),
         clearLog: () => { memoryEvents.length = 0; },
         runIdleCheck: () => runMemoryIdleCheck(),
+        // History's budget pass at another limit (the dust-undo smoke makes
+        // entries cold on a small frame with it), and the cold entries' dust
+        // states (#281): their kind and the bytes their records keep.
+        pruneHistory: (limit) => { pruneHistoryForMemory({ limit }); updateUndoRedoButtons(); },
+        coldDust: () => ({
+          ...coldDustDiagnostics, pending: coldDustJobs.size,
+          entries: [...undoStack, ...redoStack].filter(entry => entry.refs?.cold).map(entry => ({
+            label: entry.label, kind: entry.refs.dust?.kind || null, pending: Boolean(entry.refs.dust?.pixels?.pending),
+            bytes: coldDustRecordBytes(entry.refs.dust?.pixels?.record || null)
+          }))
+        }),
         // The pixel buffers the open photo (state, history) and the budgeted
         // photo caches hold: the photo-session smoke's retained-plane check
         // (#234) finds every other live plane through the heap.
@@ -12293,6 +12851,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const base = state.loadedBaseImageData;
       // A session restored without its base (#249) is remembered again too.
       if (!item || item.file !== state.loadedFile || !(base || state.baseDescriptor) || state.rawDecodePending) return;
+      // The history it keeps carries finished dust records (#281).
+      finishColdDustJobs();
       // A reduced preview-tier frame (#263) is never a settled view, nor is
       // one still waiting for its normal-size tick, nor one whose original is
       // being rebuilt (#249), nor a full-resolution plane kept while its
@@ -12325,11 +12885,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const display = settled ? captureDisplaySession(item, entry) : null;
       if (display) entry.display = display;
       // The persistent store keeps the display proxy of an exact route across
-      // restarts (part 3), after the next paint (the planes are copied). Not
-      // with lens correction, which the fills skip too: a cold open looks a
-      // stored proxy up without it (expectedStoredProxyKey), so this one could
-      // never be read back and would only push readable ones out (R2-006).
-      if (display && displayProxyStore && !lensCorrectionActive(state)) {
+      // restarts (part 3), after the next paint (the planes are copied), when
+      // its level carries the lens correction its key names (#278,
+      // storableDisplayLevel).
+      if (display && displayProxyStore && storableDisplayLevel(display.snapshot.refs.displayLevelImageData)) {
         const proxy = { image: display.snapshot.refs.displayLevelImageData, sample: display.sample,
           proxyKey: display.sourcePending.key, meta: displaySessionMeta(display) };
         schedulePostPaintTask(() => { void persistDisplayProxy(item, proxy); });
@@ -12407,6 +12966,17 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       return stored;
     }
 
+    // Whether the live display level carries the lens correction the live
+    // proxy key names (#278): the one its source was corrected with, or one
+    // carried with a record of it (none when nothing says). A lens runtime
+    // that failed, or lens settings changed without a conversion since,
+    // leave a level a cold open of the recipe would not show: it is not
+    // stored (the session and its spill still keep it, as they keep what
+    // the photo was left showing).
+    function storableDisplayLevel(level) {
+      return (displayLevelLenses.get(level) ?? null) === lensSignature(state);
+    }
+
     // A session without its base left before it settled (#249, R2-002): a
     // slider tick or Undo still converting, the original or the source being
     // rebuilt ("Preparing original…"), a recipe-changed activation running.
@@ -12463,6 +13033,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       state.dustRemoval._state = null;
       dustRefreshRepairMask = null;
       restoredDust = null;
+      coldRestoredDust = null;
       clearFullResolutionRenderState();
       undoStack.length = 0;
       redoStack.length = 0;
@@ -12631,11 +13202,20 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       return samples;
     }
 
-    // The lens remap applyLensCorrectionWithSettings runs, or null.
+    // The lens remap applyLensCorrectionWithSettings runs, or null: the lens
+    // part of a display proxy's key. Everything lensfun's maps and the remap
+    // are built from (the crop's size is the geometry part): the profile's
+    // stable identity (lensProfileKey, never lensfun's handle, which another
+    // build does not share), the parameters and the modes.
     function lensSignature(settings = state) {
-      if (!lensCorrectionActive(settings)) return null;
-      const lens = resolveLensCorrection(settings);
-      return JSON.stringify([lens.selectedLens, lens.params, lens.modes]);
+      return lensSignatureOf(resolveLensCorrection(settings));
+    }
+
+    // The same of a resolved lens block (resolveLensCorrection).
+    function lensSignatureOf(lens) {
+      if (!(lens?.enabled && lens.selectedLens)) return null;
+      const { focal, crop, aperture, distance, stepMode, step } = lens.params;
+      return JSON.stringify([lensProfileKey(lens.selectedLens), { focal, crop, aperture, distance, stepMode, step }, lens.modes]);
     }
 
     function analysisAreaOf(meta) {
@@ -12677,7 +13257,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // they hold and cannot go cold, so they are left out, as for #244's cold
     // sessions.
     function coldHistory(entries) {
-      return entries.filter(entry => !entry.dustDelta).map(entry => (entry.refs?.cold ? entry : { ...entry, refs: { cold: true } }));
+      // A cold entry keeps a compacted dust state (#281), not one by reference.
+      return entries.filter(entry => !entry.dustDelta)
+        .map(entry => (entry.refs?.cold && entry.refs.dust?.kind !== 'objects' ? entry : { ...entry, refs: { cold: true } }));
     }
 
     // Stand-ins for a Tier B session's planes, with the memo of the geometry
@@ -12777,7 +13359,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       };
       const history = entries => entries.flatMap(snapshot => {
         if (snapshot.dustDelta) return pinsDropped(snapshot.dustDelta) ? [] : [snapshot];
-        if (snapshot.refs?.cold) return [snapshot];
+        // A dust state a cold entry keeps by reference (#281) goes as a hot
+        // entry's planes do.
+        if (snapshot.refs?.cold) {
+          const dust = snapshot.refs.dust;
+          return dust?.kind === 'objects' && (pinsDropped(dust) || (stripPinned && pinsOwn(dust))) ? [{ ...snapshot, refs: { cold: true } }] : [snapshot];
+        }
         const hot = { ...snapshot, refs: releaseFrame(snapshot.refs) };
         return pinsDropped(hot.refs) || (stripPinned && pinsOwn(hot.refs)) ? [{ ...snapshot, refs: { cold: true } }] : [hot];
       });
@@ -12904,16 +13491,17 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     // The proxy key a cold open of `item` would convert now, for a stored
-    // entry of these base sizes: the recipe's geometry and analysis area (as
+    // entry of these base sizes: the recipe's geometry, lens correction (as
+    // restoreSettings resolves it, #278) and analysis area (as
     // fillDisplayProxy keys it).
     function expectedStoredProxyKey(item, meta) {
       const settings = item?.settings;
-      if (!settings?.autoFrameMeta || !meta?.base || lensCorrectionActive(settings)) return null;
+      if (!settings?.autoFrameMeta || !meta?.base) return null;
       const descriptor = { width: meta.base.width, height: meta.base.height, has16: meta.base.has16, route: meta.base.route };
       const key = geometryKeyFor(descriptor, { rotationAngle: settings.rotationAngle, mirrored: settings.mirrored, cropRegion: settings.cropRegion });
       return displayProxyKey({
         id: null, route: descriptor.route, base: descriptor, rotationAngle: key.angle, mirrored: key.mirrored, cropRegion: key.crop,
-        lens: null, area: analysisAreaOf(settings.autoFrameMeta)
+        lens: lensSignature(settings), area: analysisAreaOf(settings.autoFrameMeta)
       });
     }
 
@@ -12952,16 +13540,20 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       return true;
     }
 
-    // What installs a spilled or stored proxy again, besides the planes.
+    // What installs a spilled or stored proxy again, besides the planes; a
+    // lens-corrected level's lens comes with it (#278).
     function displaySessionMeta(display) {
       const base = display.baseDescriptor;
       const key = display.geometry;
+      const level = display.snapshot.refs.displayLevelImageData;
+      const levelLens = displayLevelLenses.get(level);
       return {
         base: { width: base.width, height: base.height, has16: base.has16, route: base.route },
         geometry: { angle: key.angle, mirrored: key.mirrored, crop: key.crop, frameWidth: key.frameWidth, frameHeight: key.frameHeight },
         cropSize: display.cropSize, source: { width: display.sourcePending.width, height: display.sourcePending.height },
-        area: display.sourcePending.area, level: displayLevelGeometry(display.snapshot.refs.displayLevelImageData),
-        rawMetadata: display.rawMetadata || null, filmEdge: display.filmEdge || null
+        area: display.sourcePending.area, level: displayLevelGeometry(level),
+        rawMetadata: display.rawMetadata || null, filmEdge: display.filmEdge || null,
+        ...(levelLens ? { levelLens } : {})
       };
     }
 
@@ -12995,6 +13587,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // threshold lowers it) comes back as the plane itself.
       const level = meta.level?.k > 1 && image.__image16?.data
         ? adoptDisplayLevel(image.__image16.data, image.width, image.height, meta.level) : image;
+      // The lens correction its writer saw the level carry (#278).
+      if (typeof meta.levelLens === 'string') displayLevelLenses.set(level, meta.levelLens);
       return {
         tier: 'B', spilled: true, stored, file: item.file, base: null, baseDescriptor: base, rawMetadata: meta.rawMetadata, filmEdge: meta.filmEdge,
         planes: { frame, crop, level }, sample,
@@ -13019,13 +13613,19 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // (R2-003: after a restart or a project reopen, a roll pass, lane or
     // prefetch decode of a stored frame renders nothing). A roll frame held
     // in its worker (#252) comes back to the page only when there is a proxy
-    // to fill.
+    // to fill. With lens correction (#278) the resolved lens block it is
+    // keyed by comes too (`lensCorrection`): the fill corrects with that one.
     async function displayProxyFillPlan(item, shape, settings) {
       if (!(displayProxySpill.enabled || displayProxyStore) || !item || !shape || !state.fileQueue.includes(item)) return null;
       const skip = { skip: true };
-      if (!settings?.autoFrameMeta || !settings.filmEdge?.checked || lensCorrectionActive(settings)) return skip;
+      if (!settings?.autoFrameMeta || !settings.filmEdge?.checked) return skip;
       if (!usesSilverCoreConversion(settings) || state.dustRemoval.enabled || settings.repairStrokes?.length) return skip;
       if (shape.route === 'raw-fallback') return skip;
+      // Resolved once, before anything awaits: the key and the remap name the
+      // same lens. A fill remaps the 16-bit plane only.
+      const lensCorrection = resolveLensCorrection(settings);
+      const lens = lensSignatureOf(lensCorrection);
+      if (lens && (!shape.has16 || lensRemapFailed(lens))) return skip;
       const key = geometryKeyFor(shape, { rotationAngle: settings.rotationAngle, mirrored: settings.mirrored, cropRegion: settings.cropRegion });
       // Step 2's border mode of a colour frame without a crop reads its pixels.
       if (!key.crop && requiresFilmBase(settings)) return skip;
@@ -13035,12 +13635,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const descriptor = { width: shape.width, height: shape.height, has16: Boolean(shape.has16), route: shape.route };
       const area = analysisAreaOf(settings.autoFrameMeta);
       const proxyKey = displayProxyKey({
-        id: null, route: shape.route, base: descriptor, rotationAngle: key.angle, mirrored: key.mirrored, cropRegion: key.crop, lens: null, area
+        id: null, route: shape.route, base: descriptor, rotationAngle: key.angle, mirrored: key.mirrored, cropRegion: key.crop, lens, area
       });
       const kept = displayProxySpill.proxyKey(item.id) === proxyKey || await storedDisplayProxyKept(item, proxyKey);
       // The item may have left the queue while its file was hashed.
       if (!state.fileQueue.includes(item)) return null;
-      return { key, source, k, descriptor, area, proxyKey, kept };
+      return { key, source, k, descriptor, area, proxyKey, kept, lensCorrection: lens ? lensCorrection : null };
     }
 
     // Whether the persistent store holds `proxyKey` for `item`'s file (the
@@ -13058,6 +13658,38 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       }
     }
 
+    // The remap a lens-corrected fill applies (#278): lensfun's maps for its
+    // crop, as the editor builds them (from the cache, which fills do not
+    // grow), or null when the lens runtime or the maps fail. A lens that
+    // failed is not tried again by fills (lensRemapFailed): its frames are
+    // planned as skipped, so a roll frame's planes stay in its worker.
+    const lensRemapFailures = new Map();
+    async function lensRemapFor(lensCorrection, width, height) {
+      const signature = lensSignatureOf(lensCorrection);
+      if (lensRemapFailed(signature)) return null;
+      let failure = 'runtime';
+      try {
+        const runtime = await ensureLensfunClient();
+        failure = 'maps';
+        return { maps: lensCorrectionMaps(runtime, lensCorrection, width, height, { remember: false }), modes: lensCorrection.modes };
+      } catch (error) {
+        lensRemapFailures.set(signature, failure);
+        console.warn('Lens correction failed; display proxies of frames with this lens are not filled:', sanitizeLensRuntimeError(error));
+        return null;
+      }
+    }
+
+    // Whether fills gave up on this lens: for the session when lensfun could
+    // not build its maps, until the runtime loads when it did not load.
+    function lensRemapFailed(signature) {
+      const failure = lensRemapFailures.get(signature);
+      if (failure === 'runtime' && lensfunRuntime.client) {
+        lensRemapFailures.delete(signature);
+        return false;
+      }
+      return Boolean(failure);
+    }
+
     // Roll analysis and the lanes decode frames the editor has not opened.
     // While such a decode is in hand, the display proxy a cold open of the
     // frame would convert, its display level (#248), is rendered from it in
@@ -13065,9 +13697,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // with buildDisplayLevel's own sums) and stored or spilled with the
     // frame's colour-analysis sample, so the first open converts it without
     // a decode, at any window size. Only for decided geometry (the frame and
-    // film-edge detections done), without lens correction or repairs, and
-    // for a frame whose level is smaller than it (k > 1). Resolves whether a
-    // proxy of that key is kept.
+    // film-edge detections done), without repairs, and for a frame whose
+    // level is smaller than it (k > 1). A lens-corrected frame (#278) is
+    // remapped as the editor remaps it after the crop, band by band in the
+    // pool too, with the maps lensfun builds for it: not when they cannot be
+    // built (the editor would show the frame uncorrected, which no key
+    // names) or the lens moves rows too far for the bands' budget. Resolves
+    // whether a proxy of that key is kept.
     async function fillDisplayProxy(item, base, settings, { isCurrent = () => true } = {}) {
       const skip = () => { displaySessionDiagnostics.fillSkips++; return false; };
       if (!base?.data || isReleasedPlane(base)) return false;
@@ -13078,17 +13714,27 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         displaySessionDiagnostics.fillsKept++;
         return true;
       }
-      const { key, source, k, descriptor, area, proxyKey } = fill;
+      const { key, source, k, descriptor, area, proxyKey, lensCorrection } = fill;
       const plan = geometryPlanFor(base, key);
       if (!plan) return skip();
-      const level = await geometryPool.renderDisplayLevel(base, plan, { k, isCurrent });
+      let level;
+      if (lensCorrection) {
+        const lens = plan.has16 ? await lensRemapFor(lensCorrection, plan.outWidth, plan.outHeight) : null;
+        if (!isCurrent() || !state.fileQueue.includes(item)) return false;
+        if (!lens) return skip();
+        level = await geometryPool.renderLensDisplayLevel(base, plan, lens, { k, isCurrent });
+        if (!level && isCurrent() && state.fileQueue.includes(item)) return skip();
+      } else {
+        level = await geometryPool.renderDisplayLevel(base, plan, { k, isCurrent });
+      }
       if (!level || !isCurrent() || !state.fileQueue.includes(item)) return false;
       const sample = getColorAnalysisSample(settings, base);
       const meta = {
         base: descriptor,
         geometry: { angle: key.angle, mirrored: key.mirrored, crop: key.crop, frameWidth: key.frameWidth, frameHeight: key.frameHeight },
         cropSize: key.crop ? { width: key.crop.width, height: key.crop.height } : null, source, area, level: displayLevelGeometry(level),
-        rawMetadata: null, filmEdge: settings.filmEdge || null
+        rawMetadata: null, filmEdge: settings.filmEdge || null,
+        ...(lensCorrection ? { levelLens: lensSignatureOf(lensCorrection) } : {})
       };
       // The persistent store keeps it across restarts (part 3); the session
       // spill takes it when the store is off or full.
@@ -13113,6 +13759,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       state.baseDescriptor = entry.baseDescriptor;
       state.sourcePending = entry.sourcePending || null;
       state.rawMetadata = entry.rawMetadata || null;
+      rememberShotMetadata(fileItem.file, state.rawMetadata);
       state.filmEdge = entry.filmEdge || null;
       expiredAnalysisKey = null;
       state.displayImageData = null;
@@ -13290,6 +13937,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           const samplesMatch = sameDescriptorSamples(descriptor, base);
           state.loadedBaseImageData = base;
           if (!state.rawMetadata && decoded.rawMetadata) state.rawMetadata = decoded.rawMetadata;
+          rememberShotMetadata(state.loadedFile, decoded.rawMetadata);
           state.baseDescriptor = null;
           reviveFrameDescriptor();
           const missed = colorAnalysisSampleMisses.delete(descriptor);
@@ -13451,6 +14099,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       displaySessionDiagnostics.selfChecks++;
       const levelMatches = rebuilt.width === level.width && rebuilt.height === level.height
         && displayPlaneHash(rebuilt) === displayPlaneHash(level);
+      // The level in use now carries the source's lens (#278).
+      displayLevelLenses.set(levelMatches ? level : rebuilt, lensCorrectedSources.get(source) || null);
       const base = state.loadedBaseImageData;
       const cached = base ? colorAnalysisSamples.get(base) : null;
       const area = cached?.key === analysisAreaOf(state.autoFrame.lastDiagnostics) ? JSON.parse(cached.key) : null;
@@ -13653,6 +14303,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       dustAiRefresh.rects.length = 0;
       dustRefreshRepairMask = null;
       restoredDust = null;
+      coldRestoredDust = null;
       cancelScheduledFullResolutionRender();
       coreReprocessGeneration += 1;
       coreReprocessToken += 1;
@@ -13938,6 +14589,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           state.localExposure = null;
           state.repairStrokes = [];
           state.rawMetadata = extractedRawMeta;
+          rememberShotMetadata(file, extractedRawMeta);
           if (webglState.gl) {
             webglState.sourceDirty = true;
             webglState.sourceSize = { w: 0, h: 0 };
@@ -14168,9 +14820,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
             ramBytes: memoryRuntime.ramBytes,
             onMetadata(meta) {
               record.rawMetadata = meta;
+              rememberShotMetadata(record.file, meta);
               if (state.fullDecode === record && meta && !state.rawMetadata) {
                 state.rawMetadata = meta;
                 applyLensMetadataPrefill(meta);
+                // The photo's own focal length and aperture, now known (#278).
+                if (applyShotMetadata(state.lensCorrection.params, shotMetadataFor(record.file))) updateLensCorrectionUI();
               }
             }
           });
@@ -14853,7 +15508,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       state.filmBase = { ...ref.filmBase };
       state.filmBaseSet = true;
       if (ref.lensCorrection) {
-        const safeLens = sanitizeLensCorrection(ref.lensCorrection, state.lensCorrection);
+        // The reference's lens, with this photo's own focal length and
+        // aperture unless the reference's were typed (#278).
+        const safeLens = withReceivingShot(sanitizeLensCorrection(ref.lensCorrection, state.lensCorrection),
+          state.lensCorrection, shotMetadataFor(state.loadedFile));
         state.lensCorrection.enabled = Boolean(safeLens.enabled);
         state.lensCorrection.selectedLens = safeLens.selectedLens ? { ...safeLens.selectedLens } : null;
         state.lensCorrection.params = { ...safeLens.params };
@@ -15038,24 +15696,30 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       return state.lensCorrection.search;
     }
 
+    // A profile chosen from the search results sets the lens, not the shot
+    // (#278): the photo's focal length and aperture stay what its file's
+    // metadata gives or the user typed. Only a focal length neither gave is
+    // guessed from the profile (a prime's own). The profile is stored by its
+    // identity, with the camera the search was narrowed to; the handle the
+    // search returned is the running build's for it.
     function applyLensProfileSelection(lens) {
-      const selected = sanitizeLensSelection(lens, null);
+      const selected = sanitizeLensSelection({ ...lens, camera: state.lensCorrection.searchCamera || null }, null);
       if (!selected) return false;
+      if (lensfunRuntime.client) rememberLensHandle(lensfunRuntime.client, selected, Number(lens?.handle));
       state.lensCorrection.selectedLens = selected;
       state.lensCorrection.enabled = true;
       state.lensCorrection.search.lensModel = selected.model || state.lensCorrection.search.lensModel;
       state.lensCorrection.search.lensMaker = selected.maker || state.lensCorrection.search.lensMaker;
+      const params = state.lensCorrection.params;
       if (!state.lensCorrection.paramTouched.crop && Number.isFinite(selected.cropFactor) && selected.cropFactor > 0) {
-        state.lensCorrection.params.crop = clampBetween(selected.cropFactor, 0.1, 10);
+        params.crop = clampBetween(selected.cropFactor, 0.1, 10);
       }
-      if (!state.lensCorrection.paramTouched.focal) {
-        state.lensCorrection.params.focal = clampBetween(guessFocalFromLensProfile(selected), 1, 10_000);
-      }
-      if (!state.lensCorrection.paramTouched.aperture && Number.isFinite(selected.maxAperture) && selected.maxAperture > 0) {
-        state.lensCorrection.params.aperture = clampBetween(selected.maxAperture, 0.5, 512);
+      applyShotMetadata(params, shotMetadataFor(state.loadedFile));
+      if (!params.focalSource) {
+        params.focal = clampBetween(guessFocalFromLensProfile(selected), 1, 10_000);
       }
       state.lensCorrection.lastError = '';
-      setLensStatus('lensStatusSelected', { lens: formatLensLabel(selected) || `#${selected.handle}` });
+      setLensStatus('lensStatusSelected', { lens: formatLensLabel(selected) });
       updateLensCorrectionUI();
       markCurrentFileDirty();
       return true;
@@ -15090,6 +15754,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         });
 
         state.lensCorrection.searchResults = Array.isArray(results) ? results.slice(0, 200) : [];
+        // lensfun narrows a search to a camera only by its model.
+        state.lensCorrection.searchCamera = query.cameraModel ? { maker: query.cameraMaker, model: query.cameraModel } : null;
         renderLensSearchResults();
 
         if (!state.lensCorrection.searchResults.length) {
@@ -15120,8 +15786,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       } else if (!state.lensCorrection.enabled) {
         setLensStatus('lensStatusSkipped');
       } else if (state.lensCorrection.selectedLens) {
+        // The photo's own focal length and aperture (#278).
+        applyShotMetadata(state.lensCorrection.params, shotMetadataFor(state.loadedFile));
         setLensStatus('lensStatusSelected', {
-          lens: formatLensLabel(state.lensCorrection.selectedLens) || `#${state.lensCorrection.selectedLens.handle}`
+          lens: formatLensLabel(state.lensCorrection.selectedLens)
         });
       }
       updateLensCorrectionUI();
@@ -15171,10 +15839,21 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const input = document.getElementById(id);
       if (!input) return;
       const handler = () => {
-        const value = sanitizeNumeric(input.value, state.lensCorrection.params[key], min, max);
+        const previous = state.lensCorrection.params[key];
+        const value = sanitizeNumeric(input.value, previous, min, max);
+        const shot = key === 'focal' || key === 'aperture';
+        // A focal length or aperture left as the field shows it (rounded) is
+        // not typed: the photo's own value stays, unrounded (#278).
+        if (shot && value === Number(Number(previous).toFixed(decimals))) return;
         state.lensCorrection.params[key] = value;
         input.value = String(Number(value).toFixed(decimals)).replace(/\.?0+$/, '');
-        state.lensCorrection.paramTouched[key] = true;
+        if (shot) {
+          // The photo's shot, as the user typed it: kept over its file's
+          // metadata and profile choices.
+          state.lensCorrection.params[`${key}Source`] = 'user';
+        } else {
+          state.lensCorrection.paramTouched[key] = true;
+        }
         markCurrentFileDirty();
       };
       input.addEventListener('change', handler);
@@ -16365,6 +17044,33 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           settings: extractCurrentSettings(),
           wb: { r: state.wbR, g: state.wbG, b: state.wbB, confidence: state.wbAutoConfidence ?? null }
         })),
+        // With ?debug=1, a lensfun client of the smoke's own (#278): its
+        // maps, so a lens-corrected display session runs the real remap.
+        lensRuntime: client => {
+          if (!DEBUG_UI) return false;
+          Object.assign(lensfunRuntime, { client, source: 'local', initPromise: null, lastError: '' });
+          lensMapCache.clear();
+          lensRemapFailures.clear();
+          return true;
+        },
+        // What lens correction did to the photo on screen: its status,
+        // whether its source and display level carry the recipe's lens, the
+        // corrections its source got (distortion where the lens has it, TCA
+        // and vignetting where the lens has them) and the recipe's focal
+        // length and aperture with their sources (#278).
+        lens: () => {
+          const signature = lensSignature(state);
+          const source = state.conversionSourceImageData;
+          const { focal, aperture, focalSource = null, apertureSource = null } = state.lensCorrection.params;
+          return {
+            profile: state.lensCorrection.selectedLens ? { ...state.lensCorrection.selectedLens } : null,
+            shot: { focal, aperture, focalSource, apertureSource },
+            active: Boolean(signature), status: state.lensCorrection.statusKey || null,
+            source: source ? lensCorrectedSources.get(source) === signature && Boolean(signature) : null,
+            level: state.displayLevelImageData ? displayLevelLenses.get(state.displayLevelImageData) === signature && Boolean(signature) : null,
+            corrections: source?.__lensCorrections ? { ...source.__lensCorrections } : null
+          };
+        },
         // A photo that is not on screen opens cold next time (or, with
         // `keepStore`, from the persistent store): its session, prefetched
         // base and spilled (and stored) proxies go.
@@ -17411,13 +18117,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         const containerRect = canvasContainer.getBoundingClientRect();
         const cx = containerRect.left + containerRect.width / 2;
         const cy = containerRect.top + containerRect.height / 2;
-        zoomAtPoint(state.zoomLevel * ZOOM_BUTTON_FACTOR, cx, cy);
+        zoomAtPoint(state.zoomLevel * ZOOM_BUTTON_FACTOR, cx, cy, { step: true });
       } else if (key === '-') {
         event.preventDefault();
         const containerRect = canvasContainer.getBoundingClientRect();
         const cx = containerRect.left + containerRect.width / 2;
         const cy = containerRect.top + containerRect.height / 2;
-        zoomAtPoint(state.zoomLevel / ZOOM_BUTTON_FACTOR, cx, cy);
+        zoomAtPoint(state.zoomLevel / ZOOM_BUTTON_FACTOR, cx, cy, { step: true });
       } else if (key === '0') {
         event.preventDefault();
         resetUserZoom();
@@ -17506,14 +18212,14 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const containerRect = canvasContainer.getBoundingClientRect();
       const cx = containerRect.left + containerRect.width / 2;
       const cy = containerRect.top + containerRect.height / 2;
-      zoomAtPoint(state.zoomLevel * ZOOM_BUTTON_FACTOR, cx, cy);
+      zoomAtPoint(state.zoomLevel * ZOOM_BUTTON_FACTOR, cx, cy, { step: true });
     });
 
     document.getElementById('zoomOutBtn').addEventListener('click', () => {
       const containerRect = canvasContainer.getBoundingClientRect();
       const cx = containerRect.left + containerRect.width / 2;
       const cy = containerRect.top + containerRect.height / 2;
-      zoomAtPoint(state.zoomLevel / ZOOM_BUTTON_FACTOR, cx, cy);
+      zoomAtPoint(state.zoomLevel / ZOOM_BUTTON_FACTOR, cx, cy, { step: true });
     });
 
     document.getElementById('zoomResetBtn').addEventListener('click', () => {
@@ -18681,7 +19387,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (state.zoomLevel > 1) {
         resetUserZoom();
       } else {
-        zoomAtPoint(ZOOM_DOUBLE_CLICK_FACTOR, e.clientX, e.clientY);
+        zoomAtPoint(ZOOM_DOUBLE_CLICK_FACTOR, e.clientX, e.clientY, { step: true });
       }
     });
 
@@ -20338,6 +21044,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         next.repairStrokes = structuredClone(item.settings?.repairStrokes || []);
         // These describe the receiving photograph, not the copied colour recipe.
         next.reviewed = Boolean(item.settings?.reviewed);
+        // Its focal length and aperture too, unless the copied ones were typed (#278).
+        if (next.lensCorrection) next.lensCorrection = withReceivingShot(next.lensCorrection, item.settings?.lensCorrection, shotMetadataFor(item.file));
         next.frameMetadata = sanitizeFrameMetadata(item.settings?.frameMetadata);
         next.filmEdge = item.settings?.filmEdge ? structuredClone(item.settings.filmEdge) : null;
         // Keep the receiving frame's roll share only after interpretation
@@ -20625,6 +21333,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const aborted = () => signal?.reason?.name === 'AbortError' ? signal.reason : new DOMException('Decode was aborted', 'AbortError');
       const ownClaim = claim ? null : createFrameClaim(file, { priority, signal, label: label || `decode ${file.name}` });
       const memoryClaim = claim || ownClaim;
+      // Every decode records the photo's focal length and aperture (#278).
+      const metadataSink = meta => {
+        rememberShotMetadata(file, meta);
+        onMetadata?.(meta);
+      };
       let image;
       try {
         if (isRawLikeFileName(fileName)) {
@@ -20640,7 +21353,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
             // A background lane's decode leaves the cores to the photo on
             // screen (#264: native and threaded WASM alike).
             priority,
-            ...(onMetadata ? { onMetadata } : {}),
+            onMetadata: metadataSink,
             ...(onStage ? { onStage } : {}),
             ...(halfSize ? { halfSize: true, outputBps: 16, suppressSensorDefects: false, knownFullSize: knownImageDimensions(file) } : {}),
             ...(postDecode ? { postDecode } : {}),
@@ -20864,6 +21577,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const borderBuffer = inputs.borderBuffer;
       const borderBufferBorderValue = sanitizeNumeric(state.coreBorderBufferBorderValue, 10, 0, 30);
       const filmBase = autoDetectFilmBase(imageData, borderBuffer);
+      // The editor's lens block carries over to the next photo of the roll,
+      // with the photo's own focal length and aperture where its file gives
+      // them, over values carried from another photo, typed ones too (#278).
+      const lensCorrection = state.lensCorrection
+        ? sanitizeLensCorrection(state.lensCorrection, createDefaultLensCorrectionSettings())
+        : createDefaultLensCorrectionSettings();
+      if (item?.file) applyShotMetadata(lensCorrection.params, shotMetadataFor(item.file), { replaceUser: true });
       trace.end();
       return {
         cropRegion: null,
@@ -20874,9 +21594,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         filmBase: filmBase,
         filmEdge: null,
         rollFrame: null,
-        lensCorrection: state.lensCorrection
-          ? sanitizeLensCorrection(state.lensCorrection, createDefaultLensCorrectionSettings())
-          : createDefaultLensCorrectionSettings(),
+        lensCorrection,
         coreFilmPreset: 'none',
         coreColorModel: 'standard',
         coreEnhancedProfile: 'none',
@@ -21259,7 +21977,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         const planes = options.releaseEarly && !previewMax && !tileMax && options.stage !== 'source'
           && !lensCorrectionActive(settings) ? '16' : null;
         workingData = own(await renderGeometryChain(imageData, geometry, { isCurrent, maxInFlight: options.geometryBands, planes }), imageData);
-        workingData = own(await applyLensCorrectionWithSettings(workingData, settings, { updateUi: false }), workingData);
+        workingData = own(await applyLensCorrectionWithSettings(workingData, settings, { updateUi: false, file }), workingData);
         assertRepairCurrent(isCurrent);
         fullWorkingShortSide = Math.min(workingData.width, workingData.height);
       }
@@ -21394,7 +22112,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           isCurrent, maxInFlight: options.geometryBands,
           planes: options.releaseEarly && !lensCorrectionActive(settings) ? '16' : null
         }), imageData);
-        rebuilt = own(await applyLensCorrectionWithSettings(rebuilt, settings, { updateUi: false }), rebuilt);
+        rebuilt = own(await applyLensCorrectionWithSettings(rebuilt, settings, { updateUi: false, file }), rebuilt);
         assertRepairCurrent(isCurrent);
         workingData = rebuilt;
         rebuilt = null;
@@ -22871,6 +23589,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           state.sourcePending = cached.base ? null : cached.sourcePending || null;
           if (displayForm) displaySessionDiagnostics.ramHits++;
           state.rawMetadata = cached.rawMetadata;
+          rememberShotMetadata(fileItem.file, cached.rawMetadata);
           state.filmEdge = cached.filmEdge;
           expiredAnalysisKey = null;
           state.displayImageData = null;
@@ -23143,6 +23862,18 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (state.lensCorrection.selectedLens) {
         state.lensCorrection.search.lensModel = state.lensCorrection.selectedLens.model || state.lensCorrection.search.lensModel;
         state.lensCorrection.search.lensMaker = state.lensCorrection.selectedLens.maker || state.lensCorrection.search.lensMaker;
+      }
+      // A lens-corrected photo converts with its own focal length and aperture
+      // where its file gives them and the user typed none (#278): a recipe
+      // saved before their source was recorded, or built without the file's
+      // metadata, may hold another photo's or a guess. The photo's recipe
+      // takes them too, so its exports, fills and stored proxies agree.
+      if (state.lensCorrection.enabled && state.lensCorrection.selectedLens
+        && applyShotMetadata(state.lensCorrection.params, shotMetadataFor(state.loadedFile))) {
+        const item = getCurrentQueueItem();
+        if (item && item.settings === settings && settings.lensCorrection) {
+          item.settings = { ...settings, lensCorrection: { ...settings.lensCorrection, params: { ...state.lensCorrection.params } } };
+        }
       }
       state.lensCorrection.statusKey = state.lensCorrection.enabled
         ? (state.lensCorrection.selectedLens ? 'lensStatusSelected' : 'lensStatusNeedProfile')
@@ -25021,9 +25752,14 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
             allowCrop, silent: true, autoFrame, filmType: snapshot.filmType, signal, detection
           }).then(settings => { trace.mark('autoFrame', { applied: settings.autoFrameMeta?.appliedMode || 'none' }); return settings; })
           : Promise.resolve(snapshot);
+        // `readMs`: the read's own time; it shares one worker reply with the
+        // frame detection, so the stage's mark alone cannot time it (#273).
         const edge = readEdge
           ? analysed.then(outcome => outcome.read)
-            .then(read => { trace.mark('filmEdge', { found: Boolean(read?.result?.found || read?.result?.text) }); return read; })
+            .then(read => {
+              trace.mark('filmEdge', { found: Boolean(read?.result?.found || read?.result?.text), ...(Number.isFinite(read?.ms) ? { readMs: read.ms } : {}) });
+              return read;
+            })
           : Promise.resolve(null);
         frame.catch(() => {});
         edge.catch(() => {});
@@ -25901,7 +26637,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // only with those live rectangles.
     let dodgeBurnDrawing = false;
     let dodgeBurnPointerId = null;
-    let dodgeBurnPoints = [];
+    // The stroke's points (working pixels): the ones the live effect paints
+    // and the pen-up stores (createStrokeRecorder, #280).
+    let dodgeBurnRecorder = null;
     let dodgeBurnSurface = null;
     let dodgeBurnRect = null;
     let dodgeBurnLastSample = null;
@@ -25958,15 +26696,19 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // The container's touch pan must not start under the brush.
       event.stopPropagation();
       captureBrushPointer(event.currentTarget, event.pointerId);
+      const { radius } = strokeBrush(parameters, geometry);
       dodgeBurnDrawing = true;
       dodgeBurnPointerId = event.pointerId;
       dodgeBurnSurface = event.currentTarget;
       dodgeBurnRect = rect;
       dodgeBurnBrush = brush;
-      dodgeBurnPoints = [point];
+      // Every point up to 400; past that a pen stroke keeps one per eighth of
+      // the brush radius, so it is stored as painted (#280).
+      dodgeBurnRecorder = createStrokeRecorder({ spacing: radius / 8, decimate: event.pointerType === 'pen' });
+      dodgeBurnRecorder.add(point);
       dodgeBurnLastSample = { clientX: event.clientX, clientY: event.clientY };
       brushFeedback.begin({ tool: 'dodge', color: BRUSH_FEEDBACK_STYLES.dodge.colors[parameters.stops < 0 ? 'dodge' : 'burn'],
-        radius: strokeBrush(parameters, geometry).radius, frameWidth: geometry.width, frameHeight: geometry.height, surface: rect });
+        radius, frameWidth: geometry.width, frameHeight: geometry.height, surface: rect });
       brushFeedback.add([point]);
       beginLiveDodge(parameters, geometry, point);
     }
@@ -25974,7 +26716,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     function onDodgeBurnPointerMove(event) {
       if (!dodgeBurnDrawing || event.pointerId !== dodgeBurnPointerId) return;
       const dpr = window.devicePixelRatio || 1;
-      const added = [];
+      const samples = [];
+      const kept = [];
       for (const sample of pointerSamples(event)) {
         // At least a device pixel apart (#254 A.3): coalesced samples make a
         // fast stroke a curve instead of a few long chords.
@@ -25982,12 +26725,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         const point = pointerToWorkingPoint(sample, dodgeBurnRect);
         if (!point) continue;
         dodgeBurnLastSample = { clientX: sample.clientX, clientY: sample.clientY };
-        dodgeBurnPoints.push(point);
-        added.push(point);
+        samples.push(point);
+        if (dodgeBurnRecorder.add(point)) kept.push(point);
       }
-      if (!added.length) return;
-      brushFeedback.add(added);
-      addLiveDodgePoints(added);
+      // The trail follows every sample; the live effect paints the points kept.
+      if (samples.length) brushFeedback.add(samples);
+      if (kept.length) addLiveDodgePoints(kept);
     }
 
     function releaseDodgeBurnPointer() {
@@ -26003,13 +26746,20 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     function onDodgeBurnPointerUp(event) {
       if (!dodgeBurnDrawing || event.pointerId !== dodgeBurnPointerId) return;
       releaseDodgeBurnPointer();
-      const points = dodgeBurnPoints;
-      dodgeBurnPoints = [];
+      const recorder = dodgeBurnRecorder;
+      dodgeBurnRecorder = null;
+      // The last sample ends a pen stroke even when the recorder skipped it;
+      // the live effect paints it too, so the stored stroke is the painted one.
+      const end = recorder?.finish();
+      if (end) addLiveDodgePoints([end]);
+      const points = recorder ? recorder.points : [];
       const geometry = dodgeBurnGeometry();
       if (!points.length || !geometry) { endLiveDodge(false); return; }
-      // More than 400 points are resampled, as repair strokes are, so the
-      // stroke keeps its end; the sanitiser itself stays as it is (#254 A.6).
-      const kept = resampleStrokePoints(points);
+      // A mouse or touch stroke (one pressure) of more than 400 points is
+      // resampled, as repair strokes are, so it keeps its end (#254 A.6;
+      // within 1/255 of the live frame). A pen stroke is stored as painted
+      // (#280); only one that goes on past MAX_STROKE_POINTS is resampled.
+      const kept = resampleStrokePoints(points, recorder.decimate ? MAX_STROKE_POINTS : DENSE_STROKE_POINTS);
       const stroke = {
         ...(dodgeBurnBrush || dodgeBurnBrushValues()),
         points: kept.map((p) => ({ ...workingPointToBase(p, geometry), p: p.p }))
@@ -26020,9 +26770,17 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       markCurrentFileDirty();
       updateDodgeBurnUI();
       // The live rectangles stay on screen until this frame replaces them; the
-      // stored stroke joins the display overlay.
+      // stored stroke joins the display overlay. Over another frame than the
+      // worker's, what they left on screen stands for the pen-up's settings
+      // until their exact frame lands (adoptLiveComposite, #254 follow-up).
       endLiveDodge(true);
       scheduleCoreReprocess({ full: false });
+      const session = liveDodge;
+      if (session && session.ended === 'commit') {
+        session.commitToken = coreReprocessToken;
+        session.storedPoints = state.localExposure?.strokes?.at(-1)?.points?.length || 0;
+        adoptLiveComposite(session);
+      }
       syncDisplayOverlay();
     }
 
@@ -26031,7 +26789,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     function cancelDodgeBurnStroke() {
       if (!dodgeBurnDrawing) return;
       releaseDodgeBurnPointer();
-      dodgeBurnPoints = [];
+      dodgeBurnRecorder = null;
       endLiveDodge(false);
     }
 
@@ -26102,12 +26860,22 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       return { shown, gl: false, serial: liveDisplaySerial };
     }
 
-    // The worker frame a stroke paints over: the frame on screen when it is
-    // the worker's live frame of the current settings ('exact'), else the
-    // worker's newest frame of the current settings and the same size
-    // ('delta'). Null while a newer frame is on its way.
-    function liveDodgeTarget(display) {
+    // What a stroke paints over (null while a newer frame is on its way):
+    // - 'exact': the frame on screen is the worker's live frame of the current
+    //   settings; its rectangles go in as they are.
+    // - 'display': the frame on screen is the display preview of a
+    //   full-resolution frame of the current settings (exactDisplays), whose
+    //   source the worker holds as its level. The worker converts the stroke's
+    //   region of that source as the frame was converted and filters it as the
+    //   display was (exposureExact): the rectangles are that display's own
+    //   pixels with the stroke (#254 follow-up).
+    // - 'delta': another frame (a repaired one, say): the worker's newest frame
+    //   of the current settings and the same size, shown as displayed + (live -
+    //   committed), an approximation.
+    function liveDodgeTarget(display, session = null) {
       if (!LIVE_DODGE_ENABLED || !display || !usesSilverCoreConversion(state)) return null;
+      const full = session?.noExactDisplay ? null : exactDisplayTarget(display);
+      if (full) return full;
       if (coreReprocessScheduled || _coreReprocessPending || _coreReprocessPreviewInFlight || gpuPreviewScheduler.isAhead()) return null;
       const own = convertPreviewFrameInWorker.liveFrameOf?.(display.shown);
       if (own && !staleLiveFrames.has(own.seq) && displayedFrameToken === coreReprocessToken) return { frame: own, mode: 'exact' };
@@ -26117,13 +26885,43 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       return null;
     }
 
+    // The 'display' target over the frame on screen, or null. The display must
+    // be the filter of a full-resolution frame as its conversion made it: a
+    // repaired frame is another object, and an in-place patch moves
+    // convertedPixelsRevision, so the worker's region (which carries no dust
+    // or AI repair) is never painted over repaired pixels.
+    function exactDisplayTarget(display) {
+      if (!liveDodgeExactDisplays) return null;
+      const entry = exactDisplays.get(display.shown);
+      const source = state.conversionSourceImageData;
+      if (!entry || entry.token !== coreReprocessToken || entry.generation !== coreReprocessGeneration
+        || entry.revision !== convertedPixelsRevision) return null;
+      // The worker converts regions of its cached level: the source itself.
+      if (!source || state.displayLevelImageData !== source
+        || !convertPreviewFrameInWorker.holds?.(source, getColorAnalysisSample(state))) return null;
+      const geometry = localExposureGeometryFor(state);
+      if (!geometry) return null;
+      return { mode: 'display', frame: null, entry, source, exact: {
+        settings: buildRouterSettings(state), analysis: entry.analysis,
+        frame: { width: source.width, height: source.height },
+        display: { width: display.shown.width, height: display.shown.height, k: entry.k },
+        geometry: { ...geometry, width: source.width, height: source.height }
+      } };
+    }
+
     function beginLiveDodge(parameters, geometry, firstPoint) {
       if (!LIVE_DODGE_ENABLED) return;
       const display = liveDodgeDisplay();
-      const session = { id: liveDodgeCounters.strokes + 1, parameters, geometry, display, target: liveDodgeTarget(display),
+      const session = { id: liveDodgeCounters.strokes + 1, parameters, geometry, display, target: null,
         // The stored strokes this one is painted over; the pen-up adds it to them.
         committed: state.localExposure || null,
-        base: [], sent: 0, inFlight: false, reset: true, fullStroke: false, ended: null, touched: false, warming: false };
+        // `sent` points were posted, the rectangles of `applied` are on screen,
+        // `inFlight` requests run (two at most, at the pen-up).
+        base: [], sent: 0, applied: 0, inFlight: 0, reset: true, fullStroke: false, ended: null, touched: false, warming: false,
+        // What the rectangles left on screen over a frame that is not the
+        // worker's own (noteLiveComposite), and the pen-up's token.
+        composite: null, adjusted: null, noExactDisplay: false, commitToken: null, storedPoints: 0, adopted: false };
+      session.target = liveDodgeTarget(display, session);
       liveDodge = session;
       liveDodgeCounters.strokes++;
       addLiveDodgePoints([firstPoint]);
@@ -26154,40 +26952,57 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     function retargetLiveDodge(session) {
-      session.display = liveDodgeDisplay();
-      session.target = liveDodgeTarget(session.display);
+      const display = liveDodgeDisplay();
+      // Rectangles over another frame are no part of the new frame's composite.
+      if (!display || !session.display || display.shown !== session.display.shown || display.gl !== session.display.gl) {
+        session.composite = null;
+        session.adjusted = null;
+        session.applied = 0;
+      }
+      session.display = display;
+      session.target = liveDodgeTarget(display, session);
       session.reset = true;
       if (!session.target && session.display && !session.ended) warmLiveDodge(session);
     }
 
     function flushLiveDodge(session) {
       if (session.released) return;
-      if (liveDodge !== session) { releaseLiveDodge(session); return; }
-      if (session.inFlight || session.ended === 'cancel') return;
+      if (liveDodge !== session) { finishLiveDodge(session); return; }
+      if (session.ended === 'cancel') return;
+      // One request at a time while painting: points gather meanwhile. The
+      // pen-up sends the rest at once, so the worker paints it before it
+      // converts the pen-up frame (#254 follow-up).
+      if (session.inFlight && session.ended !== 'commit') return;
       if (!liveDodgeStillShown(session)) {
-        if (session.ended) { releaseLiveDodge(session); return; }
+        if (session.ended) { finishLiveDodge(session); return; }
         retargetLiveDodge(session);
       }
-      if (!session.target) { if (session.ended) releaseLiveDodge(session); return; }
+      if (!session.target) { if (session.ended && !session.inFlight) finishLiveDodge(session); return; }
       const points = session.reset ? session.base.slice() : session.base.slice(session.sent);
-      if (!points.length && !session.reset && !session.fullStroke) { if (session.ended) releaseLiveDodge(session); return; }
+      if (!points.length && !session.reset && !session.fullStroke) { if (session.ended && !session.inFlight) finishLiveDodge(session); return; }
+      const upTo = session.base.length;
+      const { mode } = session.target;
       const request = { frame: session.target.frame, strokeId: session.id, stroke: session.parameters, points, committed: session.committed,
-        reset: session.reset, fullStroke: session.fullStroke, withCommitted: session.target.mode === 'delta' };
-      session.sent = session.base.length;
+        reset: session.reset, fullStroke: session.fullStroke, withCommitted: mode === 'delta', exact: session.target.exact || null,
+        source: session.target.source || null };
+      session.sent = upTo;
       session.reset = false;
       session.fullStroke = false;
-      session.inFlight = true;
+      session.inFlight++;
       liveDodgeCounters.requests++;
-      convertPreviewFrameInWorker.exposureLive(request)
-        .then((reply) => applyLiveDodgeReply(session, reply, request.frame), (error) => {
+      const pending = mode === 'display' ? convertPreviewFrameInWorker.exposureExact(request) : convertPreviewFrameInWorker.exposureLive(request);
+      pending
+        .then((reply) => applyLiveDodgeReply(session, reply, request, upTo), (error) => {
           console.warn('Live dodge and burn failed:', error?.message || error);
+          if (mode === 'display') session.noExactDisplay = true;
           session.target = null;
         })
         .finally(() => {
-          session.inFlight = false;
+          session.inFlight--;
+          if (session.inFlight) return;
           // Points that arrived meanwhile, or the rest of an ended stroke.
           if (session.base.length > session.sent || session.reset || session.fullStroke) flushLiveDodge(session);
-          else if (session.ended) releaseLiveDodge(session);
+          else if (session.ended) finishLiveDodge(session);
         });
     }
 
@@ -26206,14 +27021,18 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       return out;
     }
 
-    // `frame`: the live frame the request painted over.
-    function applyLiveDodgeReply(session, reply, frame) {
+    // `request`: what was asked (its live frame, `exact` for a display
+    // target); `upTo`: the points it covered.
+    function applyLiveDodgeReply(session, reply, request, upTo) {
+      const { frame } = request;
       if (reply.stale) {
         liveDodgeCounters.stale++;
         // Retargeting must never pick that frame again (a request loop): the
         // next target is a newer or a warmed frame.
         if (frame) staleLiveFrames.add(frame.seq);
         if (staleLiveFrames.size > 32) staleLiveFrames.delete(staleLiveFrames.values().next().value);
+        // A display whose source the worker no longer holds is painted by delta.
+        if (request.exact) session.noExactDisplay = true;
       }
       if (session.ended === 'cancel') return;
       if (reply.stale || reply.needsReset) {
@@ -26222,12 +27041,18 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         else retargetLiveDodge(session);
         return;
       }
-      if (!reply.rect || !liveDodgeStillShown(session)) return;
+      if (!liveDodgeStillShown(session)) return;
+      if (!reply.rect) {
+        session.applied = Math.max(session.applied, upTo);
+        return;
+      }
       const { rect } = reply;
       const shown = session.display.shown;
-      const rows = session.target?.mode === 'delta' && reply.committedRgba
+      const mode = session.target?.mode;
+      const rows = mode === 'delta' && reply.committedRgba
         ? liveDeltaRows(shown, rect, reply.rgba, reply.committedRgba) : reply.rgba;
-      if (session.target?.mode === 'delta') liveDodgeCounters.deltaRects++;
+      if (mode === 'delta') liveDodgeCounters.deltaRects++;
+      if (mode === 'display') liveDodgeCounters.exactRects++;
       liveDodgeCounters.rects++;
       liveDodgeCounters.maxRectPixels = Math.max(liveDodgeCounters.maxRectPixels, rect.width * rect.height);
       liveDodgeCounters.lastRect = { ...rect };
@@ -26237,12 +27062,15 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         width: Math.max(box.x + box.width, rect.x + rect.width) - Math.min(box.x, rect.x),
         height: Math.max(box.y + box.height, rect.y + rect.height) - Math.min(box.y, rect.y)
       };
+      const rows16 = mode === 'display' ? reply.image16 : null;
       if (session.display.gl) {
         if (!webglUploadRectRows(rect, rows, shown.width, shown.height)) {
           session.target = null;
           return;
         }
+        noteLiveComposite(session, rect, rows, rows16, null);
         session.touched = true;
+        session.applied = Math.max(session.applied, upTo);
         liveDodgeCounters.uploads++;
         renderWebGL();
         return;
@@ -26256,8 +27084,97 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       });
       const photo = state.sprocketPreviewEnabled ? mainCanvasPhoto : null;
       ctx.putImageData(adjusted, (photo ? photo.x : 0) + rect.x, (photo ? photo.y : 0) + rect.y);
+      noteLiveComposite(session, rect, rows, rows16, adjusted);
       session.touched = true;
+      session.applied = Math.max(session.applied, upTo);
       liveDodgeCounters.puts++;
+    }
+
+    function writeRectRows(plane, width, rect, rows) {
+      const span = rect.width * 4;
+      for (let y = 0; y < rect.height; y++) plane.set(rows.subarray(y * span, (y + 1) * span), ((rect.y + y) * width + rect.x) * 4);
+    }
+
+    // What the rectangles of a stroke leave on screen over a frame that is
+    // not the worker's own (#254 follow-up): the display preview with their
+    // rows in it (the 16-bit plane too while they are exact), and on a CPU
+    // display the adjusted frame with their adjusted rows. Its pen-up installs
+    // it as the display (adoptLiveComposite). Over the worker's own frame the
+    // pen-up frame is the live frame itself, so nothing is kept.
+    function noteLiveComposite(session, rect, rows, rows16, adjusted) {
+      if (session.target?.mode === 'exact') return;
+      const shown = session.display.shown;
+      if (!session.composite) {
+        const composite = new ImageData(new Uint8ClampedArray(shown.data), shown.width, shown.height);
+        if (rows16 && shown.__image16?.data instanceof Uint16Array) {
+          composite.__image16 = { width: shown.width, height: shown.height, data: new Uint16Array(shown.__image16.data) };
+        }
+        session.composite = composite;
+        const frame = state.displayImageData;
+        session.adjusted = !session.display.gl && frame && frame.width === shown.width && frame.height === shown.height
+          ? new ImageData(new Uint8ClampedArray(frame.data), frame.width, frame.height) : null;
+      }
+      const { composite } = session;
+      writeRectRows(composite.data, composite.width, rect, rows);
+      if (composite.__image16) {
+        if (rows16) writeRectRows(composite.__image16.data, composite.width, rect, rows16);
+        else delete composite.__image16;
+      }
+      if (session.adjusted && adjusted) writeRectRows(session.adjusted.data, shown.width, rect, adjusted.data);
+    }
+
+    // Once a committed stroke's rectangles are all on screen, and its pen-up
+    // frame has not landed, what they left there becomes the display preview
+    // without a redraw (#254 follow-up). The pen-up frame then leaves it
+    // (keepLiveComposite), and the exact frame of the stroke replaces it:
+    // outside the stroke's rectangles that frame is the one on screen before
+    // it. A composite of exact rectangles is the exact display of the pen-up
+    // settings, so a next stroke paints exactly over it too.
+    function adoptLiveComposite(session) {
+      const composite = session.composite;
+      if (!composite || session.adopted || session.ended !== 'commit' || session.commitToken === null) return;
+      if (session.inFlight || session.applied < session.base.length) return;
+      if (session.commitToken !== coreReprocessToken || displayedFrameToken === session.commitToken) return;
+      const display = liveDodgeDisplay();
+      if (!display || !session.display || display.shown !== session.display.shown || display.gl !== session.display.gl
+        || display.serial !== session.display.serial) return;
+      session.adopted = true;
+      state.previewSourceImageData = composite;
+      state.webglSourceImageData = composite;
+      state.histogramSourceImageData = buildHistogramSourceImageData(composite);
+      if (session.adjusted) state.displayImageData = session.adjusted;
+      liveComposites.set(composite, { token: session.commitToken, adjusted: session.adjusted });
+      if (session.target?.mode === 'display' && session.storedPoints === session.base.length && composite.__image16) {
+        exactDisplays.set(composite, { ...session.target.entry, token: session.commitToken, revision: convertedPixelsRevision });
+      }
+      session.display = { ...session.display, shown: composite };
+      liveDodgeCounters.adopted++;
+    }
+
+    // The live composite on screen that stands for `token`'s settings, or null.
+    function liveCompositeOf(token) {
+      const shown = state.previewSourceImageData;
+      const entry = shown ? liveComposites.get(shown) : null;
+      return entry && entry.token === token ? { image: shown, adjusted: entry.adjusted } : null;
+    }
+
+    // Puts the live composite back after its pen-up frame was applied: the
+    // display fields name it again, the texture (which holds it) is not
+    // uploaded again, and a CPU display keeps its adjusted frame.
+    function keepLiveComposite(composite, sourceDirty) {
+      state.previewSourceImageData = composite.image;
+      state.webglSourceImageData = composite.image;
+      state.histogramSourceImageData = buildHistogramSourceImageData(composite.image);
+      if (composite.adjusted) state.displayImageData = composite.adjusted;
+      webglState.sourceDirty = sourceDirty;
+      liveDodgeCounters.kept++;
+    }
+
+    // The stroke's last request has run: a committed stroke's composite
+    // becomes the display, and the worker lets the stroke go.
+    function finishLiveDodge(session) {
+      adoptLiveComposite(session);
+      releaseLiveDodge(session);
     }
 
     // Pen-up keeps the rectangles (and sends the last points) until the new
@@ -26316,14 +27233,40 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         containerClass: canvasContainer.classList.contains('brush-tool-active'),
         feedback: brushFeedback.state(),
         layer: { visible: displayOverlay.style.display === 'block', width: displayOverlay.width, height: displayOverlay.height,
-          box: ['left', 'top', 'width', 'height'].map(key => displayOverlay.style[key]),
+          photo: displayOverlayState.plan ? { ...displayOverlayState.plan.photo } : null,
           counters: { ...displayOverlayState.counters, paints: displayDebugCounters.overlayPaints } },
         tint: dustTint.image ? { width: dustTint.width, height: dustTint.height, current: Boolean(dustTint.mask === state.dustRemoval.mask && dustTint.tag === state.dustRemoval.maskTag) } : null,
         live: { ...liveDodgeCounters, enabled: LIVE_DODGE_ENABLED,
-          session: liveDodge ? { mode: liveDodge.target?.mode || null, ended: liveDodge.ended, points: liveDodge.base.length, touched: liveDodge.touched } : null },
+          session: liveDodge ? { mode: liveDodge.target?.mode || null, ended: liveDodge.ended, points: liveDodge.base.length, touched: liveDodge.touched,
+            sent: liveDodge.sent, applied: liveDodge.applied, inFlight: liveDodge.inFlight, adopted: liveDodge.adopted } : null,
+          // The display preview on screen (#254 follow-up): what a stroke's
+          // rectangles left there, and whether it is a full-resolution frame's
+          // exact display of the current settings.
+          display: (() => {
+            const shown = displaySourceImageData();
+            const exact = shown ? exactDisplays.get(shown) : null;
+            return { composite: Boolean(shown && liveComposites.has(shown)), exact: Boolean(exact && exact.token === coreReprocessToken) };
+          })() },
+        // Points of each stored dodge-and-burn stroke (#280).
+        strokePoints: (state.localExposure?.strokes || []).map((stroke) => stroke.points.length),
         canvasWrites: { ...mainCanvasWrites },
         photoRect: (() => { const rect = brushSurfaceRect(); return { left: rect.left, top: rect.top, width: rect.width, height: rect.height }; })()
       }),
+      // The dust mask's bytes in a rectangle of the working frame (clipped to
+      // it), as committed: where a stroke's disc landed (#279 follow-up).
+      maskWindow: (x, y, width, height) => {
+        const mask = state.dustRemoval.mask;
+        const frame = state.processedImageData;
+        if (!mask || !frame) return null;
+        const x0 = Math.max(0, Math.floor(x)), y0 = Math.max(0, Math.floor(y));
+        const x1 = Math.min(frame.width, Math.ceil(x + width)), y1 = Math.min(frame.height, Math.ceil(y + height));
+        if (!(x1 > x0 && y1 > y0)) return null;
+        const data = [];
+        for (let row = y0; row < y1; row++) for (let column = x0; column < x1; column++) data.push(mask[row * frame.width + column] ? 1 : 0);
+        return { x: x0, y: y0, width: x1 - x0, height: y1 - y0, frame: [frame.width, frame.height], data };
+      },
+      // The delta path on frames that would get exact rectangles (#254 follow-up).
+      setExactDisplays: (on) => { liveDodgeExactDisplays = Boolean(on); },
       resetCounters: () => {
         mainCanvasWrites.put = 0; mainCanvasWrites.draw = 0; mainCanvasWrites.maxPutPixels = 0;
         for (const key of Object.keys(liveDodgeCounters)) liveDodgeCounters[key] = key === 'lastRect' || key === 'box' ? null : 0;
@@ -28098,7 +29041,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         rollMetadata: state.rollMetadata,
         rollReference: state.rollReference,
         rollAnalysis: state.rollAnalysis,
-        lensCorrection: state.lensCorrection
+        // The lens block as recipes keep it: the profile's identity, never a
+        // lensfun handle (#278), nor the panel's search results.
+        lensCorrection: sanitizeLensCorrection(state.lensCorrection, createDefaultLensCorrectionSettings())
       });
     }
 

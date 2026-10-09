@@ -35,15 +35,18 @@ export function upscaleReference(reference, width, height) {
 }
 
 /**
- * CSS percentages that lay an element over the photo of a framed canvas
- * (`layout` from getSprocketFrameLayout), whatever size the canvas is shown at.
+ * The CSS transform that lays an element with the photo canvas's box (its
+ * left, top, width and height, transform-origin 0 0) over `rect` of the
+ * frameWidth x frameHeight frame the canvas shows: the photo of a framed
+ * canvas (`layout` from getSprocketFrameLayout) or a region of the image.
+ *
+ * Not a box of its own (#279 follow-up): the compositor puts a canvas at its
+ * box rounded to whole CSS pixels in the wrapper's space, before the zoom
+ * scales it, so a fractional box drifts off the photo's pixel grid by up to
+ * half a CSS pixel times the zoom. The photo canvas's box is whole pixels,
+ * and a transform is applied as it is. The translation is a percentage of
+ * that box, so the element follows a new fit without being placed again.
  */
-export function photoRectPercent({ frameWidth, frameHeight, x, y, width, height }) {
-  const percent = (value, total) => `${(value / total) * 100}%`;
-  return {
-    left: percent(x, frameWidth),
-    top: percent(y, frameHeight),
-    width: percent(width, frameWidth),
-    height: percent(height, frameHeight)
-  };
+export function frameRectTransform({ x, y, width, height }, frameWidth, frameHeight) {
+  return `translate(${(x / frameWidth) * 100}%, ${(y / frameHeight) * 100}%) scale(${width / frameWidth}, ${height / frameHeight})`;
 }

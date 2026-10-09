@@ -10,7 +10,7 @@ import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   displayProxyBuildHashes, DISPLAY_PROXY_ENTRY_FILES, DISPLAY_PROXY_CODE_FILES, DISPLAY_PROXY_DECODER_FILES,
-  DISPLAY_PROXY_SCAN_DECODER_FILES, DISPLAY_PROXY_CODEC_FILES
+  DISPLAY_PROXY_SCAN_DECODER_FILES, DISPLAY_PROXY_CODEC_FILES, DISPLAY_PROXY_LENS_PACKAGE, DISPLAY_PROXY_LENS_FILES
 } from '../../../scripts/display-proxy-hashes.mjs';
 
 const appRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -84,15 +84,32 @@ for (const file of ['app/analysisRegion.js', 'app/heifLoader.js', 'workers/scanD
 }
 
 // ---- Third-party decoders: every package the closure imports is hashed
-// with the decoder, but the lens database, whose corrected proxies are never
-// read back from the store (expectedStoredProxyKey has no key for them) ----
+// with the decoder, the lens database and runtime too: a lens-corrected
+// proxy is read back from the store (#278) ----
 const packageOf = specifier => specifier.split('/').slice(0, specifier.startsWith('@') ? 2 : 1).join('/');
-const hashedPackages = ['libraw-wasm', ...Object.keys(DISPLAY_PROXY_SCAN_DECODER_FILES)];
-const unhashedPackages = ['@neoanaloglabkk/lensfun-wasm'];
+const hashedPackages = ['libraw-wasm', ...Object.keys(DISPLAY_PROXY_SCAN_DECODER_FILES), DISPLAY_PROXY_LENS_PACKAGE];
 for (const name of new Set(closure.bare.map(packageOf))) {
-  assert.ok(hashedPackages.includes(name) || unhashedPackages.includes(name), `the decoder hash covers ${name}`);
+  assert.ok(hashedPackages.includes(name), `the decoder hash covers ${name}`);
 }
 for (const name of hashedPackages) assert.ok(closure.bare.some(specifier => packageOf(specifier) === name), `the closure runs ${name}`);
+// The lens package's files are those its exports give for every entry the
+// closure imports (the module, its core and the core's wasm and data), with
+// its version, and the release main.js's CDN fallback loads is that one.
+{
+  // Its exports give no package.json: the package as the hash reads it.
+  const lensRoot = realpathSync(join(appRoot, '..', 'node_modules', DISPLAY_PROXY_LENS_PACKAGE));
+  const manifest = JSON.parse(readFileSync(join(lensRoot, 'package.json'), 'utf8'));
+  for (const specifier of closure.bare.filter(name => packageOf(name) === DISPLAY_PROXY_LENS_PACKAGE)) {
+    const entry = manifest.exports['.' + specifier.slice(DISPLAY_PROXY_LENS_PACKAGE.length)];
+    const target = typeof entry === 'string' ? entry : entry?.import || entry?.default;
+    assert.ok(target && DISPLAY_PROXY_LENS_FILES.includes(target.replace(/^\.\//, '')), `${specifier} (${target}) is hashed`);
+  }
+  assert.ok(DISPLAY_PROXY_LENS_FILES.includes('package.json'));
+  assert.ok(DISPLAY_PROXY_LENS_FILES.includes(manifest.main.replace(/^\.\//, '')), 'the IIFE the CDN fallback runs');
+  for (const file of DISPLAY_PROXY_LENS_FILES) assert.ok(existsSync(join(lensRoot, file)), `lens file exists: ${file}`);
+  const mainSource = readFileSync(join(srcRoot, 'app', 'main.js'), 'utf8');
+  assert.equal(/const LENSFUN_PACKAGE_VERSION = '([^']+)'/.exec(mainSource)?.[1], manifest.version, 'the CDN fallback loads the hashed release');
+}
 // The scan decoders' files are the entries the bundler resolves.
 const requireFromApp = createRequire(join(srcRoot, 'app', 'tiffFileLoader.js'));
 for (const [name, files] of Object.entries(DISPLAY_PROXY_SCAN_DECODER_FILES)) {
@@ -134,11 +151,16 @@ try {
   }
   mkdirSync(join(app, 'public', 'codecs'), { recursive: true });
   for (const file of DISPLAY_PROXY_CODEC_FILES) writeFileSync(join(app, 'public', file), `codec ${file}`);
+  const lensPackage = join(scratch, 'node_modules', DISPLAY_PROXY_LENS_PACKAGE);
+  for (const file of DISPLAY_PROXY_LENS_FILES) {
+    mkdirSync(dirname(join(lensPackage, file)), { recursive: true });
+    writeFileSync(join(lensPackage, file), `lens ${file}`);
+  }
   const before = displayProxyBuildHashes(app);
   assert.equal(before.code, real.code, 'the code hash depends on the files only');
   let code = before.code;
   for (const [file, what] of [['app/displayPreview.js', 'the display resize'], ['app/analysisRegion.js', 'the colour-analysis sample'],
-    ['app/pngFileLoader.js', 'the 16-bit PNG decoder']]) {
+    ['app/pngFileLoader.js', 'the 16-bit PNG decoder'], ['app/lensMaps.js', 'the lens remap']]) {
     appendFileSync(join(app, 'src', file), '\n// changed\n');
     const after = displayProxyBuildHashes(app);
     assert.notEqual(after.code, code, `a change to ${what} is a miss`);
@@ -160,6 +182,9 @@ try {
   changeDecoder(join(scratch, 'node_modules', 'utif', 'UTIF.js'), 'another UTIF');
   changeDecoder(join(scratch, 'node_modules', 'upng-js', 'package.json'), 'another upng-js release');
   changeDecoder(join(app, 'public', 'codecs', 'libheif.wasm'), 'another libheif');
+  // #278: lensfun's database and runtime shape a lens-corrected proxy.
+  changeDecoder(join(lensPackage, 'dist', 'assets', 'lensfun-core.data'), 'another lens database');
+  changeDecoder(join(lensPackage, 'dist', 'assets', 'lensfun-core.wasm'), 'another lensfun build');
   const local = join(scratch, 'local-dist');
   mkdirSync(local, { recursive: true });
   for (const file of DISPLAY_PROXY_DECODER_FILES) writeFileSync(join(local, file), `local ${file}`);
@@ -169,4 +194,4 @@ try {
 } finally {
   rmSync(scratch, { recursive: true, force: true });
 }
-console.log(`displayProxyHashes: the ${closure.files.length} modules that shape a stored proxy are hashed; code, scan-decoder, codec and LibRaw changes change the store key`);
+console.log(`displayProxyHashes: the ${closure.files.length} modules that shape a stored proxy are hashed; code, scan-decoder, codec, lens and LibRaw changes change the store key`);

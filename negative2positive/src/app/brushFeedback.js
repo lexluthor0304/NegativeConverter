@@ -13,11 +13,57 @@ export const BRUSH_FEEDBACK_STYLES = {
   dodge: { opacity: 0.45, colors: { dodge: 'rgb(120, 200, 255)', burn: 'rgb(255, 170, 0)' } },
 };
 
+// A stroke keeps every point it records up to this many (#280): strokes of up
+// to 400 points are stored exactly as they were recorded.
+export const DENSE_STROKE_POINTS = 400;
+
 // At most `max` points, taken with sanitizeRepairStrokes's index formula, so a
 // long stroke keeps its end instead of losing its tail to a truncation.
-export function resampleStrokePoints(points, max = 400) {
+export function resampleStrokePoints(points, max = DENSE_STROKE_POINTS) {
   if (!Array.isArray(points) || points.length <= max) return points;
   return Array.from({ length: max }, (_, i) => points[Math.round(i * (points.length - 1) / (max - 1))]);
+}
+
+/**
+ * The points a dodge-and-burn stroke keeps while it is painted (#280). The live
+ * effect paints the points kept and the pen-up stores them, so the settled
+ * frame is the last live frame. Every point is kept up to DENSE_STROKE_POINTS,
+ * so such a stroke is stored as it always was. Past that, a pen stroke
+ * (`decimate`) keeps a point only once it is at least `spacing` (an eighth of
+ * the brush radius, in the points' working pixels) from the last one kept:
+ * resampling the whole stroke at pen-up could not carry pen pressure that
+ * changes within a few hundred samples, and its feather edge jumped by up to
+ * 19-31/255. A stroke of one pressure (mouse, touch) keeps every point and is
+ * resampled at pen-up as before; that stays within 1/255 of the live frame.
+ */
+export function createStrokeRecorder({ spacing = 0, decimate = false } = {}) {
+  const points = [];
+  let skipped = null;
+  return {
+    points,
+    decimate,
+    // Records a point; true when it is kept (to be painted and stored).
+    add(point) {
+      if (decimate && points.length >= DENSE_STROKE_POINTS) {
+        const last = points[points.length - 1];
+        if (Math.hypot(point.x - last.x, point.y - last.y) < spacing) {
+          skipped = point;
+          return false;
+        }
+      }
+      points.push(point);
+      skipped = null;
+      return true;
+    },
+    // At pen-up, the last point recorded ends the stroke even when it was
+    // skipped. Returns it (to be painted too) or null.
+    finish() {
+      const end = skipped;
+      skipped = null;
+      if (end) points.push(end);
+      return end;
+    },
+  };
 }
 
 // The pointer samples an event stands for: its coalesced samples where the

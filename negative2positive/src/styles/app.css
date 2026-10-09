@@ -607,6 +607,9 @@ body {
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.04);
 }
 
+/* The photo canvases. main.js sets `object-fit: fill` while the backing has
+   the box's shape up to rounding, so the photo fills its box like every layer
+   over it (#279 follow-up); `contain` stays for a backing of another shape. */
 #canvas {
   max-width: 100%;
   max-height: 100%;
@@ -622,22 +625,27 @@ body {
 
 /* The "before" of the comparison: a display-size copy of the negative laid
    over the image. It follows zoom and pan with the wrapper and never resizes
-   #canvas; main.js places it over the photo when the film border is shown. */
+   #canvas. It always keeps this box, the photo canvas's: with the film border
+   main.js lays it over the photo by a transform, since a box of its own is
+   placed on its own pixel grid, which the zoom magnifies (#279). */
 .before-after-canvas {
   position: absolute;
   inset: 0;
   width: 100%;
   height: 100%;
+  transform-origin: 0 0;
   pointer-events: none;
   z-index: 10;
 }
 
 /* The display overlay (#253, #254): the dust-mask tint and the saved
    dodge-and-burn strokes over the photo, whichever canvas shows it, following
-   zoom and pan with the wrapper. main.js sizes its backing to the display
-   photo and places it over the photo's rectangle when the film border is
-   shown. Under the comparison (z-index 10); the stroke being painted is on
-   .brush-feedback, outside the wrapper. */
+   zoom and pan with the wrapper. It always keeps this box, the photo canvas's
+   (#279): a box of its own is placed on its own pixel grid, which the zoom
+   magnifies. main.js sizes its backing like the canvas's (framed with the
+   film border) and draws into the photo's rectangle. Under the comparison
+   (z-index 10); the stroke being painted is on .brush-feedback, outside the
+   wrapper. */
 .display-overlay {
   position: absolute;
   left: 0;
@@ -649,13 +657,17 @@ body {
   z-index: 5;
 }
 
-/* The detail layer (#248): native pixels of a zoomed view over the base image,
-   at the region's rect in the wrapper's untransformed space. main.js sets the
-   rect and shows it. */
+/* The detail layer (#248): native pixels of a zoomed view over the base image.
+   It keeps the photo canvas's box, and main.js lays it over the region's
+   rectangle by a transform (#279: a box of its own is placed on its own pixel
+   grid, which the zoom magnifies) and shows it. */
 #glDetailCanvas {
   position: absolute;
   left: 0;
   top: 0;
+  width: 100%;
+  height: 100%;
+  transform-origin: 0 0;
   display: none;
   pointer-events: none;
 }

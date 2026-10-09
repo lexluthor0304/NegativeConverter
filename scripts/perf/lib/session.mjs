@@ -318,7 +318,9 @@ export class ChromeSession {
     this.windowStartMetrics = await this.performanceMetrics();
     if (!this.options.probe) return this.now();
     this.windowStartSelfMs = await this.evaluate('globalThis.__ncPerf ? globalThis.__ncPerf.selfMs() : 0');
-    return this.evaluate(`globalThis.__ncPerf.beginWindow(${JSON.stringify(label)})`);
+    // No 5 ms heartbeat in Chrome: the Long Tasks API and CDP task time
+    // replace it, and its timer tasks only added probe load (#273).
+    return this.evaluate(`globalThis.__ncPerf.beginWindow(${JSON.stringify(label)}, { ticks: false })`);
   }
 
   /** Ends the window: frames, timer ticks, main busy % (CDP) and probe self time. */
@@ -415,22 +417,47 @@ export class ChromeSession {
     await this.page.send('Input.dispatchKeyEvent', { type: 'keyUp', key, code: spec.code, windowsVirtualKeyCode: spec.keyCode, nativeVirtualKeyCode: spec.keyCode, modifiers });
   }
 
-  /** Make a control visible (tab, <details>, collapsed section), outside any measured window. */
+  /**
+   * Make a control visible (tab, <details>, collapsed section), outside any
+   * measured window, and return its rect once it holds still. An opened
+   * Studio drawer slides its body in (160 ms, steps(4), translateY 8 px →
+   * 0, studio-pixel.css): a rect read during that animation put S2's wbR
+   * press 6 px below the 3 px slider track, so the drag moved nothing
+   * (#273). Running finite animations on the control and its ancestors are
+   * awaited, then the rect must stay the same for 6 frames (3 s at most).
+   */
   async reveal(id) {
     const rect = await this.evaluate(`(async () => {
       const element = document.getElementById(${JSON.stringify(id)});
       if (!element) return null;
+      const frame = () => new Promise(resolve => requestAnimationFrame(() => resolve()));
       const pane = element.closest('.studio-pane');
       if (pane && pane.hidden) document.getElementById('studioTab-' + pane.id.replace('studioPane-', ''))?.click();
       for (let details = element.closest('details'); details; details = details.parentElement && details.parentElement.closest('details')) details.open = true;
       const collapsed = element.closest('.section-content.collapsed');
       if (collapsed) (collapsed.parentElement.querySelector('.section-header, .section-title') || {}).click?.();
       window.dispatchEvent(new Event('resize'));
-      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      await frame(); await frame();
       element.scrollIntoView({ block: 'center', inline: 'center' });
-      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      const deadline = performance.now() + 3000;
+      const finishing = [];
+      for (let node = element; node; node = node.parentElement) {
+        for (const animation of node.getAnimations ? node.getAnimations() : []) {
+          const end = animation.effect?.getComputedTiming?.().endTime;
+          if (animation.playState === 'running' && Number.isFinite(end)) finishing.push(animation.finished.catch(() => {}));
+        }
+      }
+      if (finishing.length) await Promise.race([Promise.all(finishing), new Promise(resolve => setTimeout(resolve, 2000))]);
+      let last = null;
+      let still = 0;
+      while (still < 6 && performance.now() < deadline) {
+        await frame();
+        const r = element.getBoundingClientRect();
+        still = last && r.x === last.x && r.y === last.y && r.width === last.width && r.height === last.height ? still + 1 : 0;
+        last = r;
+      }
       const r = element.getBoundingClientRect();
-      return { x: r.x, y: r.y, width: r.width, height: r.height, visible: r.width > 0 && r.height > 0 && r.y >= 0 && r.bottom <= innerHeight };
+      return { x: r.x, y: r.y, width: r.width, height: r.height, visible: r.width > 0 && r.height > 0 && r.y >= 0 && r.bottom <= innerHeight, settled: still >= 6 };
     })()`);
     if (!rect || !rect.visible) throw new ScenarioAbort('ui', `#${id} could not be revealed: ${JSON.stringify(rect)}`);
     return rect;

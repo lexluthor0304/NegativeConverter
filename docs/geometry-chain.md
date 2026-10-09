@@ -54,7 +54,11 @@ the k × k box level the preview worker resamples display images from. Batch
 export asks for none. A display proxy fill (#249) asks for the level alone
 (`renderDisplayLevel`): its bands read a shared base through views and copy
 only the plane the level reads from a plain one, in bands planned by the
-bytes they copy (`planDisplayLevelBands`, `docs/photo-sessions.md`).
+bytes they copy (`planDisplayLevelBands`, `docs/photo-sessions.md`). A
+lens-corrected frame's fill (#278, `renderLensDisplayLevel`) renders, per
+band, the crop rows the lens remap of its rows reads, remaps them with the
+band's grid rows (`lensMaps.js`, the editor's remap) and box-averages them,
+in bands planned by the base rows they copy and the rows they render.
 `counters.copiedBytes` counts every band row the main thread copies, for
 both kinds of job.
 
@@ -157,7 +161,9 @@ In `main.js` the scalars change synchronously and the planes follow:
   is larger than the budget (a 60 MP crop). A cold entry, or one captured
   while a build was pending, restores its exact scalars and rebuilds its
   planes from the base in the pool, then converts without new automatic
-  measurements. Promoted two-stage entries replay their full-base crop/WB
+  measurements. A stripped entry keeps the dust state it settled (#281,
+  `docs/dust-removal.md`), compacted once nothing else holds it; the
+  detection after that conversion puts it back instead of detecting again. Promoted two-stage entries replay their full-base crop/WB
   event (`docs/two-stage-raw-import.md`). Snapshots captured while that history
   rebuild or measurement is pending also stay cold and retain the same event,
   even after geometry/detection finish, so temporary pixels or WB cannot

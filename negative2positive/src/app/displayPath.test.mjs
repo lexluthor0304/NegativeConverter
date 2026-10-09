@@ -330,7 +330,7 @@ for (const worker of ['none', 'failing']) {
 
 // ---- B3: #canvas holds the drawn buffer; its CSS box fits the full frame ----
 const { getSprocketFrameLayout, getSprocketFrameMetrics, composeSprocketFrame } = await import('./sprocketFrame.js');
-const { upscaleReference, photoRectPercent } = await import('./displayCanvas.js');
+const { upscaleReference, frameRectTransform } = await import('./displayCanvas.js');
 
 function canvasFixture({ sprocket = false, step = 3 } = {}) {
   const calls = [];
@@ -364,7 +364,7 @@ function canvasFixture({ sprocket = false, step = 3 } = {}) {
     ...displaySessionStubs(),
     state, canvas, ctx: canvas.ctx, glCanvas, sprocketPreviewFrameCanvas: frameCanvas, sprocketPreviewFrameCtx: frameCanvas.ctx,
     sprocketPreviewFrameCache: { key: '', sourceRef: null, metrics: null },
-    beforeAfterCanvas: comparison, beforeAfterCanvasSource: null, beforeAfterBuiltReference: null, mainCanvasPhoto: null,
+    beforeAfterCanvas: comparison, beforeAfterCanvasSource: null, beforeAfterCanvasPlaced: '', beforeAfterBuiltReference: null, mainCanvasPhoto: null,
     hideDetailLayer: noop,
     mainCanvasFit: { width: 0, height: 0, reference: null },
     composeDisplaySprocketFrame: (imageData, options) => composeSprocketFrame(imageData, options),
@@ -374,13 +374,13 @@ function canvasFixture({ sprocket = false, step = 3 } = {}) {
     },
     getSprocketFrameMetrics, getSprocketFrameLayout, getSprocketFrameComposeOptions: () => ({ edgeMarkings: {} }),
     prepareSprocketPreviewFont: noop, settleInterimGeometryDisplay: noop,
-    step3FrameReference, upscaleReference, photoRectPercent, JSON,
+    step3FrameReference, upscaleReference, frameRectTransform, JSON,
     adjustCanvasDisplay: (w, h, reference) => fits.push({ w, h,
       reference: reference === undefined ? 'state' : reference && { width: reference.width, height: reference.height } }),
   });
-  vm.runInContext([...DISPLAY_SESSION_HELPERS, 'setMainCanvasBox', 'setMainCanvasDimensions', 'refitMainCanvasBox', 'sprocketFrameSize', 'sprocketFrameReference',
+  vm.runInContext([...DISPLAY_SESSION_HELPERS, 'setMainCanvasBox', 'setMainCanvasDimensions', 'fitPhotoCanvasContent', 'refitMainCanvasBox', 'sprocketFrameSize', 'sprocketFrameReference',
     'displaySourceImageData', 'fitStep3CanvasBox', 'getSprocketPreviewFrameCacheKey', 'ensureSprocketPreviewFrameBackground',
-    'renderFastSprocketPreview', 'renderAdjustedImageDataToMainCanvas', 'placeBeforeAfterCanvas',
+    'renderFastSprocketPreview', 'renderAdjustedImageDataToMainCanvas', 'comparisonPhotoLayout', 'placeBeforeAfterCanvas',
     'showBeforeAfterReference', 'releaseBeforeAfterCanvas'].map(functionSource).join('\n'), context);
   return { context, state, canvas, glCanvas, comparison, full, calls, fits };
 }
@@ -446,12 +446,16 @@ for (const [width, height] of [[1500, 1000], [1000, 1500]]) {
     assert.deepEqual([f.canvas.width, f.canvas.height], [metrics.outputWidth, metrics.outputHeight]);
     assert.deepEqual({ ...f.context.mainCanvasPhoto }, layout);
   }
-  // The comparison over the photo rectangle, drawn once per reference.
+  // The comparison over the photo rectangle, drawn once per reference. It
+  // keeps the photo canvas's box and a transform lays it over the photo
+  // (#279 follow-up: a box of its own was rounded off the photo's grid).
   const before = image(width, height);
   assert.equal(f.context.showBeforeAfterReference(before), true);
-  const box = photoRectPercent(layout);
   assert.deepEqual([f.comparison.style.left, f.comparison.style.top, f.comparison.style.width, f.comparison.style.height],
-    [box.left, box.top, box.width, box.height]);
+    [undefined, undefined, undefined, undefined], 'no box of its own');
+  assert.equal(f.comparison.style.transform, frameRectTransform(layout, layout.frameWidth, layout.frameHeight));
+  assert.equal(f.comparison.style.transform, `translate(${layout.x / layout.frameWidth * 100}%, ${layout.y / layout.frameHeight * 100}%) `
+    + `scale(${width / layout.frameWidth}, ${height / layout.frameHeight})`);
   assert.deepEqual([f.comparison.width, f.comparison.height], [width, height]);
   const puts = f.calls.filter(call => call[0] === 'comparison' && call[1] === 'put').length;
   f.comparison.style.display = 'none';
@@ -464,11 +468,22 @@ for (const [width, height] of [[1500, 1000], [1000, 1500]]) {
 }
 
 {
-  // Without the border the comparison covers the whole image box.
+  // Without the border the comparison covers the whole image box, untransformed;
+  // turning the border off takes a transform it had back.
   const f = canvasFixture();
   f.context.renderAdjustedImageDataToMainCanvas(image(1500, 1000), f.full);
   f.context.showBeforeAfterReference(image(1500, 1000));
-  assert.deepEqual([f.comparison.style.left, f.comparison.style.top, f.comparison.style.width, f.comparison.style.height], ['', '', '', '']);
+  assert.deepEqual([f.comparison.style.left, f.comparison.style.top, f.comparison.style.width, f.comparison.style.height],
+    [undefined, undefined, undefined, undefined]);
+  assert.equal(f.comparison.style.transform, undefined, 'never placed: the stylesheet\'s box');
+  f.state.sprocketPreviewEnabled = true;
+  f.context.renderAdjustedImageDataToMainCanvas(image(1500, 1000), f.full);
+  f.context.showBeforeAfterReference(image(1500, 1000));
+  assert.match(f.comparison.style.transform, /^translate\(/);
+  f.state.sprocketPreviewEnabled = false;
+  f.context.renderAdjustedImageDataToMainCanvas(image(1500, 1000), f.full);
+  f.context.showBeforeAfterReference(image(1500, 1000));
+  assert.equal(f.comparison.style.transform, '');
 }
 
 {

@@ -106,7 +106,8 @@ function fixture({ width = 3000, height = 2000, repairs = false, largePreviewFra
   const fills = [];
   const displayNegatives = [];
   let heldNegative = null;
-  const glCanvas = { width: 0, height: 0 };
+  // Its box: 930 x 620 CSS px, whole pixels (#279).
+  const glCanvas = { width: 0, height: 0, style: { width: '930px', height: '620px' } };
   const controllerStub = { active: false, ends: [], nextStartTier: 'normal',
     nextStart() { return { tier: this.nextStartTier, reason: null }; },
     end(reason) { this.ends.push(reason); this.active = false; context.onPreviewTierChange('normal'); } };
@@ -213,7 +214,7 @@ function fixture({ width = 3000, height = 2000, repairs = false, largePreviewFra
     'getDisplayPreviewSize', 'noteTierImage', 'buildPreviewSourceImageData', 'buildWebglSourceImageData',
     'histogramSourceFor', 'scheduleDisplayPreviewResize', 'ensureConversionPreviewForDisplay', 'displayIsReduced',
     'reducedConversionInFlight', 'redrawForPreviewTier', 'leavePreviewTier', 'restoreNormalTierDisplay', 'onPreviewTierChange',
-    'onPreviewTierSessionEnd', 'resetPreviewTierForActivation', 'resizeWebGLCanvas',
+    'onPreviewTierSessionEnd', 'resetPreviewTierForActivation', 'resizeWebGLCanvas', 'fitPhotoCanvasContent',
     'installDisplayFor', 'installDisplayPreview', 'cancelDisplayPreviewRebuild', 'rebuildDisplayPreview',
     'captureSnapshotWithPendingDisplay', 'countMainResample', 'updateConversionTarget', 'conversionTargetFor',
     'coreReprocessBusy', 'whenCoreReprocessIdle', 'noteCoreReprocessSettled', 'runCoreReprocess',
@@ -314,10 +315,14 @@ const pixels = image => image.width * image.height;
   assert.ok(bytesEqual(f.context.buildWebglSourceImageData(frame, 4096), resizeDisplayPreview(frame, referenceSize(frame, 4096))));
   f.context.resizeWebGLCanvas(1860, 1240);
   assert.deepEqual([f.glCanvas.width, f.glCanvas.height], [1860, 1240], 'the drawing buffer follows the texture');
+  assert.equal(f.glCanvas.style.objectFit, 'fill', 'the photo fills its box');
   f.context.previewTier = 'reduced';
   f.context.resizeWebGLCanvas(1860, 1240);
   assert.ok(f.glCanvas.width * f.glCanvas.height <= PREVIEW_TIER_REDUCED_MAX_PIXELS, 'reduced buffer is <= 1 MP');
   assert.ok(Math.abs(f.glCanvas.width / f.glCanvas.height - 1.5) < 0.01);
+  // #279 follow-up: the capped buffer's shape differs from the box's by its
+  // rounding only, so it fills the box rather than being letterboxed in it.
+  assert.equal(f.glCanvas.style.objectFit, 'fill', 'a reduced buffer fills the box too');
   f.context.resizeWebGLCanvas(900, 600);
   assert.deepEqual([f.glCanvas.width, f.glCanvas.height], [900, 600], 'a small texture is drawn at its own size');
 }

@@ -51,17 +51,19 @@ const deps = {
   autoDetectFilmBase: () => ({ r: 205, g: 141, b: 92 }),
   cachedDetectFilmType: () => null,
   createPerfTrace: () => ({ mark() {}, end() {} }),
-  clampBetween: (v, min, max) => Math.min(max, Math.max(min, v))
+  clampBetween: (v, min, max) => Math.min(max, Math.max(min, v)),
+  // #278: no file's focal length or aperture is known.
+  shotMetadataByFile: new WeakMap()
 };
 export function mainFunctions(names, extraDeps = {}) {
   const all = { ...deps, ...extraDeps };
   const code = [
     ...['PRESET_TYPES', 'CORE_ENHANCED_PROFILE_OPTIONS', 'CORE_COLOR_MODEL_OPTIONS', 'CORE_COLOR_MODEL_MIGRATION_MAP'].map(constSource),
     ...['sanitizePresetType', 'inferFilmTypeFromLegacyPreset', 'sanitizeCoreEnhancedProfile', 'sanitizeCoreColorModel',
-      'createDefaultLensCorrectionSettings', 'sanitizeLensSelection', 'sanitizeLensCorrection', 'makeLinearCurveLut',
+      'createDefaultLensCorrectionSettings', 'sanitizeLensSelection', 'sanitizeLensShotSource', 'sanitizeLensCorrection', 'makeLinearCurveLut',
       'makeLinearCurvePoints', 'sanitizeNumeric', 'sanitizeFilmBase', 'sanitizeCurvePointChannel',
       'buildCurveLutFromPoints', 'sanitizeCurveLut', 'sanitizeSettings', 'defaultFilmBaseBuffer', 'getImageDataPixelCount',
-      'defaultSettingsInputs', 'createDefaultSettings', 'photoSettingsKey',
+      'defaultSettingsInputs', 'shotMetadataFor', 'applyShotMetadata', 'createDefaultSettings', 'photoSettingsKey',
       ...names].map(functionSource)
   ].join('\n');
   const exported = ['sanitizeSettings', 'createDefaultSettings', 'photoSettingsKey', 'sanitizeNumeric', ...names];

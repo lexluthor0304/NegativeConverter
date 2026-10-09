@@ -6,6 +6,7 @@ import {
   byKind, dragMetrics, eventTimingP95, longTaskSummary, rafGapSummary, importMetrics, settledAt, pictures, GL_CANVAS, CPU_CANVAS, CROP_CANVAS
 } from '../lib/metrics.mjs';
 import { round } from '../lib/stats.mjs';
+import { ScenarioAbort } from '../lib/session.mjs';
 
 // NC_PERF_TIME_SCALE=0 is for the harness's own tests (simulated sessions);
 // real runs always wait the full time.
@@ -142,15 +143,32 @@ export async function importPhotos(ctx, paths, { settle = true, window = 'import
     metrics.controlStages = await session.evaluate(`globalThis.__ncPerfControl ? globalThis.__ncPerfControl.stages(${before}) : []`);
   }
   const stage = predicate => metrics.stages.find(predicate)?.ms;
+  const control = key => metrics.controlStages?.find(entry => entry.key === key)?.ms;
   ctx.record(`${ctx.scenario.id}.control.stage.librawDecodeMs`, ctx.args.probe
-    ? stage(entry => entry.cls === 'libraw' && entry.fn === 'imageData') : metrics.controlStages?.find(entry => entry.key === 'librawDecodeMs')?.ms);
+    ? stage(entry => entry.cls === 'libraw' && entry.fn === 'imageData') : control('librawDecodeMs'));
   ctx.record(`${ctx.scenario.id}.control.stage.autoFrameMs`, ctx.args.probe
-    ? stage(entry => entry.cls === 'analyze-frame' || entry.cls === 'analyze-import') : metrics.controlStages?.find(entry => entry.key === 'autoFrameMs')?.ms);
+    ? stage(entry => entry.cls === 'analyze-frame' || entry.cls === 'analyze-import') : control('autoFrameMs'));
+  // The film-edge read's own time, as the auto-frame worker reports it (#273).
+  ctx.record(`${ctx.scenario.id}.control.stage.filmEdgeMs`, ctx.args.probe ? importFilmEdgeMs(metrics.stages) : control('filmEdgeMs'));
   return metrics;
 }
 
+/**
+ * The film-edge stage of an import: the 'read-film-edge' round trip on refs
+ * before #251; since then the read's own time inside the 'analyze-import'
+ * request, which the worker reports with its reply (#273). Null when
+ * neither was recorded (a ref whose worker does not report it).
+ */
+export function importFilmEdgeMs(stages) {
+  const read = stages.find(entry => entry.cls === 'read-film-edge');
+  if (read) return read.ms;
+  return stages.find(entry => entry.cls === 'analyze-import' && Number.isFinite(entry.filmEdgeMs))?.filmEdgeMs ?? null;
+}
+
 export function recordImportMetrics(ctx, prefix, metrics) {
-  const keys = ['firstPixelsDrawnMs', 'firstPhotoVisibleMs', 'firstPositiveVisibleMs', 'readyMs', 'settledMs', 'librawDecodes', 'changeToLibrawOpenMs'];
+  // Provisional pixels on the photo-switch veil (#235), then the exact ones.
+  const keys = ['firstProvisionalPixelsMs', 'provisionalKind', 'firstEmbeddedPreviewMs', 'firstPixelsDrawnMs', 'firstPhotoVisibleMs',
+    'firstPositiveVisibleMs', 'readyMs', 'settledMs', 'librawDecodes', 'changeToLibrawOpenMs'];
   for (const key of keys) ctx.record(`${prefix}.${key}`, metrics[key]);
   ctx.record(`${prefix}.longTaskCount`, metrics.longTasks.n);
   ctx.record(`${prefix}.longTaskTotalMs`, metrics.longTasks.totalMs);
@@ -167,10 +185,12 @@ export function recordImportMetrics(ctx, prefix, metrics) {
   ctx.record(`${prefix}.stage.sensorDefectsMs`, stage(entry => entry.cls === 'suppress'));
   ctx.record(`${prefix}.stage.rawPostDecodeMs`, stage(entry => entry.cls === 'process'));
   // Since #251 an import sends one 'analyze-import' request for frame
-  // detection and film edge; its time is autoFrameMs and filmEdgeMs stays
-  // empty. Older refs send 'analyze-frame' and 'read-film-edge'.
+  // detection and film edge; its round trip is autoFrameMs. The worker
+  // reports each part's own time (#273): filmEdgeMs (the read) and
+  // frameDetectMs. Older refs send 'analyze-frame' and 'read-film-edge'.
   ctx.record(`${prefix}.stage.autoFrameMs`, stage(entry => entry.cls === 'analyze-frame' || entry.cls === 'analyze-import'));
-  ctx.record(`${prefix}.stage.filmEdgeMs`, stage(entry => entry.cls === 'read-film-edge'));
+  ctx.record(`${prefix}.stage.filmEdgeMs`, importFilmEdgeMs(metrics.stages));
+  ctx.record(`${prefix}.stage.frameDetectMs`, metrics.stages.find(entry => entry.cls === 'analyze-import' && Number.isFinite(entry.frameMs))?.frameMs ?? null);
   ctx.record(`${prefix}.stage.scanDecodeMs`, stage(entry => entry.cls === 'decode'));
   ctx.record(`${prefix}.stage.previewConvertMs`, stage(entry => entry.cls === 'convert'));
   ctx.raw[`${prefix}.stages`] = metrics.stages;
@@ -210,20 +230,46 @@ function inputsBetween(events, start, end, predicate = () => true) {
 }
 
 /**
+ * Where a drag of slider `id` presses: its thumb, from the rect it has now,
+ * and what the page would hit there (`hit` null: the slider itself).
+ */
+export async function sliderPressPoint(ctx, id) {
+  return ctx.session.evaluate(`(() => {
+    const e = document.getElementById(${JSON.stringify(id)});
+    const r = e.getBoundingClientRect();
+    const min = Number(e.min || 0), max = Number(e.max || 100);
+    const fraction = (Number(e.value) - min) / Math.max(1e-9, max - min);
+    const x = r.x + ${THUMB_PX / 2} + fraction * (r.width - ${THUMB_PX}), y = r.y + r.height / 2;
+    const hit = document.elementFromPoint(x, y);
+    return { sliderPressPoint: true, x, y, width: r.width, value: e.value, min, max, fraction,
+      hit: hit === e ? null : hit ? (hit.id || hit.tagName.toLowerCase()) : 'nothing' };
+  })()`);
+}
+
+/**
  * One slider drag: 180 trusted moves at 60 Hz over 40 % of the track, then
- * 3 s of observation. Records `${prefix}.<metric>`.
+ * 3 s of observation. Records `${prefix}.<metric>`. The press point is taken
+ * after the reveal has settled and must hit the slider; a press that lands
+ * elsewhere fails the step instead of recording a drag that moved nothing
+ * (#273: S2's wbR).
  */
 export async function dragSlider(ctx, id, prefix, { cpu = false, observeMs = 3000 } = {}) {
   const { session } = ctx;
-  const rect = await session.reveal(id);
-  const info = await session.evaluate(`(() => { const e = document.getElementById(${JSON.stringify(id)}); return { value: e.value, min: Number(e.min || 0), max: Number(e.max || 100) }; })()`);
-  const span = rect.width - THUMB_PX;
-  const fraction = (Number(info.value) - info.min) / Math.max(1e-9, info.max - info.min);
-  const x0 = rect.x + THUMB_PX / 2 + fraction * span;
-  const y = rect.y + rect.height / 2;
-  const direction = fraction <= 0.5 ? 1 : -1;
-  const x1 = x0 + direction * 0.4 * span;
+  await session.reveal(id);
   await sleep(500);
+  let point = await sliderPressPoint(ctx, id);
+  if (point.hit) {
+    await session.reveal(id);
+    await sleep(500);
+    point = await sliderPressPoint(ctx, id);
+  }
+  if (point.hit) throw new ScenarioAbort('ui', `${prefix}: the press point (${round(point.x)}, ${round(point.y)}) hits #${point.hit}, not #${id}`);
+  const info = { value: point.value, min: point.min, max: point.max };
+  const span = point.width - THUMB_PX;
+  const x0 = point.x;
+  const y = point.y;
+  const direction = point.fraction <= 0.5 ? 1 : -1;
+  const x1 = x0 + direction * 0.4 * span;
   await session.drain();
   const uiBefore = await uiCounters(ctx);
   const windowStart = await session.beginWindow(`${prefix}`);
@@ -245,6 +291,7 @@ export async function dragSlider(ctx, id, prefix, { cpu = false, observeMs = 300
     await resetSlider(ctx, id, info.value);
     return null;
   }
+  if (press.id !== id) throw new ScenarioAbort('ui', `${prefix}: the press landed on #${press.id || '?'}, not #${id}`);
   const metrics = dragMetrics(events, {
     targetId: id, canvasId: cpu ? CPU_CANVAS : GL_CANVAS, initialValue: info.value, frameTimes: window.frames,
     window: { start: press.t, release: release.t, end: release.t + observeMs }

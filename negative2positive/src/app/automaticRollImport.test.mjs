@@ -966,12 +966,15 @@ function workerRoll(f, { analysisFor = () => ({}), dng = true, holdAnalysis = nu
 // from main.js, with the modules they read, in place of the fixture's stubs.
 const MERGE_FUNCTIONS = ['getImageDataPixelCount', 'clampBetween', 'sanitizeNumeric', 'makeLinearCurveLut',
   'createDefaultLensCorrectionSettings', 'autoDetectFilmBase', 'defaultSettingsInputs', 'createDefaultSettings',
+  'shotMetadataFor', 'applyShotMetadata',
   'autoFrameEffectiveAngle', 'rotate180CropRegion', 'mirrorCropForRotatedFrame', 'analyzeStudioImportFrame', 'mergeImportFilmEdge'];
 function useRealMerge(f) {
   Object.assign(f.context, {
     detectedImportSettings, cachedDetectFilmType, cachedAutoDetectFilmBase, EXPIRED_RESCUE_DEFAULTS, sanitizeFrameMetadata,
     canAutoApplyImportFrame, imageAreaFromDetection, sanitizeFilmEdgeForSettings, normalizeAngleDegrees,
-    recordPerfStages: () => {}, updateMetadataUI: () => {}
+    recordPerfStages: () => {}, updateMetadataUI: () => {},
+    // #278: no frame's focal length or aperture is known.
+    shotMetadataByFile: new WeakMap()
   });
   f.state.autoFrame = { enabled: true, onImport: true, highConfidence: 0.72, rotate180Default: false };
   f.state.filmType = 'color';

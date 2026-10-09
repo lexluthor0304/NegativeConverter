@@ -66,6 +66,11 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
   // The committed strokes the worker last received with a live request.
   let liveCommittedSent = null;
   let lastSource = null;
+  // Each source posted for the worker to cache gets a number (#254 follow-up):
+  // an exposureExact request names the one it converts regions of, so the
+  // worker can tell whether it still caches it.
+  let sourceSeq = 0;
+  const sourceSeqs = new WeakMap();
   let lastAnalysis = null;
   let lastLocalExposure = null;
   let lastRecipe = null;
@@ -178,6 +183,10 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
       // Keep the 16-bit plane in the worker until commit() asks for it.
       if (options.retain16) message.retain16 = true;
       message.reuseSource = lastSource === imageData;
+      if (!message.reuseSource) {
+        message.sourceSeq = ++sourceSeq;
+        sourceSeqs.set(imageData, sourceSeq);
+      }
       message.reuseAnalysis = lastAnalysis === analysis;
       if (message.reuseAnalysis) delete message.options.analysisImageData;
       // Dodge-and-burn strokes arrive as sanitised settings, which are shared
@@ -335,6 +344,8 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
     }
     // A frame the worker can paint a live dodge-and-burn stroke over (#254).
     if (result.liveFrame) liveFrames.set(out, { ...result.liveFrame, worker: w });
+    // The analysis a full-resolution frame was converted with (#254 follow-up).
+    if (result.analysis) out.__analysis = result.analysis;
     if (result.histogram) {
       const sample = result.histogram;
       const histogram = new ImageData(new Uint8ClampedArray(sample.rgba), sample.width, sample.height);
@@ -475,21 +486,28 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
 
   // A detail region (#248 part 5), converted from `rows` (the region's native
   // 16- or 8-bit pixels, transferred) or from the cached level, with the base's
-  // analysis. `warm` only sets up the roi slot. Resolves to the region's 8-bit
-  // ImageData (null for `warm`).
-  convert.roi = async ({ settings, base = null, region, rows = null, warm = false, signal = null }) => {
-    assertDetailRoiAllocation(region, warm);
+  // analysis. `warm` only sets up the conversion at idle. With `band` and
+  // `analysis` (#270) only that band's output rows, from its 16-bit `rows`,
+  // with the analysis main passes: any worker can take it. Resolves to the
+  // region's (or band's) 8-bit ImageData, with the worker's stage times in
+  // `__timings` (null for `warm`).
+  convert.roi = async ({ settings, base = null, region, rows = null, warm = false, band = null, analysis = null, signal = null }) => {
+    assertDetailRoiAllocation(region, warm, band);
     const body = { settings, base, region, warm };
+    if (band) Object.assign(body, { band, analysis });
     const transfers = [];
     if (rows) {
       if (rows instanceof Uint16Array) body.image16 = rows.buffer;
       else body.rgba = rows.buffer;
       transfers.push(rows.buffer);
     }
-    const reply = await postUncached('roi', body, transfers, region.slotWidth * region.slotHeight, signal);
+    const pixels = warm ? region.slotWidth * region.slotHeight : region.outWidth * (band ? band.y1 - band.y0 : region.outHeight);
+    const reply = await postUncached('roi', body, transfers, pixels, signal);
     if (reply.warm) return null;
     assertDetailAllocation(reply.width, reply.height, DETAIL_MAX_OUTPUT_PIXELS, DETAIL_MAX_DIMENSION);
-    return new ImageData(new Uint8ClampedArray(reply.rgba), reply.width, reply.height);
+    const image = new ImageData(new Uint8ClampedArray(reply.rgba), reply.width, reply.height);
+    if (reply.timings) image.__timings = reply.timings;
+    return image;
   };
 
   // The live frame a conversion result stands for in this client's current
@@ -519,6 +537,26 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
       rect: reply.rect,
       rgba: new Uint8ClampedArray(reply.rgba),
       committedRgba: reply.committedRgba ? new Uint8ClampedArray(reply.committedRgba) : null,
+    };
+  };
+
+  // One step of a live stroke over the display preview of a full-resolution
+  // frame (#254 follow-up): the worker converts the full-resolution region the
+  // new points reach of `source` (the level it caches, which must be that
+  // frame's source) and filters it as that display preview was filtered.
+  // `exact` ({ settings, analysis, frame, display, geometry }) is sent with
+  // `reset` only. Resolves to { rect, rgba, image16 } in display pixels, or
+  // { stale, needsReset, rect: null }.
+  convert.exposureExact = async ({ strokeId = null, stroke, points, reset = false, fullStroke = false, exact = null, source = null, signal = null }) => {
+    const body = { strokeId, stroke, points, reset, fullStroke, sourceSeq: (source && sourceSeqs.get(source)) || 0 };
+    if (reset) body.exact = exact;
+    const reply = await postUncached('exposureExact', body, [], 1, signal);
+    if (reply.stale || reply.needsReset || !reply.rect) return { stale: Boolean(reply.stale), needsReset: Boolean(reply.needsReset), rect: null };
+    return {
+      rect: reply.rect,
+      rgba: new Uint8ClampedArray(reply.rgba),
+      image16: reply.image16 ? new Uint16Array(reply.image16) : null,
+      committedRgba: null,
     };
   };
 

@@ -123,6 +123,26 @@ const same = (a, b, label) => {
   assert.equal(displayProxyKey({ ...base, filmType: 'bw', wbR: 2 }), key, 'recipe values are not key parts');
 }
 
+// The lens part (#278): the lens correction a level carries, verbatim. No
+// lens is null, as before #278, and a level stored with a lens keeps it in
+// its record's metadata.
+{
+  const parts = { route: 'libraw16', base: { width: 100, height: 80, has16: true }, rotationAngle: 0.5, cropRegion: { left: 1, top: 2, width: 50, height: 40 }, area: '[1]' };
+  const lens = focal => JSON.stringify([{ handle: 2741040 }, { focal, crop: 1.5, aperture: 5.6, distance: 1000, stepMode: 'auto', step: 2 }, { includeTca: true, includeVignetting: false }]);
+  assert.equal(JSON.parse(displayProxyKey({ ...parts, lens: lens(18) }))[7], lens(18), 'the lens part is the signature');
+  assert.equal(displayProxyKey({ ...parts }), displayProxyKey({ ...parts, lens: null }), 'no lens is null');
+  assert.equal(JSON.parse(displayProxyKey({ ...parts }))[7], null);
+  assert.notEqual(displayProxyKey({ ...parts, lens: lens(18) }), displayProxyKey({ ...parts, lens: lens(24) }), 'another lens is another key');
+  assert.notEqual(displayProxyKey({ ...parts, lens: lens(18) }), displayProxyKey({ ...parts }), 'and so is none');
+  const { buildDisplayLevel } = await import('./displayPreview.js');
+  const level = buildDisplayLevel(source16(40, 30, { seed: 5 }), 2);
+  const record = decodeDisplayProxyRecord(encodeDisplayProxyRecord({ key: displayProxyKey({ ...parts, lens: lens(18) }), meta: { levelLens: lens(18) }, plane: packDisplayPlane(level) }),
+    { expectKey: displayProxyKey({ ...parts, lens: lens(18) }) });
+  assert.equal(record.meta.levelLens, lens(18), 'the record keeps the lens its level carries');
+  assert.equal(decodeDisplayProxyRecord(encodeDisplayProxyRecord({ key: displayProxyKey({ ...parts, lens: lens(18) }), plane: packDisplayPlane(level) }),
+    { expectKey: displayProxyKey({ ...parts, lens: lens(24) }) }), null, 'read under another lens: a miss');
+}
+
 // The checksum reads unaligned views and distinguishes single bits.
 {
   const bytes = Uint8Array.from({ length: 103 }, (_, i) => (i * 31) & 255);

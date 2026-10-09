@@ -125,6 +125,39 @@ that still fails (a stage that reads neighbours, for one) settles with the exact
 The paper LUT build caches its strength-independent part per paper and toning
 (exact), so a toning-strength drag rebuilds it in about 1 ms instead of 5–6 ms.
 
+### A tick's cost and input→draw (#272)
+
+From the input's dispatch to `drawArrays`, a SilverCore tick took 1.6–1.9 ms (p50)
+on the main thread for contrast and temperature and 2.2–2.5 ms for exposure, which
+ticks on every frame (Chrome 155, DPR 2, S2 with the probe); a Step-3 cyan tick
+takes 0.2–0.3 ms. In a profiled contrast drag about 1.0 ms of it was the three
+65,536-entry tone-curve interpolations (`CurveEngine.interpolateToLUT`) and 0.17 ms
+the table-texture pack. The interpolation now walks the knots segment by segment
+with the same float64 expression per entry, and the pack writes 32-bit words: the
+tables are identical (`CurveEngine.interpolate.test.mjs` keeps the old
+implementation and a digest of `generateCurves`), and the tick is 1.0 ms (p50) and
+1.2 ms (p95) for contrast and temperature on a small fixture. On the synthetic 60 MP
+DNG at a load of 8–57 (three interleaved single-repetition S2 runs per side) it went
+from 1.6–2.8 to 0.9–1.5 ms (p50) and from 4.0–4.8 to 2.3–3.4 ms (p95; load stretches
+the tail), and input→draw from 15.7 / 18.4 to 14.7 / 17.2 ms (contrast, p50 / p95,
+medians) and from 16.2 / 19.0 to 15.5 / 17.4 ms (temperature).
+
+Most of S2's input→draw is not the tick. Chrome dispatches mouse moves aligned to
+animation frames: a move whose timestamp is later than a frame's time waits for the
+next frame's BeginMainFrame, which dispatches it about 1 ms after that frame's time,
+and the GPU tick draws in that same frame. A move therefore waits up to one frame,
+depending on where in the frame it arrives (its phase). S2 starts each drag's 60 Hz
+schedule right after the awaited press, which completes 1.5–5.5 ms after a frame
+start when the main thread is idle, and every move of the drag keeps that phase:
+each waits 13–16 ms (p50) before any app code runs. At a phase of φ ms the move→draw
+time is about 17.8 − φ ms plus the tick. Contrast and temperature read 16–18 ms
+before #272 because their drags kept that early phase; exposure's ticks cost as much
+or more, but its press often met a busy main thread (a later phase), and a slider
+that changes value on every move is paired with a move that arrived before the
+upload but was not dispatched yet, which reads about 1 ms at an early phase
+(performance-benchmark.md, "Input phase"). With the 1.2 ms tick, p95 ≤ 16 ms needs φ
+≳ 3 ms; below that the remainder is Chrome's frame-aligned input, outside the app.
+
 ## Settle, state and histogram
 
 - The exact frame of the newest settings leaves on commit, 150 ms after the last
@@ -210,15 +243,80 @@ surface at 2.2–4 MP, in Node). They now stay on the GPU.
   fallback draws the same underlay.
 - **Overlays.** The dust tint and the saved dodge strokes are drawn on
   `#displayOverlay`, a transparent canvas in the transform wrapper above the photo,
-  backed at the display photo's size and placed over the photo's rectangle with the
-  border. It is repainted only when the tint, the strokes, the geometry or the size
-  change; the photo is never redrawn for an overlay, and both display paths use it.
-  The stroke being painted, by any brush, is on `#brushFeedback` outside the wrapper
-  (#254, `brushFeedback.js`), and the brushes map through the photo rectangle inside
-  the border on both canvases. With the border the overlay's box is fractional, and the
-  compositor places the layer on its own pixel grid: at 381 % zoom the smoke measures
-  the drawn stroke 1.3 screen px off its point (a third of a layout pixel), with the
-  overlay's own pixels exact.
+  backed at the display photo's size (framed with the border, see below). It is
+  repainted only when the tint, the
+  strokes, the geometry or the size change; the photo is never redrawn for an
+  overlay, and both display paths use it. The stroke being painted, by any brush, is
+  on `#brushFeedback` outside the wrapper (#254, `brushFeedback.js`), and the brushes
+  map through the photo rectangle inside the border on both canvases.
+- **One pixel grid (#279).** The compositor gives each canvas layer its box rounded
+  to whole CSS pixels in the wrapper's space, and the zoom scales the rounding. The
+  overlay used to have a box of its own over the photo's rectangle with the border:
+  fractional, rounded apart from the photo, and at 381 % the smoke measured a drawn
+  stroke 1.3 screen px off its point while the overlay's pixels were exact. The
+  overlay now always takes the photo canvas's box. With the border its backing is
+  the framed display size, as `#glCanvas` and `#canvas` are, and the tint and the
+  strokes go into the photo's rectangle at its integer offset (the strokes clipped
+  to it): the same pixels a backing of the photo's size held. Both layers then sit
+  on one grid: a standalone Chrome measurement over WebGL and 2D canvases, DPR 1
+  and 2 and zoom 1 and 3.81 found 0.000 px between them, where a box of its own was
+  up to 1.88 px off. `adjustCanvasDisplay` also fits the canvases' box to whole
+  CSS pixels, the size the compositor showed anyway: a box 746.5 px wide was shown
+  747 px wide, which put a point 60 % across the photo 1.1 screen px from its
+  client rect at 381 %. With a whole-pixel box the client rect is where the photo
+  is drawn (once the photo fills it, see the follow-up below), up to the wrapper's
+  own sub-pixel position (at most 0.5 CSS px at any zoom), so the brush mappings
+  and `#brushFeedback`, which work from that rect, stay on the photo. The fit scale
+  behind "100 %" and the zoom stays the exact one (the detail layer plans its
+  density from it). In the display-modes smoke at 381 % (DPR 1), measured with
+  whole-pixel clips, a saved stroke on `#glCanvas` was 1.28 px off its point with
+  the border and 0.70 px without it before; on either canvas it is now within
+  0.2 px, and the tint and the live dab within 0.1 px.
+- **The comparison, the detail layer and the photo itself (#279 follow-up).** The
+  before/after comparison and the detail layer (#248) were the last layers in the
+  wrapper with boxes of their own: the comparison over the photo's rectangle inside
+  the border (percentages of the wrapper), the detail layer at its region's
+  rectangle in CSS pixels at the exact fit scale, while the photo is drawn at its
+  whole-pixel box's scale (up to half a CSS pixel apart across the frame, which the
+  zoom magnifies too). Both now keep the photo canvas's box, the stylesheet's, and a
+  CSS transform lays them over their rectangle (`frameRectTransform` in
+  `displayCanvas.js`): a translation in percentages of that box and a scale. The
+  compositor applies a transform as it is, so they land where the box puts their
+  rectangle, and the percentages follow a new fit without placing them again. Their
+  pixels are those they had: the comparison is still its reference put at its own
+  size, the detail layer its region, planned at the same density; only the placement
+  changed. The pan that puts a region's corner on a whole device pixel uses the
+  box's scale, where the corner now is. A standalone Chrome measurement (DPR 1 and
+  2, zoom 1 to 7.45, 2D and WebGL canvases) put the detail layer within 0.1 px of
+  the base at 381 % and 0.035 px at 745 %, where its own box was 2.3 px and 4.5 px
+  off, and the comparison within 0.002 px of the photo (0.08 px for a reference of
+  another size).
+  Measuring the layers against the photo under them (not against its client rect)
+  showed the photo itself off its box: `#glCanvas` and `#canvas` had
+  `object-fit: contain`, and their backing and box come from separate roundings
+  (the display size is floored at fit x DPR, the box rounded from the full frame;
+  a reduced tier caps the backing). A 901 x 601 backing in a 902 x 601 box was
+  letterboxed and snapped to start 1 CSS px in, so without the border the photo was
+  drawn 1.7 to 2.2 screen px right of where its box, and every layer laid on the
+  box (the overlay of #279 too), put it at 333 % to 381 %. `fitPhotoCanvasContent`
+  sets `object-fit: fill` while the backing has the box's shape up to rounding (at
+  most 2 CSS px of letterbox), so the photo fills its box like every layer over it;
+  a backing of another shape (the box already fits new planes whose frame is not
+  drawn yet) keeps `contain`, letterboxed as before rather than stretched. In the
+  app, measured on screen with the sides of a patch that the layer and the photo
+  under it both show (`scripts/screen-edges.mjs`), DPR 1 unless noted:
+  - the detail layer (zoom-detail smoke) was 2.16 screen px off the base at true
+    100 % (333 %) and 4.35 px at 381 %, of which the base's letterbox was 1.67 and
+    1.91 px; now 0.04 and 0.07 px, and the base within 0.15 px of its box;
+  - the comparison over `#glCanvas` (display-modes smoke) without the border was
+    0.59 px (100 %) and 1.88 px (381 %) off the photo, all of it the photo's
+    letterbox (0.58 and 2.18 px off its box); now 0.08 and 0.20 px, the photo
+    within 0.53 px of its box. With the border its own box measured within 0.14 px
+    before and after;
+  - over `#canvas` at DPR 2 (compare-preview smoke) the comparison was within
+    0.17 px before and is within 0.11 px now, with and without the border: there
+    the photo's backing filled its box and the box rounded benignly. The transform
+    keeps the comparison there however Chrome would round a box of its own.
 - **Histogram.** Unchanged: the GL path's sample (≤ 24,576 px) goes through the same
   look, rescue and hold-to-compare rules, every 260 ms and at each settle, including
   above 16 MP where `updateFull` does not run.
@@ -253,9 +351,37 @@ fallback keeps one worker; #256 splits export conversions).
 - #253: `render/displayModes.test.mjs` (the fp32 model of the mode stages against
   `pixelAdjustments.js` on every parity recipe, the orientation fixture, the stage
   cache), `--display-modes-only` (offscreen mode parity, a look in the app, the border
-  underlay against `composeSprocketFrame`, overlay alignment at 100 % and about 400 %,
-  GL vs CPU pointer mapping, the failed self-test) and `--expired-only` (the rescue on
-  `#glCanvas` within the budget, drags, hold-to-compare).
+  underlay against `composeSprocketFrame`, overlay alignment, GL vs CPU pointer
+  mapping, the failed self-test) and `--expired-only` (the rescue on `#glCanvas`
+  within the budget, drags, hold-to-compare).
+- #279: `--display-modes-only` checks the overlay in the photo canvas's box with its
+  backing (the framed display size with the border) and the same photo pixels as a
+  photo-size backing (`__ncDisplay.overlayParity`), then a dodge stroke (on
+  `#glCanvas` and `#canvas`), the tint of a direct dust stroke and the live dab on
+  `#brushFeedback` on screen within 1 CSS px of their image points, at 100 % and
+  about 400 % zoom, with and without the border. Its screenshots clip whole device
+  pixels: Chrome rounds a fractional clip's origin and truncates its size, which had
+  added up to half a pixel to each measurement. `displayModesWiring.test.mjs`
+  checks the plan, the offsets of the tint, its patches and the strokes, and that
+  the overlay sets no box of its own; `zoomActualPixels.test.mjs` the whole-pixel
+  box.
+- #279 follow-up: `--display-modes-only` shows the comparison over `#glCanvas` and
+  checks that it keeps the photo canvas's box (a transform over the photo with the
+  border) and draws a colour patch's left and top sides within 1 CSS px of where
+  the photo under it draws them, and the photo within 1 CSS px of where its box
+  puts them, at 100 % and about 400 % zoom, with and without the border; its dust
+  check now measures the live dab and the tint against one reference, the disc
+  the stroke commits, read back from the dust mask (`__ncBrush.maskWindow`).
+  `--compare-preview-only` does the same for the comparison over `#canvas` (DPR 2,
+  with and without the border) and `--zoom-detail-only` for the detail layer over
+  the base at true 100 % and about 400 %. The edges are found on screen to a
+  fraction of a pixel where each layer's profile across a patch side crosses
+  halfway between its two sides (`scripts/screen-edges.mjs`).
+  `displayCanvas.test.mjs` checks `frameRectTransform`, `displayPath.test.mjs` the
+  comparison's placement, `detailLayerWiring.test.mjs` the detail layer's and the
+  snapped pan, `zoomActualPixels.test.mjs` and `previewTierWiring.test.mjs` the
+  photo's `object-fit` (a reduced buffer included), `brushWiring.test.mjs` the dab
+  at the committed disc's centre.
 - Frame rates, latency, heap growth and WebKit behaviour need the #230 harness.
 
 ## Native detail at zoom (#248 review)
@@ -265,13 +391,19 @@ region becomes stale as soon as that frame arrives; the next base draw recrops
 it without a pan. Tier B uses its pending whole-frame size for fog and mean-grid
 coordinates. Conversion completion wakes a waiting request directly; retaining
 or committing a preview plane does not block an ROI. The 250 ms release budget
-is exercised with fake timers; real driver/worker latency remains device-dependent.
+is exercised with fake timers; in Chrome the zoom-detail smoke measured 47 ms
+from a slider release at 100 % to a current region (its 6 MP fixture, 4 bands,
+#270). Real driver/worker latency remains device-dependent.
 
 Only one current region is requested. Matching cuts deduplicate even when they
 cannot cover the entire view, and superseded requests abort and drop queued row
 buffers. When native rows would exceed 16 MP, the retained level covers the full
 view at its available density. This is a display approximation below native zoom;
 100% and export-triggered exact frames use exact frame crops.
+
+The region's canvas keeps the base's box, and a transform lays it over the
+region (#279 follow-up, see Display modes): it is drawn on the base's pixel
+grid at any zoom, where a box of its own was rounded off it.
 
 An export's exact frame uses its own pixels and box-filter grid, even when the
 source plan says `fromLevel`. Above the 16 MP native-copy limit it builds that
@@ -282,25 +414,47 @@ the rectangle, placement and whole-frame fog coordinates stay the same. It
 never substitutes the retained source-conversion level for the exact frame.
 Cancellation stops before the next band or transfer.
 
-The worker owns the private padded RGBA16 plane, converts it in place, releases
-received rows before conversion, and uses its result's RGBA8 bytes directly when
-slot and output sizes match. The former unconditional 128 MB claim is replaced
-by conservative allocation accounting: at DPR 2, a 1110x700 CSS view has a
-2560x1792 slot and a <=2478x1658 native-density region. At lower densities native
-rows may approach the 16 MP cap. Including that resampling peak, a worst-case sparse
-stops map and old/new detail textures plus the drawing buffer, allow **384 MiB**
-for that slot, and **512 MiB** for a 1600x1000 view (3584x2304 slot). The bound
-also allows one superseding row payload while an active synchronous
-pass finishes; older queued payloads are discarded. These bounds
-exclude the already retained base/analysis and driver-internal overhead; they
-are estimates, not measured process RSS. Planning uses a 60 MP descriptor while
-tests allocate at most 12 MP. `estimateDetailRoiBytes` checks the plane/texture
-accounting against these bounds. `?detailProbe=1` retains a test-only region for CPU
-parity checks; its retained plane and transient reference/readback copies are additional.
+A region converts at its own size (#270): the padded fixed-size slot is gone,
+since a transient conversion keeps no plane and a new size costs the engine
+under 0.5 ms (Node, alternating 640x384 and 641x385 regions). With cores to
+spare it converts in row bands at once, in the preview worker and up to three
+detail workers (`planDetailBandCount`: 4 bands from 8 cores, 3 from 6, 2 from
+4, 1 below that, with sharpening, or after a band failed; 2 at most where
+memory is short). Main cuts each band's rows (native rows, or the level block's
+rows; below full density the rows the resample's taps read, in whole boxes of
+the native box filter), asks the preview worker for the base's analysis, posts
+the bands, and assembles the RGBA8 replies before one upload. Every stage is per
+pixel, so the bands equal the whole region byte for byte
+(`conversionWorker.roi.test.mjs`, 92 banded regions; the zoom-detail smoke's
+`bandParity`). Each worker owns its plane, converts it in place and releases
+its received rows before conversion.
 
-The limits bind allocation callers: native/level copies are at most 16 MP,
-exact-frame native bands at most 1 MP, and output/padded-slot/GL surfaces at
-most 8,388,608 pixels with dimensions at most 8192. Planning and warm-up skip
+The former unconditional 128 MB claim is replaced by conservative allocation
+accounting (`estimateDetailRoiBytes`): each band holds at most its input rows
+(8 B per input pixel), one superseding request's rows, the box level of native
+rows and 16 B per output pixel (resampled plane, RGBA8 output, a dense stops map
+at worst); main adds 8 B per output pixel while bands run (the shown texture and
+drawing buffer) and 24 B after they end (replies, assembly, old and new texture
+and drawing buffer). The bound is 16 x input + box + 24 x output + 1 MiB. At
+DPR 2, a 1110x700 CSS view (2560x1792 slot) with the worst native input (16 MP
+at the cap) gives 350 MiB, under **384 MiB**; a 1600x1000 view (3584x2304 slot)
+gives 434 MiB, under **512 MiB**. In the benchmark's view (1076x621 CSS at DPR
+2, 60 MP) the steps of S4 give 113-193 MB (true 100 %: a 2408x1498 native
+region, 145 MB). Exact-frame crops give 182 MB and 265 MB for the two views at
+1.5x fit. These bounds exclude the already retained base/analysis, each detail
+worker's own heap (module code and engine tables) and driver-internal overhead;
+they are estimates, not measured process RSS. Measured (S4 `--quick`, noisy,
+2026-10-08): the renderer's peak was 1829 MB against 1742 MB before (medians)
+and 1212 MB against 1140 MB after the scenario; that difference is mostly the
+three detail workers' heaps with the planes of their last band, which each
+worker frees at its next garbage collection. Planning uses a 60 MP descriptor
+while tests allocate at most 12 MP. `?detailProbe=1` retains a test-only region
+for CPU parity checks; its retained plane and transient reference/readback
+copies are additional.
+
+The limits bind allocation callers: native/level copies (and each band's rows)
+are at most 16 MP, exact-frame native bands at most 1 MP, and output/slot/GL
+surfaces at most 8,388,608 pixels with dimensions at most 8192. Planning and warm-up skip
 unsupported viewport sizes; the base display continues. The page client and
 worker check dimensions before copying, posting, resampling or padding, and
 the detail upload checks again. `estimateDetailRoiBytes(..., { exactFrame: true })`

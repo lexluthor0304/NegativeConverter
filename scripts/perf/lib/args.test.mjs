@@ -71,5 +71,22 @@ assert.deepEqual(linearPath({ x0: 0, y0: 0, x1: 10, y1: 20, count: 2 }), [{ x: 5
   });
   assert.deepEqual(times, [0, 120, 120, 150]);
 }
+{
+  // Commands that fail while later steps still wait (the browser was killed
+  // mid-drag) are reported in the results and never left unhandled (#273).
+  const unhandled = [];
+  const onUnhandled = reason => unhandled.push(reason);
+  process.on('unhandledRejection', onUnhandled);
+  try {
+    const result = await runPaced(3, i => (i === 0 ? Promise.reject(new Error('CDP connection closed')) : 'sent'), {
+      periodMs: 5, sleep: ms => new Promise(resolve => setTimeout(resolve, ms)), spinMs: 0
+    });
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.deepEqual(result.results.map(entry => entry.status), ['rejected', 'fulfilled', 'fulfilled']);
+    assert.equal(unhandled.length, 0, 'no unhandled rejection while the loop sleeps');
+  } finally {
+    process.off('unhandledRejection', onUnhandled);
+  }
+}
 
 console.log('args and pacing: option parsing and absolute 60 Hz schedule tests passed');

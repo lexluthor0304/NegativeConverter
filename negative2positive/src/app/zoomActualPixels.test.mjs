@@ -33,6 +33,7 @@ function fixture({ source: size = { width: 9536, height: 6336 }, container = { w
     conversionSourceImageData: conversionSource, sprocketPreviewEnabled: false
   };
   const refreshed = [];
+  const detailDelays = [];
   const wrapper = element();
   const context = vm.createContext({
     state, window: { devicePixelRatio: dpr }, Math, Number, parseFloat,
@@ -48,8 +49,10 @@ function fixture({ source: size = { width: 9536, height: 6336 }, container = { w
     step3FrameReference, upscaleReference,
     computeZoomGeometry, clampPanValues, interimGeometryCss: () => '',
     postponeFullResolutionRenderForInteraction: () => {},
-    // The detail layer (#248 part 5) follows zoom and pan on its own.
-    noteDetailViewChanged: () => {}, dropDetailLayer: () => {},
+    // The detail layer (#248 part 5) follows zoom and pan on its own; a
+    // discrete step asks for its region at once (#270).
+    noteDetailViewChanged: (delay) => detailDelays.push(delay), dropDetailLayer: () => {},
+    DETAIL_SETTLE_MS: 100, DETAIL_STEP_SETTLE_MS: 0,
     // A brush stroke follows zoom and pan on the overlay (#254).
     brushFeedback: { drawing: false }, remapBrushStroke: () => {},
     refreshDisplayPreviewForViewport: () => refreshed.push(state.conversionSourceImageData),
@@ -60,14 +63,14 @@ function fixture({ source: size = { width: 9536, height: 6336 }, container = { w
     constSource('ZOOM_MIN'), constSource('ZOOM_MAX_FIT'), constSource('ZOOM_DOUBLE_CLICK_FACTOR'),
     'const canvasDisplayFit = { w: 0, h: 0, containerW: 0, containerH: 0, zoom: 0, dpr: 0, scale: 0 };',
     'let displayPreviewResizeTimer = null;',
-    ...['getFullResDisplayReference', 'displayFrameReference', 'conversionSourceSize', 'adjustCanvasDisplay', 'actualPixelsZoom', 'zoomMax', 'zoomIndicatorText',
+    ...['getFullResDisplayReference', 'displayFrameReference', 'conversionSourceSize', 'adjustCanvasDisplay', 'fitPhotoCanvasContent', 'actualPixelsZoom', 'zoomMax', 'zoomIndicatorText',
       'applyZoomPanTransform', 'getZoomGeometry', 'clampPan', 'resetZoomPan', 'resetUserZoom',
       'toggleActualPixels', 'zoomAtPoint', 'scheduleDisplayPreviewResize'].map(functionSource)
   ].join('\n'), context);
   const runTimers = () => { for (const [id, timer] of [...timers]) { timers.delete(id); timer.callback(); } };
   // The first draw fits the stand-in texture against the full-resolution reference.
   context.adjustCanvasDisplay(1809, 1202);
-  return { context, state, wrapper, refreshed, timers, runTimers, container, conversionSource };
+  return { context, state, wrapper, refreshed, timers, runTimers, container, conversionSource, detailDelays };
 }
 
 const cssWidth = f => parseFloat(f.wrapper.style.width);
@@ -75,18 +78,37 @@ const cssWidth = f => parseFloat(f.wrapper.style.width);
 for (const container of [{ width: 1110 - 300, height: 700 - 100 }, { width: 1440 - 300, height: 900 - 100 }, { width: 1110, height: 700 }]) {
   for (const dpr of [1, 2]) {
     const f = fixture({ container, dpr });
-    const fit = cssWidth(f) / 9536;
+    // CSS pixels per image pixel at zoom 1, against the full-resolution frame.
+    const fit = Math.min((container.width - 20) / 9536, (container.height - 20) / 6336, 1);
+    // #279: the box is the nearest whole CSS pixels, the size the compositor
+    // shows a canvas at, so its client rect is where the photo is drawn.
+    assert.deepEqual([f.wrapper.style.width, f.wrapper.style.height], [`${Math.round(9536 * fit)}px`, `${Math.round(6336 * fit)}px`]);
+    assert.deepEqual([f.context.glCanvas.style.width, f.context.glCanvas.style.height], [f.wrapper.style.width, f.wrapper.style.height]);
+    assert.ok(Number.isInteger(cssWidth(f)) && Math.abs(cssWidth(f) - 9536 * fit) <= 0.5);
+    // #279 follow-up: the photo fills that box. A backing of the box's shape
+    // up to rounding (the display size is floored, the box rounded) is
+    // stretched over it, never letterboxed a pixel off; one of another shape
+    // (the box already fits new planes) is letterboxed, as before.
+    const gl = f.context.glCanvas;
+    for (const [width, height, want] of [[Math.floor(9536 * fit * dpr), Math.floor(6336 * fit * dpr), 'fill'],
+      [Math.round(9536 * fit * dpr) - 1, Math.round(6336 * fit * dpr), 'fill'], [1202, 1809, 'contain'], [0, 0, 'contain']]) {
+      Object.assign(gl, { width, height });
+      f.context.fitPhotoCanvasContent(gl);
+      assert.equal(gl.style.objectFit, want, `${width} x ${height} in ${gl.style.width} x ${gl.style.height}`);
+    }
     const zoom100 = Math.max(1, 1 / (fit * dpr));
     assert.ok(Math.abs(f.context.actualPixelsZoom() - zoom100) < 1e-9, 'zoom100 = max(1, 1 / (fit x DPR))');
     // 200 % of native is reachable.
     assert.ok(f.context.zoomMax() >= 2 * zoom100 - 1e-9);
     f.context.zoomAtPoint(1000, 100, 100);
+    assert.equal(f.detailDelays.at(-1), 100, 'a wheel or pinch tick lets the detail layer settle');
     assert.ok(Math.abs(f.state.zoomLevel - 2 * zoom100) < 1e-9, `max zoom is 200 % of native (${JSON.stringify(container)} @${dpr})`);
     assert.equal(f.context.zoomIndicatorText(), '200%');
     f.context.resetZoomPan();
 
     // "1:1" from fit: one image pixel per device pixel, centred on the view.
     f.context.toggleActualPixels();
+    assert.equal(f.detailDelays.at(-1), 0, '1:1 is a step: the detail layer asks at once (#270)');
     assert.ok(Math.abs(f.state.zoomLevel - zoom100) < 1e-9, '1:1 reaches true 100 %');
     assert.equal(f.context.zoomIndicatorText(), '100%', 'the indicator reads 100 % at true 100 %');
     const geometry = f.context.getZoomGeometry();
@@ -132,4 +154,4 @@ for (const container of [{ width: 1110 - 300, height: 700 - 100 }, { width: 1440
   assert.equal(f.timers.size, 0);
 }
 
-console.log('zoomActualPixels: true 1:1 toggle, image-relative indicator, 200 % reachable, source-checked settle hook');
+console.log('zoomActualPixels: whole-pixel box, true 1:1 toggle, image-relative indicator, 200 % reachable, source-checked settle hook');
