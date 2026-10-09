@@ -179,6 +179,9 @@ Go to **System Settings → Privacy & Security**, scroll down and click **Open A
 - The terminal log shows the decision (`[linux-compat]` lines) and, once a photo is open, one `[webview]`
   line with the WebGL renderer, the decision, the WebKitGTK version and the starting preview tier.
   Include both in bug reports about sluggish sliders.
+- One `[memory]` line at startup shows the WebKitGTK memory limit the app applies before the window
+  opens (half of RAM, so WebKit's 30 s cache and JIT purge starts at a quarter of RAM instead of
+  1.5 GiB), or `WebKit defaults` when `/proc/meminfo` could not be read.
 - When the webview composites in software (the legacy default, `off`, no render node) or WebGL is a
   software rasteriser (llvmpipe, SwiftShader), slider and curve drags preview at up to 1 MP and the
   full display resolution returns on release. Other hosts drop to that tier only when frames run slow.

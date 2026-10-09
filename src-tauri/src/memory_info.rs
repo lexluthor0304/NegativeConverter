@@ -4,7 +4,9 @@
 //! this the desktop app plans every job for an unknown machine. The page
 //! sizes its renderer-wide budget from `totalBytes` and picks its idle policy
 //! from `engine` (WebKit's 30 s memory monitor purges caches and JIT code
-//! above 1.5 GiB on macOS and Linux; WebView2 has no such monitor).
+//! above 1.5 GiB on macOS, and on Linux above a quarter of RAM once
+//! `apply_linux_memory_pressure_settings` ran, #282; WebView2 has no such
+//! monitor).
 //!
 //! macOS reads `hw.memsize`, which the App Store sandbox allows. #252 uses
 //! the same command and signature.
@@ -54,7 +56,7 @@ pub fn parse_meminfo(text: &str) -> Option<(u64, Option<u64>)> {
     Some((total, field("MemAvailable")))
 }
 
-/// WebKitGTK's `memory-limit` (MB) that would move the Strict threshold from
+/// WebKitGTK's `memory-limit` (MB) that moves the Strict threshold from
 /// 1.5 GiB to about 4 GiB on a 16 GB machine: half of `MemTotal`.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn webkitgtk_memory_limit_mb(total_bytes: u64) -> u32 {
@@ -130,32 +132,82 @@ pub fn get_memory_info() -> Result<MemoryInfo, String> {
     memory_info()
 }
 
-/// Linux: the WebContent memory-pressure settings (#258 part 6). WebKitGTK
-/// takes them only as the construct-only `memory-pressure-settings` property
-/// of the WebKitWebContext, and wry 0.55 builds that context itself without
-/// it (`webkit_website_data_manager_set_memory_pressure_settings`, the one
-/// static setter, covers the network process only). Until wry exposes the
-/// property the web process keeps WebKit's defaults; one startup line says
-/// so, with the limit this machine would get.
+/// What WebKitGTK's memory pressure runs with on this machine (#258 part 6,
+/// #282): a `memory-limit` of half of `MemTotal`, so the Strict policy that
+/// purges caches and JIT code every 30 s starts at a quarter of RAM instead
+/// of WebKit's fixed 1.5 GiB. Everything else stays WebKitGTK's default: the
+/// conservative and strict thresholds (0.33 and 0.5 of the limit), the 30 s
+/// poll, and the kill threshold (unset: the web process is never killed).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WebKitGtkMemoryPlan {
+    /// `MemTotal` in MB.
+    pub total_mb: u64,
+    /// WebKitGTK's `memory-limit` in MB: half of `MemTotal`.
+    pub memory_limit_mb: u32,
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+impl WebKitGtkMemoryPlan {
+    /// `None` when the limit would be 0 MB, which WebKitGTK refuses.
+    pub fn for_total_bytes(total_bytes: u64) -> Option<Self> {
+        let memory_limit_mb = webkitgtk_memory_limit_mb(total_bytes);
+        (memory_limit_mb > 0).then_some(Self { total_mb: total_bytes / (1024 * 1024), memory_limit_mb })
+    }
+
+    /// The startup line of #258's acceptance: the applied limit, where Strict
+    /// starts (WebKitGTK's default strict threshold, half of the limit), and
+    /// that the kill threshold stays unset.
+    pub fn log_line(&self) -> String {
+        format!(
+            "[memory] WebKitGTK memory-limit {} MB of {} MB (Strict from {} MB); kill threshold unset",
+            self.memory_limit_mb,
+            self.total_mb,
+            self.memory_limit_mb / 2
+        )
+    }
+
+    /// wry's settings: only the limit; every other field `None` keeps
+    /// WebKitGTK's default.
+    #[cfg(target_os = "linux")]
+    pub fn settings(&self) -> tauri_runtime_wry::wry::MemoryPressureSettings {
+        tauri_runtime_wry::wry::MemoryPressureSettings {
+            memory_limit_mb: Some(self.memory_limit_mb),
+            ..Default::default()
+        }
+    }
+}
+
+/// Linux: apply the plan before the first webview and log it. WebKitGTK takes
+/// the settings only as the construct-only `memory-pressure-settings`
+/// property of the WebKitWebContext, which Tauri's wry builds itself when the
+/// main window from tauri.conf.json is created, so they go in as the
+/// process-wide default of the wry fork this build pins (`[patch.crates-io]`
+/// in Cargo.toml) through the wry instance Tauri uses. Without a readable
+/// `MemTotal` the web process keeps WebKit's defaults and the line says so.
 #[cfg(target_os = "linux")]
-pub fn log_linux_memory_pressure_plan() {
-    match read_physical_memory() {
-        Ok((total, _)) => eprintln!(
-            "[memory] WebKitGTK memory pressure: WebKit defaults (Strict from 1.5 GiB); \
-             planned memory-limit {} MB of {} MB not applied: wry does not expose WebContext memory-pressure-settings",
-            webkitgtk_memory_limit_mb(total),
-            total / (1024 * 1024)
-        ),
+pub fn apply_linux_memory_pressure_settings() {
+    let plan = read_physical_memory().and_then(|(total, _)| {
+        WebKitGtkMemoryPlan::for_total_bytes(total)
+            .ok_or_else(|| format!("MemTotal {total} bytes gives a 0 MB limit"))
+    });
+    match plan {
+        Ok(plan) => {
+            tauri_runtime_wry::wry::set_default_memory_pressure_settings(plan.settings());
+            eprintln!("{}", plan.log_line());
+        }
         Err(err) => eprintln!("[memory] WebKitGTK memory pressure: WebKit defaults ({err})"),
     }
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn log_linux_memory_pressure_plan() {}
+pub fn apply_linux_memory_pressure_settings() {}
 
 #[cfg(test)]
 mod tests {
-    use super::{memory_info, parse_meminfo, webkitgtk_memory_limit_mb, webview_engine};
+    use super::{
+        memory_info, parse_meminfo, webkitgtk_memory_limit_mb, webview_engine, WebKitGtkMemoryPlan,
+    };
 
     const GIB: u64 = 1024 * 1024 * 1024;
 
@@ -212,5 +264,42 @@ mod tests {
         assert_eq!(webkitgtk_memory_limit_mb(16 * GIB), 8192);
         assert_eq!(webkitgtk_memory_limit_mb(8 * GIB), 4096);
         assert_eq!(webkitgtk_memory_limit_mb(0), 0);
+    }
+
+    #[test]
+    fn webkitgtk_plan_logs_the_applied_limit_and_where_strict_starts() {
+        // A 16 GB machine's /proc/meminfo (#282's numbers).
+        let (total, _) = parse_meminfo("MemTotal:       16303196 kB\n").unwrap();
+        let plan = WebKitGtkMemoryPlan::for_total_bytes(total).unwrap();
+        assert_eq!(plan, WebKitGtkMemoryPlan { total_mb: 15921, memory_limit_mb: 7960 });
+        assert_eq!(
+            plan.log_line(),
+            "[memory] WebKitGTK memory-limit 7960 MB of 15921 MB (Strict from 3980 MB); kill threshold unset"
+        );
+        assert_eq!(
+            WebKitGtkMemoryPlan::for_total_bytes(16 * GIB),
+            Some(WebKitGtkMemoryPlan { total_mb: 16384, memory_limit_mb: 8192 })
+        );
+    }
+
+    #[test]
+    fn webkitgtk_plan_refuses_a_zero_limit() {
+        // WebKitGTK rejects memory-limit 0: such a machine keeps the defaults.
+        assert_eq!(WebKitGtkMemoryPlan::for_total_bytes(0), None);
+        assert_eq!(WebKitGtkMemoryPlan::for_total_bytes(1024 * 1024), None);
+        assert!(WebKitGtkMemoryPlan::for_total_bytes(2 * 1024 * 1024).is_some());
+    }
+
+    /// Runs where the wry types exist (CI's ubuntu test job): only the limit
+    /// is set; the thresholds, the kill threshold and the poll stay WebKitGTK's.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn webkitgtk_settings_set_only_the_limit() {
+        let settings = WebKitGtkMemoryPlan::for_total_bytes(16 * GIB).unwrap().settings();
+        assert_eq!(settings.memory_limit_mb, Some(8192));
+        assert_eq!(settings.conservative_threshold, None);
+        assert_eq!(settings.strict_threshold, None);
+        assert_eq!(settings.kill_threshold, None);
+        assert_eq!(settings.poll_interval, None);
     }
 }
