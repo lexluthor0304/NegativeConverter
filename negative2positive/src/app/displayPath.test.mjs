@@ -293,7 +293,7 @@ for (const worker of ['none', 'failing']) {
 // may accept the result. Exercise main.js's guards with the real worker bridge.
 for (const invalidate of ['none', 'source', 'photo', 'dust', 'dodge', 'dodge rectangle', 'crop', 'comparison', 'GL', 'settle']) {
   const f = settleFixture({ width: 320, height: 240 });
-  f.context.updatePreviewCpu();
+  f.context.updatePreviewCpu({ histogram: true });
   assert.equal(f.requests.length, 1);
   assert.equal(f.requests[0].quality, 'preview');
   assert.equal(f.drawn.length, 0, 'no synchronous pixel pass');
@@ -313,6 +313,7 @@ for (const invalidate of ['none', 'source', 'photo', 'dust', 'dodge', 'dodge rec
     applyPreparedAdjustmentsToBuffer(f.shown, recipe, expected, { quality: 'preview' });
     assert.deepEqual(f.state.displayImageData.data, expected.data, 'byte-identical preview kernel');
     assert.equal(f.counters.mainAdjustments, 0);
+    assert.deepEqual(f.histograms, [f.state.displayImageData], 'comparison exit updates the histogram when the frame presents');
   }
   if (invalidate === 'settle') assert.deepEqual(f.state.displayImageData.data, expectedFull(f.shown).data, 'a late preview cannot replace the exact frame');
   f.dispose();

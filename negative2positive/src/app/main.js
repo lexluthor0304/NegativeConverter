@@ -4349,9 +4349,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
       if (state.currentStep >= 3 && state.processedImageData) {
         // Edits made while the comparison was shown were not drawn.
-        updatePreview();
+        updatePreview({ histogram: true });
         if (isWebGLActive()) renderHistogramForWebGL(true);
-        else if (state.displayImageData) renderHistogram(state.displayImageData);
         return;
       }
 
@@ -7596,7 +7595,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       fullUpdateTimer = null;
     }
 
-    function updatePreview() {
+    function updatePreview({ histogram = false } = {}) {
       if (!state.processedImageData) return;
       if (state.beforeAfterActive || state.cropping) return;
       // A GPU frame ahead of the exact one is display-only (#239): the active
@@ -7618,7 +7617,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       }
 
       updateCanvasVisibility();
-      updatePreviewCpu();
+      updatePreviewCpu({ histogram });
     }
 
     // WebGL presents: no CPU frame is on screen, and none may land. The hidden
@@ -7656,7 +7655,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       syncDisplayOverlay();
     }
 
-    function updatePreviewCpu() {
+    function updatePreviewCpu({ histogram = false } = {}) {
       if (!state.processedImageData || state.cropping || state.beforeAfterActive) return;
       // A preview supersedes an older exact pass, but an in-flight preview may
       // still present during a drag. Its single waiting slot keeps only the
@@ -7675,6 +7674,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         previewAdjustedBuffer = adjusted;
         // Histogram updates are deferred to the exact settled frame.
         presentCpuFrame(adjusted, { fastSprocketPreview: true });
+        // Leaving comparison used to read the synchronous preview handle.
+        // Follow the actual asynchronous presentation instead.
+        if (histogram) renderHistogram(adjusted);
       };
       const fallback = () => {
         if (!current()) return;
