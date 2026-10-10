@@ -353,6 +353,12 @@ exports never read it. The exact settled pass retains its existing quality and
 worker route. The memory ledger accounts for the lane and hidden-window shedding
 cancels it without a main-thread retry.
 
+The lane uploads each source/revision once. Its worker retains that immutable
+8-bit plane and writes results into separate transferred buffers; settings-only
+drags send no pixel payload. A same-size photo switch, in-place brush revision
+or worker restart uploads again. Weak source identities on main do not keep old
+photos alive, and memory accounting includes the retained worker input.
+
 This is CPU work moved off the UI thread; the WebGL2 hardware path remains the
 preferred display route, with its pixel-precision gates unchanged. The other
 four #293 stages (ZIP CRC, linear DNG, lens remap and 8-bit canvas rotation) are

@@ -26,7 +26,7 @@ export function createCpuPreviewRenderer({ workers = createExportWorkerBridge() 
     try {
       if (!current()) { diagnostics.discarded++; return; }
       diagnostics.worker++;
-      const adjusted = await workers.workerApplyAdjustments(job.source, job.settings, 'preview');
+      const adjusted = await workers.workerApplyPreviewAdjustments(job.source, job.settings, job.revision);
       if (!current()) { diagnostics.discarded++; return; }
       if (adjusted) {
         job.present(adjusted);

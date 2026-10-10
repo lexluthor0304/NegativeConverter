@@ -7687,7 +7687,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         });
         present(previewAdjustedBuffer);
       };
-      if (!cpuPreviewRenderer.request({ source, settings, current, present, fallback })) {
+      if (!cpuPreviewRenderer.request({ source, settings, revision, current, present, fallback })) {
         cpuPreviewRenderer.cancel();
         fallback();
       }

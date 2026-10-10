@@ -178,6 +178,10 @@ function settleFixture({ width = 1200, height = 900, worker = 'real', gl = false
   const real = createExportWorkerBridge({ workerFactory: () => new InProcessWorker() });
   const workers = {
     isWorkerAvailable: () => worker !== 'none',
+    workerApplyPreviewAdjustments: (source, prepared, revision) => {
+      requests.push({ source, prepared, quality: 'preview', revision });
+      return real.workerApplyPreviewAdjustments(source, prepared, revision);
+    },
     workerApplyAdjustments: (source, prepared, quality, ...rest) => {
       requests.push({ source, prepared, quality });
       if (worker === 'failing') return Promise.resolve(null);

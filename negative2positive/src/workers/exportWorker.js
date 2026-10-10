@@ -31,6 +31,9 @@ const adjustmentLutScratch16 = {
   lutG: new Uint16Array(65536),
   lutB: new Uint16Array(65536)
 };
+// Only the independent CPU display lane uses this cache. Export passes keep
+// their existing in-place ownership protocol and never read this frame.
+let previewSource = null;
 
 self.onmessage = function (e) {
   const msg = e.data;
@@ -38,6 +41,9 @@ self.onmessage = function (e) {
     switch (msg.type) {
       case 'applyAdjustments':
         handleApplyAdjustments(msg);
+        break;
+      case 'previewAdjustments':
+        handlePreviewAdjustments(msg);
         break;
       case 'applyAdjustments16':
         handleApplyAdjustments16(msg);
@@ -135,6 +141,22 @@ function handleApplyAdjustments(msg) {
     { type: 'result', id, data: pixels.buffer, width, height },
     [pixels.buffer]
   );
+}
+
+function handlePreviewAdjustments({ id, sourceKey, inputBuffer, width, height, settings }) {
+  if (inputBuffer) {
+    const pixels = new Uint8ClampedArray(inputBuffer);
+    if (pixels.length !== width * height * 4) throw new Error('Invalid CPU preview source size');
+    previewSource = { key: sourceKey, width, height, pixels };
+  }
+  if (!previewSource || previewSource.key !== sourceKey || previewSource.width !== width || previewSource.height !== height) {
+    throw new Error('CPU preview source is missing');
+  }
+  normalizeCurves(settings);
+  const params = computeAdjustmentParams(settings, { width, height });
+  const pixels = new Uint8ClampedArray(width * height * 4);
+  applyAdjustmentsToPixels(previewSource.pixels, pixels, width * height, params, 'preview', null, 500000, adjustmentLutScratch);
+  self.postMessage({ type: 'result', id, data: pixels.buffer, width, height }, [pixels.buffer]);
 }
 
 // The Step-3 stage on a 16-bit plane, in place: the same function and params

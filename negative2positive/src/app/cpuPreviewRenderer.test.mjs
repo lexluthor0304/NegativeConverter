@@ -7,8 +7,8 @@ function fixture() {
   let available = true;
   const workers = {
     isWorkerAvailable: () => available, workerAlive: true, residentBytes: 12,
-    workerApplyAdjustments(source, settings, quality) {
-      return new Promise((resolve, reject) => calls.push({ source, settings, quality, resolve, reject }));
+    workerApplyPreviewAdjustments(source, settings, revision) {
+      return new Promise((resolve, reject) => calls.push({ source, settings, revision, resolve, reject }));
     },
     cancelWorkerRequests() {
       for (const call of calls) call.reject(Object.assign(new Error('released'), { name: 'AbortError' }));
@@ -16,7 +16,7 @@ function fixture() {
   };
   const renderer = createCpuPreviewRenderer({ workers });
   const source = { width: 512, height: 256, data: { byteLength: 524288 } };
-  const job = (id, current = () => true) => ({ source, settings: { id }, current,
+  const job = (id, current = () => true) => ({ source, settings: { id }, revision: 7, current,
     present: frame => frames.push(frame), fallback: () => fallbacks.push(id) });
   return { renderer, calls, frames, fallbacks, source, job, unavailable: () => { available = false; } };
 }
@@ -31,7 +31,7 @@ function fixture() {
   assert.deepEqual(f.frames, ['first'], 'continuous input does not starve presentation');
   assert.equal(f.calls.length, 2);
   assert.equal(f.calls[1].settings.id, 99, 'only the latest waiting recipe runs');
-  assert.equal(f.calls[1].quality, 'preview');
+  assert.equal(f.calls[1].revision, 7, 'the revision of mutable source pixels reaches the bridge');
   f.calls[1].resolve('last');
   await tick();
   assert.deepEqual(f.frames, ['first', 'last']);
