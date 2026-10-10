@@ -375,6 +375,9 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory,
   // The planes of the last request stay in the worker's heap until it is
   // terminated (the memory ledger's worker resident, #258).
   let lastJobBytes = 0;
+  const previewSourceIds = new WeakMap();
+  let nextPreviewSourceId = 0;
+  let previewSourceKey = null;
 
   function clearIdleRelease() {
     if (idleTimer !== null) clearTimeout(idleTimer);
@@ -421,6 +424,7 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory,
     clearIdleRelease();
     largeSinceIdle = false;
     lastJobBytes = 0;
+    previewSourceKey = null;
     const dying = worker;
     worker = null;
     if (!dying) return;
@@ -539,7 +543,7 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory,
       }
       clearIdleRelease();
       if (idleReleaseMs > 0 && Number(options.pixels) > IDLE_RELEASE_MIN_PIXELS) largeSinceIdle = true;
-      lastJobBytes = messagePlaneBytes(message);
+      lastJobBytes = Math.max(messagePlaneBytes(message), options.residentBytes || 0);
 
       const id = ++requestId;
       message.id = id;
@@ -659,6 +663,39 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory,
       if (isAbortError(err)) throw err;
       // Fallback to main thread
       warnWorkerFallbackOnce('applyAdjustments', err);
+      return null;
+    }
+  }
+
+  /** Display-only lane: upload an immutable source once, then send recipes.
+   * The worker keeps the input and writes each result into a separate buffer.
+   * Callers must change revision after an in-place edit, and serialize requests
+   * (cpuPreviewRenderer keeps one running and one waiting). No editor plane is
+   * transferred or retained here; source identities are weak keys.
+   */
+  async function workerApplyPreviewAdjustments(imageData, settings, revision = 0) {
+    const { width, height, data } = imageData;
+    if (!previewSourceIds.has(data)) previewSourceIds.set(data, ++nextPreviewSourceId);
+    const key = `${previewSourceIds.get(data)}:${width}:${height}:${revision}`;
+    try {
+      if (disposed) throw disposedBridgeError();
+      // Start a replacement worker before checking its empty source cache.
+      if (!getWorker()) return null;
+      let inputBuffer = null;
+      if (key !== previewSourceKey) {
+        let input = prepareRequestInput(data);
+        if (isPromise(input)) input = await input;
+        inputBuffer = input.buffer;
+      }
+      const result = await sendToWorker({ type: 'previewAdjustments', inputBuffer, sourceKey: key,
+        width, height, settings: serializeSettings(settings) }, inputBuffer ? [inputBuffer] : [], null,
+      { ...requestOptionsFor(imageData, {}), residentBytes: data.byteLength * 2 });
+      previewSourceKey = key;
+      return new ImageData(result.data, result.width, result.height);
+    } catch (error) {
+      previewSourceKey = null;
+      if (isAbortError(error)) throw error;
+      warnWorkerFallbackOnce('previewAdjustments', error);
       return null;
     }
   }
@@ -1121,6 +1158,7 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory,
 
   return {
     workerApplyAdjustments,
+    workerApplyPreviewAdjustments,
     workerApplyAdjustments16,
     workerGainMap16,
     workerAdjust16AndEncode,

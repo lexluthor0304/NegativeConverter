@@ -194,6 +194,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     import { applyDustStroke } from '../silvercore/engine/DustBrush.js';
     import { getLoadingOverlay } from '../ui/LoadingOverlay.js';
     import { createPerfTraceFactory, readPerfFlags } from './perfTrace.js';
+    import { createCpuPreviewRenderer } from './cpuPreviewRenderer.js';
     import {
       workerApplyAdjustments,
       workerApplyAdjustments16,
@@ -4348,9 +4349,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
       if (state.currentStep >= 3 && state.processedImageData) {
         // Edits made while the comparison was shown were not drawn.
-        updatePreview();
+        updatePreview({ histogram: true });
         if (isWebGLActive()) renderHistogramForWebGL(true);
-        else if (state.displayImageData) renderHistogram(state.displayImageData);
         return;
       }
 
@@ -7499,6 +7499,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     let fullUpdateTimer = null;
 
     let previewAdjustedBuffer = null;
+    const cpuPreviewRenderer = createCpuPreviewRenderer();
     // The settled display frame adjusted on this thread (at most 1 MP, or a
     // display preview without the export worker).
     let settledAdjustedBuffer = null;
@@ -7594,7 +7595,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       fullUpdateTimer = null;
     }
 
-    function updatePreview() {
+    function updatePreview({ histogram = false } = {}) {
       if (!state.processedImageData) return;
       if (state.beforeAfterActive || state.cropping) return;
       // A GPU frame ahead of the exact one is display-only (#239): the active
@@ -7616,7 +7617,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       }
 
       updateCanvasVisibility();
-      updatePreviewCpu();
+      updatePreviewCpu({ histogram });
     }
 
     // WebGL presents: no CPU frame is on screen, and none may land. The hidden
@@ -7634,6 +7635,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
     function supersedeSettledDisplay() {
       settledDisplayToken++;
+      cpuPreviewRenderer.cancel();
     }
 
     // What the CPU display adjusts: the display preview (at most the
@@ -7653,14 +7655,42 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       syncDisplayOverlay();
     }
 
-    function updatePreviewCpu() {
-      if (!state.processedImageData || state.cropping) return;
-      supersedeSettledDisplay();
+    function updatePreviewCpu({ histogram = false } = {}) {
+      if (!state.processedImageData || state.cropping || state.beforeAfterActive) return;
+      // A preview supersedes an older exact pass, but an in-flight preview may
+      // still present during a drag. Its single waiting slot keeps only the
+      // newest recipe; non-preview owners invalidate both through supersede.
+      settledDisplayToken++;
       const source = displaySourceImageData();
-      previewAdjustedBuffer = ensureImageDataBuffer(previewAdjustedBuffer, source.width, source.height);
-      applyAdjustmentsToBuffer(source, state, previewAdjustedBuffer, 'preview');
-      // Histogram updates are deferred to settled frames for responsiveness.
-      presentCpuFrame(previewAdjustedBuffer, { fastSprocketPreview: true });
+      const settings = buildDisplayAdjustmentSettings();
+      const generation = loadGeneration;
+      const revision = convertedPixelsRevision;
+      const stroke = liveDodge;
+      const puts = liveDodgeCounters.puts;
+      const current = () => source === displaySourceImageData() && generation === loadGeneration
+        && revision === convertedPixelsRevision && stroke === liveDodge && puts === liveDodgeCounters.puts
+        && state.currentStep >= 3 && !state.cropping && !state.beforeAfterActive && !isWebGLActive();
+      const present = (adjusted) => {
+        previewAdjustedBuffer = adjusted;
+        // Histogram updates are deferred to the exact settled frame.
+        presentCpuFrame(adjusted, { fastSprocketPreview: true });
+        // Leaving comparison used to read the synchronous preview handle.
+        // Follow the actual asynchronous presentation instead.
+        if (histogram) renderHistogram(adjusted);
+      };
+      const fallback = () => {
+        if (!current()) return;
+        previewAdjustedBuffer = ensureImageDataBuffer(previewAdjustedBuffer, source.width, source.height);
+        noteMainThreadAdjustment(source);
+        applyPreparedAdjustmentsToBuffer(source, settings, previewAdjustedBuffer, {
+          quality: 'preview', lutScratch: adjustmentLutScratch
+        });
+        present(previewAdjustedBuffer);
+      };
+      if (!cpuPreviewRenderer.request({ source, settings, revision, current, present, fallback })) {
+        cpuPreviewRenderer.cancel();
+        fallback();
+      }
     }
 
     function updateFull() {
@@ -7700,7 +7730,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     function renderSettledDisplay() {
       const source = displaySourceImageData();
       if (!source || state.cropping || state.beforeAfterActive) return;
-      const token = ++settledDisplayToken;
+      supersedeSettledDisplay();
+      const token = settledDisplayToken;
       displayDebugCounters.settleRequests++;
       const prepared = buildDisplayAdjustmentSettings();
       const current = () => token === settledDisplayToken && source === displaySourceImageData();
@@ -7877,6 +7908,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         settledParity: verifySettledDisplay,
         glParity: verifyGlDisplay,
         glActive: () => isWebGLActive(),
+        cpuPreview: () => ({ ...cpuPreviewRenderer.diagnostics, busy: cpuPreviewRenderer.busy }),
         // The frame on screen, whichever canvas shows it (a GL frame read back in
         // its own draw task): { surface, width, height, data, photo }.
         shownFrame: () => {
@@ -9495,6 +9527,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           const previewProcessed = await convertFromCurrentSource(state, { preview: hasSmallPreview, interactive: true, includeAnalysisPreview: false, retain16,
             previewSource: repairedSource });
           if (!previewProcessed) return false;
+          // Conversion and CPU adjustments overlap, but a fast conversion must
+          // not invalidate every slow display pass (e.g. spatial film rescue).
+          // Keep this lane busy until the preceding source has been presented;
+          // its pending slot still coalesces input. Mode/photo changes cancel
+          // the barrier, and the ownership checks below then discard stale work.
+          const cpuDisplayReady = cpuPreviewRenderer.whenIdle();
+          if (cpuDisplayReady) await cpuDisplayReady;
           // The worker's newest frame, which a dodge stroke can paint over (#254).
           if (generation === coreReprocessGeneration) noteLiveFrame(previewProcessed, token, generation);
           if (reducedInput) reducedDisplayImages.add(previewProcessed);
@@ -12101,6 +12140,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       thumbnailSources.clear();
       watchRollSamples.clear();
       if (!exportWorkerPendingCount()) terminateExportWorker();
+      cpuPreviewRenderer.release();
       // The detection helpers' OpenCV realms (#252) start again on demand.
       analyzeFrameInWorker.releaseHelpers();
       // RAW post-decode workers live only for their decode (#232): none idles.
@@ -12521,6 +12561,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // #250's default bridge releases itself 4 s after a large request.
       idle: () => isExportWorkerAlive() && exportWorkerPendingCount() === 0,
       release: () => terminateExportWorker()
+    });
+    workerResidents.set('cpu-preview', {
+      residentBytes: () => cpuPreviewRenderer.residentBytes,
+      idle: () => cpuPreviewRenderer.alive && !cpuPreviewRenderer.busy,
+      release: () => cpuPreviewRenderer.release()
     });
     workerResidents.set('opencv', {
       residentBytes: () => analyzeFrameInWorker.residentBytes,

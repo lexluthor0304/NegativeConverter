@@ -206,7 +206,14 @@ export async function runComparePreviewSmoke({ send, evaluate, waitFor, wait, fa
     const result = await evaluate(`(async () => {
       const slider = document.getElementById('wbR'), compare = document.getElementById('beforeAfterBtn');
       const probe = window.__comparePreviewProbe, hash = window.__comparePreviewHash;
-      const nextFrame = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      const nextFrame = async () => {
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        const deadline = performance.now() + 5000;
+        while (window.__ncDisplay.cpuPreview().busy && performance.now() < deadline) {
+          await new Promise(resolve => requestAnimationFrame(resolve));
+        }
+        if (window.__ncDisplay.cpuPreview().busy) throw new Error('CPU preview did not settle');
+      };
       const input = value => { slider.value = String(value); slider.dispatchEvent(new Event('input', { bubbles: true })); };
       const writesDuring = action => {
         probe.writes.length = 0; probe.recording = true;
@@ -214,8 +221,8 @@ export async function runComparePreviewSmoke({ send, evaluate, waitFor, wait, fa
         probe.recording = false;
         return { start, ms, writes: probe.writes.splice(0).filter(w => w.id !== 'histogramCanvas') };
       };
-      // Input, not change: this isolates synchronous adjustment freshness from
-      // asynchronous SilverCore conversion and does not schedule a full pass.
+      // Input, not change: isolate Step 3 from SilverCore conversion. The CPU
+      // preview now presents asynchronously from its own bounded worker lane.
       input(1.05); await nextFrame();
       const baseline = hash();
       input(1.35); await nextFrame();
@@ -225,6 +232,7 @@ export async function runComparePreviewSmoke({ send, evaluate, waitFor, wait, fa
       const reference = hash('beforeAfterCanvas'), underComparison = hash();
       const comparisonFrame = window.__ncDisplay.frame();
       const firstExit = writesDuring(() => compare.click());
+      await nextFrame();
       const restored = hash();
       input(1.35); await nextFrame();
       const fresh = hash();
@@ -233,11 +241,12 @@ export async function runComparePreviewSmoke({ send, evaluate, waitFor, wait, fa
       const secondPress = writesDuring(() => compare.click());
       input(.75); await nextFrame();
       const secondExit = writesDuring(() => compare.click());
+      await nextFrame();
       const changedWhileComparing = hash();
       input(.75); await nextFrame();
       const freshChanged = hash();
       return { baseline, recent, reference, underComparison, restored, fresh, changedWhileComparing, freshChanged,
-        firstPress, secondPress, firstExit, secondExit, comparisonFrame,
+        firstPress, secondPress, firstExit, secondExit, comparisonFrame, cpuPreview: window.__ncDisplay.cpuPreview(),
         cpuVisible: getComputedStyle(document.getElementById('canvas')).display !== 'none',
         glVisible: getComputedStyle(document.getElementById('glCanvas')).display !== 'none',
         border: document.getElementById('sprocketPreviewBtn').getAttribute('aria-pressed') };
@@ -246,6 +255,7 @@ export async function runComparePreviewSmoke({ send, evaluate, waitFor, wait, fa
       secondPress: { ms: result.secondPress.ms, writes: result.secondPress.writes } }));
     if (TIMING_BUDGETS && (result.firstPress.ms > 16 || result.firstPress.paintMs - result.firstPress.start > 50)) fail('first comparison press exceeded entry/paint budget: ' + JSON.stringify(result.firstPress));
     if (!result.cpuVisible || result.glVisible || result.border !== 'true') fail('compare scenario did not use the CPU border display');
+    if (result.cpuPreview.worker < 2 || result.cpuPreview.presented < 2 || result.cpuPreview.failed) fail('CPU previews did not use the worker lane: ' + JSON.stringify(result.cpuPreview));
     if (result.baseline === result.recent || result.reference === result.recent) fail('compare fixture did not distinguish changed settings/reference');
     if (result.underComparison !== result.recent) fail('entering the comparison drew over #canvas: ' + JSON.stringify(result));
     if (result.restored !== result.recent || result.restored !== result.fresh) fail('compare exit restored stale pixels after recent slider input: ' + JSON.stringify(result));

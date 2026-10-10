@@ -192,6 +192,13 @@ for (const [width, height] of sizes) {
     applyPreparedAdjustmentsToBuffer(frame, settings, live, { quality: 'full', lutScratch: sharedScratch });
     sameBytes(live.data, reference.data, `${label}: applyPreparedAdjustmentsToBuffer == frozen stage`);
 
+    // #293: the cached CPU display lane uses preview quality, including the
+    // look/rescue spatial stages and transparent pixels of these fixtures.
+    const preview = await bridge.workerApplyPreviewAdjustments(frame, settings, 0);
+    applyPreparedAdjustmentsToBuffer(frame, settings, live, { quality: 'preview', lutScratch: sharedScratch });
+    sameBytes(preview.data, live.data, `${label}: cached preview == main-thread preview`);
+    sameBytes(frame.data, inputBefore, `${label}: cached input is immutable`);
+
     // #254: a rectangle adjusted on its own, at its place in the frame (the
     // live dodge rectangles on a CPU display), equals that rectangle of the frame.
     for (const rect of [{ x: 0, y: 0, w: 7, h: 5 }, { x: Math.floor(width / 3), y: Math.floor(height / 2), w: Math.floor(width / 4), h: 3 }, { x: width - 5, y: height - 4, w: 5, h: 4 }]) {

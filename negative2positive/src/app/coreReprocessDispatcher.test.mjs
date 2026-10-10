@@ -8,6 +8,7 @@ import {
 import { routeCoreConversion, keepsFullPlaneOnDowngrade } from './fullResolutionRouting.js';
 import { DISABLED_GPU_PREVIEW_SCHEDULER, createGpuPreviewScheduler, GPU_SETTLE_IDLE_MS } from './gpuPreviewScheduler.js';
 import { displaySessionStubs, DISPLAY_SESSION_HELPERS } from './displaySessionHarness.mjs';
+import { createCpuPreviewRenderer } from './cpuPreviewRenderer.js';
 
 // Drives the real scheduler, reprocess and slider functions from main.js (as
 // restartRender.test.mjs does) against a fake clock: timeouts and animation
@@ -259,6 +260,72 @@ function schedulerFixture({ repairs = false, large = false, gpu = null } = {}) {
   assert.equal(f.context.coreReprocessTimer, null);
   f.conversions[0].resolve(f.result());
   await settle();
+  assert.equal(f.context.coreReprocessBusy(), false);
+}
+
+{
+  // #293: conversion is faster than a spatial CPU display recipe. Keep one
+  // conversion ahead, without replacing the source of every pending picture.
+  const f = schedulerFixture();
+  const passes = [], frames = [];
+  let shown = { width: 512, height: 256, value: 0 };
+  const renderer = createCpuPreviewRenderer({ workers: {
+    isWorkerAvailable: () => true,
+    workerApplyPreviewAdjustments: source => new Promise(resolve => passes.push({ source, resolve }))
+  } });
+  f.context.cpuPreviewRenderer = renderer;
+  f.context.applyPreviewProcessedImageToState = image => {
+    shown = image;
+    f.log.push(`apply:${image.value}`);
+  };
+  const draw = () => {
+    const source = shown;
+    renderer.request({ source, settings: {}, current: () => shown === source,
+      present: () => frames.push(source.value), fallback: () => assert.fail('no fallback expected') });
+  };
+  f.context.updatePreview = draw;
+  draw();
+  f.request(1);
+  await settle();
+  f.conversions[0].resolve({ width: 512, height: 256, value: 1 });
+  await settle();
+  f.request(2);
+  await settle();
+  assert.equal(shown.value, 0, 'completed conversion keeps the source until its display pass lands');
+  assert.equal(f.context.coreReprocessBusy(), true, 'export/switch barriers still see the pending conversion');
+  assert.equal(f.conversions.length, 1, 'input coalesces while display is behind');
+  passes[0].resolve({});
+  await settle();
+  assert.deepEqual(frames, [0]);
+  assert.equal(shown.value, 1);
+  assert.equal(passes.length, 2);
+  assert.equal(f.conversions.length, 2, 'next conversion overlaps the new CPU adjustment pass');
+  f.conversions[1].resolve({ width: 512, height: 256, value: 2 });
+  await settle();
+  assert.equal(shown.value, 1);
+  passes[1].resolve({});
+  await settle();
+  assert.deepEqual(frames, [0, 1], 'continuous source changes retain intermediate pictures');
+  assert.equal(shown.value, 2);
+  passes[2].resolve({});
+  await settle();
+  assert.deepEqual(frames, [0, 1, 2]);
+  assert.equal(renderer.diagnostics.discarded, 0);
+}
+
+{
+  // A photo switch during the wait invalidates the conversion on resumption.
+  const f = schedulerFixture();
+  let release;
+  f.context.cpuPreviewRenderer = { whenIdle: () => new Promise(resolve => { release = resolve; }) };
+  f.request(1);
+  await settle();
+  f.conversions[0].resolve(f.result());
+  await settle();
+  f.context.coreReprocessGeneration++;
+  release();
+  await settle();
+  assert.equal(f.log.includes('apply'), false);
   assert.equal(f.context.coreReprocessBusy(), false);
 }
 
