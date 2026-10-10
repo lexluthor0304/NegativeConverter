@@ -65,6 +65,7 @@ function hiddenWindow(f, { budgetBytes = 1e15, itemBytes = 0, park = false } = {
     dustRefreshRepairMask: null, dustTint: {}, displayOverlayState: {}, unpinDustWorker() {}, disposeDustWorker() {}, noteDustReplaced() {},
     undoStack: [], redoStack: [], settledAdjustedBuffer: null, previewAdjustedBuffer: null, workerResidents: new Map(),
     exportWorkerPendingCount: () => 0,
+    cpuPreviewRenderer: { release() {} },
     terminateExportWorker: () => {
       if (workers.exportAlive) workers.terminated++;
       workers.exportAlive = false;

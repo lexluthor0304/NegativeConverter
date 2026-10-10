@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { displaySessionStubs, DISPLAY_SESSION_HELPERS } from './displaySessionHarness.mjs';
+import { createCpuPreviewRenderer } from './cpuPreviewRenderer.js';
 
 const source = readFileSync(new URL('./main.js', import.meta.url), 'utf8');
 function functionSource(name) {
@@ -200,6 +201,8 @@ function settleFixture({ width = 1200, height = 900, worker = 'real', gl = false
     // frame; a full frame drops the live dodge rectangles.
     syncDisplayOverlay: () => overlaySyncs.push(drawn.length), scheduleDisplayModesWarmup: noop, refreshGlBorderSmear: noop,
     liveDisplaySerial: 0,
+    loadGeneration: 1, convertedPixelsRevision: 0, liveDodge: null, liveDodgeCounters: { puts: 0 },
+    cpuPreviewRenderer: createCpuPreviewRenderer({ workers }),
     renderHistogram: imageData => histograms.push(imageData),
     isWebGLActive: () => glActive,
     // updateFull's own dependencies.
@@ -255,7 +258,7 @@ for (const supersede of ['newer frame', 'new source', 'crop', 'comparison', 'GL'
   if (supersede === 'Step 2') f.state.currentStep = 2;
   const drawnBefore = f.drawn.length;
   await settle(); await settle();
-  assert.equal(f.drawn.length, drawnBefore, `${supersede}: the late result is not drawn`);
+  assert.equal(f.drawn.length, drawnBefore + (supersede === 'newer frame' ? 1 : 0), `${supersede}: only the current preview may draw`);
   assert.equal(f.counters.settlePresented, 0);
   f.dispose();
 }
@@ -283,6 +286,35 @@ for (const worker of ['none', 'failing']) {
   assert.equal(f.counters.settleSync, 1);
   assert.equal(f.counters.mainAdjustMaxPixels, 1200 * 900, `${worker}: never more than the display preview here`);
   assert.equal(f.counters.mainAdjustOverPreviewCap, 0);
+  f.dispose();
+}
+
+// The asynchronous preview uses the same pixels, and only its display owner
+// may accept the result. Exercise main.js's guards with the real worker bridge.
+for (const invalidate of ['none', 'source', 'photo', 'dust', 'dodge', 'dodge rectangle', 'crop', 'comparison', 'GL', 'settle']) {
+  const f = settleFixture({ width: 320, height: 240 });
+  f.context.updatePreviewCpu();
+  assert.equal(f.requests.length, 1);
+  assert.equal(f.requests[0].quality, 'preview');
+  assert.equal(f.drawn.length, 0, 'no synchronous pixel pass');
+  if (invalidate === 'source') f.state.previewSourceImageData = ramp(320, 240);
+  if (invalidate === 'photo') f.context.loadGeneration++;
+  if (invalidate === 'dust') f.context.convertedPixelsRevision++;
+  if (invalidate === 'dodge') f.context.liveDodge = {};
+  if (invalidate === 'dodge rectangle') f.context.liveDodgeCounters.puts++;
+  if (invalidate === 'crop') f.state.cropping = true;
+  if (invalidate === 'comparison') f.state.beforeAfterActive = true;
+  if (invalidate === 'GL') f.setGl(true);
+  if (invalidate === 'settle') f.context.updateFull();
+  await settle(); await settle();
+  assert.equal(f.drawn.length, ['none', 'settle'].includes(invalidate) ? 1 : 0, invalidate);
+  if (invalidate === 'none') {
+    const expected = image(320, 240);
+    applyPreparedAdjustmentsToBuffer(f.shown, recipe, expected, { quality: 'preview' });
+    assert.deepEqual(f.state.displayImageData.data, expected.data, 'byte-identical preview kernel');
+    assert.equal(f.counters.mainAdjustments, 0);
+  }
+  if (invalidate === 'settle') assert.deepEqual(f.state.displayImageData.data, expectedFull(f.shown).data, 'a late preview cannot replace the exact frame');
   f.dispose();
 }
 

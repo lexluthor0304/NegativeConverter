@@ -336,22 +336,28 @@ again.
 Not done: the optional row-band split of the fallback `convert` across workers (the
 fallback keeps one worker; #256 splits export conversions).
 
-Also not done (#293, stage 5): the CPU display's per-tick Step 3. In the excluded
-modes (WebGL off or failed, crop, before/after) the worker converts the display
-preview per tick as before, and `updatePreviewCpu` still runs the preview-quality
-Step 3 (`applyAdjustmentsToBuffer`, `'preview'`) on the main thread over that
-display-size frame; only the settled frame's exact pass runs in the export worker
-above 1 MP (`renderSettledDisplay`). Moving the per-tick pass into the preview
-worker means one round trip per tick (a copy of the display frame each way, a
-newest-wins queue, and the exact-frame rules above for what may replace what on
-screen), with the histogram, the live dodge rectangles and the loupe reading
-`presentCpuFrame`'s handle; it needs the S2 CPU-path measurements (`cyan` and
-`coreExposure` with `#coreUseWebGL` off) and the display-session and
-compare-preview smokes before it can be judged, which the #293 run could not
-make (the #230 harness needs more free disk than the machine had). The other
-four #293 stages (the ZIP CRC, the linear DNG, the lens remap and the 8-bit
-canvas rotation) are off the main thread; see `docs/batch-export-pipeline.md`
-and `docs/geometry-chain.md`.
+The CPU display's per-tick Step 3 (#293, stage 5) now uses an independent
+export-worker bridge (`app/cpuPreviewRenderer.js`), so a conversion or export
+cannot queue ahead of a slider's adjustment pass. It uses the same preview-quality
+kernel and display-size pixels. Frames below 65,536 pixels keep the short local
+pass; unavailable or failed workers keep the existing local fallback.
+
+The lane holds one running request and one waiting recipe; subsequent inputs
+replace the waiting recipe before any pixels are copied. A running frame can
+present during continuous input, followed by the latest recipe, so a pass slower
+than one animation frame does not starve the display. The source, load generation,
+in-place pixel revision and live dodge stroke/rectangle count must still match.
+A settled frame, GL frame, comparison, crop or reset invalidates pending previews.
+The histogram and loupe still read the handle installed by `presentCpuFrame`, and
+exports never read it. The exact settled pass retains its existing quality and
+worker route. The memory ledger accounts for the lane and hidden-window shedding
+cancels it without a main-thread retry.
+
+This is CPU work moved off the UI thread; the WebGL2 hardware path remains the
+preferred display route, with its pixel-precision gates unchanged. The other
+four #293 stages (ZIP CRC, linear DNG, lens remap and 8-bit canvas rotation) are
+off the main thread too; see `docs/batch-export-pipeline.md` and
+`docs/geometry-chain.md`.
 
 ## Verification
 

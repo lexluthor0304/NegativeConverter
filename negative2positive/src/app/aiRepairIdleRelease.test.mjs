@@ -215,6 +215,7 @@ for (const busy of ['aiRepairRunsInFlight', 'pendingBrushRepairs', 'activeLongJo
     photoSessions: { clear() {} }, photoPreviews: { clear() {} }, photoPrefetch: { clear() {} },
     thumbnailSources: { clear() {} }, watchRollSamples: { clear() {} },
     exportWorkerPendingCount: () => 0, terminateExportWorker: () => {},
+    cpuPreviewRenderer: { release() {} },
     analyzeFrameInWorker: { releaseHelpers() {} },
   });
   c.state.fileQueue = [{ settings: { repairStrokes: [] } }];
