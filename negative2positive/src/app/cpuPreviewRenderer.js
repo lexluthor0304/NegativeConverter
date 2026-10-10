@@ -12,9 +12,17 @@ export const CPU_PREVIEW_WORKER_MIN_PIXELS = 65_536;
  */
 export function createCpuPreviewRenderer({ workers = createExportWorkerBridge() } = {}) {
   let active = null;
+  let activeGeneration = null;
   let queued = null;
   let generation = 0;
+  let idleWaiters = [];
   const diagnostics = { requested: 0, coalesced: 0, worker: 0, presented: 0, discarded: 0, failed: 0 };
+
+  function settleWaiters() {
+    const waiters = idleWaiters;
+    idleWaiters = [];
+    for (const resolve of waiters) resolve();
+  }
 
   async function drain() {
     if (active || !queued) return;
@@ -22,6 +30,7 @@ export function createCpuPreviewRenderer({ workers = createExportWorkerBridge() 
     queued = null;
     active = job;
     const token = generation;
+    activeGeneration = token;
     const current = () => token === generation && job.current();
     try {
       if (!current()) { diagnostics.discarded++; return; }
@@ -43,13 +52,16 @@ export function createCpuPreviewRenderer({ workers = createExportWorkerBridge() 
       }
     } finally {
       active = null;
+      activeGeneration = null;
       void drain();
+      if (!active && !queued) settleWaiters();
     }
   }
 
   function cancel() {
     generation++;
     queued = null;
+    settleWaiters();
   }
 
   return {
@@ -63,6 +75,13 @@ export function createCpuPreviewRenderer({ workers = createExportWorkerBridge() 
       return true;
     },
     cancel,
+    // A conversion can run alongside the display pass, but must not replace
+    // its source until it presents. Otherwise a slow recipe loses every frame
+    // throughout a core-control drag. Cancelled owners never hold the barrier.
+    whenIdle() {
+      if (!queued && (!active || activeGeneration !== generation)) return null;
+      return new Promise(resolve => idleWaiters.push(resolve));
+    },
     release() {
       cancel();
       workers.cancelWorkerRequests('CPU preview released');

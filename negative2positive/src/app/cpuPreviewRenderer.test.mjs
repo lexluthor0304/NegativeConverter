@@ -70,6 +70,34 @@ for (const failure of ['null', 'error', 'abort']) {
 
 {
   const f = fixture();
+  assert.equal(f.renderer.whenIdle(), null, 'idle display adds no asynchronous boundary');
+  f.renderer.request(f.job(1));
+  f.renderer.request(f.job(2));
+  let done = false;
+  const barrier = f.renderer.whenIdle().then(() => { done = true; });
+  f.calls[0].resolve('first');
+  await tick();
+  assert.equal(done, false, 'source replacement waits for the queued current recipe too');
+  f.calls[1].resolve('latest');
+  await barrier;
+  assert.deepEqual(f.frames, ['first', 'latest']);
+  assert.equal(f.renderer.whenIdle(), null);
+}
+
+for (const end of ['cancel', 'release']) {
+  const f = fixture();
+  f.renderer.request(f.job(1));
+  const barrier = f.renderer.whenIdle();
+  f.renderer[end]();
+  await barrier;
+  assert.equal(f.renderer.whenIdle(), null, 'invalidated work cannot hold a new display owner');
+  f.calls[0].resolve('obsolete');
+  await tick();
+  assert.deepEqual(f.frames, []);
+}
+
+{
+  const f = fixture();
   assert.equal(f.renderer.request({ ...f.job(1), source: { width: 64, height: 64 } }), false);
   f.unavailable();
   assert.equal(f.renderer.request(f.job(2)), false);

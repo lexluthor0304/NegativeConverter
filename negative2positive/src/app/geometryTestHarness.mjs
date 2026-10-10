@@ -243,6 +243,7 @@ export function createHarness(base, { historyBudget = 768 * 1024 * 1024, session
     buildDisplayLevelInBands: displayPreview.buildDisplayLevelInBands, buildDisplayLevel: displayPreview.buildDisplayLevel,
     isDisplayTarget: displayPreview.isDisplayTarget, displaySizeServes: displayPreview.displaySizeServes,
     previewTier: 'normal', previewTierMaxPixels: () => 4_000_000, webglState: {},
+    cpuPreviewRenderer: { whenIdle: () => null },
     // main.js's getDisplayPreviewSize over the fixture's container.
     getDisplayPreviewSize: (image, maxDimension = 8192, tier = target.previewTier) => {
       const container = target.getCanvasContainerSize();

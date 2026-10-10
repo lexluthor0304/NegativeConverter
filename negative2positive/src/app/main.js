@@ -9527,6 +9527,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           const previewProcessed = await convertFromCurrentSource(state, { preview: hasSmallPreview, interactive: true, includeAnalysisPreview: false, retain16,
             previewSource: repairedSource });
           if (!previewProcessed) return false;
+          // Conversion and CPU adjustments overlap, but a fast conversion must
+          // not invalidate every slow display pass (e.g. spatial film rescue).
+          // Keep this lane busy until the preceding source has been presented;
+          // its pending slot still coalesces input. Mode/photo changes cancel
+          // the barrier, and the ownership checks below then discard stale work.
+          const cpuDisplayReady = cpuPreviewRenderer.whenIdle();
+          if (cpuDisplayReady) await cpuDisplayReady;
           // The worker's newest frame, which a dodge stroke can paint over (#254).
           if (generation === coreReprocessGeneration) noteLiveFrame(previewProcessed, token, generation);
           if (reducedInput) reducedDisplayImages.add(previewProcessed);

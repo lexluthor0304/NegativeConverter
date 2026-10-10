@@ -348,6 +348,11 @@ present during continuous input, followed by the latest recipe, so a pass slower
 than one animation frame does not starve the display. The source, load generation,
 in-place pixel revision and live dodge stroke/rectangle count must still match.
 A settled frame, GL frame, comparison, crop or reset invalidates pending previews.
+Conversion can overlap a CPU adjustment pass, but waits for that pass before
+replacing its source. This keeps slow spatial-rescue recipes visible during core
+control drags; fast conversions would otherwise invalidate every pending frame.
+The conversion lane stays busy and coalesces inputs during this wait. Cancellation
+releases the wait, after which the conversion rechecks its photo/source ownership.
 The histogram and loupe still read the handle installed by `presentCpuFrame`, and
 exports never read it. The exact settled pass retains its existing quality and
 worker route. The memory ledger accounts for the lane and hidden-window shedding
