@@ -19,6 +19,9 @@ const { createGeometryPool, runGeometryBand, runCanvasRotation, canvasRotationFi
 const { planGeometry, renderGeometry, rotatedDimensions, normalizeAngleDegrees } = await import('./imageGeometry.js');
 
 const bytes = a => Buffer.from(a.buffer, a.byteOffset, a.byteLength);
+// A declined rotation is `false`; a frame would be an ImageData, which assert
+// must never diff (it would inspect every sample).
+const declined = (value, label) => assert.equal(value === false ? 'false' : (value === null ? 'null' : typeof value), 'false', label);
 
 // A stand-in for the canvas: nearest-neighbour inverse map of the canvas
 // transform, alpha 255 inside the source and 0 outside; `salt` perturbs it
@@ -121,17 +124,20 @@ const sourceBefore = Buffer.from(bytes(source.data));
   assert.ok(bytes(chained.data).equals(bytes(renderGeometry(rotated, plan).data)), 'mirror + crop in the pool');
   // Stale: null, nothing counted.
   let calls = 0;
-  assert.equal(await pool.rotateCanvas(source, 5, { isCurrent: () => ++calls < 2 }), null);
+  assert.equal((await pool.rotateCanvas(source, 5, { isCurrent: () => ++calls < 2 })) === null, true, 'a stale job resolves null');
   assert.equal(pool.counters.canvasRotations, 2);
+  // Without workers (disableWorkers, as a failure would leave the pool) the
+  // page rotates; dispose() only releases the workers.
+  pool.disableWorkers();
+  declined(await pool.rotateCanvas(source, 5), 'a pool without workers declines');
   pool.dispose();
-  assert.equal(await pool.rotateCanvas(source, 5), false, 'a disposed pool declines');
 }
 
 // 2. Another rasteriser on the worker: the check fails, the page rotates.
 {
   const log = [];
   const pool = createGeometryPool({ workerFactory: fakeWorkerFactory(log, { workerRotate: (image, angle) => stubRotate(image, angle, angle === 44.9 ? 1 : 0) }), workersSupported: true, size: 2, idleTimeoutMs: 5, pageRotate: stubRotate });
-  assert.equal(await pool.rotateCanvas(source, 3.7), false);
+  declined(await pool.rotateCanvas(source, 3.7), 'another rasteriser declines');
   assert.deepEqual(pool.canvasRotation, { checked: true, supported: false });
   assert.equal(log.filter(entry => entry.type === 'geometry-rotate').length, 3, 'the check stops at the first differing angle');
   assert.equal(pool.counters.canvasRotations, 0);
@@ -146,14 +152,14 @@ const sourceBefore = Buffer.from(bytes(source.data));
 {
   const log = [];
   const pool = createGeometryPool({ workerFactory: fakeWorkerFactory(log, { throwOn: copy => copy.width === 300 }), workersSupported: true, size: 2, idleTimeoutMs: 5, pageRotate: stubRotate });
-  assert.equal(await pool.rotateCanvas(source, 3.7), false, 'an error reply declines');
+  declined(await pool.rotateCanvas(source, 3.7), 'an error reply declines');
   assert.deepEqual(pool.canvasRotation, { checked: true, supported: false });
   assert.equal(pool.available, true);
-  assert.equal(await pool.rotateCanvas(source, 3.7), false, 'declined from then on');
+  declined(await pool.rotateCanvas(source, 3.7), 'declined from then on');
   assert.equal(log.filter(entry => entry.type === 'geometry-rotate').length, 5);
   pool.dispose();
   const failing = createGeometryPool({ workerFactory: fakeWorkerFactory([], { throwOn: () => true }), workersSupported: true, size: 1, idleTimeoutMs: 5, pageRotate: stubRotate });
-  assert.equal(await failing.rotateCanvas(source, 3.7), false);
+  declined(await failing.rotateCanvas(source, 3.7), 'a failing check declines');
   assert.equal(failing.available, true);
   failing.dispose();
 }
@@ -162,7 +168,7 @@ const sourceBefore = Buffer.from(bytes(source.data));
 //    pool falls back to the synchronous path for good.
 {
   const pool = createGeometryPool({ workerFactory: fakeWorkerFactory([], { crashOn: (copy) => copy.type === 'geometry-rotate' && copy.width === 300 }), workersSupported: true, size: 2, idleTimeoutMs: 5, pageRotate: stubRotate });
-  assert.equal(await pool.rotateCanvas(source, 3.7), false);
+  declined(await pool.rotateCanvas(source, 3.7), 'a crash declines');
   assert.equal(pool.available, false);
   pool.dispose();
 }
@@ -171,7 +177,7 @@ const sourceBefore = Buffer.from(bytes(source.data));
 {
   const log = [];
   const pool = createGeometryPool({ workerFactory: fakeWorkerFactory(log), workersSupported: false, size: 2, pageRotate: stubRotate });
-  assert.equal(await pool.rotateCanvas(source, 3.7), false);
+  declined(await pool.rotateCanvas(source, 3.7), 'no workers declines');
   assert.equal(log.length, 0);
   assert.deepEqual(pool.canvasRotation, { checked: false, supported: false });
   pool.dispose();
@@ -206,7 +212,7 @@ const sourceBefore = Buffer.from(bytes(source.data));
       return worker;
     }
   });
-  assert.equal(await pool.rotateCanvas(source, 3.7), false, 'no OffscreenCanvas on a Node thread');
+  declined(await pool.rotateCanvas(source, 3.7), 'no OffscreenCanvas on a Node thread');
   assert.deepEqual(pool.canvasRotation, { checked: true, supported: false });
   assert.equal(pool.available, true);
   const plan = planGeometry(source, { mirrored: true, cropRegion: { left: 5, top: 5, width: 100, height: 100 } });

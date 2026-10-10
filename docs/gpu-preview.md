@@ -336,6 +336,23 @@ again.
 Not done: the optional row-band split of the fallback `convert` across workers (the
 fallback keeps one worker; #256 splits export conversions).
 
+Also not done (#293, stage 5): the CPU display's per-tick Step 3. In the excluded
+modes (WebGL off or failed, crop, before/after) the worker converts the display
+preview per tick as before, and `updatePreviewCpu` still runs the preview-quality
+Step 3 (`applyAdjustmentsToBuffer`, `'preview'`) on the main thread over that
+display-size frame; only the settled frame's exact pass runs in the export worker
+above 1 MP (`renderSettledDisplay`). Moving the per-tick pass into the preview
+worker means one round trip per tick (a copy of the display frame each way, a
+newest-wins queue, and the exact-frame rules above for what may replace what on
+screen), with the histogram, the live dodge rectangles and the loupe reading
+`presentCpuFrame`'s handle; it needs the S2 CPU-path measurements (`cyan` and
+`coreExposure` with `#coreUseWebGL` off) and the display-session and
+compare-preview smokes before it can be judged, which the #293 run could not
+make (the #230 harness needs more free disk than the machine had). The other
+four #293 stages (the ZIP CRC, the linear DNG, the lens remap and the 8-bit
+canvas rotation) are off the main thread; see `docs/batch-export-pipeline.md`
+and `docs/geometry-chain.md`.
+
 ## Verification
 
 - Node: `silverAdapter.preview.test.mjs`, `conversionWorker.preview.test.mjs`,

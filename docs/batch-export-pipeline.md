@@ -472,6 +472,24 @@ stage busy share, the `convert` mark per 60 MP frame with bands, Step-3
 band time, per-lane peak and WebContent `phys_footprint`, and the per-frame
 copy time and lane retention before and after.
 
+#293 (the ZIP CRC and the linear DNG off the main thread), measured in Node
+on a synthetic 60 MP frame (9536 × 6336) with the real workers on
+`worker_threads`, main-thread busy time from a 1 ms timer's missed ticks
+(the machine was swapping, so the wall times are noisy; the S9 run of the
+#230 harness could not be made with 3–6 GB of free disk against its 3 GB
+guard floor):
+
+| stage | before (main thread) | after |
+| --- | --- | --- |
+| ZIP entry of 362.5 MB (one 60 MP TIFF16): CRC + write | busy 341 ms in 12 ms slices, longest task 78 ms, wall 364 ms | busy 42 ms, longest task 2 ms, wall 272 ms (the CRC worker; one Blob write) |
+| linear DNG, batch frame (plane handed over) | one task of 336 ms (build 275 + Blob 61) | busy 53 ms, longest task 2 ms, wall 330 ms (worker build 253, Blob 33) |
+| linear DNG, single export (the editor's plane copied) | one task of 336 ms | busy 519 ms in 32 MiB copy slices, longest task 61 ms, wall 1060 ms under swap pressure |
+
+Both archives and all three DNGs are byte-identical (the same CRC, the same
+bytes). In Chrome the batch-pipeline smoke's three-file ZIP ran every entry's
+CRC in the worker, and the ownership smoke's single and batch DNG exports ran
+in the export worker with the same file hash.
+
 The automatic roll analysis after a multi-file import runs frame detection
 silently: it used to show the blocking "Detecting the image area and tilt…"
 overlay for every file in the background pass, covering the editor for

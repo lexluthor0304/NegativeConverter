@@ -224,6 +224,23 @@ Deriving them on demand (RGB `>>> 8`, alpha by the producer's rule) needs
 every full-resolution 8-bit reader moved to derived inputs; the base plane is
 produced by the post-decode worker of #232 and the display preview by #248.
 
+## #293 measurements
+
+Node, a synthetic 60 MP frame (9536 × 6336), the real geometry workers on
+six `worker_threads`, main-thread busy time from a 1 ms timer's missed
+ticks (the S5 run of the #230 harness could not be made for want of free
+disk, and S5's 16-bit DNG does not exercise these two paths):
+
+| stage | before (main thread) | after |
+| --- | --- | --- |
+| lens remap, distortion + TCA + vignetting, grid step 8 | one task of 6353 ms | wall 1661 ms; busy 973 ms on the main thread (the bands' source-row copies and grid slices), longest task 143 ms |
+| 8-bit rotation at a non-right angle | one canvas rotation of the whole frame (1–2 s at 60 MP in Chrome, not timed in Node: no canvas) | busy 42 ms (the 32 MiB copy slices, longest 21 ms) plus the rotation on the worker's canvas |
+
+The pool's lens output and the whole-image remap agree sample for sample. In
+Chrome (the geometry smoke, a 2400 × 1700 8-bit scan at 4°) the chain on the
+page canvas took 66 ms and the chain with the worker canvas 71 ms of wall
+time with no long task, and the two chains' planes were the same bytes.
+
 ## Debugging
 
 `window.__ncGeometry` exposes the counters (`diagnostics`, `main`, `pool`),

@@ -1,5 +1,5 @@
 import { yieldTaskForJob } from './yieldToPaint.js';
-import { readBlobChunks, toUint8Array, crc32OfBlob } from '../workers/blobCrc32.js';
+import { toUint8Array, crc32OfBlob } from '../workers/blobCrc32.js';
 
 const ZIP_MAX_U16 = 0xFFFF;
 const ZIP_MAX_U32 = 0xFFFFFFFF;

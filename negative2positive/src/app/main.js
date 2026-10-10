@@ -169,7 +169,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     import { createDustHistoryArchive } from './dustHistoryArchive.js';
     import { loadLocalLensfunAssets } from './lensfunLoader.js';
     import {
-      applyLensMapsToImage, buildLensMaps, lensHandleFor, lensMapBuffers, lensMapRequest, lensMapsMovePixels, lensProfileKey,
+      buildLensMaps, lensHandleFor, lensMapBuffers, lensMapRequest, lensMapsMovePixels, lensProfileKey,
       rememberLensHandle
     } from './lensMaps.js';
     import { createOpenCvLoader } from './opencvLoader.js';

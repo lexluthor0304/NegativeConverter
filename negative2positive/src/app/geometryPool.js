@@ -32,11 +32,12 @@ const LEVEL_COPY_TASK_BYTES = 32 * 1024 * 1024;
 // A lens-corrected level's band on the main thread (#278) renders the rows
 // its remap reads this many at a time per task.
 const LENS_WINDOW_ROWS_PER_TASK = 32;
-// The 2D-canvas rotation of an 8-bit frame (#293): the frame's bytes are
-// copied for the worker this many per task, and the worker's canvas is
-// admitted only after its rotation of a fixture by these angles equals
-// the page canvas's byte for byte.
-const ROTATION_COPY_SLICE_BYTES = 32 << 20;
+// A plane copied for a worker (#293: a lens band's input rows, the 8-bit
+// frame of a canvas rotation) is copied this many bytes per task, so no
+// copy is a long task. The worker's canvas is admitted only after its
+// rotation of a fixture by these angles equals the page canvas's byte for
+// byte.
+const PLANE_COPY_SLICE_BYTES = 32 << 20;
 export const CANVAS_ROTATION_CHECK_ANGLES = Object.freeze([2.5, -7.25, 44.9, 123.4]);
 
 export function defaultGeometryPoolSize(hardwareConcurrency = globalThis.navigator?.hardwareConcurrency) {
@@ -225,6 +226,25 @@ function lensLevelRows(plan, window16, lens, y0, y1, k) {
     out.set(displayLevelRows({ width, height: b - a, __image16: { data: rows } }, k, levelWidth), ((a - y0) / k) * levelWidth * 4);
   }
   return out;
+}
+
+// Elements [start, end) of a typed array as a new array of its kind, copied
+// PLANE_COPY_SLICE_BYTES per task (#293); null once `isCurrent()` turned
+// false between slices. A small range is one synchronous copy.
+async function copyElementsInSlices(view, start, end, isCurrent, yieldTask = yieldToEventLoop) {
+  const Type = view.constructor;
+  const length = Math.max(0, end - start);
+  const perSlice = Math.max(1, Math.floor(PLANE_COPY_SLICE_BYTES / Type.BYTES_PER_ELEMENT));
+  if (length <= perSlice) return view.slice(start, end);
+  const target = new Type(length);
+  for (let offset = 0; offset < length; offset += perSlice) {
+    if (offset) {
+      await yieldTask();
+      if (!isCurrent()) return null;
+    }
+    target.set(view.subarray(start + offset, start + Math.min(length, offset + perSlice)), offset);
+  }
+  return target;
 }
 
 // A band's source when the base is shared (#264): full-width rows [y, y +
@@ -980,11 +1000,16 @@ export function createGeometryPool({
         } else {
           const window = lensSourceRows(maps, modes, band.y0, band.y1, height, extents);
           const rows = (window.y1 - window.y0) * rowWords;
+          // A plain plane's rows are copied in slices, a task each, so a
+          // band of a 60 MP frame (about 80 MB of rows) is no long task.
+          const copied = sharedSource ? null : await copyElementsInSlices(plane, window.y0 * rowWords, window.y1 * rowWords, isCurrent, yieldTask);
+          if (!sharedSource && !copied) {
+            handOver(entry);
+            return null;
+          }
           const src = sharedSource
             ? { y: window.y0, height: window.y1 - window.y0, shared16: { buffer: plane.buffer, byteOffset: plane.byteOffset + window.y0 * rowWords * 2, length: rows } }
-            : { y: window.y0, height: window.y1 - window.y0,
-              data16: has16 ? plane.slice(window.y0 * rowWords, window.y1 * rowWords) : null,
-              data8: has16 ? null : plane.slice(window.y0 * rowWords, window.y1 * rowWords) };
+            : { y: window.y0, height: window.y1 - window.y0, data16: has16 ? copied : null, data8: has16 ? null : copied };
           counters.copiedBytes += copiedBytes(src);
           const outRows = sharedOut
             ? { buffer: out16.buffer, byteOffset: out16.byteOffset + band.y0 * rowWords * 2, length: (band.y1 - band.y0) * rowWords }
@@ -1063,17 +1088,8 @@ export function createGeometryPool({
   }
 
   // The frame's bytes for the worker, a slice per task; null once stale.
-  async function copyPlaneInSlices(view, isCurrent) {
-    const source = new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
-    const target = new Uint8Array(source.length);
-    for (let offset = 0; offset < source.length; offset += ROTATION_COPY_SLICE_BYTES) {
-      if (offset) {
-        await yieldTask();
-        if (!isCurrent()) return null;
-      }
-      target.set(source.subarray(offset, Math.min(source.length, offset + ROTATION_COPY_SLICE_BYTES)), offset);
-    }
-    return target.buffer;
+  function copyPlaneInSlices(view, isCurrent) {
+    return copyElementsInSlices(view, 0, view.length, isCurrent).then(copy => (copy ? copy.buffer : null));
   }
 
   /**
