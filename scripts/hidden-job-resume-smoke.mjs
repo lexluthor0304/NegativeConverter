@@ -62,7 +62,10 @@ function installSaveCapture() {
     const capture = { name: options.suggestedName, chunks: [], bytes: null };
     p.zips.push(capture);
     return { name: capture.name, createWritable: async () => ({
-      async write(bytes) { capture.chunks.push(new Uint8Array(bytes).slice()); },
+      async write(bytes) {
+        // Keep Blob payloads intact, matching FileSystemWritableFileStream.
+        capture.chunks.push(bytes instanceof Blob ? bytes : new Uint8Array(bytes).slice());
+      },
       async close() { capture.bytes = new Uint8Array(await new Blob(capture.chunks).arrayBuffer()); capture.chunks = []; },
       async abort() { capture.aborted = true; }
     }) };
@@ -118,7 +121,7 @@ function decodeTiff(name, bytes) {
 }
 
 async function zipEntries(bytes) {
-  const zip = await JSZip.loadAsync(bytes);
+  const zip = await JSZip.loadAsync(bytes, { checkCRC32: true });
   const names = Object.keys(zip.files).filter(name => !zip.files[name].dir);
   const entries = [];
   for (const name of names) entries.push(decodeTiff(name, await zip.files[name].async('nodebuffer')));
