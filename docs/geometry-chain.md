@@ -62,6 +62,23 @@ in bands planned by the base rows they copy and the rows they render.
 `counters.copiedBytes` counts every band row the main thread copies, for
 both kinds of job.
 
+The lens remap of the working image runs in the same pool (#293,
+`renderLensRemap`): `applyLensCorrectionWithSettings` splits the corrected
+image into 4–6 row bands; each band is sent the input rows its output rows
+read (`lensSourceRows`; a view of a shared 16-bit plane, a copy otherwise)
+and its grid rows (`sliceLensMaps`), and returns its rows of both planes
+rendered with `applyLensMapRows`, the kernel of the whole-image remap, so
+the assembled image is `applyLensMapsToImage`'s byte for byte
+(`geometryPool.lens.test.mjs`: every map and mode combination, 8-bit,
+16-bit and shared sources, band counts, the synchronous fallback, a failed
+band, a crashed worker, the in-flight cap, real threads). A 16-bit output
+of a shared source is shared and written in place by the bands. Without
+workers the bands render on the main thread, at most 1 MP per task. A
+stale job (`isCurrent`) resolves null, and so does the call; its callers
+check their own currency right after. The display-session smoke's
+lens-corrected frame runs this path: its export and its display proxy's
+self-check (the fills' banded remap, #278) are compared with it.
+
 In `main.js` the scalars change synchronously and the planes follow:
 
 - `applyGeometryFromBase` keys the requested geometry (base identity, angle,

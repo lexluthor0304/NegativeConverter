@@ -1488,8 +1488,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // `file` (an export's): the photo's own focal length and aperture from its
     // file's metadata replace values the user did not type (#278), as
     // restoreSettings does for the editor's photo.
+    // `isCurrent` (#293): the remap stops once it turns false and the call
+    // resolves null; `geometryBands` bounds a batch lane's bands in flight.
     async function applyLensCorrectionWithSettings(imageData, settings, options = {}) {
-      const { updateUi = false, file = null } = options;
+      const { updateUi = false, file = null, isCurrent = () => true, geometryBands = null } = options;
       const lensCorrection = resolveLensCorrection(settings);
       const selectedLens = lensCorrection.selectedLens;
 
@@ -1525,7 +1527,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
       try {
         const maps = lensCorrectionMaps(runtime, lensCorrection, imageData.width, imageData.height);
-        const corrected = applyLensMapsToImage(imageData, maps, lensCorrection.modes);
+        // The remap in the geometry pool (#293): row bands on its workers,
+        // the bytes of the whole-image remap (applyLensMapsToImage, which
+        // the pool runs itself when it has no workers); null once stale.
+        const corrected = await geometryPool.renderLensRemap(imageData, maps, lensCorrection.modes, {
+          isCurrent, maxInFlight: geometryBands || interactiveGeometryBands({ outWidth: imageData.width, outHeight: imageData.height })
+        });
+        if (!corrected) return null;
         // Keep the display-to-source map for brush coordinates, when the remap
         // moves pixels (not for vignetting alone). Non-enumerable metadata
         // avoids copying the grid into conversion worker messages.
@@ -8253,7 +8261,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         else {
           pixels = await renderGeometryChain(base, settings, { isCurrent });
           if (!ownsInputs()) return;
-          source = await applyLensCorrectionWithSettings(pixels, settings.lensCorrection);
+          source = await applyLensCorrectionWithSettings(pixels, settings.lensCorrection, { isCurrent: ownsInputs });
           if (!ownsInputs()) return;
           processed = await convertFrameOffMainThread({ imageData: source, settings: buildRouterSettings(settings, base),
             options: { preview: false, forceFullProcess: true, includeAnalysisPreview: true, analysisImageData: getColorAnalysisSample(settings, base) },
@@ -10184,7 +10192,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
             refreshCanvasContainerSize();
             state.conversionPreviewImageData = pendingConversionTarget() || proxyTarget;
           } else {
-            correctedSourceData = await applyLensCorrectionWithSettings(sourceData, state, { updateUi: true });
+            correctedSourceData = await applyLensCorrectionWithSettings(sourceData, state, { updateUi: true, isCurrent: isCurrentConversion });
             if (!isCurrentConversion()) return;
             trace.mark('lensCorrection', {
               outputPixels: getImageDataPixelCount(correctedSourceData)
@@ -14007,8 +14015,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         const planes = workingPlanes();
         if (!planes || !isCurrentLoad(generation)) return false;
         if (state.sourcePending !== pending) return Boolean(state.conversionSourceImageData);
-        const corrected = await applyLensCorrectionWithSettings(planes, state, { updateUi: false });
-        if (!isCurrentLoad(generation) || state.sourcePending !== pending || workingPlanes() !== planes) {
+        const corrected = await applyLensCorrectionWithSettings(planes, state, {
+          updateUi: false, isCurrent: () => isCurrentLoad(generation) && state.sourcePending === pending && workingPlanes() === planes
+        });
+        if (!corrected || !isCurrentLoad(generation) || state.sourcePending !== pending || workingPlanes() !== planes) {
           return Boolean(state.conversionSourceImageData);
         }
         state.conversionSourceImageData = corrected;
@@ -21984,7 +21994,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         const planes = options.releaseEarly && !previewMax && !tileMax && options.stage !== 'source'
           && !lensCorrectionActive(settings) ? '16' : null;
         workingData = own(await renderGeometryChain(imageData, geometry, { isCurrent, maxInFlight: options.geometryBands, planes }), imageData);
-        workingData = own(await applyLensCorrectionWithSettings(workingData, settings, { updateUi: false, file }), workingData);
+        workingData = own(await applyLensCorrectionWithSettings(workingData, settings, { updateUi: false, file, isCurrent, geometryBands: options.geometryBands }), workingData);
         assertRepairCurrent(isCurrent);
         fullWorkingShortSide = Math.min(workingData.width, workingData.height);
       }
@@ -22119,7 +22129,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           isCurrent, maxInFlight: options.geometryBands,
           planes: options.releaseEarly && !lensCorrectionActive(settings) ? '16' : null
         }), imageData);
-        rebuilt = own(await applyLensCorrectionWithSettings(rebuilt, settings, { updateUi: false, file }), rebuilt);
+        rebuilt = own(await applyLensCorrectionWithSettings(rebuilt, settings, { updateUi: false, file, isCurrent, geometryBands: options.geometryBands }), rebuilt);
         assertRepairCurrent(isCurrent);
         workingData = rebuilt;
         rebuilt = null;

@@ -99,9 +99,11 @@ Now one driver (`runBatchExport` in `main.js`) runs the per-file pipeline
   only builds the cropped window, for right angles and mirror-only geometry
   too, bit-identical to the step chain (`planGeometry` + `renderGeometryRows`
   in `imageGeometry.js`). It runs in the shared geometry worker pool
-  (`geometryPool.js`, 4–6 row bands), so lanes no longer queue on the main
-  thread for this step; only 8-bit sources at a non-right angle keep the
-  canvas rotation there. Each lane's bands in flight come from
+  (`geometryPool.js`, 4–6 row bands), and so does the lens remap of the
+  working image (#293, `renderLensRemap`, the whole-image remap's bytes),
+  so lanes no longer queue on the main thread for these steps; only 8-bit
+  sources at a non-right angle keep the canvas rotation there. Each lane's
+  bands in flight come from
   `planGeometryBandsInFlight` (a transient band budget shared by the lanes).
   The import frame detection returns the rotated frame's size only (#251),
   so this is the file's one rotation. See `docs/geometry-chain.md`.
