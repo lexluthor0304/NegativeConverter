@@ -101,9 +101,10 @@ Now one driver (`runBatchExport` in `main.js`) runs the per-file pipeline
   in `imageGeometry.js`). It runs in the shared geometry worker pool
   (`geometryPool.js`, 4–6 row bands), and so does the lens remap of the
   working image (#293, `renderLensRemap`, the whole-image remap's bytes),
-  so lanes no longer queue on the main thread for these steps; only 8-bit
-  sources at a non-right angle keep the canvas rotation there. Each lane's
-  bands in flight come from
+  so lanes no longer queue on the main thread for these steps; an 8-bit
+  source at a non-right angle is rotated on a worker's OffscreenCanvas
+  (#293, the page canvas's bytes where the pool's check admitted the
+  worker, else on the page as before). Each lane's bands in flight come from
   `planGeometryBandsInFlight` (a transient band budget shared by the lanes).
   The import frame detection returns the rotated frame's size only (#251),
   so this is the file's one rotation. See `docs/geometry-chain.md`.

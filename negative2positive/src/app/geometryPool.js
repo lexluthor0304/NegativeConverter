@@ -5,7 +5,7 @@
 // the base, which sessions, history and analysis samples share, is never
 // transferred or detached.
 import {
-  planGeometryBands, sliceGeometrySource, renderGeometryRows, wrapGeometryOutput, geometrySourceRect
+  planGeometryBands, sliceGeometrySource, renderGeometryRows, wrapGeometryOutput, geometrySourceRect, applyRotationToImageData
 } from './imageGeometry.js';
 import { displayLevelFactor, displayLevelRows, adoptDisplayLevel } from './displayPreview.js';
 import { allocPlane16, hasDerivedEightBit, markDerivedEightBit, isSharedPlane, deriveEightBit, guardSharedPlanes, sharedPlanesAvailable } from './crossOriginIsolation.js';
@@ -32,6 +32,12 @@ const LEVEL_COPY_TASK_BYTES = 32 * 1024 * 1024;
 // A lens-corrected level's band on the main thread (#278) renders the rows
 // its remap reads this many at a time per task.
 const LENS_WINDOW_ROWS_PER_TASK = 32;
+// The 2D-canvas rotation of an 8-bit frame (#293): the frame's bytes are
+// copied for the worker this many per task, and the worker's canvas is
+// admitted only after its rotation of a fixture by these angles equals
+// the page canvas's byte for byte.
+const ROTATION_COPY_SLICE_BYTES = 32 << 20;
+export const CANVAS_ROTATION_CHECK_ANGLES = Object.freeze([2.5, -7.25, 44.9, 123.4]);
 
 export function defaultGeometryPoolSize(hardwareConcurrency = globalThis.navigator?.hardwareConcurrency) {
   const cores = Number(hardwareConcurrency) || 4;
@@ -254,6 +260,41 @@ function runLensRemapBand(message) {
   return { payload: { id, data8: out8, data16: sharedOut ? null : out16 }, transfers };
 }
 
+// The 2D-canvas rotation of an 8-bit frame at a non-right angle (#293), on
+// the worker's OffscreenCanvas: applyRotationToImageData's canvas path, the
+// code the page runs on its own canvas (createImageCanvas gives a worker an
+// OffscreenCanvas), so where the engine rasterises both alike the bytes
+// are the page canvas's; the pool admits the worker only after a fixture
+// check says so. `rotate` is the page's function (tests inject one).
+export function runCanvasRotation(message, rotate = applyRotationToImageData) {
+  const { id, width, height, angle, data } = message;
+  const image = new ImageData(new Uint8ClampedArray(data), width, height);
+  const rotated = rotate(image, angle);
+  const out = rotated.data instanceof Uint8ClampedArray ? rotated.data : new Uint8ClampedArray(rotated.data);
+  return { payload: { id, width: rotated.width, height: rotated.height, data8: out }, transfers: [out.buffer] };
+}
+
+// The check's fixture: 61 x 47 opaque pseudo-random pixels.
+export function canvasRotationFixture() {
+  const width = 61;
+  const height = 47;
+  const data = new Uint8ClampedArray(width * height * 4);
+  let seed = 0x5EED293;
+  for (let i = 0; i < data.length; i++) {
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+    data[i] = i % 4 === 3 ? 255 : seed >>> 24;
+  }
+  return new ImageData(data, width, height);
+}
+
+function sameBytes(a, b) {
+  if (!a || !b || a.byteLength !== b.byteLength) return false;
+  const x = new Uint8Array(a.buffer, a.byteOffset, a.byteLength);
+  const y = new Uint8Array(b.buffer, b.byteOffset, b.byteLength);
+  for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return false;
+  return true;
+}
+
 // The worker side: one band of one plan, and with `levelFactor` > 1 its rows
 // of the display level (#248); with `levelOnly` (#249) those level rows
 // alone, of the lens-corrected output with `lens` (#278); with `planes16`
@@ -365,6 +406,8 @@ export function createGeometryPool({
   timeoutMs = 120000,
   idleTimeoutMs = 30000,
   yieldTask = yieldToEventLoop,
+  // The page's rotation, the reference of the canvas check (#293).
+  pageRotate = applyRotationToImageData,
   onError = error => console.warn('Geometry workers unavailable, using the synchronous path:', error)
 } = {}) {
   const poolSize = Math.max(1, Math.floor(size) || 1);
@@ -373,8 +416,13 @@ export function createGeometryPool({
   let sequence = 0;
   let broken = !workersSupported;
   let idleTimer = null;
+  // The canvas rotation (#293): checked once, against the page canvas.
+  let canvasRotationCheck = null;
+  let canvasRotationChecked = false;
+  let canvasRotationOk = false;
   // `copiedBytes`: band source rows copied on this thread (R2-003).
-  const counters = { jobs: 0, rotations: 0, copies: 0, workerBands: 0, syncBands: 0, fallbacks: 0, levels: 0, copiedBytes: 0, lensRemaps: 0 };
+  // `canvasRotations`: 8-bit frames rotated on a worker's canvas (#293).
+  const counters = { jobs: 0, rotations: 0, copies: 0, workerBands: 0, syncBands: 0, fallbacks: 0, levels: 0, copiedBytes: 0, lensRemaps: 0, canvasRotations: 0 };
 
   function scheduleIdle() {
     clearTimeout(idleTimer);
@@ -436,10 +484,18 @@ export function createGeometryPool({
       if (data.error) {
         const error = new Error(data.error);
         pending.reject(error);
+        // A rotation the worker's canvas could not do (#293) is that
+        // rotation's failure alone: the page canvas takes those from now
+        // on, and the worker goes on with its bands.
+        if (pending.rotation) {
+          canvasRotationOk = false;
+          handOver(entry);
+          return;
+        }
         fail(entry, error);
         return;
       }
-      pending.resolve({ data8: data.data8, data16: data.data16 || null, level16: data.level16 || null, spent: data.spent || null });
+      pending.resolve({ data8: data.data8, data16: data.data16 || null, level16: data.level16 || null, spent: data.spent || null, width: data.width, height: data.height });
       handOver(entry);
     };
     workers.push(entry);
@@ -958,11 +1014,112 @@ export function createGeometryPool({
     return output;
   }
 
+  // ---- The 2D-canvas rotation of 8-bit frames (#293) ----
+
+  function postRotation(entry, image, angle, data) {
+    return new Promise((resolve, reject) => {
+      const id = ++sequence;
+      const timer = setTimeout(() => fail(entry, new Error('Geometry worker timed out')), timeoutMs);
+      entry.pending = { id, resolve, reject, timer, rotation: true };
+      try {
+        entry.worker.postMessage({ type: 'geometry-rotate', id, width: image.width, height: image.height, angle, data }, [data]);
+      } catch (error) {
+        fail(entry, error);
+      }
+    });
+  }
+
+  // The fixture rotated by every check angle on the page canvas and on a
+  // worker's: the worker is admitted only when all four are the same bytes
+  // (another rasteriser, or no OffscreenCanvas in workers, keeps the page
+  // canvas). Once per pool.
+  async function checkCanvasRotation() {
+    if (broken) return false;
+    const fixture = canvasRotationFixture();
+    for (const angle of CANVAS_ROTATION_CHECK_ANGLES) {
+      const expected = pageRotate(fixture, angle);
+      const entry = await acquire();
+      if (!entry) return false;
+      let result;
+      try {
+        result = await postRotation(entry, fixture, angle, fixture.data.slice().buffer);
+      } catch {
+        return false;
+      }
+      if (!result || result.width !== expected.width || result.height !== expected.height || !sameBytes(result.data8, expected.data)) return false;
+    }
+    return true;
+  }
+
+  function canvasRotationSupported() {
+    if (!canvasRotationCheck) {
+      canvasRotationCheck = checkCanvasRotation().catch(() => false).then(ok => {
+        canvasRotationOk = ok;
+        canvasRotationChecked = true;
+        return ok;
+      });
+    }
+    return canvasRotationCheck.then(() => canvasRotationOk);
+  }
+
+  // The frame's bytes for the worker, a slice per task; null once stale.
+  async function copyPlaneInSlices(view, isCurrent) {
+    const source = new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+    const target = new Uint8Array(source.length);
+    for (let offset = 0; offset < source.length; offset += ROTATION_COPY_SLICE_BYTES) {
+      if (offset) {
+        await yieldTask();
+        if (!isCurrent()) return null;
+      }
+      target.set(source.subarray(offset, Math.min(source.length, offset + ROTATION_COPY_SLICE_BYTES)), offset);
+    }
+    return target.buffer;
+  }
+
+  /**
+   * The 2D-canvas rotation of an 8-bit `source` (no 16-bit plane) by a
+   * non-right `angle` on a worker's OffscreenCanvas (#293): the same bytes
+   * the page canvas writes, where the check admitted the worker. The
+   * frame's bytes are copied here in slices (the base is never
+   * transferred) and the rotated frame comes back by transfer. Resolves the
+   * rotated ImageData; `false` when the page canvas has to rotate (no
+   * workers, a check that failed, a worker that could not); null once
+   * `isCurrent()` turned false.
+   */
+  async function rotateCanvas(source, angle, { isCurrent = () => true } = {}) {
+    if (broken || !(await canvasRotationSupported())) return false;
+    if (!isCurrent()) return null;
+    const data = await copyPlaneInSlices(source.data, isCurrent);
+    if (!data) return null;
+    counters.copiedBytes += data.byteLength;
+    const entry = await acquire();
+    if (!entry) return false;
+    if (!isCurrent()) {
+      handOver(entry);
+      return null;
+    }
+    let result;
+    try {
+      result = await postRotation(entry, source, angle, data);
+    } catch {
+      return false;
+    }
+    if (!isCurrent()) return null;
+    if (!(result?.data8 instanceof Uint8ClampedArray) || result.data8.length !== result.width * result.height * 4) return false;
+    counters.jobs++;
+    counters.rotations++;
+    counters.canvasRotations++;
+    return new ImageData(result.data8, result.width, result.height);
+  }
+
   return {
     render,
     renderDisplayLevel,
     renderLensDisplayLevel,
     renderLensRemap,
+    rotateCanvas,
+    /** The canvas check (#293): { checked, supported }. */
+    get canvasRotation() { return { checked: canvasRotationChecked, supported: canvasRotationOk }; },
     get size() { return poolSize; },
     get available() { return !broken; },
     counters,

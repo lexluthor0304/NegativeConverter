@@ -17013,6 +17013,22 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         disableWorkers: () => geometryPool.disableWorkers(),
         pending: () => Boolean(state.geometryPending),
         inspect: inspectGeometryState,
+        // The pool's canvas check (#293) and the export chain of the open
+        // photo built from its base, hashed (the smoke run).
+        canvasRotation: () => geometryPool.canvasRotation,
+        renderChain: async () => {
+          const base = state.loadedBaseImageData;
+          if (!base) return null;
+          const output = await renderGeometryChain(base, {
+            rotationAngle: effectiveGeometryAngle(state.rotationAngle), mirrored: state.mirrored, cropRegion: state.cropRegion
+          });
+          const hash = data => {
+            let value = 2166136261;
+            for (let i = 0; i < data.length; i++) value = Math.imul(value ^ data[i], 16777619);
+            return value >>> 0;
+          };
+          return output ? { width: output.width, height: output.height, hash8: output.data ? hash(output.data) : null } : null;
+        },
         // Builds the current geometry again (the memo is dropped for it).
         rebuild: () => {
           const installed = state.croppedImageData || state.originalImageData;
@@ -17300,11 +17316,23 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const source = adopted ? adopted.image : base;
       const plan = geometryPlanFor(source, key, { rotated: Boolean(adopted) });
       if (!plan) {
-        // 8-bit source at a non-right angle: the canvas rotates here, as it
-        // always has; the rotated frame is then the only full-size plane.
+        // 8-bit source at a non-right angle: the canvas rotation on a
+        // worker's OffscreenCanvas (#293), the mirror as an index plan in
+        // the pool; the page canvas where the pool cannot reproduce its
+        // bytes, and for inconsistent planes (renderGeometryFrame, as it
+        // always was). The rotated frame is then the only full-size plane.
         await yieldToEventLoop();
         if (!isCurrent()) return null;
-        const frame = renderGeometryFrame(base, key);
+        const pooled = adopted || source.__image16 ? false : await geometryPool.rotateCanvas(base, key.angle, { isCurrent });
+        if (pooled === null || !isCurrent()) return null;
+        let frame;
+        if (pooled) {
+          const mirror = key.mirrored ? planGeometry(pooled, { mirrored: true }) : null;
+          frame = mirror ? await geometryPool.render(pooled, mirror, { isCurrent, maxInFlight: interactiveGeometryBands(mirror) }) : pooled;
+          if (!frame || !isCurrent()) return null;
+        } else {
+          frame = renderGeometryFrame(base, key);
+        }
         return { frame, cropped: key.crop ? cropImageDataRegion(frame, key.crop) : null };
       }
       // The pool builds the frame's display level with its bands (#248), so
@@ -21267,15 +21295,38 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       return cropImageDataRegion(imageData, sanitized);
     }
 
+    // The pool's canvas rotation of an 8-bit source (no 16-bit plane) at a
+    // non-right angle (#293): the rotated frame; false when the page canvas
+    // has to rotate (the pool's OffscreenCanvas did not reproduce its
+    // bytes, or no workers); null once stale.
+    async function rotateEightBitInPool(source, geometry, isCurrent) {
+      if (!source || source.__image16) return false;
+      const angle = effectiveGeometryAngle(geometry?.rotationAngle);
+      if (!angle) return false;
+      return geometryPool.rotateCanvas(source, angle, { isCurrent });
+    }
+
     // The export geometry chain in the pool, bit-identical to
-    // applyGeometryChainToImageData. 8-bit sources at a non-right angle keep
-    // the canvas rotation on this thread.
+    // applyGeometryChainToImageData. An 8-bit source at a non-right angle
+    // is rotated on a worker's canvas (#293) and then mirrored and cropped
+    // as one index plan, the step chain's bytes; the page canvas rotates it
+    // where the pool cannot, and inconsistent planes keep the step chain.
     // `planes: '16'` (#256): a caller that reads only the 16-bit plane of the
     // output gets `{ width, height, __image16 }` from the pool, without the
     // 8-bit plane; the other paths ignore it.
     async function renderGeometryChain(source, geometry, { isCurrent = () => true, maxInFlight = null, planes = null } = {}) {
-      const plan = planGeometry(source, geometry, { sanitizeCrop: (crop, frame) => sanitizeCropRegionForImage(crop, frame) });
-      if (!plan) return applyGeometryChainToImageData(source, geometry, exportGeometrySteps);
+      const sanitizeCrop = (crop, frame) => sanitizeCropRegionForImage(crop, frame);
+      const plan = planGeometry(source, geometry, { sanitizeCrop });
+      if (!plan) {
+        const rotated = await rotateEightBitInPool(source, geometry, isCurrent);
+        if (rotated === null) return null;
+        if (!rotated) return applyGeometryChainToImageData(source, geometry, exportGeometrySteps);
+        const rest = planGeometry(rotated, { rotationAngle: 0, mirrored: geometry?.mirrored, cropRegion: geometry?.cropRegion }, { sanitizeCrop });
+        if (!rest || rest.identity) return rotated;
+        const output = await geometryPool.render(rotated, rest, { isCurrent, maxInFlight: maxInFlight || interactiveGeometryBands(rest), planes });
+        assertRepairCurrent(isCurrent);
+        return output;
+      }
       if (plan.identity) return source;
       const output = await geometryPool.render(source, plan, { isCurrent, maxInFlight: maxInFlight || interactiveGeometryBands(plan), planes });
       assertRepairCurrent(isCurrent);
