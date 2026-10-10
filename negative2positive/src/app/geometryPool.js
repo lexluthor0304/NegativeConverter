@@ -228,6 +228,25 @@ function lensLevelRows(plan, window16, lens, y0, y1, k) {
   return out;
 }
 
+// `target.set(rows, at)` PLANE_COPY_SLICE_BYTES per task (#293): a band's
+// rows placed into a frame-sized plane without a long task. False once
+// `isCurrent()` turned false between slices.
+async function placeInSlices(target, rows, at, isCurrent, yieldTask = yieldToEventLoop) {
+  const perSlice = Math.max(1, Math.floor(PLANE_COPY_SLICE_BYTES / rows.BYTES_PER_ELEMENT));
+  if (rows.length <= perSlice) {
+    target.set(rows, at);
+    return true;
+  }
+  for (let offset = 0; offset < rows.length; offset += perSlice) {
+    if (offset) {
+      await yieldTask();
+      if (!isCurrent()) return false;
+    }
+    target.set(rows.subarray(offset, Math.min(rows.length, offset + perSlice)), at + offset);
+  }
+  return true;
+}
+
 // Elements [start, end) of a typed array as a new array of its kind, copied
 // PLANE_COPY_SLICE_BYTES per task (#293); null once `isCurrent()` turned
 // false between slices. A small range is one synchronous copy.
@@ -979,9 +998,12 @@ export function createGeometryPool({
       }, band.y0, band.y1);
       counters.syncBands++;
     };
-    const place = (band, part) => {
-      out8.set(part.data8, band.y0 * rowWords);
-      if (out16 && part.data16) out16.set(part.data16, band.y0 * rowWords);
+    // A band's rows go into the output in slices, a task each (a 60 MP
+    // band's two planes are about 120 MB).
+    const place = async (band, part) => {
+      if (!(await placeInSlices(out8, part.data8, band.y0 * rowWords, isCurrent, yieldTask))) return false;
+      if (out16 && part.data16 && !(await placeInSlices(out16, part.data16, band.y0 * rowWords, isCurrent, yieldTask))) return false;
+      return true;
     };
     const queue = bands.slice();
     const running = new Map();
@@ -1029,7 +1051,7 @@ export function createGeometryPool({
       running.delete(settled.key);
       if (!isCurrent()) return null;
       if (settled.error) here(settled.band);
-      else place(settled.band, settled.part);
+      else if (!(await place(settled.band, settled.part))) return null;
       await yieldTask();
     }
     if (!isCurrent()) return null;

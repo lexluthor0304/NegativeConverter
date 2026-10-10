@@ -233,7 +233,7 @@ disk, and S5's 16-bit DNG does not exercise these two paths):
 
 | stage | before (main thread) | after |
 | --- | --- | --- |
-| lens remap, distortion + TCA + vignetting, grid step 8 | one task of 6353 ms | wall 1661 ms; busy 973 ms on the main thread (the bands' source-row copies and grid slices), longest task 143 ms |
+| lens remap, distortion + TCA + vignetting, grid step 8 | one task of 5.9–6.4 s | wall 2.0 s; busy 1141 ms on the main thread in 32 MiB copy slices (the bands' input rows out, their output rows in, the grid slices), longest task 27 ms, none over 50 ms |
 | 8-bit rotation at a non-right angle | one canvas rotation of the whole frame (1–2 s at 60 MP in Chrome, not timed in Node: no canvas) | busy 42 ms (the 32 MiB copy slices, longest 21 ms) plus the rotation on the worker's canvas |
 
 The pool's lens output and the whole-image remap agree sample for sample. In

@@ -107,6 +107,7 @@ function page({ storage, desktop = false, folderFiles = new Map() }) {
     canUseBrowserZipStreaming: () => true,
     createBrowserZipWritable: async (name) => ({ fileName: name, writable: {} }),
     ZipStoreWriter: class { async addBlob() {} async close() {} async abort() {} },
+    batchPipelineDiagnostics: { lastZip: null },
     isBrowserSavePickerCancel: () => false, showBrowserZipStreamSummary: () => {},
     isDesktopBatchExportLocked: () => false, singleExportActive: false,
     hiddenJobs: { setSafeMode: () => {} }, photoSessions: { clear() {} }, photoPreviews: { clear() {} }, photoPrefetch: { clear() {} }, thumbnailSources: { clear() {} },

@@ -25,6 +25,8 @@ export const WORKER_PROBES = Object.freeze({
   scanDecode: () => new Worker(new URL('../workers/scanDecodeWorker.js', import.meta.url), { type: 'module' }),
   multiShot: () => new Worker(new URL('../workers/multiShotWorker.js', import.meta.url), { type: 'module' }),
   export: () => new Worker(new URL('../workers/exportWorker.js', import.meta.url), { type: 'module' }),
+  // The ZIP export's CRC worker (#293).
+  zipCrc: () => new Worker(new URL('../workers/zipCrcWorker.js', import.meta.url), { type: 'module' }),
   // The roll analysis's frame workers and the detection helpers (#252), and
   // the display proxy store (#249).
   rollFrame: () => new Worker(new URL('../workers/rollFrameWorker.js', import.meta.url), { type: 'module' }),
