@@ -140,6 +140,14 @@ function serializeSettings(settings) {
 
 function copyTypedArrayBuffer(view) {
   const { buffer, byteOffset, byteLength } = view;
+  // A shared plane's slice is shared too (#264) and cannot be in a transfer
+  // list: a small shared plane is copied into a plain buffer instead (#293;
+  // the sliced copy below always makes one).
+  if (!(buffer instanceof ArrayBuffer)) {
+    const copy = new Uint8Array(byteLength);
+    copy.set(new Uint8Array(buffer, byteOffset, byteLength));
+    return copy.buffer;
+  }
   return buffer.slice(byteOffset, byteOffset + byteLength);
 }
 
@@ -456,6 +464,10 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory,
       case 'bandResult':
         settleEntry(msg.id, entry);
         entry.resolve({ blob: msg.blob, adler: msg.adler, length: msg.length });
+        break;
+      case 'dngResult':
+        settleEntry(msg.id, entry);
+        entry.resolve({ blob: msg.blob, gain: msg.gain || null, buildMs: msg.buildMs, blobMs: msg.blobMs });
         break;
       case 'imageResult':
         settleEntry(msg.id, entry);
@@ -1006,6 +1018,67 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory,
   }
 
   /**
+   * The linear DNG in the worker (#293): `source` is the geometry-applied
+   * negative (its `__image16` plane when it has one of its own size, else
+   * its 8-bit frame, which the worker upcasts as main.js's toImage16 does).
+   * The worker runs buildLinearPositive, the DNG parts and the Blob; only
+   * the Blob comes back, with the worker's build and Blob times. The plane
+   * is copied unless `transferPlane` (an export-owned plane; an 8-bit real
+   * ImageData also needs `onRestore`). The kernel never writes its input,
+   * so a transferred plane comes back with any worker error.
+   * @param {{filmBase?: object|null, positive?: boolean, metadata?: object|null, transferPlane?: boolean, onRestore?: function, signal?: AbortSignal, timeoutMs?: number, onProgress?: function}} [options]
+   * @returns {Promise<{blob: Blob, gain: number[]|null, buildMs: number, blobMs: number}|null>}
+   *   null when the worker failed (the caller builds on the main thread).
+   *   Rejects with an AbortError on cancellation and with an
+   *   ExportInputLostError when a transferred plane did not come back.
+   */
+  async function workerEncodeLinearDng(source, options = {}) {
+    const opts = normalizeRequestOptions(options);
+    const { width, height } = source || {};
+    if (!source || !(width > 0) || !(height > 0)) return null;
+    const plane = source.__image16 && isRgbaPlaneOf(source.__image16, width, height) ? source.__image16 : null;
+    const view = plane ? plane.data : source.data;
+    const bits = plane ? 16 : 8;
+    if (!(view instanceof Uint16Array || view instanceof Uint8ClampedArray) || view.length !== width * height * 4) return null;
+    const transfer = plane ? Boolean(opts.transferPlane) : mayTransfer8(source, opts);
+    const byteLength = view.byteLength;
+    let input = prepareRequestInput(view, { transfer, signal: opts.signal });
+    if (isPromise(input)) input = await input;
+    const { buffer: inputBuffer, transferred } = input;
+    try {
+      const result = await sendToWorker(
+        {
+          type: 'encodeLinearDng',
+          inputBuffer,
+          width,
+          height,
+          bits,
+          filmBase: opts.filmBase ? { r: opts.filmBase.r, g: opts.filmBase.g, b: opts.filmBase.b } : null,
+          positive: Boolean(opts.positive),
+          metadata: opts.metadata || null
+        },
+        [inputBuffer],
+        opts.onProgress,
+        requestOptionsFor(source, opts)
+      );
+      if (!result || !isBlob(result.blob)) throw new Error('Unexpected encodeLinearDng result');
+      return result;
+    } catch (err) {
+      const returned = takeReturned(err);
+      reclaimUnlessNotPosted(err, returned.input, {
+        transferred, byteLength, what: plane ? '16-bit plane' : '8-bit frame',
+        reattach: (buffer) => {
+          if (plane) plane.data = markOwnedPlanes(new Uint16Array(buffer));
+          else restore8(source, buffer, opts);
+        }
+      });
+      if (isAbortError(err)) throw err;
+      warnWorkerFallbackOnce('encodeLinearDng', err);
+      return null;
+    }
+  }
+
+  /**
    * Check if the export worker is available.
    */
   function isWorkerAvailable() {
@@ -1055,6 +1128,7 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory,
     workerEncodePng16,
     workerEncodePng16Band,
     workerEncodeTiff,
+    workerEncodeLinearDng,
     isWorkerAvailable,
     cancelWorkerRequests,
     terminateWorker,
@@ -1092,6 +1166,7 @@ export function createExportWorkerPool({ size = 2, workerFactory } = {}) {
     workerEncodeImage: (...args) => pick().workerEncodeImage(...args),
     workerEncodePng16: (...args) => pick().workerEncodePng16(...args),
     workerEncodeTiff: (...args) => pick().workerEncodeTiff(...args),
+    workerEncodeLinearDng: (...args) => pick().workerEncodeLinearDng(...args),
     isWorkerAvailable: () => lanes.every(lane => lane.isWorkerAvailable()),
     cancelWorkerRequests: (reason) => lanes.forEach(lane => lane.cancelWorkerRequests(reason)),
     terminateWorker: () => lanes.forEach(lane => lane.terminateWorker()),
@@ -1224,6 +1299,7 @@ export const workerAdjust16AndEncode = defaultBridge.workerAdjust16AndEncode;
 export const workerEncodeImage = defaultBridge.workerEncodeImage;
 export const workerEncodePng16 = defaultBridge.workerEncodePng16;
 export const workerEncodeTiff = defaultBridge.workerEncodeTiff;
+export const workerEncodeLinearDng = defaultBridge.workerEncodeLinearDng;
 export const isWorkerAvailable = defaultBridge.isWorkerAvailable;
 export const cancelWorkerRequests = defaultBridge.cancelWorkerRequests;
 export const terminateWorker = defaultBridge.terminateWorker;

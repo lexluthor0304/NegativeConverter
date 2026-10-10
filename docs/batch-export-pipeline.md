@@ -99,9 +99,12 @@ Now one driver (`runBatchExport` in `main.js`) runs the per-file pipeline
   only builds the cropped window, for right angles and mirror-only geometry
   too, bit-identical to the step chain (`planGeometry` + `renderGeometryRows`
   in `imageGeometry.js`). It runs in the shared geometry worker pool
-  (`geometryPool.js`, 4–6 row bands), so lanes no longer queue on the main
-  thread for this step; only 8-bit sources at a non-right angle keep the
-  canvas rotation there. Each lane's bands in flight come from
+  (`geometryPool.js`, 4–6 row bands), and so does the lens remap of the
+  working image (#293, `renderLensRemap`, the whole-image remap's bytes),
+  so lanes no longer queue on the main thread for these steps; an 8-bit
+  source at a non-right angle is rotated on a worker's OffscreenCanvas
+  (#293, the page canvas's bytes where the pool's check admitted the
+  worker, else on the page as before). Each lane's bands in flight come from
   `planGeometryBandsInFlight` (a transient band budget shared by the lanes).
   The import frame detection returns the rotated frame's size only (#251),
   so this is the file's one rotation. See `docs/geometry-chain.md`.
@@ -113,11 +116,24 @@ Now one driver (`runBatchExport` in `main.js`) runs the per-file pipeline
   downloads (browser) and folder writes (desktop). The dead JSZip desktop ZIP
   path was removed. The desktop batch now also gets 16-bit output and the
   analog metadata, which only the browser paths had before.
-- ZIP computes CRC while writing each payload once, then writes a standard
-  ZIP32/ZIP64 data descriptor. CRC/write work uses bounded chunks and yields
-  periodically so input and progress tasks can run. The CRC is slice-by-8
-  (`workers/crc32.js`, eight bytes per step, identical values; shared with
-  the PNG chunk CRCs). Opaque PNG16/TIFF files store RGB; real transparency
+- ZIP computes each entry's CRC while the payload is written once, then
+  writes a standard ZIP32/ZIP64 data descriptor. The CRC runs in the
+  archive's own `workers/zipCrcWorker.js` (#293): the entry's Blob is posted
+  by reference, the worker streams it in 256 KiB chunks through the
+  slice-by-8 register (`workers/crc32.js`, eight bytes per step, identical
+  values; shared with the PNG chunk CRCs, the chunking in
+  `workers/blobCrc32.js`) and only the 32-bit value comes back; meanwhile
+  the main thread hands the whole Blob to the `FileSystemWritableFileStream`
+  in one `write`, whose bytes the browser process copies to the file, so no
+  byte of a 362 MB TIFF16 entry passes through the main thread and the local
+  header, descriptor and central directory are the only writes it builds.
+  The archive's bytes are those of the main-thread writer (the ZIP test
+  compares them, with the real worker on a thread). Without workers, or
+  after a worker failure (the written bytes stand; only the checksum is
+  computed again), the payload is read in bounded chunks that are
+  checksummed and written here with a task boundary every 12 ms, as before.
+  `window.__ncBatchPipeline.diagnostics.lastZip` counts the entries each
+  path checksummed. Opaque PNG16/TIFF files store RGB; real transparency
   remains RGBA. PNG16 uses lossless Sub filtering.
 - PNG16 is encoded in row bands (#257, `workers/png16Bands.js`). The rows
   are split into bands of about 16 MiB of filtered bytes (whole rows; 22
@@ -152,15 +168,25 @@ Now one driver (`runBatchExport` in `main.js`) runs the per-file pipeline
   table per channel of the linear value for each 16-bit code (exactly the
   value the old per-pixel Float32 buffer held), the gain percentile from the
   same strided samples, and a Uint16 output table. On a little-endian host
-  the strip is a view of the output, not a copy. A single export builds it
-  synchronously behind the overlay. A batch builds it with
-  `buildLinearPositiveAsync`: one task per channel percentile, then the
+  the strip is a view of the output, not a copy. The build runs in the
+  export worker (#293, `encodeLinearDng`): the geometry-applied negative's
+  16-bit plane (or its 8-bit frame, upcast in the worker exactly as
+  `toImage16` did on the page) goes to the worker, `buildLinearPositive`,
+  the DNG parts and `new Blob` run there, and only the Blob comes back with
+  the worker's build and Blob times. A batch frame hands its own plane over
+  without a copy (#250) and releases what is left when the file is encoded;
+  a lost plane renders the frame again with copies. The single export sends
+  the editor's plane as a sliced copy (32 MiB per task), and Cancel stops
+  the worker. The bytes are those of the main-thread build and of the
+  frozen 1703835 kernel (`linearDng.reference.mjs`;
+  `exportWorkerLinearDng.test.mjs`, `linearDng.test.mjs`, the ownership
+  smoke's real worker). Without a worker the page builds as before: the
+  single export synchronously behind the overlay, the batch with
+  `buildLinearPositiveAsync` (one task per channel percentile, then the
   output pass in slices of about 16 ms with a MessageChannel task in
-  between, because the desktop batch keeps the editor live. The final
-  `new Blob` still copies the strip in one call; its duration is in the
-  `linearDngBatch` perf trace (`blobMs`, `?debug=1`). If it exceeds 50 ms in
-  the macOS app, the batch build should move into the lane's export worker,
-  which can take the batch-owned source plane by transfer.
+  between, because the desktop batch keeps the editor live). The
+  `linearDngBatch` perf trace keeps its `build` stage and `blobMs`
+  (`?debug=1`, the #230 harness's S9 reads both), now the worker's times.
 - Desktop writes (`desktopExportWriter.js`) send 8 MiB chunks
   (`EXPORT_CHUNK_BYTES`, equal to `CHUNK_LIMIT` in `export_stream.rs`; a
   test reads the Rust constant). Exactly one `append_export_chunk` is in
@@ -445,6 +471,24 @@ DNGs, another 60 MP photo open): per-file time for TIFF16 and JPEG, decode
 stage busy share, the `convert` mark per 60 MP frame with bands, Step-3
 band time, per-lane peak and WebContent `phys_footprint`, and the per-frame
 copy time and lane retention before and after.
+
+#293 (the ZIP CRC and the linear DNG off the main thread), measured in Node
+on a synthetic 60 MP frame (9536 × 6336) with the real workers on
+`worker_threads`, main-thread busy time from a 1 ms timer's missed ticks
+(the machine was swapping, so the wall times are noisy; the S9 run of the
+#230 harness could not be made with 3–6 GB of free disk against its 3 GB
+guard floor):
+
+| stage | before (main thread) | after |
+| --- | --- | --- |
+| ZIP entry of 362.5 MB (one 60 MP TIFF16): CRC + write | busy 341 ms in 12 ms slices, longest task 78 ms, wall 364 ms | busy 42 ms, longest task 2 ms, wall 272 ms (the CRC worker; one Blob write) |
+| linear DNG, batch frame (plane handed over) | one task of 336 ms (build 275 + Blob 61) | busy 53 ms, longest task 2 ms, wall 330 ms (worker build 253, Blob 33) |
+| linear DNG, single export (the editor's plane copied) | one task of 336 ms | busy 519 ms in 32 MiB copy slices, longest task 61 ms, wall 1060 ms under swap pressure |
+
+Both archives and all three DNGs are byte-identical (the same CRC, the same
+bytes). In Chrome the batch-pipeline smoke's three-file ZIP ran every entry's
+CRC in the worker, and the ownership smoke's single and batch DNG exports ran
+in the export worker with the same file hash.
 
 The automatic roll analysis after a multi-file import runs frame detection
 silently: it used to show the blocking "Detecting the image area and tilt…"

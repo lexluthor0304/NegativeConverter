@@ -256,3 +256,171 @@ console.log('zipStoreWriter.test.mjs extended cases passed');
   assert.deepEqual(await zip.file('large.bin').async('uint8array'), bytes);
   assert.equal((await zip.file('empty.bin').async('uint8array')).length, 0);
 }
+
+// --- #293: the CRC worker --------------------------------------------------
+// The archive written with the CRC worker (the real zipCrcWorker.js handler,
+// in process and on a real thread) is byte-identical to the main-thread
+// writer's: the payload goes to the sink as one Blob write, the worker
+// streams it for the checksum, and the headers, descriptors and central
+// directory are the same bytes. A failing worker falls back to this thread
+// for the rest of the archive, which is still the same archive.
+{
+  const { createZipCrcWorker } = await import('./zipStoreWriter.js');
+  const { crc32OfBlob } = await import('../workers/blobCrc32.js');
+  const { Worker: NodeWorker } = await import('node:worker_threads');
+
+  // A sink that takes whole Blobs too (a FileSystemWritableFileStream does).
+  class BlobWritable extends MemoryWritable {
+    constructor() { super(); this.blobWrites = 0; }
+    async write(chunk) {
+      if (chunk instanceof Blob) {
+        this.blobWrites += 1;
+        this.chunks.push(new Uint8Array(await chunk.arrayBuffer()));
+        return;
+      }
+      return super.write(chunk);
+    }
+  }
+
+  // The real worker module's handler in process: `self` is this scope.
+  let deliver = null;
+  globalThis.self = { onmessage: null, postMessage(message) { deliver(message); } };
+  await import('../workers/zipCrcWorker.js');
+  const handler = self.onmessage;
+  assert.equal(typeof handler, 'function');
+  const inProcessFactory = ({ behaviour = () => 'run' } = {}) => () => {
+    const worker = { onmessage: null, onerror: null, onmessageerror: null, terminated: false, posts: 0 };
+    worker.postMessage = (message) => {
+      worker.posts += 1;
+      const plan = behaviour(message);
+      setTimeout(async () => {
+        if (worker.terminated) return;
+        if (plan === 'crash') { worker.onerror?.({ message: 'crc worker crashed' }); return; }
+        if (plan === 'garbage') { worker.onmessage?.({ data: { id: message.id, crc: 1, size: -1 } }); return; }
+        if (plan === 'hang') return;
+        const replies = [];
+        deliver = (reply) => replies.push(reply);
+        await handler({ data: message });
+        for (const reply of replies) if (!worker.terminated) worker.onmessage?.({ data: reply });
+      }, 1);
+    };
+    worker.terminate = () => { worker.terminated = true; };
+    return worker;
+  };
+
+  let seed = 4242;
+  const random = () => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return seed; };
+  const payload = (length) => { const bytes = new Uint8Array(length); for (let i = 0; i < length; i++) bytes[i] = random() >>> 24; return bytes; };
+  const entries = [
+    ['frame-01.tif', payload(3 * 1024 * 1024 + 17)],
+    ['frame-02.tif', payload(777)],
+    ['empty.bin', new Uint8Array(0)],
+    ['frame-01.tif', payload(65536)]
+  ];
+  const now = new Date('2026-10-10T09:00:00Z');
+  const writeArchive = async (options) => {
+    const target = new BlobWritable();
+    const writer = new ZipStoreWriter(target, { now, ...options });
+    for (const [name, bytes] of entries) await writer.addBlob(name, new Blob([bytes]));
+    await writer.close();
+    return { bytes: target.bytes(), stats: writer.stats, target, writer };
+  };
+
+  const main = await writeArchive({ crcWorker: false });
+  assert.deepEqual(main.stats, { workerEntries: 0, mainEntries: entries.length, workerFailures: 0 });
+  assert.equal(main.target.blobWrites, 0, 'the main-thread writer streams chunks');
+
+  const worker = createZipCrcWorker({ workerFactory: inProcessFactory() });
+  const pooled = await writeArchive({ crcWorker: worker });
+  assert.deepEqual(pooled.stats, { workerEntries: entries.length, mainEntries: 0, workerFailures: 0 });
+  assert.equal(pooled.target.blobWrites, entries.length, 'each payload is one Blob write');
+  assert.ok(Buffer.from(pooled.bytes).equals(Buffer.from(main.bytes)), 'the worker-CRC archive is byte-identical to the main-thread archive');
+  assert.equal(worker.broken, true, 'close() releases the worker');
+  const archive = await JSZip.loadAsync(pooled.bytes, { checkCRC32: true });
+  assert.deepEqual(Object.keys(archive.files).sort(), ['empty.bin', 'frame-01 (2).tif', 'frame-01.tif', 'frame-02.tif']);
+  assert.deepEqual(await archive.file('frame-01 (2).tif').async('uint8array'), entries[3][1]);
+
+  // The worker's answer is checked against the Blob it was asked about.
+  for (const [name, bytes] of entries) {
+    assert.equal(await createZipCrcWorker({ workerFactory: inProcessFactory() }).compute(new Blob([bytes])), await crc32OfBlob(new Blob([bytes])), name);
+  }
+
+  // A crash after the first entry: that entry and the rest are checksummed
+  // here, the archive is the same, the worker is not asked again.
+  {
+    let posts = 0;
+    const crashing = createZipCrcWorker({ workerFactory: inProcessFactory({ behaviour: () => (++posts === 2 ? 'crash' : 'run') }) });
+    const result = await writeArchive({ crcWorker: crashing });
+    assert.ok(Buffer.from(result.bytes).equals(Buffer.from(main.bytes)), 'after a worker crash the archive is still byte-identical');
+    assert.deepEqual(result.stats, { workerEntries: 1, mainEntries: entries.length - 1, workerFailures: 1 });
+    assert.equal(posts, 2, 'a broken worker gets no further request');
+  }
+  // A nonsensical answer counts as a failure too.
+  {
+    const garbage = createZipCrcWorker({ workerFactory: inProcessFactory({ behaviour: () => 'garbage' }) });
+    const result = await writeArchive({ crcWorker: garbage });
+    assert.ok(Buffer.from(result.bytes).equals(Buffer.from(main.bytes)));
+    assert.deepEqual(result.stats, { workerEntries: 0, mainEntries: entries.length, workerFailures: 1 });
+  }
+  // A worker that never answers times out, and the writer carries on here.
+  {
+    const hanging = createZipCrcWorker({ workerFactory: inProcessFactory({ behaviour: () => 'hang' }), timeoutMs: 20 });
+    // The timeout timer never holds a process open (unref); hold it here.
+    const keepAlive = setInterval(() => {}, 5);
+    let result;
+    try { result = await writeArchive({ crcWorker: hanging }); } finally { clearInterval(keepAlive); }
+    assert.ok(Buffer.from(result.bytes).equals(Buffer.from(main.bytes)));
+    assert.deepEqual(result.stats, { workerEntries: 0, mainEntries: entries.length, workerFailures: 1 });
+  }
+  // A factory that throws: no worker, the main-thread path from the start.
+  {
+    const none = createZipCrcWorker({ workerFactory: () => { throw new Error('no workers here'); } });
+    const result = await writeArchive({ crcWorker: none });
+    assert.ok(Buffer.from(result.bytes).equals(Buffer.from(main.bytes)));
+    assert.deepEqual(result.stats, { workerEntries: 0, mainEntries: entries.length, workerFailures: 1 });
+  }
+  // abort() releases the worker.
+  {
+    const released = createZipCrcWorker({ workerFactory: inProcessFactory() });
+    const writer = new ZipStoreWriter(new BlobWritable(), { now, crcWorker: released });
+    await writer.addBlob('a.bin', new Blob([entries[1][1]]));
+    await writer.abort();
+    assert.equal(released.broken, true);
+  }
+
+  // The real worker script on a real thread, Blobs posted by reference.
+  {
+    const workerUrl = new URL('../workers/zipCrcWorker.js', import.meta.url).href;
+    const shim = `
+      const { parentPort } = require('node:worker_threads');
+      globalThis.self = { postMessage: (message, transfers) => parentPort.postMessage(message, transfers) };
+      const early = [];
+      let loaded = false;
+      parentPort.on('message', data => loaded ? self.onmessage?.({ data }) : early.push(data));
+      import(${JSON.stringify(workerUrl)}).then(() => { loaded = true; for (const data of early) self.onmessage?.({ data }); });
+    `;
+    const threads = [];
+    const threaded = createZipCrcWorker({
+      workerFactory: () => {
+        const thread = new NodeWorker(shim, { eval: true });
+        threads.push(thread);
+        const worker = {
+          postMessage: (message, transfers) => thread.postMessage(message, transfers),
+          terminate: () => thread.terminate()
+        };
+        thread.on('message', (data) => worker.onmessage?.({ data }));
+        thread.on('error', (error) => worker.onerror?.(error));
+        return worker;
+      }
+    });
+    let result;
+    try {
+      result = await writeArchive({ crcWorker: threaded });
+    } finally {
+      for (const thread of threads) await thread.terminate();
+    }
+    assert.ok(Buffer.from(result.bytes).equals(Buffer.from(main.bytes)), 'the real-thread archive is byte-identical');
+    assert.deepEqual(result.stats, { workerEntries: entries.length, mainEntries: 0, workerFailures: 0 });
+  }
+  console.log('zipStoreWriter.test.mjs CRC worker cases passed');
+}

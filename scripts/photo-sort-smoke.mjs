@@ -91,7 +91,11 @@ function installSortProbe() {
     const capture = { name: options.suggestedName }, chunks = [];
     p.archives.push(capture);
     return { name: capture.name, createWritable: async () => ({
-      async write(bytes) { chunks.push(new Uint8Array(bytes).slice()); },
+      async write(bytes) {
+        // FileSystemWritableFileStream accepts whole Blob payloads as well as
+        // byte-array headers; Uint8Array(Blob) would silently drop the payload.
+        chunks.push(bytes instanceof Blob ? bytes : new Uint8Array(bytes).slice());
+      },
       async close() { capture.data = await dataUrl(new Blob(chunks, { type: 'application/zip' })); },
       async abort() { capture.aborted = true; },
     }) };
@@ -259,8 +263,11 @@ export async function runPhotoSortSmoke({ send, evaluate, waitFor, wait, fail, i
 
     await evaluate(`document.getElementById('exportZipBtn').click()`);
     await until('sorted streaming ZIP complete', `!!window.__photoSortProbe.archives[0]?.data && !document.getElementById('exportBtn').disabled`, 120000);
-    const archive = await JSZip.loadAsync(Buffer.from((await evaluate('window.__photoSortProbe.archives[0].data')).split(',')[1], 'base64'));
+    const archive = await JSZip.loadAsync(Buffer.from((await evaluate('window.__photoSortProbe.archives[0].data')).split(',')[1], 'base64'), { checkCRC32: true });
     const entries = Object.values(archive.files).filter(entry => !entry.dir);
+    const crc = await evaluate('window.__ncBatchPipeline?.diagnostics?.lastZip');
+    expect(crc?.workerEntries === entries.length && crc.mainEntries === 0 && crc.workerFailures === 0,
+      'sorted ZIP must exercise whole-Blob writes with worker CRCs: ' + JSON.stringify(crc));
     expect(JSON.stringify(entries.map(entry => entry.name)) === JSON.stringify(['frame2_converted.png', 'frame10_converted.png', 'frame20_converted.png']),
       'ZIP entry order does not match sorted selection: ' + JSON.stringify(entries.map(entry => entry.name)));
     const encoded = await Promise.all(entries.map(async entry => ({ name: entry.name, ...pngHash(await entry.async('nodebuffer')) })));

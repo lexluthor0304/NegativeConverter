@@ -169,7 +169,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     import { createDustHistoryArchive } from './dustHistoryArchive.js';
     import { loadLocalLensfunAssets } from './lensfunLoader.js';
     import {
-      applyLensMapsToImage, buildLensMaps, lensHandleFor, lensMapBuffers, lensMapRequest, lensMapsMovePixels, lensProfileKey,
+      buildLensMaps, lensHandleFor, lensMapBuffers, lensMapRequest, lensMapsMovePixels, lensProfileKey,
       rememberLensHandle
     } from './lensMaps.js';
     import { createOpenCvLoader } from './opencvLoader.js';
@@ -202,6 +202,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       workerEncodeImage,
       workerEncodePng16,
       workerEncodeTiff,
+      workerEncodeLinearDng,
       isWorkerAvailable,
       isExportInputLostError,
       isAbortError,
@@ -239,7 +240,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // own (contact sheet, multi-shot merge, watch folder). A single export
     // makes its own bridge and a batch export its own pool (#250); both pass
     // it through `bridge`.
-    const defaultExportWorkers = { workerApplyAdjustments, workerApplyAdjustments16, workerGainMap16, workerAdjust16AndEncode, workerEncodeImage, workerEncodePng16, workerEncodeTiff, isWorkerAvailable };
+    const defaultExportWorkers = { workerApplyAdjustments, workerApplyAdjustments16, workerGainMap16, workerAdjust16AndEncode, workerEncodeImage, workerEncodePng16, workerEncodeTiff, workerEncodeLinearDng, isWorkerAvailable };
     // 暗室 UI に一本化。古い workspace パラメーターで別画面へ分岐しない。
     let studioAutoFrameRunning = false;
     let studioWorkspace = null;
@@ -1488,8 +1489,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // `file` (an export's): the photo's own focal length and aperture from its
     // file's metadata replace values the user did not type (#278), as
     // restoreSettings does for the editor's photo.
+    // `isCurrent` (#293): the remap stops once it turns false and the call
+    // resolves null; `geometryBands` bounds a batch lane's bands in flight.
     async function applyLensCorrectionWithSettings(imageData, settings, options = {}) {
-      const { updateUi = false, file = null } = options;
+      const { updateUi = false, file = null, isCurrent = () => true, geometryBands = null } = options;
       const lensCorrection = resolveLensCorrection(settings);
       const selectedLens = lensCorrection.selectedLens;
 
@@ -1525,7 +1528,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
       try {
         const maps = lensCorrectionMaps(runtime, lensCorrection, imageData.width, imageData.height);
-        const corrected = applyLensMapsToImage(imageData, maps, lensCorrection.modes);
+        // The remap in the geometry pool (#293): row bands on its workers,
+        // the bytes of the whole-image remap (applyLensMapsToImage, which
+        // the pool runs itself when it has no workers); null once stale.
+        const corrected = await geometryPool.renderLensRemap(imageData, maps, lensCorrection.modes, {
+          isCurrent, maxInFlight: geometryBands || interactiveGeometryBands({ outWidth: imageData.width, outHeight: imageData.height })
+        });
+        if (!corrected) return null;
         // Keep the display-to-source map for brush coordinates, when the remap
         // moves pixels (not for vignetting alone). Non-enumerable metadata
         // avoids copying the grid into conversion worker messages.
@@ -8256,7 +8265,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         else {
           pixels = await renderGeometryChain(base, settings, { isCurrent });
           if (!ownsInputs()) return;
-          source = await applyLensCorrectionWithSettings(pixels, settings.lensCorrection);
+          source = await applyLensCorrectionWithSettings(pixels, settings.lensCorrection, { isCurrent: ownsInputs });
           if (!ownsInputs()) return;
           processed = await convertFrameOffMainThread({ imageData: source, settings: buildRouterSettings(settings, base),
             options: { preview: false, forceFullProcess: true, includeAnalysisPreview: true, analysisImageData: getColorAnalysisSample(settings, base) },
@@ -10187,7 +10196,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
             refreshCanvasContainerSize();
             state.conversionPreviewImageData = pendingConversionTarget() || proxyTarget;
           } else {
-            correctedSourceData = await applyLensCorrectionWithSettings(sourceData, state, { updateUi: true });
+            correctedSourceData = await applyLensCorrectionWithSettings(sourceData, state, { updateUi: true, isCurrent: isCurrentConversion });
             if (!isCurrentConversion()) return;
             trace.mark('lensCorrection', {
               outputPixels: getImageDataPixelCount(correctedSourceData)
@@ -14010,8 +14019,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         const planes = workingPlanes();
         if (!planes || !isCurrentLoad(generation)) return false;
         if (state.sourcePending !== pending) return Boolean(state.conversionSourceImageData);
-        const corrected = await applyLensCorrectionWithSettings(planes, state, { updateUi: false });
-        if (!isCurrentLoad(generation) || state.sourcePending !== pending || workingPlanes() !== planes) {
+        const corrected = await applyLensCorrectionWithSettings(planes, state, {
+          updateUi: false, isCurrent: () => isCurrentLoad(generation) && state.sourcePending === pending && workingPlanes() === planes
+        });
+        if (!corrected || !isCurrentLoad(generation) || state.sourcePending !== pending || workingPlanes() !== planes) {
           return Boolean(state.conversionSourceImageData);
         }
         state.conversionSourceImageData = corrected;
@@ -17006,6 +17017,22 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         disableWorkers: () => geometryPool.disableWorkers(),
         pending: () => Boolean(state.geometryPending),
         inspect: inspectGeometryState,
+        // The pool's canvas check (#293) and the export chain of the open
+        // photo built from its base, hashed (the smoke run).
+        canvasRotation: () => geometryPool.canvasRotation,
+        renderChain: async () => {
+          const base = state.loadedBaseImageData;
+          if (!base) return null;
+          const output = await renderGeometryChain(base, {
+            rotationAngle: effectiveGeometryAngle(state.rotationAngle), mirrored: state.mirrored, cropRegion: state.cropRegion
+          });
+          const hash = data => {
+            let value = 2166136261;
+            for (let i = 0; i < data.length; i++) value = Math.imul(value ^ data[i], 16777619);
+            return value >>> 0;
+          };
+          return output ? { width: output.width, height: output.height, hash8: output.data ? hash(output.data) : null } : null;
+        },
         // Builds the current geometry again (the memo is dropped for it).
         rebuild: () => {
           const installed = state.croppedImageData || state.originalImageData;
@@ -17293,11 +17320,23 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const source = adopted ? adopted.image : base;
       const plan = geometryPlanFor(source, key, { rotated: Boolean(adopted) });
       if (!plan) {
-        // 8-bit source at a non-right angle: the canvas rotates here, as it
-        // always has; the rotated frame is then the only full-size plane.
+        // 8-bit source at a non-right angle: the canvas rotation on a
+        // worker's OffscreenCanvas (#293), the mirror as an index plan in
+        // the pool; the page canvas where the pool cannot reproduce its
+        // bytes, and for inconsistent planes (renderGeometryFrame, as it
+        // always was). The rotated frame is then the only full-size plane.
         await yieldToEventLoop();
         if (!isCurrent()) return null;
-        const frame = renderGeometryFrame(base, key);
+        const pooled = adopted || source.__image16 ? false : await geometryPool.rotateCanvas(base, key.angle, { isCurrent });
+        if (pooled === null || !isCurrent()) return null;
+        let frame;
+        if (pooled) {
+          const mirror = key.mirrored ? planGeometry(pooled, { mirrored: true }) : null;
+          frame = mirror ? await geometryPool.render(pooled, mirror, { isCurrent, maxInFlight: interactiveGeometryBands(mirror) }) : pooled;
+          if (!frame || !isCurrent()) return null;
+        } else {
+          frame = renderGeometryFrame(base, key);
+        }
         return { frame, cropped: key.crop ? cropImageDataRegion(frame, key.crop) : null };
       }
       // The pool builds the frame's display level with its bands (#248), so
@@ -20691,7 +20730,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         if (exportInfo.format === 'dng') {
           persistCurrentFileSettings({ silent: true, force: true });
           overlay.updateProgress(40, lang.loadingEncoding);
-          blob = renderLinearDngBlob(state.conversionSourceImageData || state.croppedImageData || state.originalImageData, state, Math.max(0, state.currentFileIndex));
+          // The editor's plane goes to this export's worker as a copy (it
+          // belongs to the editor); Cancel stops the worker build (#293).
+          allowCancel();
+          const source = state.conversionSourceImageData || state.croppedImageData || state.originalImageData;
+          const result = await renderLinearDngBlob(source, state, Math.max(0, state.currentFileIndex), { bridge: workerBridge, signal: cancel.signal });
+          batchPipelineDiagnostics.singleExport = { ...(batchPipelineDiagnostics.singleExport || {}), linearDngWorker: result.worker };
+          blob = result.blob;
         } else {
           const onModelLoad = (percent) => overlay.updateProgress(state.currentStep >= 3 ? 5 : 50, percent !== null
             ? `${getLocalizedText('exportAiModelLoading', 'Loading the AI repair model…')}${percent > 0 ? ` ${percent}%` : ''}`
@@ -21254,15 +21299,38 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       return cropImageDataRegion(imageData, sanitized);
     }
 
+    // The pool's canvas rotation of an 8-bit source (no 16-bit plane) at a
+    // non-right angle (#293): the rotated frame; false when the page canvas
+    // has to rotate (the pool's OffscreenCanvas did not reproduce its
+    // bytes, or no workers); null once stale.
+    async function rotateEightBitInPool(source, geometry, isCurrent) {
+      if (!source || source.__image16) return false;
+      const angle = effectiveGeometryAngle(geometry?.rotationAngle);
+      if (!angle) return false;
+      return geometryPool.rotateCanvas(source, angle, { isCurrent });
+    }
+
     // The export geometry chain in the pool, bit-identical to
-    // applyGeometryChainToImageData. 8-bit sources at a non-right angle keep
-    // the canvas rotation on this thread.
+    // applyGeometryChainToImageData. An 8-bit source at a non-right angle
+    // is rotated on a worker's canvas (#293) and then mirrored and cropped
+    // as one index plan, the step chain's bytes; the page canvas rotates it
+    // where the pool cannot, and inconsistent planes keep the step chain.
     // `planes: '16'` (#256): a caller that reads only the 16-bit plane of the
     // output gets `{ width, height, __image16 }` from the pool, without the
     // 8-bit plane; the other paths ignore it.
     async function renderGeometryChain(source, geometry, { isCurrent = () => true, maxInFlight = null, planes = null } = {}) {
-      const plan = planGeometry(source, geometry, { sanitizeCrop: (crop, frame) => sanitizeCropRegionForImage(crop, frame) });
-      if (!plan) return applyGeometryChainToImageData(source, geometry, exportGeometrySteps);
+      const sanitizeCrop = (crop, frame) => sanitizeCropRegionForImage(crop, frame);
+      const plan = planGeometry(source, geometry, { sanitizeCrop });
+      if (!plan) {
+        const rotated = await rotateEightBitInPool(source, geometry, isCurrent);
+        if (rotated === null) return null;
+        if (!rotated) return applyGeometryChainToImageData(source, geometry, exportGeometrySteps);
+        const rest = planGeometry(rotated, { rotationAngle: 0, mirrored: geometry?.mirrored, cropRegion: geometry?.cropRegion }, { sanitizeCrop });
+        if (!rest || rest.identity) return rotated;
+        const output = await geometryPool.render(rotated, rest, { isCurrent, maxInFlight: maxInFlight || interactiveGeometryBands(rest), planes });
+        assertRepairCurrent(isCurrent);
+        return output;
+      }
       if (plan.identity) return source;
       const output = await geometryPool.render(source, plan, { isCurrent, maxInFlight: maxInFlight || interactiveGeometryBands(plan), planes });
       assertRepairCurrent(isCurrent);
@@ -21981,7 +22049,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         const planes = options.releaseEarly && !previewMax && !tileMax && options.stage !== 'source'
           && !lensCorrectionActive(settings) ? '16' : null;
         workingData = own(await renderGeometryChain(imageData, geometry, { isCurrent, maxInFlight: options.geometryBands, planes }), imageData);
-        workingData = own(await applyLensCorrectionWithSettings(workingData, settings, { updateUi: false, file }), workingData);
+        workingData = own(await applyLensCorrectionWithSettings(workingData, settings, { updateUi: false, file, isCurrent, geometryBands: options.geometryBands }), workingData);
         assertRepairCurrent(isCurrent);
         fullWorkingShortSide = Math.min(workingData.width, workingData.height);
       }
@@ -22116,7 +22184,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           isCurrent, maxInFlight: options.geometryBands,
           planes: options.releaseEarly && !lensCorrectionActive(settings) ? '16' : null
         }), imageData);
-        rebuilt = own(await applyLensCorrectionWithSettings(rebuilt, settings, { updateUi: false, file }), rebuilt);
+        rebuilt = own(await applyLensCorrectionWithSettings(rebuilt, settings, { updateUi: false, file, isCurrent, geometryBands: options.geometryBands }), rebuilt);
         assertRepairCurrent(isCurrent);
         workingData = rebuilt;
         rebuilt = null;
@@ -22549,8 +22617,26 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         return options;
       };
       if (exportInfo.format === 'dng') {
-        const { source, settings: usedSettings } = await processFileWithSettings(file, settings, handOver({ stage: 'source', convert: workers.convert, geometryBands: workers.geometryBands, silent: true, memoryClaim: coveredMemoryClaim(), ...stages }));
-        return renderLinearDngBlobInSlices(source, usedSettings, position);
+        // The source's planes belong to this frame (#250): the lane's export
+        // worker takes the negative's plane without a copy (#293), and what
+        // is left is released once the file is encoded.
+        const ownedPlanes = [];
+        try {
+          const { source, settings: usedSettings } = await processFileWithSettings(file, settings, handOver({
+            stage: 'source', convert: workers.convert, geometryBands: workers.geometryBands, silent: true,
+            memoryClaim: coveredMemoryClaim(), ownedPlanes, ...stages
+          }));
+          return await renderLinearDngBlobForBatch(source, usedSettings, position, { bridge: workers.bridge, transferPlane: transferPlanes });
+        } catch (err) {
+          if (transferPlanes && isExportInputLostError(err)) {
+            console.warn(`A plane of ${file.name} was lost with its worker; rendering the frame again:`, err?.message || err);
+            releaseOwnedPlanes(...ownedPlanes.splice(0));
+            return await renderBatchExportFile(job, position, context, { transferPlanes: false });
+          }
+          throw err;
+        } finally {
+          releaseOwnedPlanes(...ownedPlanes);
+        }
       }
       const sprocket = options?.sprocket ?? state.exportSprocketHolesEnabled;
       const metadata = exportMetadataFor(settings, position);
@@ -22669,7 +22755,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // `last` are the last batch's; the other counters add up.
     const batchPipelineDiagnostics = {
       batches: 0, lastMode: null, lastLanes: 0, droppedPlanes16: 0, rebuilds: 0, residentFrames: 0,
-      bandBridge: {}, bands: null, singleExport: null,
+      bandBridge: {}, bands: null, singleExport: null, lastZip: null,
       decodeAhead: { admitted: 0, refused: { ceiling: 0, 'low-memory': 0, engine: 0, hidden: 0, foreground: 0, format: 0 }, lastEstimate: 0 },
       last: null
     };
@@ -23077,6 +23163,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
         overlay.updateProgress(98, lang.loadingBatchZip);
         await zipWriter.close();
+        // What the archive's CRCs ran on (#293): the ZIP CRC worker, or this
+        // thread (for the smoke run and support).
+        batchPipelineDiagnostics.lastZip = { ...zipWriter.stats };
         zipWriter = null;
         for (const { item } of jobs) if (item.status === 'done') void learnFromExport(item);
         overlay.updateProgress(100, lang.loadingComplete);
@@ -28797,35 +28886,53 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // carries one); the film base and film type come from `settings`.
     function linearDngInputs(source, settings) {
       if (!source) throw new Error('No image available for export.');
-      const plane = source.__image16 && source.__image16.data instanceof Uint16Array ? source.__image16 : toImage16(source);
       const positive = sanitizePresetType(settings.filmType || 'color') === 'positive';
       const filmBase = requiresFilmBase(settings) && settings.filmBase ? settings.filmBase : null;
-      return { plane, filmBase, positive };
+      return { positive, filmBase };
     }
 
-    // Single export: synchronous behind the overlay (about 0.3 s at 60 MP),
-    // since it reads live editor state that must not change mid-build.
-    function renderLinearDngBlob(source, settings, position) {
-      const { plane, filmBase, positive } = linearDngInputs(source, settings);
-      const linear = buildLinearPositive(plane, filmBase, { positive });
-      return encodeLinearDngBlob(linear, { metadata: exportMetadataFor(settings, position) });
-    }
-
-    // Batch: the desktop batch keeps the editor live, so the build runs in
-    // slices of about 16 ms with a task in between. It reads only the job's
-    // own decoded source and settings. `new Blob` still copies the strip in
-    // one call; its duration is traced (`blobMs`, ?debug=1 or ?perf=1) because moving
-    // the batch build into the lane's export worker is the next step if it
-    // exceeds 50 ms in the macOS app (#257).
-    async function renderLinearDngBlobInSlices(source, settings, position) {
-      const { plane, filmBase, positive } = linearDngInputs(source, settings);
-      const trace = createPerfTrace('linearDngBatch', { pixels: plane.width * plane.height });
-      const linear = await buildLinearPositiveAsync(plane, filmBase, { positive });
-      trace.mark('build');
+    // The build in the export worker (#293): the 16-bit plane (or the 8-bit
+    // frame, upcast there as toImage16 does here) is handed over when this
+    // export owns it (`transferPlane`), else copied in slices; the worker
+    // runs buildLinearPositive, the DNG parts and `new Blob`, and only the
+    // Blob comes back. Without a worker the build runs here as before: the
+    // single export synchronously behind the overlay (about 0.3 s at 60 MP,
+    // and it reads live editor state that must not change mid-build), the
+    // batch in slices of about 16 ms with a task in between (the desktop
+    // batch keeps the editor live). Resolves { blob, worker, buildMs, blobMs }.
+    async function renderLinearDngBlob(source, settings, position, { bridge = null, signal = null, transferPlane = false, sliced = false } = {}) {
+      const { positive, filmBase } = linearDngInputs(source, settings);
+      const metadata = exportMetadataFor(settings, position);
+      const exportWorkers = bridge || defaultExportWorkers;
+      if (typeof exportWorkers.workerEncodeLinearDng === 'function' && exportWorkers.isWorkerAvailable()) {
+        const result = await exportWorkers.workerEncodeLinearDng(source, { filmBase, positive, metadata, transferPlane, signal });
+        if (result) return { blob: result.blob, worker: true, buildMs: result.buildMs, blobMs: result.blobMs };
+      }
+      const plane = source.__image16 && source.__image16.data instanceof Uint16Array ? source.__image16 : toImage16(source);
+      const buildStart = performance.now();
+      const linear = sliced
+        ? await buildLinearPositiveAsync(plane, filmBase, { positive }, { signal })
+        : buildLinearPositive(plane, filmBase, { positive });
       const blobStart = performance.now();
-      const blob = encodeLinearDngBlob(linear, { metadata: exportMetadataFor(settings, position) });
-      trace.end({ bytes: blob.size, blobMs: Math.round((performance.now() - blobStart) * 10) / 10 });
-      return blob;
+      const blob = encodeLinearDngBlob(linear, { metadata });
+      return {
+        blob, worker: false,
+        buildMs: Math.round((blobStart - buildStart) * 10) / 10,
+        blobMs: Math.round((performance.now() - blobStart) * 10) / 10
+      };
+    }
+
+    // Batch: the lane's export worker builds the file from the job's own
+    // decoded source (handed over, #250) and settings; `new Blob` copies the
+    // strip there. The `linearDngBatch` trace keeps its `build` stage and
+    // `blobMs` (?debug=1 or ?perf=1; the #230 harness reads both), now the
+    // worker's times.
+    async function renderLinearDngBlobForBatch(source, settings, position, { bridge = null, transferPlane = false } = {}) {
+      const trace = createPerfTrace('linearDngBatch', { pixels: source.width * source.height });
+      const result = await renderLinearDngBlob(source, settings, position, { bridge, transferPlane, sliced: true });
+      trace.mark('build', { worker: result.worker, workerBuildMs: result.buildMs });
+      trace.end({ bytes: result.blob.size, blobMs: result.blobMs, worker: result.worker });
+      return result.blob;
     }
 
     // ===========================================

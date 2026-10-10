@@ -21,7 +21,8 @@ the unmirrored base and `cropRegion` on the rotated (and mirrored) frame.
   `mirrorImageDataHorizontal`, `applyGeometryChainToImageData`), the worker
   pool and its synchronous fallback run this core, so banded output is the
   whole output by construction. Only 8-bit sources at a non-right angle keep
-  the 2D-canvas rotation on the main thread.
+  the 2D-canvas rotation, which runs on a worker's OffscreenCanvas (#293,
+  below).
 - Strided plans (`step`) reproduce the chain followed by the step
   downsampler exactly; readers that downsample anyway (the crop view's
   stand-in, Apply Crop's crop-area detection) get their sample without the
@@ -61,6 +62,50 @@ band's grid rows (`lensMaps.js`, the editor's remap) and box-averages them,
 in bands planned by the base rows they copy and the rows they render.
 `counters.copiedBytes` counts every band row the main thread copies, for
 both kinds of job.
+
+An 8-bit source at a non-right angle (a JPEG or 8-bit TIFF scan the
+import straightens) has no 16-bit plane for the bilinear kernel, and the
+2D canvas's rasteriser cannot be reproduced bit for bit in JavaScript, so
+its rotation stays a canvas rotation, now on a worker (#293,
+`rotateCanvas`): the frame's bytes are copied to a geometry worker in
+32 MiB slices, the worker runs `applyRotationToImageData`'s canvas path on
+an `OffscreenCanvas` (the same code; `createImageCanvas` gives a worker an
+OffscreenCanvas) and transfers the rotated frame back, and the mirror and
+crop follow as one index plan in the pool (`renderGeometryChain`,
+`buildGeometryPlanes`), the step chain's bytes. The rotation cannot be
+banded: a band's canvas has another transform (its translation differs by
+the band's offset), and the rasteriser's per-pixel source coordinates are
+rounded from that transform, so a band's pixels are not guaranteed to be
+the whole frame's. Whether a worker's OffscreenCanvas writes the page
+canvas's bytes is the engine's business: before its first rotation the pool
+rotates a 61 x 47 fixture by four angles on the page canvas and on a
+worker and admits the worker only when all four are the same bytes
+(`canvasRotation`); otherwise, with no OffscreenCanvas in workers (WebKit
+before 16.4), or when a worker reports it could not rotate, the page canvas
+rotates as before and the pool goes on with its bands. In Chrome the
+geometry smoke imports an 8-bit tilted scan and checks that its planes and
+its export chain equal the chain built on the page canvas; other engines
+are gated by the fixture check only. `geometryPool.rotate.test.mjs` runs
+the admission, the hand-over, the differing-rasteriser, error, crash and
+no-worker cases on a stand-in rotation, and the real worker on a Node
+thread (no OffscreenCanvas: declined, bands still render).
+
+The lens remap of the working image runs in the same pool (#293,
+`renderLensRemap`): `applyLensCorrectionWithSettings` splits the corrected
+image into 4–6 row bands; each band is sent the input rows its output rows
+read (`lensSourceRows`; a view of a shared 16-bit plane, a copy otherwise)
+and its grid rows (`sliceLensMaps`), and returns its rows of both planes
+rendered with `applyLensMapRows`, the kernel of the whole-image remap, so
+the assembled image is `applyLensMapsToImage`'s byte for byte
+(`geometryPool.lens.test.mjs`: every map and mode combination, 8-bit,
+16-bit and shared sources, band counts, the synchronous fallback, a failed
+band, a crashed worker, the in-flight cap, real threads). A 16-bit output
+of a shared source is shared and written in place by the bands. Without
+workers the bands render on the main thread, at most 1 MP per task. A
+stale job (`isCurrent`) resolves null, and so does the call; its callers
+check their own currency right after. The display-session smoke's
+lens-corrected frame runs this path: its export and its display proxy's
+self-check (the fills' banded remap, #278) are compared with it.
 
 In `main.js` the scalars change synchronously and the planes follow:
 
@@ -178,6 +223,23 @@ Full-resolution 8-bit planes of the base and of the crop are still kept.
 Deriving them on demand (RGB `>>> 8`, alpha by the producer's rule) needs
 every full-resolution 8-bit reader moved to derived inputs; the base plane is
 produced by the post-decode worker of #232 and the display preview by #248.
+
+## #293 measurements
+
+Node, a synthetic 60 MP frame (9536 × 6336), the real geometry workers on
+six `worker_threads`, main-thread busy time from a 1 ms timer's missed
+ticks (the S5 run of the #230 harness could not be made for want of free
+disk, and S5's 16-bit DNG does not exercise these two paths):
+
+| stage | before (main thread) | after |
+| --- | --- | --- |
+| lens remap, distortion + TCA + vignetting, grid step 8 | one task of 5.9–6.4 s | wall 2.0 s; busy 1141 ms on the main thread in 32 MiB copy slices (the bands' input rows out, their output rows in, the grid slices), longest task 27 ms, none over 50 ms |
+| 8-bit rotation at a non-right angle | one canvas rotation of the whole frame (1–2 s at 60 MP in Chrome, not timed in Node: no canvas) | busy 42 ms (the 32 MiB copy slices, longest 21 ms) plus the rotation on the worker's canvas |
+
+The pool's lens output and the whole-image remap agree sample for sample. In
+Chrome (the geometry smoke, a 2400 × 1700 8-bit scan at 4°) the chain on the
+page canvas took 66 ms and the chain with the worker canvas 71 ms of wall
+time with no long task, and the two chains' planes were the same bytes.
 
 ## Debugging
 

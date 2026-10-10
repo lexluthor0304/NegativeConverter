@@ -18,6 +18,8 @@ import { applyAdjustmentsToPixels16, downconvertPlane16 } from './pixelAdjustmen
 import { encodePng16Blob, encodeTiffBlob } from './imageEncoders.js';
 import { encodePng16Band } from './png16Bands.js';
 import { computeGainMap } from './gainMap.js';
+import { buildLinearPositive, encodeLinearDngBlob } from '../app/linearDng.js';
+import { toImage16 } from '../app/multiShot.js';
 
 const adjustmentLutScratch = {
   lutR: new Uint8Array(256),
@@ -59,6 +61,9 @@ self.onmessage = function (e) {
         break;
       case 'encodeTiff':
         handleEncodeTiff(msg);
+        break;
+      case 'encodeLinearDng':
+        handleEncodeLinearDng(msg);
         break;
       default:
         self.postMessage({ type: 'error', id: msg.id, message: `Unknown message type: ${msg.type}` });
@@ -357,4 +362,37 @@ function handleEncodeTiff(msg) {
 
   self.postMessage({ type: 'progress', id, phase: 'encoding', percent: 100 });
   self.postMessage({ type: 'blobResult', id, blob });
+}
+
+// The linear DNG (#293): the geometry-applied negative's 16-bit plane (or
+// its 8-bit frame, upcast here exactly as main.js's toImage16 did) in,
+// buildLinearPositive, the DNG parts and the Blob here; only the Blob goes
+// back, with the build and Blob times for the batch's perf trace. The
+// kernel only reads its input, so the plane goes back with any error.
+function handleEncodeLinearDng(msg) {
+  const { id, inputBuffer, width, height, bits, filmBase, positive, metadata } = msg;
+  try {
+    const samples = width * height * 4;
+    let plane;
+    if (bits === 16) {
+      const data = new Uint16Array(inputBuffer);
+      if (data.length !== samples) throw new Error(`16-bit input holds ${data.length} samples for ${width}x${height}`);
+      plane = { width, height, data };
+    } else {
+      const data = new Uint8ClampedArray(inputBuffer);
+      if (data.length !== samples) throw new Error(`8-bit input holds ${data.length} samples for ${width}x${height}`);
+      plane = toImage16({ width, height, data });
+    }
+    const started = performance.now();
+    const linear = buildLinearPositive(plane, filmBase || null, { positive: Boolean(positive) });
+    const built = performance.now();
+    const blob = encodeLinearDngBlob(linear, { metadata: metadata || null });
+    const done = performance.now();
+    self.postMessage({
+      type: 'dngResult', id, blob, gain: linear.gain,
+      buildMs: Math.round((built - started) * 10) / 10, blobMs: Math.round((done - built) * 10) / 10
+    });
+  } catch (err) {
+    postError(id, err, { input: inputBuffer });
+  }
 }

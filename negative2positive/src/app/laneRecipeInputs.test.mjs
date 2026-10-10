@@ -73,7 +73,7 @@ globalThis.OffscreenCanvas = class {
 };
 
 const { applyGeometryChainToImageData, applyRotationToImageData, mirrorImageDataHorizontal, planGeometry, renderGeometry,
-  sanitizeCropRect } = await import('./imageGeometry.js');
+  sanitizeCropRect, normalizeAngleDegrees } = await import('./imageGeometry.js');
 const { cropImageDataRegion, downsampleImageDataForMaxDim } = await import('./imageDataOps.js');
 const { reducedTileGeometry, renderReducedGeometry, reducedGeometryExact, tileGeometryKey } = await import('./reducedGeometry.js');
 const { markOwnedPlanes, planeBuffersOf, sharesPlaneBuffers } = await import('./planeRelease.js');
@@ -128,7 +128,7 @@ const exportGeometrySteps = {
 // active lens): the full-resolution chain, then the preview downsample.
 const tile1703835 = (base, geometry, maxDim = 288) => downsampleImageDataForMaxDim(applyGeometryChainToImageData(base, geometry, exportGeometrySteps), maxDim);
 
-const runtime = ['processFileWithSettings', 'renderPreviewFromWorkingImage', 'renderGeometryChain', 'removeFrameDust',
+const runtime = ['processFileWithSettings', 'renderPreviewFromWorkingImage', 'renderGeometryChain', 'rotateEightBitInPool', 'effectiveGeometryAngle', 'removeFrameDust',
   'frameWantsAutoWhiteBalance', 'applyFrameAutoWhiteBalance', 'applyFrameExpiredAnalysis', 'tileAnalysisReference',
   'resolveLensCorrection', 'lensCorrectionActive', 'tileRecipeSettled', 'perPhotoSettingsFallback', 'expiredImportKeepsFullFrame',
   'autoFrameDetectionFilmType']
@@ -162,8 +162,9 @@ function fixture(base, { frame, expired = true } = {}) {
     settleImportFilmType: (_item, settings) => settings,
     sanitizeSettings: settings => structuredClone(settings),
     // The geometry core and pool: the real planner and renderer.
-    planGeometry, applyGeometryChainToImageData, exportGeometrySteps, sanitizeCropRegionForImage: sanitizeCropRect,
-    geometryPool: { render: async (image, plan) => renderGeometry(image, plan) },
+    planGeometry, applyGeometryChainToImageData, exportGeometrySteps, sanitizeCropRegionForImage: sanitizeCropRect, normalizeAngleDegrees,
+    // No worker canvas here (#293): an 8-bit tilt takes the page canvas, as 1703835 did.
+    geometryPool: { render: async (image, plan) => renderGeometry(image, plan), rotateCanvas: async () => false },
     interactiveGeometryBands: () => 1,
     reducedTileGeometry, tileGeometryKey,
     reducedGeometryExact,

@@ -133,6 +133,7 @@ export async function runExportOwnershipSmoke({ send, evaluate, waitFor, wait, f
     const { computeGainMap } = await import('/src/app/gainMapJpeg.js');
     const { attachMetadataToBlob, listJpegSegments } = await import('/src/app/exportMetadata.js');
     const encoders = await import('/src/app/exportImageEncoders.js');
+    const { buildLinearPositive, encodeLinearDngBlob } = await import('/src/app/linearDng.js');
     const W = 331, H = 197;
     const makeProcessed = () => {
       const plane = new Uint16Array(W * H * 4);
@@ -218,6 +219,19 @@ export async function runExportOwnershipSmoke({ send, evaluate, waitFor, wait, f
       result.alphaFallback = (await bridge.workerEncodeImage(translucent, { mimeType: 'image/png', transferPlane: true, onRestore: (frame) => { restored = frame; } })) === null
         && restored instanceof ImageData && restored.data[7] === 128;
       result.support = encodeImageSupported();
+
+      // The linear DNG in the worker (#293): the same bytes as the main-thread
+      // build, with a copied plane (intact here) and with a transferred one.
+      const dngMeta = { exif: { make: 'NeoAnalogLab', model: 'smoke', dateTime: '2026:10:10 09:00:00' }, xmp: '<x:xmpmeta xmlns:x="adobe:ns:meta/"></x:xmpmeta>' };
+      const filmBase = { r: 212, g: 131, b: 77 };
+      const dngMain = await bytesOf(encodeLinearDngBlob(buildLinearPositive(makeProcessed().__image16, filmBase, { positive: false }), { metadata: dngMeta }));
+      const dngCopied = await bridge.workerEncodeLinearDng(processed, { filmBase, positive: false, metadata: dngMeta });
+      result.dngWorker = Boolean(dngCopied && dngCopied.blob) && Number.isFinite(dngCopied.buildMs) && Number.isFinite(dngCopied.blobMs);
+      result.dngBytesEqual = Boolean(dngCopied) && sameArray(await bytesOf(dngCopied.blob), dngMain);
+      result.dngPlaneIntact = processed.__image16.data.byteLength === W * H * 8;
+      const dngOwned = markOwnedPlanes(makeProcessed());
+      const dngMoved = await bridge.workerEncodeLinearDng(dngOwned, { filmBase, positive: false, metadata: dngMeta, transferPlane: true });
+      result.dngTransferred = dngOwned.__image16.data.byteLength === 0 && Boolean(dngMoved) && sameArray(await bytesOf(dngMoved.blob), dngMain);
     } finally {
       bridge.terminateWorker();
     }
@@ -247,6 +261,7 @@ export async function runExportOwnershipSmoke({ send, evaluate, waitFor, wait, f
   if (!worker.pngChunksEqual || !worker.jpegSegmentsEqual) fail('metadata chunks differ after attachMetadataToBlob: ' + JSON.stringify(worker));
   if (!worker.planeIntact || !worker.alphaFallback) fail('encodeImage plane/alpha handling regressed: ' + JSON.stringify(worker));
   if (!worker.fusedTransferred || !worker.fusedBytes || !worker.blobAfterTerminate) fail('fused TIFF16 / Blob after terminate regressed: ' + JSON.stringify(worker));
+  if (!worker.dngWorker || !worker.dngBytesEqual || !worker.dngPlaneIntact || !worker.dngTransferred) fail('the worker linear DNG differs from the main-thread build or mishandled its plane: ' + JSON.stringify(worker));
   if (worker.engine === 'chromium' && (worker.release !== 'worker' || !worker.released)) fail('plane release did not go through the throwaway worker: ' + JSON.stringify(worker));
   if (!worker.pngBytesEqual || !worker.jpegBytesEqual) console.log('note: Chrome worker encodes differ in file bytes only (decoded pixels equal)');
   if (worker.jpegIccProfiles > 1) console.log(`note: JPEG carries ${worker.jpegIccProfiles} ICC profiles on the worker and canvas paths alike (pre-existing, audit backlog)`);
@@ -343,6 +358,24 @@ export async function runExportOwnershipSmoke({ send, evaluate, waitFor, wait, f
       fail('a 16-bit TIFF did not use the fused request: ' + JSON.stringify(tiff));
     }
     if (tiff.workersAlive !== 0) fail('the TIFF export left its worker alive: ' + JSON.stringify(tiff));
+
+    // The linear DNG (#293): the single export sends the editor's plane to
+    // its worker as a copy; a one-file batch hands the frame's own plane
+    // over (one transfer); neither builds the DNG on the main thread, and
+    // both workers are gone afterwards.
+    await evaluate(`document.querySelector('.format-btn[data-format="dng"]').click()`);
+    const dng = await exportOnce('ownership DNG export');
+    console.log('studio DNG export:', JSON.stringify(dng));
+    if (!/dng|octet|tiff/.test(dng.type) && !(dng.size > 0)) fail('DNG export failed: ' + JSON.stringify(dng));
+    if (!exportTypes(dng).includes('encodeLinearDng')) fail('the single DNG export was not built in the export worker: ' + JSON.stringify(dng));
+    if (dng.workersCreated < 1 || dng.workersAlive !== 0) fail('the DNG export left its worker alive: ' + JSON.stringify(dng));
+    const dngWorker = await evaluate(`window.__ncBatchPipeline?.diagnostics?.singleExport?.linearDngWorker`);
+    if (dngWorker !== true) fail('the single DNG export fell back to the main thread: ' + JSON.stringify(dngWorker));
+    const dngBatch = await exportOnce('ownership DNG batch export', 'exportAllBtn');
+    console.log('studio DNG batch export:', JSON.stringify(dngBatch));
+    if (!exportTypes(dngBatch).includes('encodeLinearDng')) fail('the batch DNG was not built in the export worker: ' + JSON.stringify(dngBatch));
+    if (dngBatch.workersAlive !== 0) fail('the DNG batch left an export worker alive: ' + JSON.stringify(dngBatch));
+    if (dngBatch.size !== dng.size) console.log('note: batch and single DNG differ in size (per-file settings); not a failure');
 
     // A one-file batch: a pool of one, the source lent to the conversion
     // lane, the lane released after the frame, every export worker gone.
