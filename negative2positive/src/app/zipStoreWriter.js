@@ -1,5 +1,5 @@
 import { yieldTaskForJob } from './yieldToPaint.js';
-import { updateCrc32 } from '../workers/crc32.js';
+import { readBlobChunks, toUint8Array, crc32OfBlob } from '../workers/blobCrc32.js';
 
 const ZIP_MAX_U16 = 0xFFFF;
 const ZIP_MAX_U32 = 0xFFFFFFFF;
@@ -9,7 +9,6 @@ const ZIP_GENERAL_PURPOSE_UTF8 = 0x0800;
 const ZIP_GENERAL_PURPOSE_DESCRIPTOR = 0x0008;
 const ZIP_METHOD_STORE = 0;
 const ZIP64_EXTRA_ID = 0x0001;
-const ZIP_CHUNK_BYTES = 256 * 1024;
 
 const textEncoder = new TextEncoder();
 
@@ -83,45 +82,6 @@ function encodeEntryName(name) {
   const bytes = textEncoder.encode(normalizeZipEntryName(name));
   ensureZipU16(bytes.length, 'ZIP entry name length');
   return bytes;
-}
-
-function toUint8Array(chunk) {
-  if (chunk instanceof Uint8Array) return chunk;
-  if (chunk instanceof ArrayBuffer) return new Uint8Array(chunk);
-  if (ArrayBuffer.isView(chunk)) {
-    return new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
-  }
-  throw new Error('Unsupported ZIP stream chunk type.');
-}
-
-async function* readBlobChunks(blob) {
-  if (blob && typeof blob.stream === 'function') {
-    const reader = blob.stream().getReader();
-    try {
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        if (value) {
-          const bytes = toUint8Array(value);
-          for (let offset = 0; offset < bytes.length; offset += ZIP_CHUNK_BYTES) {
-            yield bytes.subarray(offset, offset + ZIP_CHUNK_BYTES);
-          }
-        }
-      }
-    } finally {
-      reader.releaseLock();
-    }
-    return;
-  }
-
-  if (blob && typeof blob.slice === 'function' && typeof blob.arrayBuffer === 'function') {
-    for (let offset = 0; offset < blob.size; offset += ZIP_CHUNK_BYTES) {
-      yield new Uint8Array(await blob.slice(offset, offset + ZIP_CHUNK_BYTES).arrayBuffer());
-    }
-    return;
-  }
-
-  throw new Error('ZIP entry payload is not a Blob.');
 }
 
 function getDosDateTime(date = new Date()) {
@@ -280,7 +240,109 @@ export function canUseBrowserZipStreaming(globalObject = globalThis) {
   );
 }
 
+// The CRC worker (#293): one `workers/zipCrcWorker.js` per archive, started
+// at the first entry and terminated with the writer. `compute(blob)` posts
+// the Blob by reference and resolves its CRC-32; a worker that fails or
+// cannot start rejects once and is not used again (`broken`), and the
+// writer computes the rest of the archive's CRCs on this thread.
+export const ZIP_CRC_WORKER_TIMEOUT_BASE_MS = 30_000;
+export const ZIP_CRC_WORKER_TIMEOUT_PER_MIB_MS = 100;
+
+function defaultZipCrcWorkerFactory() {
+  return new Worker(new URL('../workers/zipCrcWorker.js', import.meta.url), { type: 'module' });
+}
+
+export function createZipCrcWorker({ workerFactory = defaultZipCrcWorkerFactory, timeoutMs = null } = {}) {
+  let worker = null;
+  let broken = false;
+  let sequence = 0;
+  const pending = new Map();
+
+  function settle(id) {
+    const entry = pending.get(id);
+    if (!entry) return null;
+    pending.delete(id);
+    clearTimeout(entry.timer);
+    return entry;
+  }
+
+  function fail(error) {
+    broken = true;
+    const dying = worker;
+    worker = null;
+    if (dying) {
+      dying.onmessage = dying.onerror = dying.onmessageerror = null;
+      try { dying.terminate(); } catch { /* already stopped */ }
+    }
+    for (const id of Array.from(pending.keys())) settle(id).reject(error);
+  }
+
+  function start() {
+    if (worker || broken) return worker;
+    try {
+      worker = workerFactory();
+    } catch (error) {
+      worker = null;
+      broken = true;
+      return null;
+    }
+    worker.onmessage = ({ data }) => {
+      const entry = data ? settle(data.id) : null;
+      if (!entry) return;
+      if (data.error || !Number.isInteger(data.crc) || data.crc < 0 || data.crc > 0xFFFFFFFF || data.size !== entry.size) {
+        const error = new Error(data.error || `Unexpected ZIP CRC result for ${entry.size} bytes`);
+        entry.reject(error);
+        fail(error);
+        return;
+      }
+      entry.resolve(data.crc);
+    };
+    worker.onerror = (event) => fail(new Error(event?.message || 'ZIP CRC worker crashed'));
+    worker.onmessageerror = () => fail(new Error('Invalid ZIP CRC worker message'));
+    return worker;
+  }
+
+  return {
+    /** Whether a request may go to the worker (never after a failure). */
+    get available() { return !broken && (worker !== null || typeof workerFactory === 'function'); },
+    get broken() { return broken; },
+    compute(blob) {
+      const w = start();
+      if (!w) return Promise.reject(new Error('ZIP CRC worker unavailable'));
+      return new Promise((resolve, reject) => {
+        const id = ++sequence;
+        const limit = Number.isFinite(timeoutMs) ? timeoutMs
+          : ZIP_CRC_WORKER_TIMEOUT_BASE_MS + Math.ceil(blob.size / (1024 * 1024)) * ZIP_CRC_WORKER_TIMEOUT_PER_MIB_MS;
+        const timer = setTimeout(() => {
+          if (!pending.has(id)) return;
+          fail(new Error(`ZIP CRC worker timed out after ${limit} ms`));
+        }, limit);
+        timer.unref?.();
+        pending.set(id, { resolve, reject, timer, size: blob.size });
+        try {
+          w.postMessage({ type: 'zip-crc32', id, blob });
+        } catch (error) {
+          settle(id);
+          reject(error);
+          fail(error);
+        }
+      });
+    },
+    dispose() {
+      fail(new Error('ZIP CRC worker released'));
+      broken = true;
+    }
+  };
+}
+
 export class ZipStoreWriter {
+  /**
+   * @param {{write: Function, close?: Function, abort?: Function}} writable
+   * @param {{now?: Date, forceZip64?: boolean, crcWorker?: boolean|object}} [options]
+   *   `crcWorker`: the CRC worker (#293) of this archive, `false` for the
+   *   main-thread CRC, or an object from createZipCrcWorker (tests). By
+   *   default a worker is started where `Worker` exists.
+   */
   constructor(writable, options = {}) {
     if (!writable || typeof writable.write !== 'function') {
       throw new Error('A writable file stream is required for ZIP export.');
@@ -294,6 +356,12 @@ export class ZipStoreWriter {
     // archives switch automatically once a field overflows.
     this.forceZip64 = options.forceZip64 === true;
     this.usedNames = new Set();
+    const crcWorker = options.crcWorker;
+    this.crcWorker = crcWorker && typeof crcWorker === 'object' ? crcWorker
+      : (crcWorker === false || typeof Worker !== 'function' ? null : createZipCrcWorker());
+    // Entries whose CRC the worker computed while the payload was written
+    // whole, entries this thread checksummed, and worker failures.
+    this.stats = { workerEntries: 0, mainEntries: 0, workerFailures: 0 };
   }
 
   async writeChunk(chunk) {
@@ -301,6 +369,33 @@ export class ZipStoreWriter {
     ensureSafeSize(this.position + bytes.byteLength, 'ZIP archive size');
     await this.writable.write(bytes);
     this.position += bytes.byteLength;
+  }
+
+  // The payload as one write: the stream copies the Blob's bytes itself
+  // (the browser process, for a FileSystemWritableFileStream), so no byte of
+  // the entry passes through this thread.
+  async writePayload(blob) {
+    ensureSafeSize(this.position + blob.size, 'ZIP archive size');
+    await this.writable.write(blob);
+    this.position += blob.size;
+  }
+
+  // Today's path, and the fallback: the payload read in bounded chunks that
+  // are checksummed and written here, with a task boundary every 12 ms.
+  async writePayloadInChunks(blob) {
+    let yieldAt = performance.now() + 12;
+    return crc32OfBlob(blob, async (chunk) => {
+      await this.writeChunk(chunk);
+      // An immediately-ready Blob reader and sink only yield microtasks. Give
+      // input/paint/cancel handlers a real task boundary during long exports.
+      // A hidden tab clamps setTimeout to 1 s or more, which would pace the
+      // CRC pass at one 12 ms slice per second (#241): yield through a
+      // MessageChannel task there instead.
+      if (performance.now() >= yieldAt) {
+        await yieldTaskForJob();
+        yieldAt = performance.now() + 12;
+      }
+    });
   }
 
   async addBlob(name, blob) {
@@ -327,26 +422,39 @@ export class ZipStoreWriter {
     };
 
     await this.writeChunk(createLocalFileHeader(entry));
-    let crc = 0xFFFFFFFF;
-    let yieldAt = performance.now() + 12;
-    for await (const chunk of readBlobChunks(blob)) {
-      crc = updateCrc32(crc, chunk);
-      await this.writeChunk(chunk);
-      // An immediately-ready Blob reader and sink only yield microtasks. Give
-      // input/paint/cancel handlers a real task boundary during long exports.
-      // A hidden tab clamps setTimeout to 1 s or more, which would pace the
-      // CRC pass at one 12 ms slice per second (#241): yield through a
-      // MessageChannel task there instead.
-      if (performance.now() >= yieldAt) {
-        await yieldTaskForJob();
-        yieldAt = performance.now() + 12;
+    // The CRC in the worker (#293) while the payload is written whole: the
+    // worker streams the Blob, this thread streams nothing. If the worker
+    // fails, the written bytes are what they are; only the CRC is computed
+    // again, here, from the Blob (read once more).
+    const worker = this.crcWorker && this.crcWorker.available ? this.crcWorker : null;
+    if (worker) {
+      const crc = worker.compute(blob);
+      // A rejection while the write is still pending must not go unhandled.
+      crc.catch(() => {});
+      await this.writePayload(blob);
+      try {
+        entry.crc32 = await crc;
+        this.stats.workerEntries++;
+      } catch (error) {
+        this.stats.workerFailures++;
+        console.warn('ZIP CRC worker failed; computing the checksum on the main thread:', error?.message || error);
+        entry.crc32 = await crc32OfBlob(blob);
+        this.stats.mainEntries++;
       }
+    } else {
+      entry.crc32 = await this.writePayloadInChunks(blob);
+      this.stats.mainEntries++;
     }
-    entry.crc32 = (crc ^ 0xFFFFFFFF) >>> 0;
     await this.writeChunk(createDataDescriptor(entry));
     this.entries.push(entry);
     this.usedNames.add(uniqueName.toLowerCase());
     return uniqueName;
+  }
+
+  releaseCrcWorker() {
+    if (!this.crcWorker) return;
+    try { this.crcWorker.dispose(); } catch { /* released */ }
+    this.crcWorker = null;
   }
 
   async close() {
@@ -372,11 +480,13 @@ export class ZipStoreWriter {
       await this.writable.close();
     }
     this.closed = true;
+    this.releaseCrcWorker();
   }
 
   async abort() {
     if (this.closed) return;
     this.closed = true;
+    this.releaseCrcWorker();
     if (typeof this.writable.abort === 'function') {
       await this.writable.abort();
     }

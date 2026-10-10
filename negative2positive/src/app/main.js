@@ -22665,7 +22665,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // `last` are the last batch's; the other counters add up.
     const batchPipelineDiagnostics = {
       batches: 0, lastMode: null, lastLanes: 0, droppedPlanes16: 0, rebuilds: 0, residentFrames: 0,
-      bandBridge: {}, bands: null, singleExport: null,
+      bandBridge: {}, bands: null, singleExport: null, lastZip: null,
       decodeAhead: { admitted: 0, refused: { ceiling: 0, 'low-memory': 0, engine: 0, hidden: 0, foreground: 0, format: 0 }, lastEstimate: 0 },
       last: null
     };
@@ -23098,6 +23098,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       } finally {
         batchOverlayProgress = null;
         overlay.hide();
+        // What the archive's CRCs ran on (#293): the ZIP CRC worker, or this
+        // thread (for the smoke run and support).
+        batchPipelineDiagnostics.lastZip = { ...zipWriter.stats };
         marker.finish();
       }
     }

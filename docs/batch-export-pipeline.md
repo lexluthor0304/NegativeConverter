@@ -113,11 +113,24 @@ Now one driver (`runBatchExport` in `main.js`) runs the per-file pipeline
   downloads (browser) and folder writes (desktop). The dead JSZip desktop ZIP
   path was removed. The desktop batch now also gets 16-bit output and the
   analog metadata, which only the browser paths had before.
-- ZIP computes CRC while writing each payload once, then writes a standard
-  ZIP32/ZIP64 data descriptor. CRC/write work uses bounded chunks and yields
-  periodically so input and progress tasks can run. The CRC is slice-by-8
-  (`workers/crc32.js`, eight bytes per step, identical values; shared with
-  the PNG chunk CRCs). Opaque PNG16/TIFF files store RGB; real transparency
+- ZIP computes each entry's CRC while the payload is written once, then
+  writes a standard ZIP32/ZIP64 data descriptor. The CRC runs in the
+  archive's own `workers/zipCrcWorker.js` (#293): the entry's Blob is posted
+  by reference, the worker streams it in 256 KiB chunks through the
+  slice-by-8 register (`workers/crc32.js`, eight bytes per step, identical
+  values; shared with the PNG chunk CRCs, the chunking in
+  `workers/blobCrc32.js`) and only the 32-bit value comes back; meanwhile
+  the main thread hands the whole Blob to the `FileSystemWritableFileStream`
+  in one `write`, whose bytes the browser process copies to the file, so no
+  byte of a 362 MB TIFF16 entry passes through the main thread and the local
+  header, descriptor and central directory are the only writes it builds.
+  The archive's bytes are those of the main-thread writer (the ZIP test
+  compares them, with the real worker on a thread). Without workers, or
+  after a worker failure (the written bytes stand; only the checksum is
+  computed again), the payload is read in bounded chunks that are
+  checksummed and written here with a task boundary every 12 ms, as before.
+  `window.__ncBatchPipeline.diagnostics.lastZip` counts the entries each
+  path checksummed. Opaque PNG16/TIFF files store RGB; real transparency
   remains RGBA. PNG16 uses lossless Sub filtering.
 - PNG16 is encoded in row bands (#257, `workers/png16Bands.js`). The rows
   are split into bands of about 16 MiB of filtered bytes (whole rows; 22

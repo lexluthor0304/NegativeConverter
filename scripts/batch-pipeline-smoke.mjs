@@ -270,10 +270,16 @@ export async function runBatchPipelineSmoke({ send, evaluate, waitFor, wait, fai
     await waitFor('staged ZIP with slow writes', `window.__batchPipelineProbe.zip.closed && !document.getElementById('exportZipBtn').disabled && !document.body.dataset.studioBusy`, 300_000);
     const zip = await evaluate(`(() => {
       window.showSaveFilePicker = undefined;
-      return { zip: window.__batchPipelineProbe.zip, last: window.__ncBatchPipeline?.diagnostics?.last || null };
+      return { zip: window.__batchPipelineProbe.zip, last: window.__ncBatchPipeline?.diagnostics?.last || null,
+        crc: window.__ncBatchPipeline?.diagnostics?.lastZip || null };
     })()`);
     console.log('batch pipeline ZIP overlap:', JSON.stringify(zip));
     if (!zip.last || zip.last.mode !== 'default' || zip.last.lanes !== 1) fail('the ZIP did not run one default lane: ' + JSON.stringify(zip));
+    // The archive's CRCs ran in the ZIP CRC worker (#293), every payload one
+    // Blob write to the sink, none checksummed on the main thread.
+    if (!zip.crc || zip.crc.workerEntries !== 3 || zip.crc.mainEntries !== 0 || zip.crc.workerFailures !== 0) {
+      fail('the ZIP CRCs did not all run in the CRC worker: ' + JSON.stringify(zip.crc));
+    }
     if (zip.last.earlyReleases !== 2) {
       fail(`frames 1 and 2 must start while 0 and 1 are written (2 overlaps), counted ${zip.last.earlyReleases}: ` + JSON.stringify(zip));
     }
