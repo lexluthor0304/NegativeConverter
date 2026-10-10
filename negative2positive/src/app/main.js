@@ -202,6 +202,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       workerEncodeImage,
       workerEncodePng16,
       workerEncodeTiff,
+      workerEncodeLinearDng,
       isWorkerAvailable,
       isExportInputLostError,
       isAbortError,
@@ -239,7 +240,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // own (contact sheet, multi-shot merge, watch folder). A single export
     // makes its own bridge and a batch export its own pool (#250); both pass
     // it through `bridge`.
-    const defaultExportWorkers = { workerApplyAdjustments, workerApplyAdjustments16, workerGainMap16, workerAdjust16AndEncode, workerEncodeImage, workerEncodePng16, workerEncodeTiff, isWorkerAvailable };
+    const defaultExportWorkers = { workerApplyAdjustments, workerApplyAdjustments16, workerGainMap16, workerAdjust16AndEncode, workerEncodeImage, workerEncodePng16, workerEncodeTiff, workerEncodeLinearDng, isWorkerAvailable };
     // 暗室 UI に一本化。古い workspace パラメーターで別画面へ分岐しない。
     let studioAutoFrameRunning = false;
     let studioWorkspace = null;
@@ -20687,7 +20688,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         if (exportInfo.format === 'dng') {
           persistCurrentFileSettings({ silent: true, force: true });
           overlay.updateProgress(40, lang.loadingEncoding);
-          blob = renderLinearDngBlob(state.conversionSourceImageData || state.croppedImageData || state.originalImageData, state, Math.max(0, state.currentFileIndex));
+          // The editor's plane goes to this export's worker as a copy (it
+          // belongs to the editor); Cancel stops the worker build (#293).
+          allowCancel();
+          const source = state.conversionSourceImageData || state.croppedImageData || state.originalImageData;
+          const result = await renderLinearDngBlob(source, state, Math.max(0, state.currentFileIndex), { bridge: workerBridge, signal: cancel.signal });
+          batchPipelineDiagnostics.singleExport = { ...(batchPipelineDiagnostics.singleExport || {}), linearDngWorker: result.worker };
+          blob = result.blob;
         } else {
           const onModelLoad = (percent) => overlay.updateProgress(state.currentStep >= 3 ? 5 : 50, percent !== null
             ? `${getLocalizedText('exportAiModelLoading', 'Loading the AI repair model…')}${percent > 0 ? ` ${percent}%` : ''}`
@@ -22545,8 +22552,26 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         return options;
       };
       if (exportInfo.format === 'dng') {
-        const { source, settings: usedSettings } = await processFileWithSettings(file, settings, handOver({ stage: 'source', convert: workers.convert, geometryBands: workers.geometryBands, silent: true, memoryClaim: coveredMemoryClaim(), ...stages }));
-        return renderLinearDngBlobInSlices(source, usedSettings, position);
+        // The source's planes belong to this frame (#250): the lane's export
+        // worker takes the negative's plane without a copy (#293), and what
+        // is left is released once the file is encoded.
+        const ownedPlanes = [];
+        try {
+          const { source, settings: usedSettings } = await processFileWithSettings(file, settings, handOver({
+            stage: 'source', convert: workers.convert, geometryBands: workers.geometryBands, silent: true,
+            memoryClaim: coveredMemoryClaim(), ownedPlanes, ...stages
+          }));
+          return await renderLinearDngBlobForBatch(source, usedSettings, position, { bridge: workers.bridge, transferPlane: transferPlanes });
+        } catch (err) {
+          if (transferPlanes && isExportInputLostError(err)) {
+            console.warn(`A plane of ${file.name} was lost with its worker; rendering the frame again:`, err?.message || err);
+            releaseOwnedPlanes(...ownedPlanes.splice(0));
+            return await renderBatchExportFile(job, position, context, { transferPlanes: false });
+          }
+          throw err;
+        } finally {
+          releaseOwnedPlanes(...ownedPlanes);
+        }
       }
       const sprocket = options?.sprocket ?? state.exportSprocketHolesEnabled;
       const metadata = exportMetadataFor(settings, position);
@@ -23073,6 +23098,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
         overlay.updateProgress(98, lang.loadingBatchZip);
         await zipWriter.close();
+        // What the archive's CRCs ran on (#293): the ZIP CRC worker, or this
+        // thread (for the smoke run and support).
+        batchPipelineDiagnostics.lastZip = { ...zipWriter.stats };
         zipWriter = null;
         for (const { item } of jobs) if (item.status === 'done') void learnFromExport(item);
         overlay.updateProgress(100, lang.loadingComplete);
@@ -23098,9 +23126,6 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       } finally {
         batchOverlayProgress = null;
         overlay.hide();
-        // What the archive's CRCs ran on (#293): the ZIP CRC worker, or this
-        // thread (for the smoke run and support).
-        batchPipelineDiagnostics.lastZip = { ...zipWriter.stats };
         marker.finish();
       }
     }
@@ -28796,35 +28821,53 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // carries one); the film base and film type come from `settings`.
     function linearDngInputs(source, settings) {
       if (!source) throw new Error('No image available for export.');
-      const plane = source.__image16 && source.__image16.data instanceof Uint16Array ? source.__image16 : toImage16(source);
       const positive = sanitizePresetType(settings.filmType || 'color') === 'positive';
       const filmBase = requiresFilmBase(settings) && settings.filmBase ? settings.filmBase : null;
-      return { plane, filmBase, positive };
+      return { positive, filmBase };
     }
 
-    // Single export: synchronous behind the overlay (about 0.3 s at 60 MP),
-    // since it reads live editor state that must not change mid-build.
-    function renderLinearDngBlob(source, settings, position) {
-      const { plane, filmBase, positive } = linearDngInputs(source, settings);
-      const linear = buildLinearPositive(plane, filmBase, { positive });
-      return encodeLinearDngBlob(linear, { metadata: exportMetadataFor(settings, position) });
-    }
-
-    // Batch: the desktop batch keeps the editor live, so the build runs in
-    // slices of about 16 ms with a task in between. It reads only the job's
-    // own decoded source and settings. `new Blob` still copies the strip in
-    // one call; its duration is traced (`blobMs`, ?debug=1 or ?perf=1) because moving
-    // the batch build into the lane's export worker is the next step if it
-    // exceeds 50 ms in the macOS app (#257).
-    async function renderLinearDngBlobInSlices(source, settings, position) {
-      const { plane, filmBase, positive } = linearDngInputs(source, settings);
-      const trace = createPerfTrace('linearDngBatch', { pixels: plane.width * plane.height });
-      const linear = await buildLinearPositiveAsync(plane, filmBase, { positive });
-      trace.mark('build');
+    // The build in the export worker (#293): the 16-bit plane (or the 8-bit
+    // frame, upcast there as toImage16 does here) is handed over when this
+    // export owns it (`transferPlane`), else copied in slices; the worker
+    // runs buildLinearPositive, the DNG parts and `new Blob`, and only the
+    // Blob comes back. Without a worker the build runs here as before: the
+    // single export synchronously behind the overlay (about 0.3 s at 60 MP,
+    // and it reads live editor state that must not change mid-build), the
+    // batch in slices of about 16 ms with a task in between (the desktop
+    // batch keeps the editor live). Resolves { blob, worker, buildMs, blobMs }.
+    async function renderLinearDngBlob(source, settings, position, { bridge = null, signal = null, transferPlane = false, sliced = false } = {}) {
+      const { positive, filmBase } = linearDngInputs(source, settings);
+      const metadata = exportMetadataFor(settings, position);
+      const exportWorkers = bridge || defaultExportWorkers;
+      if (typeof exportWorkers.workerEncodeLinearDng === 'function' && exportWorkers.isWorkerAvailable()) {
+        const result = await exportWorkers.workerEncodeLinearDng(source, { filmBase, positive, metadata, transferPlane, signal });
+        if (result) return { blob: result.blob, worker: true, buildMs: result.buildMs, blobMs: result.blobMs };
+      }
+      const plane = source.__image16 && source.__image16.data instanceof Uint16Array ? source.__image16 : toImage16(source);
+      const buildStart = performance.now();
+      const linear = sliced
+        ? await buildLinearPositiveAsync(plane, filmBase, { positive }, { signal })
+        : buildLinearPositive(plane, filmBase, { positive });
       const blobStart = performance.now();
-      const blob = encodeLinearDngBlob(linear, { metadata: exportMetadataFor(settings, position) });
-      trace.end({ bytes: blob.size, blobMs: Math.round((performance.now() - blobStart) * 10) / 10 });
-      return blob;
+      const blob = encodeLinearDngBlob(linear, { metadata });
+      return {
+        blob, worker: false,
+        buildMs: Math.round((blobStart - buildStart) * 10) / 10,
+        blobMs: Math.round((performance.now() - blobStart) * 10) / 10
+      };
+    }
+
+    // Batch: the lane's export worker builds the file from the job's own
+    // decoded source (handed over, #250) and settings; `new Blob` copies the
+    // strip there. The `linearDngBatch` trace keeps its `build` stage and
+    // `blobMs` (?debug=1 or ?perf=1; the #230 harness reads both), now the
+    // worker's times.
+    async function renderLinearDngBlobForBatch(source, settings, position, { bridge = null, transferPlane = false } = {}) {
+      const trace = createPerfTrace('linearDngBatch', { pixels: source.width * source.height });
+      const result = await renderLinearDngBlob(source, settings, position, { bridge, transferPlane, sliced: true });
+      trace.mark('build', { worker: result.worker, workerBuildMs: result.buildMs });
+      trace.end({ bytes: result.blob.size, blobMs: result.blobMs, worker: result.worker });
+      return result.blob;
     }
 
     // ===========================================

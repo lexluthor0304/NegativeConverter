@@ -165,15 +165,25 @@ Now one driver (`runBatchExport` in `main.js`) runs the per-file pipeline
   table per channel of the linear value for each 16-bit code (exactly the
   value the old per-pixel Float32 buffer held), the gain percentile from the
   same strided samples, and a Uint16 output table. On a little-endian host
-  the strip is a view of the output, not a copy. A single export builds it
-  synchronously behind the overlay. A batch builds it with
-  `buildLinearPositiveAsync`: one task per channel percentile, then the
+  the strip is a view of the output, not a copy. The build runs in the
+  export worker (#293, `encodeLinearDng`): the geometry-applied negative's
+  16-bit plane (or its 8-bit frame, upcast in the worker exactly as
+  `toImage16` did on the page) goes to the worker, `buildLinearPositive`,
+  the DNG parts and `new Blob` run there, and only the Blob comes back with
+  the worker's build and Blob times. A batch frame hands its own plane over
+  without a copy (#250) and releases what is left when the file is encoded;
+  a lost plane renders the frame again with copies. The single export sends
+  the editor's plane as a sliced copy (32 MiB per task), and Cancel stops
+  the worker. The bytes are those of the main-thread build and of the
+  frozen 1703835 kernel (`linearDng.reference.mjs`;
+  `exportWorkerLinearDng.test.mjs`, `linearDng.test.mjs`, the ownership
+  smoke's real worker). Without a worker the page builds as before: the
+  single export synchronously behind the overlay, the batch with
+  `buildLinearPositiveAsync` (one task per channel percentile, then the
   output pass in slices of about 16 ms with a MessageChannel task in
-  between, because the desktop batch keeps the editor live. The final
-  `new Blob` still copies the strip in one call; its duration is in the
-  `linearDngBatch` perf trace (`blobMs`, `?debug=1`). If it exceeds 50 ms in
-  the macOS app, the batch build should move into the lane's export worker,
-  which can take the batch-owned source plane by transfer.
+  between, because the desktop batch keeps the editor live). The
+  `linearDngBatch` perf trace keeps its `build` stage and `blobMs`
+  (`?debug=1`, the #230 harness's S9 reads both), now the worker's times.
 - Desktop writes (`desktopExportWriter.js`) send 8 MiB chunks
   (`EXPORT_CHUNK_BYTES`, equal to `CHUNK_LIMIT` in `export_stream.rs`; a
   test reads the Rust constant). Exactly one `append_export_chunk` is in
