@@ -81,3 +81,6 @@ coverage/
 /Engineering_*
 .vercel
 .env*
+
+# scripts/build-opencv-js.sh default build tree (source checkout + CMake build of OpenCV.js)
+.opencv-js-build/

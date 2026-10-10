@@ -183,7 +183,8 @@ assert.equal(timedWorker.terminated, true);
   const answered = client(source, {}, 'read-film-edge');
   spawned[0].onmessage({ data: { type: 'opencv-module-request' } });
   await new Promise(resolve => setTimeout(resolve, 0));
-  assert.deepEqual(posted.at(-1), { type: 'opencv-module', opencvModule: null }, 'the module request is answered');
+  // No page source registered here: null Module, no variant (the worker probes its own engine, #292).
+  assert.deepEqual(posted.at(-1), { type: 'opencv-module', opencvModule: null, variant: null }, 'the module request is answered');
   spawned[0].onmessage({ data: { id: posted[0].id, result: { found: false } } });
   assert.deepEqual(await answered, { found: false });
   await new Promise(resolve => setTimeout(resolve, 20));

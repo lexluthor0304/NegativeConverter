@@ -75,10 +75,21 @@ class FakeWorker {
   assert.equal(typeof report.planeGuard.enabled, 'boolean');
   const only = await collectIsolationReport({ probes, names: ['a'], libraw: false });
   assert.deepEqual(Object.keys(only.workers), ['a']);
-  const line = formatIsolationLine({ page: { crossOriginIsolated: true, sharedArrayBuffer: true, secureContext: true },
-    workers: { a: { crossOriginIsolated: true, sharedArrayBuffer: true }, b: { crossOriginIsolated: true, sharedArrayBuffer: false },
-      libraw: { crossOriginIsolated: true, inferred: true }, heif: { error: 'no answer' } } });
+  assert.equal(only.opencv, null, 'no OpenCV describer: null');
+  // The OpenCV build the session runs (#292) comes from the page's describer.
+  const described = await collectIsolationReport({ probes, names: ['a'], libraw: false,
+    describeOpenCv: () => ({ variant: 'simd', simdSupported: true, forced: null, source: 'probe' }) });
+  assert.deepEqual(described.opencv, { variant: 'simd', simdSupported: true, forced: null, source: 'probe' });
+  const failing = await collectIsolationReport({ probes, names: ['a'], libraw: false, describeOpenCv: () => { throw new Error('not loaded'); } });
+  assert.deepEqual(failing.opencv, { error: 'not loaded' });
+  const workers = { a: { crossOriginIsolated: true, sharedArrayBuffer: true }, b: { crossOriginIsolated: true, sharedArrayBuffer: false },
+    libraw: { crossOriginIsolated: true, inferred: true }, heif: { error: 'no answer' } };
+  const line = formatIsolationLine({ page: { crossOriginIsolated: true, sharedArrayBuffer: true, secureContext: true }, workers });
   assert.equal(line, 'isolation page=1 sab=1 secure=1 workers: a=1/1 b=1/0 libraw=1/0~ heif=error(no answer)');
+  assert.equal(formatIsolationLine({ page: { crossOriginIsolated: true, sharedArrayBuffer: false, secureContext: true }, workers: { a: workers.a },
+    opencv: { variant: 'scalar', forced: 'scalar' } }), 'isolation page=1 sab=0 secure=1 opencv=scalar! workers: a=1/1');
+  assert.equal(formatIsolationLine({ page: { crossOriginIsolated: true, sharedArrayBuffer: true, secureContext: true }, workers: { a: workers.a },
+    opencv: { variant: 'simd', forced: null } }), 'isolation page=1 sab=1 secure=1 opencv=simd workers: a=1/1');
 }
 
 // ---- every worker entry answers the probe, and the report knows every worker

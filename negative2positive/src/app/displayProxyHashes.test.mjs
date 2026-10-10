@@ -10,7 +10,7 @@ import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   displayProxyBuildHashes, DISPLAY_PROXY_ENTRY_FILES, DISPLAY_PROXY_CODE_FILES, DISPLAY_PROXY_DECODER_FILES,
-  DISPLAY_PROXY_SCAN_DECODER_FILES, DISPLAY_PROXY_CODEC_FILES, DISPLAY_PROXY_LENS_PACKAGE, DISPLAY_PROXY_LENS_FILES
+  DISPLAY_PROXY_SCAN_DECODER_FILES, DISPLAY_PROXY_CODEC_FILES, DISPLAY_PROXY_UNRELATED_CODEC_FILE, DISPLAY_PROXY_LENS_PACKAGE, DISPLAY_PROXY_LENS_FILES
 } from '../../../scripts/display-proxy-hashes.mjs';
 
 const appRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -125,7 +125,15 @@ for (const file of closure.files.filter(file => /\.m?js$/.test(file))) {
   for (const match of codeOf(file).matchAll(/\bcodecs\/([\w.-]+)/g)) codecNames.add(`codecs/${match[1]}`);
 }
 assert.ok(codecNames.has('codecs/heif-worker.js'), 'heifLoader.js starts the served HEIF worker');
-for (const file of readdirSync(join(appRoot, 'public', 'codecs')).filter(name => /\.(m?js|wasm)$/.test(name))) codecNames.add(`codecs/${file}`);
+// The OpenCV SIMD build lives there too (#292) but shapes no proxy pixel;
+// nothing in the proxy closure names it.
+const unrelated = [];
+for (const file of readdirSync(join(appRoot, 'public', 'codecs')).filter(name => /\.(m?js|wasm)$/.test(name))) {
+  if (DISPLAY_PROXY_UNRELATED_CODEC_FILE.test(`codecs/${file}`)) unrelated.push(`codecs/${file}`);
+  else codecNames.add(`codecs/${file}`);
+}
+assert.deepEqual(unrelated.sort(), ['codecs/opencv-simd-glue.js', 'codecs/opencv-simd.wasm'], 'only the OpenCV build is left out of the proxy hashes');
+for (const file of unrelated) assert.ok(!codecNames.has(file), `${file} is not loaded by the proxy code`);
 assert.deepEqual([...codecNames].sort(), [...DISPLAY_PROXY_CODEC_FILES].sort(), 'every served codec file is hashed');
 
 // ---- The hashes ----

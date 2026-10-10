@@ -29,6 +29,7 @@ import { runStudioAutoCropSmoke } from './studio-auto-crop-smoke.mjs';
 import { runStudioColorAnalysisSmoke } from './studio-color-analysis-smoke.mjs';
 import { runWorkspaceUiSmoke } from './workspace-ui-smoke.mjs';
 import { runStudioRawAutoFrameSmoke } from './studio-raw-autoframe-smoke.mjs';
+import { runOpenCvAutoFrameBenchSmoke } from './opencv-autoframe-bench-smoke.mjs';
 import { runFilmEdgeSmoke } from './film-edge-smoke.mjs';
 import { runRollAnalysisSmoke } from './roll-analysis-smoke.mjs';
 import { runLightTableSmoke } from './light-table-smoke.mjs';
@@ -301,9 +302,20 @@ receiveCdp = (msg) => {
 // software rasteriser, where a single evaluate (the 62-case self-test, a
 // bordered drag) takes several times as long as on a Mac and crossed 180 s.
 const COMMAND_TIMEOUT_MS = process.env.CI ? 600_000 : 180_000;
+// NC_OPENCV_SIMD=0 runs the whole smoke on the scalar OpenCV build (#292):
+// every navigation of this run carries ?opencvSimd=0, the switch the app
+// reads once per page (app/opencvRuntime.js chooseOpenCvVariant).
+const FORCED_OPENCV_QUERY = process.env.NC_OPENCV_SIMD === '0' ? 'opencvSimd=0' : process.env.NC_OPENCV_SIMD === '1' ? 'opencvSimd=1' : null;
+function withForcedOpenCvQuery(url) {
+  if (!FORCED_OPENCV_QUERY || typeof url !== 'string' || !/^https?:\/\//.test(url)) return url;
+  const [head, hash = ''] = url.split('#');
+  return `${head}${head.includes('?') ? '&' : '?'}${FORCED_OPENCV_QUERY}${hash ? `#${hash}` : ''}`;
+}
+if (FORCED_OPENCV_QUERY) console.log(`OpenCV build forced for this run: ?${FORCED_OPENCV_QUERY}`);
 const send = (method, params = {}) => new Promise((resolve) => {
   const id = ++msgId;
   lastCommand = method;
+  if (method === 'Page.navigate' && FORCED_OPENCV_QUERY) params = { ...params, url: withForcedOpenCvQuery(params.url) };
   const timeout = setTimeout(() => fail(`Chrome command timed out: ${method}`), COMMAND_TIMEOUT_MS);
   pending.set(id, (m) => { clearTimeout(timeout); resolve(m); });
   writeCdp({ id, method, params, sessionId: pageSessionId });
@@ -422,6 +434,11 @@ await send('Page.enable');
 // Keep the compile-once OpenCV check observable even after the full run's
 // imports and worker loads have filled the default Resource Timing buffer.
 await send('Page.addScriptToEvaluateOnNewDocument', { source: 'performance.setResourceTimingBufferSize(100000);' });
+// A forced OpenCV build also reaches documents the app navigates to itself
+// (the kill switch the page reads after the query).
+if (FORCED_OPENCV_QUERY) {
+  await send('Page.addScriptToEvaluateOnNewDocument', { source: `try { localStorage.setItem('nc_opencv_simd', ${JSON.stringify(FORCED_OPENCV_QUERY.slice(-1))}); } catch {}` });
+}
 await send('Runtime.enable');
 await send('Inspector.enable');
 await send('Audits.enable');
@@ -459,6 +476,14 @@ if (process.argv.includes('--performance-only')) {
 // #252: OpenCV's shared module, the roll-frame worker and the parallel detector.
 if (process.argv.includes('--roll-frame-only')) {
   await runRollFrameSmoke({ evaluate, fail });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS'); process.exit(0);
+}
+
+// Opt-in (#292): the OpenCV build's speed in the auto-frame worker on real
+// RAW files, see scripts/opencv-autoframe-bench-smoke.mjs.
+if (process.argv.includes('--opencv-bench-only')) {
+  await runOpenCvAutoFrameBenchSmoke({ send, evaluate, waitFor, fail, port: PORT });
   if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
   console.log('SMOKE PASS'); process.exit(0);
 }

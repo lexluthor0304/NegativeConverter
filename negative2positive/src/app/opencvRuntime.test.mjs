@@ -3,8 +3,8 @@
 // an error (never a hang).
 import assert from 'node:assert/strict';
 import {
-  answerOpenCvWorker, compileWasmFromUrl, createOpenCvModuleCache, createOpenCvModuleRequester, createOpenCvRealmLoader,
-  OPENCV_MODULE_REPLY, OPENCV_MODULE_REQUEST, provideOpenCvModuleSource, serveOpenCvModule
+  answerOpenCvWorker, chooseOpenCvVariant, compileWasmFromUrl, createOpenCvModuleCache, createOpenCvModuleRequester, createOpenCvRealmLoader,
+  normalizeOpenCvVariant, OPENCV_MODULE_REPLY, OPENCV_MODULE_REQUEST, provideOpenCvModuleSource, serveOpenCvModule, WASM_SIMD_PROBE, wasmSimdSupported
 } from './opencvRuntime.js';
 
 // The smallest valid module, and one that imports a function.
@@ -156,43 +156,144 @@ for (const offered of [null, 'broken']) {
   assert.equal(serveOpenCvModule(worker, { id: 3, result: {} }, async () => module), false);
   assert.equal(serveOpenCvModule(worker, { type: OPENCV_MODULE_REQUEST }, async () => module), true);
   await flush();
-  assert.deepEqual(posted, [{ type: OPENCV_MODULE_REPLY, opencvModule: module }]);
+  assert.deepEqual(posted, [{ type: OPENCV_MODULE_REPLY, opencvModule: module, variant: null }]);
   const refusing = { calls: 0, postMessage(message) { this.calls++; if (message.opencvModule) throw new DOMException('no', 'DataCloneError'); posted.push(message); } };
-  serveOpenCvModule(refusing, { type: OPENCV_MODULE_REQUEST }, async () => module);
+  serveOpenCvModule(refusing, { type: OPENCV_MODULE_REQUEST }, async () => module, 'simd');
   await flush();
   assert.equal(refusing.calls, 2);
-  assert.deepEqual(posted.at(-1), { type: OPENCV_MODULE_REPLY, opencvModule: null });
-  serveOpenCvModule(worker, { type: OPENCV_MODULE_REQUEST }, async () => { throw new Error('offline'); });
+  assert.deepEqual(posted.at(-1), { type: OPENCV_MODULE_REPLY, opencvModule: null, variant: 'simd' }, 'the variant survives a refused clone');
+  serveOpenCvModule(worker, { type: OPENCV_MODULE_REQUEST }, async () => { throw new Error('offline'); }, 'scalar');
   await flush();
-  assert.deepEqual(posted.at(-1), { type: OPENCV_MODULE_REPLY, opencvModule: null });
+  assert.deepEqual(posted.at(-1), { type: OPENCV_MODULE_REPLY, opencvModule: null, variant: 'scalar' }, 'the variant survives a failed compile');
+  serveOpenCvModule(worker, { type: OPENCV_MODULE_REQUEST }, async () => module, 'threads');
+  await flush();
+  assert.equal(posted.at(-1).variant, null, 'an unknown variant is not forwarded');
   // The registry the clients forward to: none registered answers null.
   provideOpenCvModuleSource(null);
   assert.equal(answerOpenCvWorker(worker, { type: OPENCV_MODULE_REQUEST }), true);
   await flush();
-  assert.deepEqual(posted.at(-1), { type: OPENCV_MODULE_REPLY, opencvModule: null });
-  provideOpenCvModuleSource(async () => module);
+  assert.deepEqual(posted.at(-1), { type: OPENCV_MODULE_REPLY, opencvModule: null, variant: null });
+  provideOpenCvModuleSource(async () => module, 'simd');
   answerOpenCvWorker(worker, { type: OPENCV_MODULE_REQUEST });
   await flush();
   assert.equal(posted.at(-1).opencvModule, module);
+  assert.equal(posted.at(-1).variant, 'simd');
   assert.equal(answerOpenCvWorker(worker, { id: 1 }), false);
   provideOpenCvModuleSource(null);
 }
 
-// The worker asks once; the reply settles it; a silent page times out to null.
+// The worker asks once; the reply settles it with the Module and the
+// variant; a silent page times out to null members.
 {
   const sent = [];
   const requester = createOpenCvModuleRequester({ post: message => sent.push(message) });
   const first = requester.requestModule();
+  const offer = requester.requestOffer();
   assert.equal(requester.requestModule(), first);
-  assert.deepEqual(sent, [{ type: OPENCV_MODULE_REQUEST }]);
+  assert.deepEqual(sent, [{ type: OPENCV_MODULE_REQUEST }], 'one request for both forms');
   assert.equal(requester.accept({ id: 4 }), false);
   const module = await WebAssembly.compile(EMPTY);
-  assert.equal(requester.accept({ type: OPENCV_MODULE_REPLY, opencvModule: module }), true);
+  assert.equal(requester.accept({ type: OPENCV_MODULE_REPLY, opencvModule: module, variant: 'simd' }), true);
   assert.equal(await first, module);
+  assert.deepEqual(await offer, { module, variant: 'simd' });
   let fire;
   const silent = createOpenCvModuleRequester({ post() {}, setTimer: fn => { fire = fn; return 1; }, clearTimer() {} });
-  const waiting = silent.requestModule();
+  const waiting = silent.requestOffer();
   fire();
-  assert.equal(await waiting, null);
+  assert.deepEqual(await waiting, { module: null, variant: null });
+  const legacy = createOpenCvModuleRequester({ post() {} });
+  const old = legacy.requestOffer();
+  legacy.accept({ type: OPENCV_MODULE_REPLY, opencvModule: module });
+  assert.deepEqual(await old, { module, variant: null }, 'a reply without a variant');
+}
+
+// ---- Variant choice (#292) ----
+// The probe: this Node validates v128; an engine that refuses it, or has no
+// validate, reports no SIMD.
+assert.equal(wasmSimdSupported(), true);
+assert.equal(WebAssembly.validate(new Uint8Array(WASM_SIMD_PROBE)), true);
+assert.equal(wasmSimdSupported({ validate: () => false }), false);
+assert.equal(wasmSimdSupported({ validate: () => { throw new TypeError('no'); } }), false);
+assert.equal(wasmSimdSupported({}), false);
+assert.equal(wasmSimdSupported(null), false);
+{
+  const storage = (value) => ({ getItem: key => (key === 'nc_opencv_simd' ? value : null) });
+  assert.deepEqual(chooseOpenCvVariant({ search: '' }), { variant: 'simd', simdSupported: true, forced: null, source: 'probe' });
+  assert.deepEqual(chooseOpenCvVariant({ search: '?lang=en&opencvSimd=0' }), { variant: 'scalar', simdSupported: true, forced: 'scalar', source: 'query' });
+  assert.deepEqual(chooseOpenCvVariant({ search: '?opencvSimd=1' }), { variant: 'simd', simdSupported: true, forced: 'simd', source: 'query' });
+  assert.equal(chooseOpenCvVariant({ search: '?opencvSimd=yes' }).source, 'probe', 'other values are ignored');
+  assert.deepEqual(chooseOpenCvVariant({ search: '', storage: storage('0') }), { variant: 'scalar', simdSupported: true, forced: 'scalar', source: 'storage' });
+  assert.equal(chooseOpenCvVariant({ search: '?opencvSimd=1', storage: storage('0') }).variant, 'simd', 'the query wins over the kill switch');
+  assert.equal(chooseOpenCvVariant({ search: '', storage: { getItem() { throw new Error('denied'); } } }).variant, 'simd', 'a throwing storage is ignored');
+  // Without SIMD the scalar build runs whatever the switches say.
+  const noSimd = { validate: () => false };
+  assert.deepEqual(chooseOpenCvVariant({ search: '?opencvSimd=1', wasm: noSimd }), { variant: 'scalar', simdSupported: false, forced: 'simd', source: 'query' });
+  assert.equal(chooseOpenCvVariant({ search: '', wasm: noSimd }).variant, 'scalar');
+  assert.equal(normalizeOpenCvVariant('simd'), 'simd');
+  assert.equal(normalizeOpenCvVariant('threads'), null);
+  assert.equal(normalizeOpenCvVariant(undefined), null);
+}
+
+// The realm imports the glue of the variant the page offers, with its
+// Module; the page's variant wins over the realm's own probe; without an
+// offered variant the realm's probe decides; the realm compiles the offered
+// variant itself when no Module comes.
+{
+  const imported = [];
+  const makeLoader = (offer, { chooseVariant = () => 'simd', compileOwn = null } = {}) => {
+    const global = {};
+    const compiled = [];
+    const loader = createOpenCvRealmLoader({
+      glueUrls: { simd: '/codecs/opencv-simd-glue.js', scalar: '/assets/opencv-glue.js' },
+      getOffer: async () => offer,
+      compileOwn: compileOwn || (async (variant) => { compiled.push(variant); return WebAssembly.compile(EMPTY); }),
+      chooseVariant,
+      importGlue: async (url) => { imported.push(url); await fakeGlue(global)(); },
+      global
+    });
+    return { loader, compiled };
+  };
+  const shared = await WebAssembly.compile(EMPTY);
+  {
+    const { loader, compiled } = makeLoader({ module: shared, variant: 'scalar' });
+    const cv = await loader.load();
+    assert.equal(cv.module, shared);
+    assert.equal(imported.at(-1), '/assets/opencv-glue.js', 'the page\'s variant, not the realm\'s probe');
+    assert.deepEqual(compiled, []);
+    assert.equal(loader.stats.variant, 'scalar');
+    assert.equal(loader.stats.offeredVariant, 'scalar');
+    assert.equal(loader.stats.sharedModule, true);
+  }
+  {
+    const { loader, compiled } = makeLoader({ module: null, variant: 'simd' });
+    await loader.load();
+    assert.equal(imported.at(-1), '/codecs/opencv-simd-glue.js');
+    assert.deepEqual(compiled, ['simd'], 'no Module: the offered variant is compiled here');
+    assert.equal(loader.stats.sharedModule, false);
+    assert.equal(loader.stats.ownCompiles, 1);
+  }
+  {
+    const { loader, compiled } = makeLoader({ module: null, variant: null }, { chooseVariant: () => 'scalar' });
+    await loader.load();
+    assert.equal(imported.at(-1), '/assets/opencv-glue.js', 'no offered variant: the realm\'s probe');
+    assert.deepEqual(compiled, ['scalar']);
+    assert.equal(loader.stats.offeredVariant, null);
+  }
+  {
+    const { loader } = makeLoader({ module: shared, variant: 'threads' }, { chooseVariant: () => 'simd' });
+    await loader.load();
+    assert.equal(loader.stats.variant, 'simd', 'an unknown offered variant falls back to the probe');
+  }
+  {
+    // A single glue (no variants) keeps its one URL whatever is offered.
+    const global = {};
+    const loader = createOpenCvRealmLoader({
+      glueUrl: '/glue.js', getOffer: async () => ({ module: shared, variant: 'simd' }), compileOwn: async () => WebAssembly.compile(EMPTY),
+      importGlue: async (url) => { imported.push(url); await fakeGlue(global)(); }, global
+    });
+    await loader.load();
+    assert.equal(imported.at(-1), '/glue.js');
+    assert.equal(loader.stats.variant, 'simd');
+  }
 }
 console.log('ok opencvRuntime');

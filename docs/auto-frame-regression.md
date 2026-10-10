@@ -69,6 +69,63 @@ Node（M1 Pro、Node 26.5.1、負荷平均 4–19）で、2026-09-23 の M11 ロ
 - OpenCV はビルド時にパッケージを分割する（`scripts/opencv-assets.mjs`）: 埋め込みの 12 MB wasm を `opencv-<hash>.wasm` に、約 128 KB のグルーを `opencv-glue-<hash>.js` に。ページが 1 回だけコンパイルした `WebAssembly.Module` を各 OpenCV ワーカー（自動取景、ヘルパー、ロールフレーム、除塵、多重露光）が要求してインスタンス化する。モジュールを受け取れないワーカーは自分でコンパイルする。バイト列はパッケージと同一（`opencvAssets.test.mjs` が SHA-256 と計算結果を照合）なので、Hough・輪郭・OCR・除塵マスク・TELEA の結果は変わらない。
 - ロール解析の各フレームは専用のロールフレームワーカー（`workers/rollFrameWorker.js`）で検出する。両プレーンを持つので、全解像度の再検出はそのワーカーの画素でその場で行い、`needsFullResolution` の再試行は起きない。ロールのレーンの検出はヘルパーを使わない直列のまま。
 
+## OpenCV の WASM SIMD ビルド（#292）
+
+検出は、ページが選んだ OpenCV のビルドで走る（`docs/cross-origin-isolation.md`:
+エンジンが v128 を検証できれば SIMD ビルド、そうでなければ・`?opencvSimd=0` なら
+パッケージのスカラービルド）。両ビルドは同じ OpenCV 5.0.0 で、違うのは
+`-msimd128`（と Emscripten 4.0.20 → 6.0.4）だけ。2026-10-09 に Node（M1 Pro、
+Node 26.5.1、負荷平均 35–180、他エージェントの作業中）で、各フレームを 1 回だけ
+アプリの LibRaw 設定でフルデコードし、同じ平面に両ビルドを同じプロセスで交互に
+当てて比較した（ハーネス `notes/292-harness/`、行データ
+`notes/results/measure-292.md`）。Node には 2D canvas がないので、プレビューは
+両ビルド共通の JS 経路（`deterministicPreview`）。
+
+- **同一性（deep-equal）。** M11 ロール 20 フレーム（L1000617–636）: 検出結果
+  （角度・裁切・信頼度・方式・要確認・診断、角度のあるコマの回転済み 8/16 bit
+  平面のハッシュ）、1600 px プレビューの線分四辺形と窓（untargeted/targeted）、
+  裁切時の色解析の点列（1 フレーム 4–5 ケース: 全体・中央 80 %・検出窓・
+  −1.3° 鏡像と 0.7° の幾何サンプル）、期限切れ救済の地図と `expiredAnalysis`
+  （3 設定）、フィルム縁の文字読み、24 MP に縮小した除塵マスク、すべて一致
+  （7 項目 × 20 フレーム = 140/140; 裁切の点列は 88/88 ケース中 45 ヒット、
+  期限切れの地図 60/60・解析 60/60、角度のある 9 コマの回転済み平面も一致）。M11 プロキシ σ 0/4/8（L1000617・L1000618 の 1600 px
+  面積プレビュー + 種付き粒状、measure-B と同じ四辺形数 29/123/77 と
+  111/693/926）: 検出・四辺形・窓 6/6 一致。回帰セット（`_DSC3111`・
+  `_DSC5290`・`L1009967`、HE NEF 4 本は埋め込み JPEG）: 7 ファイルとも
+  7 項目すべて一致（49/49）。
+  合成画像（`imageWindowSearch.parity` の 4 画像の四辺形と窓、傾いたストリップ
+  4 種の検出、`openCvAnalysisTasks` の裁切 5 ケースと期限切れ 3 設定、フィルム
+  縁のテンプレートと 3 本のストリップ fixture）も一致。記録済みテスト 25 本
+  （`imageWindowSearch.parity`・`openCvAnalysisTasks`・`imageWindowDetector`・
+  `autoFrameParallel`・`rollFrameTask`・`autoFrameImport` など）は
+  `NC_OPENCV_VARIANT=simd node -r ./scripts/opencv-variant-preload.cjs` で
+  SIMD ビルド上でも通る。
+- **float が変わる段。** `imageAlignment`（ラボ照合・多重露光の ORB →
+  `findHomography` → `warpPerspective`）だけが変わる。ORB・照合・ホモグラフィーは
+  合成ペアと `shot-a/b/c` で一致（inlier 675/675、375/375、381/381）だが、
+  `shot-a` 対 `shot-dark` では inlier 158 → 157、H の平行移動が 0.015 px、
+  回転項が 2.7e-4 ずれる。同じ H でも `warpImageData` の出力は 8 bit で
+  614 400 標本中 52–146 個が ±1、16 bit 平面で 2–3 % の標本が最大 4–12/65535
+  （平均 ≈1）違う（双線形補間の丸め）。これは書き出し画素に届く（ラボ照合の
+  参照の変形、多重露光の合成）ので、受け入れは所有者の判断事項（#269 と同じ
+  扱い）。自動取景・裁切・期限切れ・除塵・フィルム縁には float のずれはない。
+- **速度（中央値、スカラー → SIMD）。** window 段は変わらない: 12 フレーム
+  （L1000617–628、各 3 回の中央値の中央値）で 499 → 503 ms、検出全体
+  1622 → 1563 ms（−4 %）、anglePasses 429 → 398 ms。Hough が支配的な段で、
+  OpenCV の `HoughLines` はベクトル化されていない。プレビュー 1600 px の
+  四辺形探索（`findWindowLineQuads`）も 1814 → 1836 ms（±1 %）。速くなるのは
+  輪郭窓: `detectImageWindow` が合成画像で 7.8 → 3.7 ms（−53 %）、
+  7.3 → 2.6 ms（−64 %）、傾きなしの合成ストリップの検出全体 37 → 17 ms。
+  期限切れ救済の OpenCV 側（`measureExpiredSpatialMapsFromSample`）は実フレーム
+  で 143 → 129 ms（−10 %）、合成平面で 42 → 24 ms（−42 %）。ORB 整列は
+  fixture で 88 → 71 ms（−20 %）、57 → 43 ms（−25 %）。除塵は
+  `docs/dust-removal.md`（24 MP 検出 1392 → 325 ms）。Chrome の自動取景
+  ワーカー（`npm run test:smoke -- --opencv-bench-only`、M11 L1000617–622 の
+  6 フレーム、各 3 回の中央値、Chrome 154 headless）: 同じ裁切・角度・方式で、
+  window 段は 1206 → 1184、2160 → 2195、647 → 659、2065 → 2103、
+  2082 → 2112、611 → 614 ms（中央値 1636 → 1644 ms）、取り込み要求の往復は
+  2283 → 2244 ms（中央値）。
+
 ## 通常の回帰
 
 ```sh

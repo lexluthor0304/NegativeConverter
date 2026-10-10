@@ -30,7 +30,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isSharedPlane, allocPlane16 } from './crossOriginIsolation.js';
     import { detectedImportSettings } from './filmTypeDetection.js';
     import { createAiModelLoader } from './aiModelLoading.js';
-    import { opencvGlueUrl, installPageOpenCvHook } from './opencvModule.js';
+    import { openCvPageGlueUrl, installPageOpenCvHook, describeOpenCvRuntime } from './opencvModule.js';
     import { i18n } from './i18n.js';
     import { interpolateText, summarizePathForUi } from './textUtils.js';
     import { computeSpline, buildCurveLut, getCurvePresetPoints, insertCurvePoint, moveCurvePoint, findNearPointIndex } from './curveMath.js';
@@ -271,8 +271,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // dump as if it identified the running build.
     const BUILD_ID = (typeof __BUILD_ID__ === 'string' && __BUILD_ID__) || 'dev';
     // The page's realm instantiates the session's compiled OpenCV module
-    // through the glue's hook (#252 part 5), as the OpenCV workers do.
-    const ensureOpenCvReady = createOpenCvLoader([opencvGlueUrl], { beforeScript: () => installPageOpenCvHook(window) });
+    // through the glue's hook (#252 part 5), as the OpenCV workers do; the
+    // glue is the chosen variant's (SIMD or scalar, #292).
+    const ensureOpenCvReady = createOpenCvLoader([openCvPageGlueUrl], { beforeScript: () => installPageOpenCvHook(window) });
     // Crop-area detection, the expired fog surface and lab match run their
     // OpenCV half in the warm auto-frame worker; the page loads OpenCV only
     // when that request fails (#245, openCvAnalysisTasks.js).
@@ -6177,10 +6178,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // ---- Cross-origin isolation (#264): what the page and its workers run with ----
     // `report()` spawns one worker of each kind and asks it (isolationReport.js);
     // the smoke run and ?debug=1 read it, the desktop logs a short form once.
+    // `opencv()` names the OpenCV build this session runs (SIMD or scalar,
+    // #292); the report carries it too.
     window.__ncIsolation = Object.assign(window.__ncIsolation || {}, {
       page: () => describeRealmIsolation(),
-      report: (options) => import('./isolationReport.js').then(module => module.collectIsolationReport(options)),
-      planeGuard: () => planeGuardReport()
+      report: (options) => import('./isolationReport.js').then(module => module.collectIsolationReport({ describeOpenCv: describeOpenCvRuntime, ...options })),
+      planeGuard: () => planeGuardReport(),
+      opencv: () => describeOpenCvRuntime()
     });
     logIsolationWhenIdle();
 
@@ -6193,7 +6197,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const run = async () => {
         try {
           const { collectIsolationReport, formatIsolationLine } = await import('./isolationReport.js');
-          const report = await collectIsolationReport(DEBUG_UI ? {} : { names: ['geometry', 'heif', 'blob'], libraw: false, concurrency: 1 });
+          const report = await collectIsolationReport({ describeOpenCv: describeOpenCvRuntime, ...(DEBUG_UI ? {} : { names: ['geometry', 'heif', 'blob'], libraw: false, concurrency: 1 }) });
           logWebviewDiagnostics(formatIsolationLine(report));
           if (DEBUG_UI) console.info('[isolation]', report);
         } catch (err) {

@@ -62,6 +62,10 @@ export const DISPLAY_PROXY_SCAN_DECODER_FILES = {
 // The HEIF codec the app serves (libheif-js, copied into public/codecs),
 // relative to negative2positive/public.
 export const DISPLAY_PROXY_CODEC_FILES = ['codecs/heif-worker.js', 'codecs/libheif.js', 'codecs/libheif.wasm'];
+// Served from public/codecs too, but not a decoder of any proxy's pixels: the
+// OpenCV SIMD build (#292) runs the analyses (auto-frame, dust, expired, lab
+// match), never the display proxy, so a rebuilt module keeps stored proxies.
+export const DISPLAY_PROXY_UNRELATED_CODEC_FILE = /^codecs\/opencv-/;
 
 // The lens database and runtime (#278), relative to the package: the module
 // lensfunLoader.js imports, the core it starts with its wasm and data, and

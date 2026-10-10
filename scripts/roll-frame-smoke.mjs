@@ -47,9 +47,15 @@ export async function runRollFrameSmoke({ evaluate, fail }) {
     fresh.dispose();
     const shared = await analyzeFrameInWorker({ width: 1, height: 1, data: new Uint8ClampedArray(4) }, {}, 'warm-up');
     const resources = performance.getEntriesByType('resource').map(entry => entry.name);
+    // The page's choice (#292): the SIMD build from public/codecs or the
+    // package's scalar build from the dev plugin; one wasm fetch either way.
+    const page = window.__ncIsolation.opencv();
     out.opencv = {
-      fresh: warmed.opencv, shared: shared.opencv,
-      wasmFetches: resources.filter(name => /\\/@opencv-assets\\/opencv-[0-9a-f]+\\.wasm/.test(name)).length,
+      fresh: warmed.opencv, shared: shared.opencv, page,
+      wasmFetches: resources.filter(name => /\\/@opencv-assets\\/opencv-[0-9a-f]+\\.wasm|\\/codecs\\/opencv-simd\\.wasm/.test(name)).length,
+      otherVariantFetches: resources.filter(name => page.variant === 'simd'
+        ? /\\/@opencv-assets\\/opencv-[0-9a-f]+\\.wasm|\\/@opencv-assets\\/opencv-glue-/.test(name)
+        : /\\/codecs\\/opencv-simd/.test(name)).length,
       // The app's own requests: the smoke's comparison realm loads the package via /@fs/.
       packageScript: resources.filter(name => /opencv\\.js(\\?|$)/.test(name) && !name.includes('/@fs/')).length
     };
@@ -173,6 +179,15 @@ export async function runRollFrameSmoke({ evaluate, fail }) {
   if (!opencv.shared?.sharedModule || !opencv.fresh?.sharedModule) fail('an OpenCV worker compiled the wasm itself instead of instantiating the page\'s module: ' + JSON.stringify(opencv));
   if (opencv.wasmFetches !== 1) fail('expected exactly one page OpenCV wasm fetch: ' + JSON.stringify(opencv));
   if (opencv.packageScript !== 0) fail('the app requested the 13 MB opencv.js: ' + JSON.stringify(opencv));
+  // #292: the workers run the variant the page chose, and nothing of the
+  // other variant was fetched.
+  const expectedVariant = process.env.NC_OPENCV_SIMD === '0' ? 'scalar' : process.env.NC_OPENCV_SIMD === '1' ? 'simd' : (opencv.page?.simdSupported ? 'simd' : 'scalar');
+  if (opencv.page?.variant !== expectedVariant) fail(`the page runs the ${opencv.page?.variant} OpenCV build, expected ${expectedVariant}: ` + JSON.stringify(opencv.page));
+  for (const [name, realm] of [['fresh', opencv.fresh], ['shared', opencv.shared]]) {
+    if (realm?.variant !== opencv.page.variant || realm?.offeredVariant !== opencv.page.variant) fail(`the ${name} OpenCV worker runs ${realm?.variant} (offered ${realm?.offeredVariant}), the page ${opencv.page.variant}: ` + JSON.stringify(opencv));
+  }
+  if (opencv.otherVariantFetches !== 0) fail('files of the other OpenCV variant were fetched: ' + JSON.stringify(opencv));
+  console.log(`ok: OpenCV ${opencv.page.variant} build on the page and in the workers (simdSupported=${opencv.page.simdSupported}, forced=${opencv.page.forced})`);
   if (!roll.found) fail('the roll-frame smoke frame has no window: ' + JSON.stringify(roll));
   if (!(roll.held && roll.moved && roll.filmStats && roll.detection && roll.edge && roll.sample && roll.tile && roll.reference)) {
     fail('roll-frame worker differs from the lane sequence: ' + JSON.stringify(roll));
