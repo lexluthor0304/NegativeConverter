@@ -119,7 +119,15 @@ jobs:
         run: npm ci
 
       - name: Build app
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ matrix.os == 'macos-latest' && '-' || '' }}
         run: npm run tauri:build
+
+      - name: Verify macOS artifact signatures
+        if: matrix.os == 'macos-latest'
+        run: |
+          python3 scripts/test-macos-artifacts.py
+          python3 scripts/verify-macos-artifacts.py --require-adhoc src-tauri/target/release/bundle/dmg/*.dmg
 
       - name: Upload bundle
         uses: actions/upload-artifact@v7

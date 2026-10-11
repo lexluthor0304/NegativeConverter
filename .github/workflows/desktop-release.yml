@@ -172,6 +172,8 @@ jobs:
         if: matrix.os != 'macos-latest' || env.APPLE_CERTIFICATE == ''
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          # Tauri must seal the app before it creates the DMG and updater tar.
+          APPLE_SIGNING_IDENTITY: ${{ matrix.os == 'macos-latest' && '-' || '' }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run tauri:build -- --config src-tauri/tauri.release.conf.json
@@ -203,17 +205,18 @@ jobs:
             exit 1
           fi
 
-      - name: Ad-hoc sign macOS app (fallback when no certificate)
-        if: matrix.os == 'macos-latest' && env.APPLE_CERTIFICATE == ''
+      - name: Verify signatures inside macOS artifacts
+        if: matrix.os == 'macos-latest'
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+        shell: bash
         run: |
           set -euo pipefail
-          for app in src-tauri/target/release/bundle/macos/*.app; do
-            [ -d "$app" ] || continue
-            echo "Ad-hoc signing: $(basename "$app")"
-            codesign --force --deep -s - "$app"
-          done
+          args=()
+          if [ -z "$APPLE_CERTIFICATE" ]; then args+=(--require-adhoc); fi
+          python3 scripts/verify-macos-artifacts.py "${args[@]}" \
+            src-tauri/target/release/bundle/dmg/*.dmg \
+            src-tauri/target/release/bundle/macos/*.app.tar.gz
 
       - name: Cleanup Apple keychain
         if: matrix.os == 'macos-latest' && always()
