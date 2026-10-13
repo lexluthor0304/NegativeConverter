@@ -82,6 +82,7 @@ function fixture() {
     activations: [], notePhotoActivation: noop, activationDwell: async () => { context.dwells++; }, dwells: 0,
     sharedDecodeInFlight: () => false, adoptSharedDecode: () => null,
     kickBackgroundPhotoWork: noop, supersedeActivation: noop, releaseActivationClaim: noop,
+    resumePhotoCropDraft: noop, ensureAiBrushPlane: noop,
     abortBackgroundDecodes: () => { context.backgroundAborts++; }, backgroundAborts: 0,
     studioThumbnailUpdateFrame: 0, cancelAnimationFrame: noop,
     studioThumbnailUpdateTimer: 0, clearTimeout: noop,
@@ -386,6 +387,24 @@ for (const outcome of ['success', 'load-error', 'prepare-error']) {
     assert.equal(f.state.loadedFile, f.item.file);
     assert.equal(redraws, 1, 'failed target restores the outgoing view and requests its detail layer again');
   }
+}
+
+// A failed cold target that leaves the outgoing planes in place resumes the
+// outgoing photo's crop draft, not the failed target's.
+{
+  const f = coldFixture(), c = f.context, resumed = [];
+  c.getCurrentQueueItem = () => {
+    const item = f.state.fileQueue[f.state.currentFileIndex];
+    return item?.file === f.state.loadedFile ? item : null;
+  };
+  c.persistCurrentFileSettings = noop;
+  c.rememberPhotoSession = () => false;
+  c.resumePhotoCropDraft = item => resumed.push(item);
+  const pending = c.switchToFile(1);
+  f.frames.shift()(); await tick();
+  f.loads[0].resolve({ status: 'error', message: 'decode failed' });
+  await pending;
+  assert.deepEqual(resumed, [f.item], 'failed navigation resumes the photo still on screen');
 }
 
 // #243: latest wins. Each switch begins an activation (aborting the previous
