@@ -308,10 +308,34 @@ export async function runIsolationSmoke({ send, sendTo, onCdpEvent, evaluate, wa
     })()`);
   };
   const decodeAndExport = async (file, label) => {
+    // A cold semantic pass can outlast a fixed post-import sleep on CI.
+    // Delay the real request on only one page: both exports must still use
+    // settled recipes, rather than freezing/cancelling that page's pass.
+    if (label === 'isolated') await evaluate(`(() => {
+      const Worker = window.Worker;
+      const delayed = window.__isolationSemanticDelay = { queued: 0, posted: 0 };
+      window.Worker = class extends Worker {
+        constructor(url, options) {
+          super(url, options);
+          if (!String(url).includes('semanticWorker')) return;
+          const post = this.postMessage.bind(this), terminate = this.terminate.bind(this);
+          let ended = false;
+          this.terminate = () => { ended = true; terminate(); };
+          this.postMessage = (message, transfer) => {
+            if (!message?.image) return post(message, transfer);
+            delayed.queued++;
+            setTimeout(() => { if (!ended) { delayed.posted++; post(message, transfer); } }, 4000);
+          };
+        }
+      };
+    })()`);
     await importFiles([file]);
     await waitFor(`${label}: RAW import converted`, ready, 180_000);
-    await wait(1500);
-    await waitFor(`${label}: settled`, ready, 180_000);
+    await waitFor(`${label}: colour analysis settled`, `${ready} && !window.__ncTwoStage.status().semanticPending && !window.__ncAnalysis.converting()`, 180_000);
+    if (label === 'isolated') {
+      const delayed = await evaluate('window.__isolationSemanticDelay');
+      if (!delayed.queued || delayed.posted !== delayed.queued) fail(`isolation export skipped the delayed semantic analysis: ${JSON.stringify(delayed)}`);
+    }
     const png8 = await exportPng(8, `${label}: 8-bit PNG`);
     const png16 = await exportPng(16, `${label}: 16-bit PNG`);
     return { png8, png16 };
