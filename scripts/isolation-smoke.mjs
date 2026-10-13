@@ -34,6 +34,7 @@ import { mkdtempSync, rmSync, mkdirSync, copyFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, basename } from 'node:path';
 import { writeSyntheticDng } from './perf/fixtures.mjs';
+import { delaySemanticInference, waitForSemanticFixture } from './semantic-test-delay.mjs';
 
 const ready = `document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy && !document.body.dataset.studioDetecting && !document.querySelector('.loading-overlay.visible')`;
 
@@ -308,10 +309,13 @@ export async function runIsolationSmoke({ send, sendTo, onCdpEvent, evaluate, wa
     })()`);
   };
   const decodeAndExport = async (file, label) => {
+    // A cold semantic pass can outlast a fixed post-import sleep on CI.
+    // Delay the real request on only one page: both exports must still use
+    // settled recipes, rather than freezing/cancelling that page's pass.
+    if (label === 'isolated') await delaySemanticInference(evaluate);
     await importFiles([file]);
     await waitFor(`${label}: RAW import converted`, ready, 180_000);
-    await wait(1500);
-    await waitFor(`${label}: settled`, ready, 180_000);
+    await waitForSemanticFixture({ evaluate, waitFor, fail, ready, label });
     const png8 = await exportPng(8, `${label}: 8-bit PNG`);
     const png16 = await exportPng(16, `${label}: 16-bit PNG`);
     return { png8, png16 };

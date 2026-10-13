@@ -11,6 +11,23 @@ Issues: [#220](https://github.com/lexluthor0304/NegativeConverter/issues/220),
 
 ## Ownership and invalidation
 
+Unapplied crop work also belongs to its photo ([#299](https://github.com/lexluthor0304/NegativeConverter/issues/299)).
+Navigating away keeps the box as fractions of the draft view, its rotation and
+straightening controls, analysis mode and aspect choice. Returning resumes the
+draft on the same applied geometry, at the current display size. This record
+contains no image buffers or canvases, and it does not change the applied crop
+or the exported recipe. Apply and Cancel end that draft; an explicit geometry
+change while the photo is away invalidates it. A superseded asynchronous return
+cannot reopen the draft over another photo. Drafts last for the open roll only;
+project files contain applied settings.
+
+An AI repair brush left ON prepares the current photo's full-resolution plane
+after both warm restoration and cold preparation. Its checked state must not
+leave a newly opened display preview silently rejecting pointer strokes.
+While the Repair tab's enabled brush can paint, memory pressure preserves its
+full-resolution plane. Other tabs may release that plane; returning to Repair
+prepares it again without an OFF/ON cycle.
+
 The active editor still owns its image buffers. Leaving a settled photo moves
 its decoded base, conversion/display sources, recipe, undo/redo and zoom into
 `photoSessionCache.js`. Opening a matching entry takes ownership back before
@@ -788,6 +805,7 @@ photo is a separate, later decode and is not counted.
 ```sh
 npm test
 PORT=5214 CDP_PORT=9238 npm run test:smoke -- --photo-session-only
+PORT=5214 CDP_PORT=9238 npm run test:smoke -- --photo-state-only
 PORT=5214 CDP_PORT=9238 npm run test:smoke -- --photo-heap-only
 PORT=5214 CDP_PORT=9238 npm run test:smoke -- --photo-activation-only
 PORT=5214 CDP_PORT=9238 npm run test:smoke -- --light-table-only

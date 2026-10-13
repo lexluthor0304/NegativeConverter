@@ -68,6 +68,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     import { createBrushFeedback, BRUSH_FEEDBACK_STYLES, pointerSamples, movedEnough, resampleStrokePoints, createStrokeRecorder, DENSE_STROKE_POINTS } from './brushFeedback.js';
     import { buildDustTintRect, buildDustTintInBands } from './dustTint.js';
     import { sanitizeRepairStrokes, buildRepairMask, pointerToRepairPoint, lensSourcePoint } from './repairBrush.js';
+    import { capturePhotoCropDraftState, photoCropDraftMatches, restorePhotoCropDraftState } from './photoCropDraft.js';
     import { createRepairStamps, sameRepairStrokes, captureDustPass, dustPassMatches, restoreDustPass } from './repairReuse.js';
     import { paperProfiles, paperIdsForFilmKind, normalizePaperId, normalizeToningId } from '../silvercore/engine/PaperProfiles.js';
     import { buildFlatFieldMap, scoreBlankFrame } from './flatField.js';
@@ -9998,7 +9999,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         && state.currentStep >= 3 && usesSilverCoreConversion(state) && hasSeparateConversionPreview()
         && !state.fullResolutionPromise && !processNegativeInFlight && !singleExportActive
         && !coreReprocessBusy() && !coreReprocessTimer && !state.dustRemoval.processing
-        && !hasFrameRepairs() && !state.cropping && !state.beforeAfterActive);
+        && !hasFrameRepairs() && !canPaintAiBrush() && !state.cropping && !state.beforeAfterActive);
     }
 
     function fullResolutionPlaneBytes() {
@@ -18342,6 +18343,25 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     const cropRatioSelect = document.getElementById('cropRatioSelect');
     const cropRatioFlipBtn = document.getElementById('cropRatioFlipBtn');
     let cropRatioChoice = { ...DEFAULT_CROP_RATIO_CHOICE };
+    const photoCropDrafts = new WeakMap();
+
+    function rememberPhotoCropDraft(item) {
+      if (!item || item.file !== state.loadedFile || !state.cropping) return;
+      const saved = capturePhotoCropDraftState(state.cropDraft, extractCurrentSettings(), cropRatioChoice);
+      if (saved) photoCropDrafts.set(item, saved);
+    }
+
+    async function resumePhotoCropDraft(item, generation) {
+      const saved = photoCropDrafts.get(item);
+      if (!saved || !isCurrentLoad(generation) || getCurrentQueueItem() !== item || state.currentStep < 3) return;
+      // Sync, reset or a roll operation can replace geometry while away.
+      // A box drawn on that old geometry must not be applied to the new one.
+      if (!photoCropDraftMatches(saved, extractCurrentSettings())) {
+        photoCropDrafts.delete(item);
+        return;
+      }
+      await beginCropMode({ resume: saved });
+    }
 
     function getCropRatioLock() {
       const draft = state.cropDraft;
@@ -18908,9 +18928,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       return Promise.resolve();
     }
 
-    function openCropMode({ analysisOnly = false } = {}) {
+    function openCropMode({ analysisOnly = false, resume = null } = {}) {
       const sourceImageData = state.originalImageData;
       if (!sourceImageData || state.cropping) return;
+      if (resume && !photoCropDraftMatches(resume, extractCurrentSettings())) return;
 
       exitBeforeAfter();
       state.samplingMode = null;
@@ -18937,10 +18958,17 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         return;
       }
       state.cropDraft.analysisOnly = analysisOnly;
-      if (analysisOnly) {
+      if (resume) {
+        restorePhotoCropDraftState(state.cropDraft, resume, extractCurrentSettings());
+        cropRatioChoice = { ...resume.ratioChoice };
+        analysisOnly = state.cropDraft.analysisOnly;
+      } else if (analysisOnly) {
         const roi = resolveAnalysisRegion({ ...state, cropRegion: null, autoFrameMeta: state.autoFrame.lastDiagnostics }, state.loadedBaseImageData || sourceImageData);
         if (roi) state.cropDraft.rect = scaleCropRect(analysisPixelBounds(sourceImageData.width, sourceImageData.height, roi), state.cropDraft.rotatedSize.width / sourceImageData.width, state.cropDraft.rotatedSize.height / sourceImageData.height);
       }
+      // The live draft now owns this work. Apply/Cancel can discard it; only
+      // navigation stores it again, with the latest rectangle and angle.
+      photoCropDrafts.delete(getCurrentQueueItem());
       applyCropBtn.textContent = analysisOnly ? studioWorkspace.text('confirmAnalysis') : i18n[currentLang].applyCrop;
 
       setCropActionUi(true);
@@ -23655,7 +23683,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         await settlePendingCropDetection();
         return switchToFile(index, { reopen });
       }
-      if (state.cropping) exitCropMode({ restore: false });
+      if (state.cropping) {
+        rememberPhotoCropDraft(getCurrentQueueItem());
+        exitCropMode({ restore: false });
+      }
       if (state.beforeAfterActive) exitBeforeAfter();
       releaseBeforeAfterCanvas();
       state.samplingMode = null;
@@ -23763,6 +23794,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           else updateStudioThumbnail();
           if (state.fullResolutionPending) scheduleFullResolutionRender('photo-restored');
           scheduleAiRepairPreloadForRecipe();
+          ensureAiBrushPlane();
           return;
         }
 
@@ -23883,7 +23915,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           delete document.body.dataset.studioBusy;
           updateFileListUI();
           studioWorkspace?.sync();
-          kickBackgroundPhotoWork();
+          // A failed target can leave the outgoing photo active too.
+          await resumePhotoCropDraft(getCurrentQueueItem(), generation);
+          if (isCurrentLoad(generation)) kickBackgroundPhotoWork();
         }
       }
     }
@@ -26133,6 +26167,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         // The provisional render may have queued the recovery copy early.
         if (item?.isDirty) scheduleProjectRecovery();
         scheduleAiRepairPreloadForRecipe();
+        ensureAiBrushPlane();
       } finally {
         trace.end();
         if (item?.provisional === provisionalToken) {
@@ -32206,7 +32241,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         isCropAreaDetecting: cropAreaDetecting,
         // Opening the Repair tab is the usual intent to repair: load MI-GAN
         // then, so the first stroke rarely waits for it.
-        onTabSelect: key => { if (key === 'repair') ensureAiRepairPreload(); syncBrushTools(); },
+        onTabSelect: key => {
+          if (key === 'repair') {
+            ensureAiRepairPreload();
+            ensureAiBrushPlane();
+          }
+          syncBrushTools();
+        },
         onResetAll: resetAllAdjustments,
         onRestart: restartPhotoProcessing,
         onNewSession: closePhotoSession,

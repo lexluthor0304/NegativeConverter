@@ -25,6 +25,7 @@
 //   same clicks made after waiting export (runMeasureWhileWaiting).
 
 import { expectLoadingOverlayIdle, loadingOverlayIdle } from './loading-overlay-idle.mjs';
+import { delaySemanticInference, waitForSemanticFixture } from './semantic-test-delay.mjs';
 
 // Imports the synthetic negative without auto crop, in a page expression: an
 // orange rebate around a dark, textured frame.
@@ -87,6 +88,7 @@ export async function runCropApplySmoke({ send, evaluate, waitFor, wait, fail, i
   const ready = READY;
   await waitFor('crop apply fixture converted', `${ready} && document.getElementById('studioFilename').textContent === 'crop-apply.png'`, 150_000);
   await wait(1200);
+  await waitForSemanticFixture({ evaluate, waitFor, fail, ready, label: 'crop apply fixture' });
   const realm = `({ cv: typeof window.cv, script: !!document.querySelector('script[data-opencv-loader]'), tasks: { ...window.__ncAnalysis.tasks } })`;
   const imported = await evaluate(realm);
   if (imported.cv !== 'undefined' || imported.script) fail('the page loaded OpenCV during import: ' + JSON.stringify(imported));
@@ -314,6 +316,7 @@ async function runEditWhileDetecting({ send, evaluate, waitFor, wait, fail, inst
     await waitFor(label + ': boot', `!!document.getElementById('studioImportAutoCrop') && !!window.__ncAnalysis && !!window.__ncGeometry`);
     await installDialogAutoAccept();
     await wait(300);
+    if (atOnce && manualWb) await delaySemanticInference(evaluate);
     await evaluate(`(async () => {
       // Holds the detection request until the test lets it go, and keeps the
       // exported files instead of downloading them.
@@ -335,6 +338,7 @@ async function runEditWhileDetecting({ send, evaluate, waitFor, wait, fail, inst
     })()`);
     await waitFor(label + ': fixture converted', `${READY} && document.getElementById('studioFilename').textContent === 'crop-apply.png'`, 150_000);
     await wait(1200);
+    await waitForSemanticFixture({ evaluate, waitFor, fail, ready: READY, label });
     // Confirm the top-left part of the stored window as the image area.
     await evaluate(`document.getElementById('studioTab-composition').click(); document.getElementById('studioConfirmAnalysis').click()`);
     await waitFor(label + ': image area mode', cropMode, 30_000);
@@ -516,6 +520,7 @@ async function runMeasureWhileWaiting({ send, evaluate, waitFor, wait, fail, ins
     })()`);
     await waitFor(label + ': fixture converted', `${READY} && document.getElementById('studioFilename').textContent === 'crop-apply.png'`, 150_000);
     await wait(1200);
+    await waitForSemanticFixture({ evaluate, waitFor, fail, ready: READY, label });
     // As in runEditWhileDetecting: an off-centre image area, then the default
     // draft around the window, which is detected again and hits.
     await evaluate(`document.getElementById('studioTab-composition').click(); document.getElementById('studioConfirmAnalysis').click()`);

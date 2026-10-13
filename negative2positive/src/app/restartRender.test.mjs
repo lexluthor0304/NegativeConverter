@@ -689,7 +689,7 @@ function prepareFixture({ itemSettings = null, detectFrame = true, learned = 0 }
     goToStep: step => { state.currentStep = step; },
     showToast: text => log.push({ toast: text }), updateFileListUI: noop,
     scheduleSemanticColour: () => log.push('semantic'), notifyImportReview: () => log.push('review'),
-    scheduleProjectRecovery: noop, scheduleAiRepairPreloadForRecipe: noop, resetZoomPan: noop,
+    scheduleProjectRecovery: noop, scheduleAiRepairPreloadForRecipe: noop, ensureAiBrushPlane: noop, resetZoomPan: noop,
     // Outside a roll import (#231), with the geometry already built (#244).
     settleImportFilmType: (target, settings) => settings, deferImportFilmTypeToast: () => false,
     // Not a two-stage stand-in and no window edits (#255).
