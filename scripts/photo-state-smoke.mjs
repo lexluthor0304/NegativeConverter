@@ -110,19 +110,41 @@ export async function runPhotoStateSmoke({ send, evaluate, waitFor, installDialo
   await evaluate(`document.getElementById('aiBrushEnabled').click()`);
   await idle();
   await open(1);
-  const strokeCount = await evaluate('window.__ncAiRepair.state().strokes');
-  const point = await evaluate(`(() => {
-    const surface = ['glCanvas', 'canvas'].map(id => document.getElementById(id)).find(el => el && getComputedStyle(el).display !== 'none');
-    const rect = surface.getBoundingClientRect();
-    return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
-  })()`);
-  await send('Input.dispatchMouseEvent', { type: 'mousePressed', ...point, button: 'left', buttons: 1, clickCount: 1 });
-  await send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...point, button: 'left', buttons: 0, clickCount: 1 });
-  await until('armed brush accepts first stroke after switch', `window.__ncAiRepair.state().strokes === ${strokeCount + 1}`, 10000);
+  const paint = async label => {
+    const strokeCount = await evaluate('window.__ncAiRepair.state().strokes');
+    const point = await evaluate(`(() => {
+      const surface = ['glCanvas', 'canvas'].map(id => document.getElementById(id)).find(el => el && getComputedStyle(el).display !== 'none');
+      const rect = surface.getBoundingClientRect();
+      return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+    })()`);
+    await send('Input.dispatchMouseEvent', { type: 'mousePressed', ...point, button: 'left', buttons: 1, clickCount: 1 });
+    await send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...point, button: 'left', buttons: 0, clickCount: 1 });
+    await until(label, `window.__ncAiRepair.state().strokes === ${strokeCount + 1}`, 10000);
+  };
+  await paint('armed brush accepts first stroke after switch');
   const strokesB = await evaluate('window.__ncTwoStage.status().settings.repairStrokes');
   await open(0);
   assert.deepEqual(await evaluate('window.__ncTwoStage.status().settings.repairStrokes'), [], 'B strokes do not leak into A');
   assert.deepEqual(await evaluate('window.__ncTwoStage.status().settings.cropRegion'), cropBefore, 'A crop survives a repaired B');
+
+  const evictBrushPlane = () => evaluate(`(async () => {
+    const planes = await import('/src/app/evictablePlanes.js');
+    const before = planes.listEvictablePlanes().find(plane => plane.name === 'processedImageData');
+    return { before, freed: planes.evictPlane('processedImageData') };
+  })()`);
+  const active = await evictBrushPlane();
+  assert.ok(active.before.bytes > 0, 'the active brush has a full-resolution plane');
+  assert.equal(active.before.evictable, false, 'the active brush protects its full-resolution source');
+  assert.equal(active.freed, 0, 'memory pressure cannot disarm a brush that can paint');
+  // The memory budget may release a full-resolution plane while another
+  // tab is open. Returning to Repair must rearm the checked brush too.
+  await evaluate(`document.getElementById('studioTab-composition').click()`);
+  const released = await evictBrushPlane();
+  assert.ok(released.freed > 0, 'an inactive brush permits full-resolution memory release');
+  await evaluate(`document.getElementById('studioTab-repair').click()`);
+  await idle();
+  await paint('armed brush accepts first stroke after memory release and tab return');
+  console.log('ok: active brush retains its plane and returning to Repair rebuilds an inactive released plane');
   await open(1);
   assert.deepEqual(await evaluate('window.__ncTwoStage.status().settings.repairStrokes'), strokesB, 'B retains its repair strokes after returning');
   console.log('ok: armed AI repair brush accepts a stroke after switching without toggling');

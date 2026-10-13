@@ -24,6 +24,9 @@ project files contain applied settings.
 An AI repair brush left ON prepares the current photo's full-resolution plane
 after both warm restoration and cold preparation. Its checked state must not
 leave a newly opened display preview silently rejecting pointer strokes.
+While the Repair tab's enabled brush can paint, memory pressure preserves its
+full-resolution plane. Other tabs may release that plane; returning to Repair
+prepares it again without an OFF/ON cycle.
 
 The active editor still owns its image buffers. Leaving a settled photo moves
 its decoded base, conversion/display sources, recipe, undo/redo and zoom into

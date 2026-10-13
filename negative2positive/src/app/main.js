@@ -9999,7 +9999,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         && state.currentStep >= 3 && usesSilverCoreConversion(state) && hasSeparateConversionPreview()
         && !state.fullResolutionPromise && !processNegativeInFlight && !singleExportActive
         && !coreReprocessBusy() && !coreReprocessTimer && !state.dustRemoval.processing
-        && !hasFrameRepairs() && !state.cropping && !state.beforeAfterActive);
+        && !hasFrameRepairs() && !canPaintAiBrush() && !state.cropping && !state.beforeAfterActive);
     }
 
     function fullResolutionPlaneBytes() {
@@ -32241,7 +32241,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         isCropAreaDetecting: cropAreaDetecting,
         // Opening the Repair tab is the usual intent to repair: load MI-GAN
         // then, so the first stroke rarely waits for it.
-        onTabSelect: key => { if (key === 'repair') ensureAiRepairPreload(); syncBrushTools(); },
+        onTabSelect: key => {
+          if (key === 'repair') {
+            ensureAiRepairPreload();
+            ensureAiBrushPlane();
+          }
+          syncBrushTools();
+        },
         onResetAll: resetAllAdjustments,
         onRestart: restartPhotoProcessing,
         onNewSession: closePhotoSession,
