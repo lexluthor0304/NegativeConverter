@@ -8,3 +8,6 @@ negative2positive/public/codecs/opencv-simd-glue.js text eol=lf
 negative2positive/public/codecs/opencv-simd-build-info.txt text eol=lf
 negative2positive/public/codecs/opencv-LICENSE.txt text eol=lf
 negative2positive/public/codecs/*.wasm binary
+# The vendored LibRaw-Wasm build (#302) is held to BUILD-INFO.txt byte for
+# byte (librawVendor.test.mjs): no line-ending conversion on any checkout.
+negative2positive/vendor/libraw-wasm/** -text

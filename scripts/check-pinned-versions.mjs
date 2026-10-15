@@ -8,7 +8,9 @@
 // Ranges are compared on their declared version (the caret is stripped), which is
 // what an automated bump rewrites. A pin marked `locked` must be declared as
 // an exact version and equal the version package-lock.json installs: a caret
-// range would let a lockfile-only update move it.
+// range would let a lockfile-only update move it. A `file:` dependency (a
+// package vendored in the repository, like libraw-wasm since #302) declares
+// the version in its own package.json, which the lockfile links.
 //
 //   node scripts/check-pinned-versions.mjs
 import { readFileSync } from 'node:fs';
@@ -40,7 +42,10 @@ for (const { dependency, constant, file, locked = false } of pins) {
     problems.push(`${dependency} is pinned in ${file} but missing from package.json`);
     continue;
   }
-  const declared = range.replace(/^[\^~>=<\s]+/, '');
+  const vendored = range.startsWith('file:') ? range.slice('file:'.length) : null;
+  const declared = vendored
+    ? JSON.parse(readFileSync(join(repoRoot, vendored, 'package.json'), 'utf8')).version
+    : range.replace(/^[\^~>=<\s]+/, '');
   const source = readFileSync(join(repoRoot, file), 'utf8');
   const match = source.match(new RegExp(`const\\s+${constant}\\s*=\\s*['"\`]([^'"\`]+)['"\`]`));
   if (!match) {
@@ -52,8 +57,11 @@ for (const { dependency, constant, file, locked = false } of pins) {
       `${file}: ${constant} is '${match[1]}' but package.json declares ${dependency}@${declared}`
     );
   }
-  const installed = lock.packages?.[`node_modules/${dependency}`]?.version;
-  if (locked && range !== declared) {
+  const entry = lock.packages?.[`node_modules/${dependency}`];
+  const installed = vendored
+    ? (entry?.link && entry.resolved === vendored ? lock.packages?.[vendored]?.version : undefined)
+    : entry?.version;
+  if (locked && !vendored && range !== declared) {
     problems.push(`package.json declares ${dependency}@${range}; ${constant} (${file}) needs it pinned exactly`);
   }
   if (locked && lock.packages?.['']?.dependencies?.[dependency] !== range) {

@@ -1,0 +1,17 @@
+{
+  "name": "libraw-wasm",
+  "version": "1.6.0-deterministic.45b40c0",
+  "description": "LibRaw WASM bindings to be able to use it in the browser. (deterministic build with the optional multi-threaded module; ybouane/LibRaw-Wasm#30 at 45b40c0, built by scripts/build-libraw-wasm.sh)",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "license": "ISC",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lexluthor0304/LibRaw-Wasm.git"
+  },
+  "gitHead": "45b40c07e08f46a3330a7aa2945f5d389daf592a",
+  "files": [
+    "dist/*"
+  ]
+}
