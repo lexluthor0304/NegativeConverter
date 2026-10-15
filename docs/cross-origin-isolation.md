@@ -80,17 +80,18 @@ keeps the copy path it always had, with the same pixels.
   in an isolated worker, one elsewhere and on the main thread. MI-GAN (AI
   repair) uses them; EfficientViT (semantic colour) stays on one thread
   because its logits depend on the thread count (see below).
-- **A threaded LibRaw build** (`src/app/librawRuntime.js`, #264 Part D), once
-  libraw-wasm ships one (`LibRaw.features.threads`): `new LibRaw({ threads })`
-  only where shared memory is available (min(cores, 8) in the foreground, 2
-  in a background lane); everywhere else, and with libraw-wasm 1.6.0,
-  `new LibRaw()` exactly as before. An instance that does not start (its
+- **A threaded LibRaw build** (`src/app/librawRuntime.js`, #264 Part D),
+  shipped by the vendored deterministic libraw-wasm since #302
+  (`LibRaw.features.threads`): `new LibRaw({ threads })` only where shared
+  memory is available (min(cores, 8) in the foreground, 2 in a background
+  lane); everywhere else (the macOS app among them) `new LibRaw()`, the
+  same build's single-threaded module, which decodes to the same pixels. An instance that does not start (its
   worker, pool or shared memory; no answer in 8 s) decodes on `new LibRaw()`
   instead and the page stops asking for threads. Its report entry comes from
   inside the LibRaw worker (`runtimeInfo()`: isolation, threads, pool size).
-  Its pthread workers share that worker's memory, so a pool that starts at
-  all is isolated; `ISOLATION_CDP_WORKERS=1` also reads each of them over
-  CDP. How this and the desktop's native decoder are chosen:
+  Its pthread workers (named `em-pthread-mt` in the threaded module) share
+  that worker's memory, so a pool that starts at all is isolated;
+  `ISOLATION_CDP_WORKERS=1` also reads each of them over CDP. How this and the desktop's native decoder are chosen:
   `docs/raw-decoding.md`.
 
 ## OpenCV build: WASM SIMD or scalar (#292)

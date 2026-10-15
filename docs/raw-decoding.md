@@ -25,7 +25,7 @@ loadRawFile ── createRawDecoder (nativeRawDecoder.js)
 | where | decoder | threads | when it cannot decode |
 |---|---|---|---|
 | desktop app whose native LibRaw passes the gate (`NATIVE_RAW_PARITY`: the pinned libraw-wasm release and the platform it was verified on; **no platform today**) | native LibRaw 0.22.1 with OpenMP, in the app process | every core; 2 for a background lane | LibRaw rejects the file (unsupported, corrupt, too big): the embedded JPEG, no second LibRaw attempt. Anything else (IPC, transfer, a step timeout, memory, lossy DNG, other settings): libraw-wasm below, with the same bytes and settings |
-| a page with shared memory (`crossOriginIsolated` **and** `SharedArrayBuffer`) and a libraw-wasm that ships the threaded build (`LibRaw.features.threads`; **not 1.6.0**) | libraw-wasm's threaded build, `new LibRaw({ threads })` | min(cores, 8); 2 for a background lane | an instance that does not start (its worker, pthread pool or 4 GB shared memory; `runtimeInfo()` rejects or does not answer in 8 s) decodes on `new LibRaw()` instead, before any bytes are handed over, and the page stops asking for threads |
+| a page with shared memory (`crossOriginIsolated` **and** `SharedArrayBuffer`) and a libraw-wasm that ships the threaded build (`LibRaw.features.threads`: the vendored build since #302, not 1.6.0) | libraw-wasm's threaded build, `new LibRaw({ threads })` | min(cores, 8); 2 for a background lane | an instance that does not start (its worker, pthread pool or 4 GB shared memory; `runtimeInfo()` rejects or does not answer in 8 s) decodes on `new LibRaw()` instead, before any bytes are handed over, and the page stops asking for threads |
 | everywhere else | `new LibRaw()`, exactly as before #264 | 1 | as before |
 
 After LibRaw, whichever ran: no image (the HE-compressed NEFs) or a decode
@@ -50,12 +50,13 @@ light-table tiles. While they decode, the photo on screen keeps the cores.
 Export All's decodes (`processFileWithSettings` and the decode-ahead
 `prepare`) run at `'user'` priority, uncapped.
 
-What each target runs today (libraw-wasm 1.6.0 pinned, the native gate off):
+What each target runs today (the vendored deterministic build
+`1.6.0-deterministic.45b40c0`, #302; the native gate still off):
 
 | target | isolated | SharedArrayBuffer | RAW decoder |
 |---|---|---|---|
-| Chrome, Vite dev/preview (and the production site, same headers) | yes | yes | `new LibRaw()` (1.6.0 has no threaded build); the threaded build once a release ships it |
-| macOS desktop (WKWebView, `tauri://localhost`) | the flag says yes | **no** | `new LibRaw()`; native LibRaw once the gate names the pinned release |
+| Chrome, Vite dev/preview (and the production site, same headers) | yes | yes | the threaded build, `new LibRaw({ threads })`: min(cores, 8), 2 in a background lane |
+| macOS desktop (WKWebView, `tauri://localhost`) | the flag says yes | **no** | `new LibRaw()` (the same build's single-threaded module); native LibRaw once the gate names this build (below) |
 | Windows WebView2, Linux WebKitGTK | not checked | not checked | `new LibRaw()` (or threaded, if they turn out to share memory); native is not built on Windows and not verified on Linux |
 
 ## Output
@@ -70,9 +71,9 @@ What each target runs today (libraw-wasm 1.6.0 pinned, the native gate off):
   no `-ffast-math`, `-ffp-contract=off`, musl's libm functions bundled) decodes
   differently from 1.6.0, whose `-ffast-math` both made its output depend on
   the toolchain and turned samples at the auto-bright white point black for
-  about one white point in seven. It reaches the app only when a release
-  with it is pinned; until then every path decodes exactly as 1.6.0 did.
-  RGB16 against 1.6.0 (the app's settings, 16 bits):
+  about one white point in seven. It reached the app with #302 (the
+  vendored build), flagged in that release's notes. RGB16 against 1.6.0 (the
+  app's settings, 16 bits):
 
   | file | size | differing samples | differing pixels | max difference |
   |---|---|---|---|---|
@@ -80,9 +81,11 @@ What each target runs today (libraw-wasm 1.6.0 pinned, the native gate off):
   | `_DSC3111.NEF` | half | 2,633 of 8,016,000 | 2,633 | 17 |
   | `_DSC5290.dng` (Sony ILCE-7M2, 24 MP) | full | 2,152 of 73,011,456 | 769 | 8,155 |
   | `_DSC5290.dng` | half | 114 of 18,252,864 | 114 | 65,535 (1.6.0's black white-point samples) |
+  | `L1009967.dng` (Leica M11, 60.4 MP) | full | 14,619 of 181,260,288 | 5,013 | 1,723 |
 
-  The 60 MP M11 DNGs (`L1009967.dng`, the 2026-09-23 roll) are still to be
-  measured: they were not decoded on the machine these numbers come from.
+  The M11 row was measured in Node through the real dist files (#302): the
+  vendored build's single-threaded module and its threaded module at 1, 4
+  and 8 threads give one RGB16 hash (`be64623a95441caa…`).
 
 ## Gates
 
@@ -100,22 +103,31 @@ package's `dist/`), so every smoke step, the gate above all, runs against an
 unreleased decoder. `vite build` and `vite preview` ignore it, and `npm test`
 always uses the installed package.
 
-## When the deterministic libraw-wasm is released
+## The vendored deterministic build (#302)
 
-1. Pin it: `libraw-wasm` `X.Y.Z` exactly in `package.json` (and the lock);
-   `LIBRAW_WASM_VERSION = 'X.Y.Z'` in `nativeRawDecoder.js`
-   (`check-pinned-versions` enforces all three).
-2. Run the WASM gate on the fixtures. It compares against the deterministic
-   hashes because the release advertises `LibRaw.features.threads`. If the
-   published build decodes differently from the one recorded here (built
-   with other flags or another toolchain), stop: record its hashes, then
-   re-run the native parity tests against them.
-3. Add the M11 DNGs and `L1009967.dng` to the gate and record them (the
-   #264 work could not decode 60 MP files).
-4. `npm run test:rust` with the fixtures on each desktop platform; then set
-   `NATIVE_RAW_PARITY.librawWasm = 'X.Y.Z'`. macOS (arm64 and x86_64)
-   then decodes natively.
-5. Flag the output change in the release notes with the table above.
+Upstream has not released ybouane/LibRaw-Wasm#30, so the app builds it
+itself: `scripts/build-libraw-wasm.sh` vendors the PR's head (commit
+`45b40c0`) as `negative2positive/vendor/libraw-wasm`, which `package.json`
+depends on as `file:negative2positive/vendor/libraw-wasm`
+(`negative2positive/vendor/libraw-wasm/README.md`). Of the steps a release
+of the deterministic build needs:
 
-On an isolated web page the threaded build then runs at once: the page
-needs no change.
+1. Pin it: done. `LIBRAW_WASM_VERSION = '1.6.0-deterministic.45b40c0'`;
+   `check-pinned-versions` reads a `file:` dependency's version from its
+   own `package.json` and the lockfile's link.
+2. The WASM gate on the fixtures: passed. Every fixture decodes to the
+   deterministic hashes recorded here, single-threaded and threaded at 1,
+   2, 4 and 8 threads, isolated and not; the HE NEFs yield no image.
+3. The M11 DNGs: `L1009967.dng` decodes deterministically at every thread
+   count (the table above). Its gate entry (`RAW_DECODE_GATE_RECORD=1`,
+   with the half-size decode and the metadata) is still to be recorded.
+4. `npm run test:rust` with the fixtures, the M11 DNG among them, on each
+   desktop platform; then set `NATIVE_RAW_PARITY.librawWasm =
+   '1.6.0-deterministic.45b40c0'`. macOS (arm64 and x86_64) then decodes
+   natively. Still to do: the native build needs several GB of free disk.
+5. The output change is flagged in the release notes of #302's release.
+
+On an isolated web page the threaded build runs at once: the page needs
+no change. When upstream publishes #30, compare its `dist/` with the
+vendored `BUILD-INFO.txt` and go back to the npm package (the vendored
+README has the steps).

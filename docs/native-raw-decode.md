@@ -6,7 +6,10 @@ links the same LibRaw release natively (`src-tauri/src/native_raw.rs`) and can
 decode on every core with OpenMP, outside WebContent. It does so only where the
 native output is verified bit-identical to the libraw-wasm release the page
 runs; everywhere else the page keeps libraw-wasm. Today that is nowhere by
-default (see [The gate](#the-gate)).
+default (see [The gate](#the-gate)). The page has run the deterministic
+build the native decoder matches since #302 (vendored, `docs/raw-decoding.md`);
+what is left before macOS decodes natively is the native parity run on the
+fixtures and the M11 DNGs, then naming that build in `NATIVE_RAW_PARITY`.
 
 ## What runs where
 

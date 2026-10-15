@@ -2,12 +2,20 @@ RAW decoder notices
 ==============================================================================
 
 Negative Converter decodes RAW files with LibRaw 0.22.1, unmodified. The web
-app and the desktop apps run it compiled to WebAssembly (the libraw-wasm
-package). The macOS and Linux desktop apps also contain it compiled
-natively and statically linked into the application: there its
-mathematical functions pow, powf, exp, log, logf and cos come from musl
-1.2.6, and on macOS its parallel regions run on the LLVM OpenMP runtime
-(libomp 22.1.8), statically linked as well.
+app and the desktop apps run it compiled to WebAssembly: a build of the
+libraw-wasm package (https://github.com/lexluthor0304/LibRaw-Wasm, commit
+45b40c07e08f46a3330a7aa2945f5d389daf592a), which is in the app's source
+repository under negative2positive/vendor/libraw-wasm with the script that
+makes it (scripts/build-libraw-wasm.sh). In that build LibRaw's mathematical
+functions pow, powf, exp, log, logf and cos come from musl 1.2.6, its
+multi-threaded module runs LibRaw's parallel regions on Emscripten's build of
+the LLVM OpenMP runtime (release 21.1.8), and it also contains Little-CMS
+2.19.1 and the Independent JPEG Group's libjpeg 9f (notices below). The
+macOS and Linux desktop apps also contain LibRaw compiled natively and
+statically linked into the application: there too its mathematical functions
+pow, powf, exp, log, logf and cos come from musl 1.2.6, and on macOS its
+parallel regions run on the LLVM OpenMP runtime (libomp 22.1.8), statically
+linked as well.
 
 LibRaw is offered under LGPL-2.1 or CDDL-1.0; this app uses it under the
 COMMON DEVELOPMENT AND DISTRIBUTION LICENSE (CDDL) Version 1.0, reproduced
@@ -27,7 +35,36 @@ LibRaw's Source Code under the CDDL.
 The LLVM OpenMP runtime is licensed under the Apache License v2.0 with LLVM
 Exceptions; parts of it originate from Intel's OpenMP runtime and remain
 available under the University of Illinois/NCSA or MIT licence. Its licence
-file is reproduced in full at the end of this document.
+file is reproduced in full at the end of this document. The WebAssembly
+build's OpenMP runtime is LLVM's as well, under the same licence.
+
+This software is based in part on the work of the Independent JPEG Group.
+The WebAssembly build contains its libjpeg 9f (copyright (C) 1991-2024,
+Thomas G. Lane, Guido Vollbeding), which LibRaw uses for lossy DNG files.
+
+Little-CMS 2.19.1 (https://github.com/mm2/Little-CMS), in the WebAssembly
+build, is licensed under the MIT License:
+
+    Copyright (c) 2023 Marti Maria Saguer
+
+    Permission is hereby granted, free of charge, to any person obtaining
+    a copy of this software and associated documentation files (the
+    "Software"), to deal in the Software without restriction, including
+    without limitation the rights to use, copy, modify, merge, publish,
+    distribute, sublicense, and/or sell copies of the Software, and to
+    permit persons to whom the Software is furnished to do so, subject
+    to the following conditions:
+
+    The above copyright notice and this permission notice shall be
+    included in all copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+    EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+    MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+    IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+    CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+    TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ==============================================================================
 LibRaw

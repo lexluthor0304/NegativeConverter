@@ -34,7 +34,7 @@ export const NATIVE_RAW_UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024;
 
 // The libraw-wasm release the page decodes with.
 // scripts/check-pinned-versions.mjs keeps it equal to package.json.
-export const LIBRAW_WASM_VERSION = '1.6.0';
+export const LIBRAW_WASM_VERSION = '1.6.0-deterministic.45b40c0';
 
 // Where native decodes are verified identical to a libraw-wasm release: the
 // RGB16 SHA-256 of every gate fixture at 1, 4 and 8 threads (the src-tauri

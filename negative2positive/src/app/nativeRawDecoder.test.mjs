@@ -55,10 +55,15 @@ console.warn = () => {};
   assert.ok(connect.includes('rawdecode:') && connect.includes('http://rawdecode.localhost'), 'CSP connect-src lists the rawdecode scheme');
 }
 
-// The page's libraw-wasm release is the one package.json declares.
+// The page's libraw-wasm release is the one package.json declares: since
+// #302 the vendored build, whose own package.json carries the version.
 {
   const pkg = JSON.parse(readFileSync(new URL('../../../package.json', import.meta.url), 'utf8'));
-  assert.equal(LIBRAW_WASM_VERSION, pkg.dependencies['libraw-wasm'].replace(/^[\^~>=<\s]+/, ''));
+  const spec = pkg.dependencies['libraw-wasm'];
+  const declared = spec.startsWith('file:')
+    ? JSON.parse(readFileSync(new URL(`../../../${spec.slice('file:'.length)}/package.json`, import.meta.url), 'utf8')).version
+    : spec.replace(/^[\^~>=<\s]+/, '');
+  assert.equal(LIBRAW_WASM_VERSION, declared);
 }
 
 // --- the gate ---------------------------------------------------------------------
