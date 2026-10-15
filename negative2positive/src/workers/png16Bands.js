@@ -16,8 +16,11 @@
  * Decoded samples are those of the previous one-shot encoder; only the
  * compressed bytes differ (#257).
  *
- * Pure apart from Blob; the zlib implementation (pako's `Deflate`) is passed
- * in, so modules that only plan bands stay free of it.
+ * Pure apart from Blob; the zlib implementation is passed in (a streaming
+ * `Deflate` with pako's interface: zlib-rs in WebAssembly from
+ * pngDeflateWasm.js, or pako itself), so modules that only plan bands stay
+ * free of it. The file bytes depend on which one ran (#301); decoded samples
+ * do not.
  */
 
 import { updateCrc32 } from './crc32.js';
@@ -141,7 +144,7 @@ function subFilterRows(samples, firstRow, rowCount, width, channels, is16, out) 
 function resolveDeflate(zlib) {
   const Deflate = zlib && typeof zlib.Deflate === 'function' ? zlib.Deflate : zlib;
   if (typeof Deflate !== 'function' || !Deflate.prototype || typeof Deflate.prototype.push !== 'function') {
-    throw new TypeError('The PNG16 encoder needs a streaming Deflate (pako.Deflate)');
+    throw new TypeError('The PNG16 encoder needs a streaming Deflate (pako.Deflate or pngDeflateWasm.js)');
   }
   return Deflate;
 }
@@ -159,7 +162,7 @@ function resolveDeflate(zlib) {
  * @param {boolean} band.isLast ends the deflate stream
  * @param {number} [band.level]
  * @param {number} [band.strategy]
- * @param {{Deflate: Function}|Function} zlib pako (or pako.Deflate)
+ * @param {{Deflate: Function}|Function} zlib pngDeflateWasm.js's or pako's (or its Deflate)
  * @returns {{parts: Uint8Array[], adler: number, length: number}} IDAT chunk
  *   parts, the Adler-32 of the band's filtered bytes and their count
  */
@@ -192,15 +195,22 @@ export function encodePng16Band({ samples, width, rows, channels, index, isLast,
   deflater.onData = emit;
 
   let adler = 1;
-  for (let y = 0; y < rows; y += rowsPerStep) {
-    const count = Math.min(rowsPerStep, rows - y);
-    const filtered = scratch.subarray(0, subFilterRows(samples, y, count, width, channels, is16, scratch));
-    adler = adler32(filtered, adler);
-    const lastStep = y + count >= rows;
-    // pako copies the input into its window before push() returns, so the
-    // scratch buffer can be refilled for the next rows.
-    deflater.push(filtered, lastStep ? (isLast ? Z_FINISH : Z_SYNC_FLUSH) : Z_NO_FLUSH);
-    if (deflater.err) throw new Error(`PNG deflate failed: ${deflater.msg || deflater.err}`);
+  try {
+    for (let y = 0; y < rows; y += rowsPerStep) {
+      const count = Math.min(rowsPerStep, rows - y);
+      const filtered = scratch.subarray(0, subFilterRows(samples, y, count, width, channels, is16, scratch));
+      adler = adler32(filtered, adler);
+      const lastStep = y + count >= rows;
+      // Both deflaters take the input before push() returns (pako into its
+      // window, the WebAssembly one into its memory), so the scratch buffer
+      // can be refilled for the next rows.
+      deflater.push(filtered, lastStep ? (isLast ? Z_FINISH : Z_SYNC_FLUSH) : Z_NO_FLUSH);
+      if (deflater.err) throw new Error(`PNG deflate failed: ${deflater.msg || deflater.err}`);
+    }
+  } finally {
+    // A band but the last ends on a sync flush, never finished: the
+    // WebAssembly stream keeps its memory until disposed. pako has no dispose.
+    if (typeof deflater.dispose === 'function') deflater.dispose();
   }
 
   const header = new Uint8Array(8);

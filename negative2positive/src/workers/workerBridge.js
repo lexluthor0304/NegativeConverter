@@ -467,7 +467,7 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory,
         break;
       case 'bandResult':
         settleEntry(msg.id, entry);
-        entry.resolve({ blob: msg.blob, adler: msg.adler, length: msg.length });
+        entry.resolve({ blob: msg.blob, adler: msg.adler, length: msg.length, deflate: msg.deflate || null });
         break;
       case 'dngResult':
         settleEntry(msg.id, entry);
@@ -1027,7 +1027,8 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory,
    * One row band of a 16-bit PNG (see createPng16BandPool). `request.pixelData`
    * is the band's own RGBA buffer and is transferred. Rejects on any failure;
    * the pool decides what to do.
-   * @returns {Promise<{blob: Blob, adler: number, length: number}>}
+   * @returns {Promise<{blob: Blob, adler: number, length: number, deflate: string|null}>}
+   *   `deflate`: the worker's deflater ('simd', 'scalar' or 'pako', #301)
    */
   function workerEncodePng16Band(request, options = {}) {
     return sendToWorker(
@@ -1236,6 +1237,9 @@ export function createPng16BandPool({ size = 1, workerFactory } = {}) {
   const idle = [...slots];
   const queue = [];
   let disposed = false;
+  // The deflater of the last frame's bands, for the export's perf trace:
+  // one variant, or 'mixed' when the workers disagreed (#301).
+  let lastDeflate = null;
   const disposedError = () => makeError('PNG16 band pool disposed', 'AbortError');
 
   function pump() {
@@ -1300,6 +1304,8 @@ export function createPng16BandPool({ size = 1, workerFactory } = {}) {
         if (onProgress) onProgress(Math.round((finished / bands.length) * 100), 'encoding');
         return result;
       })));
+      const variants = new Set(results.map((result) => result.deflate || 'unknown'));
+      lastDeflate = variants.size === 1 ? [...variants][0] : 'mixed';
       return assemblePng16Blob({ width, height, channels, idats: results.map((result) => result.blob), adler: combineBandAdlers(results) });
     } catch (err) {
       frame.abort();
@@ -1324,7 +1330,8 @@ export function createPng16BandPool({ size = 1, workerFactory } = {}) {
     size: count,
     encode,
     dispose,
-    get disposed() { return disposed; }
+    get disposed() { return disposed; },
+    get lastDeflate() { return lastDeflate; }
   };
 }
 

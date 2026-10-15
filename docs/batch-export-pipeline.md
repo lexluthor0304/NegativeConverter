@@ -139,14 +139,31 @@ Now one driver (`runBatchExport` in `main.js`) runs the per-file pipeline
   are split into bands of about 16 MiB of filtered bytes (whole rows; 22
   bands at 60 MP, 9 at 24 MP). The layout depends only on width, height and
   channel count, so the file is byte-identical whoever encodes the bands.
-  Each band is Sub-filtered in 4 MiB steps into a raw `pako.Deflate` stream
+  Each band is Sub-filtered in 4 MiB steps into a raw deflate stream
   (level 6) with a running Adler-32 and ends with a sync flush (the last
   band finishes the stream); it becomes its own IDAT chunk, built as a Blob
   in the worker. Band 0 carries the zlib header, and a last 4-byte IDAT
   holds the Adler-32, folded from the bands with `adler32Combine`. Decoded
   samples are those of the old one-shot encoder; the compressed bytes and
-  size differ slightly (a few bytes per band), so a PNG16 parity check
-  compares decoded samples, not file hashes.
+  size differ (a few bytes per band, and the deflater below), so a PNG16
+  parity check compares decoded samples, not file hashes.
+  - The deflater (#301): every path takes it from `loadPng16Zlib()`
+    (`workers/pngDeflateWasm.js`): zlib-rs 0.6.8, a Rust port of zlib-ng,
+    compiled to WebAssembly from `wasm/png-deflate`, behind pako's
+    `Deflate` interface. The SIMD module runs where `wasmSimdSupported()`
+    holds, the scalar one elsewhere; both write the same bytes. On real
+    band streams it deflates about 1.8× as fast as pako in V8 and 1.5× in
+    JavaScriptCore, with the same compression. pako remains the fallback
+    where the module cannot be instantiated, and after the module failed
+    while encoding (a trap, its memory, a zlib error): that frame is
+    encoded again with pako and the realm stays on pako; an error of the
+    encoder itself (a bad frame) still fails the encode. Band results and
+    the export's perf trace name the deflater (`deflate: 'simd'`,
+    `'scalar'` or `'pako'`). A band that ends on a sync flush is never
+    finished, so `encodePng16Band` disposes of its stream. The modules are
+    committed next to `png-deflate-build-info.txt`;
+    `scripts/build-png-deflate-wasm.sh` rebuilds them reproducibly (pinned
+    toolchain, `Cargo.lock`, remapped paths), see `wasm/png-deflate/README.md`.
   - `createPng16BandPool` (`workerBridge.js`) runs the bands on export
     workers: one pool per export operation (a single export or a batch),
     disposed when it ends. Bands wait in one ordered queue and are sliced
@@ -159,7 +176,8 @@ Now one driver (`runBatchExport` in `main.js`) runs the per-file pipeline
     pool: the lane's export worker encodes the bands one after another
     (`workerEncodePng16`), which gives the same bytes.
   - Fallbacks: pool → one export worker → the main thread
-    (`exportImageEncoders.js`), all with the same bytes.
+    (`exportImageEncoders.js`), all with the same deflater and therefore
+    the same bytes.
   - `localStorage nc_png16_rle_v1 = on` switches to the run-length strategy
     (lossless, about 4 % larger, several times faster). It has no UI and is
     off by default; it is for measuring WKWebView if level 6 misses its

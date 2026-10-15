@@ -2,10 +2,12 @@
 // node negative2positive/src/workers/png16Bands.test.mjs
 //
 // The band encoder changes the compressed bytes of a 16-bit PNG, never its
-// samples (#257). Every file here is checked two ways against the one-shot
-// encoder it replaced (kept below as a frozen copy): UPNG decodes it, and an
-// independent path verifies every chunk CRC, inflates the IDAT stream with
-// Node's zlib (which verifies the Adler-32) and undoes the Sub filter.
+// samples (#257), with either deflater: pako and zlib-rs in WebAssembly
+// (pngDeflateWasm.js, #301). Every file here is checked two ways against the
+// one-shot encoder it replaced (kept below as a frozen copy): UPNG decodes
+// it, and an independent path verifies every chunk CRC, inflates the IDAT
+// stream with Node's zlib (which verifies the Adler-32) and undoes the Sub
+// filter.
 import assert from 'node:assert/strict';
 import zlib from 'node:zlib';
 import { createRequire } from 'node:module';
@@ -16,6 +18,11 @@ import {
 } from './png16Bands.js';
 import { encodePng16Blob, exportChannelCount } from './imageEncoders.js';
 import { attachMetadataToBlob, listPngChunks } from '../app/exportMetadata.js';
+import { instantiatePngDeflate } from './pngDeflateWasm.js';
+
+// Both deflaters the encoder runs with; the module's SIMD build in Node.
+const wasmZlib = await instantiatePngDeflate();
+const DEFLATERS = [['pako', pako], [`zlib-rs (${wasmZlib.variant})`, wasmZlib]];
 
 const UPNG = createRequire(import.meta.url)('upng-js');
 
@@ -145,9 +152,9 @@ function photoLike16(width, height) {
 const random8 = (width, height, alpha) => Uint8ClampedArray.from({ length: width * height * 4 },
   (_, i) => i % 4 === 3 ? (alpha ? random() >>> 24 : 255) : random() >>> 24);
 
-async function assertSameSamplesAsHead(pixels, width, height, options = {}) {
+async function assertSameSamplesAsHead(pixels, width, height, options = {}, deflater = pako) {
   const head = await bytesOf(headEncodePng16(pixels, width, height));
-  const blob = encodePng16Blob(pixels, width, height, pako, options);
+  const blob = encodePng16Blob(pixels, width, height, deflater, options);
   assert.equal(blob.type, 'image/png');
   const bytes = await bytesOf(blob);
   const expected = expectedSamples(pixels);
@@ -209,16 +216,18 @@ assert.deepEqual(Array.from(zlibHeader(6, Z_RLE)), [0x78, 0x01]);
 // ----------------------------------------------- samples identical to HEAD
 
 // Several bands at the real 16 MiB layout, the last one partial.
-{
+for (const [name, deflater] of DEFLATERS) {
   const width = 2000, height = 1500;
+  seed = 1;
   const pixels = photoLike16(width, height);
-  const { bytes, head, plan } = await assertSameSamplesAsHead(pixels, width, height);
+  const { bytes, head, plan } = await assertSameSamplesAsHead(pixels, width, height, {}, deflater);
   assert.equal(plan.bands.length, 2);
   assert.notEqual(height % plan.rowsPerBand, 0, 'height is not a multiple of the band height');
-  // Size: the sync flushes cost a few bytes per band.
+  // Size: the sync flushes cost a few bytes per band; zlib-rs compresses
+  // like zlib at the same level, within a fraction of a percent.
   const growth = (bytes.length - head.length) / head.length;
-  assert.ok(growth < 0.001, `file grew by ${(growth * 100).toFixed(4)} %`);
-  console.log(`2-band 3 MP photo-like PNG16: HEAD ${head.length} B, bands ${bytes.length} B (${(growth * 100).toFixed(4)} %)`);
+  assert.ok(Math.abs(growth) < 0.005, `${name}: file size changed by ${(growth * 100).toFixed(4)} %`);
+  console.log(`2-band 3 MP photo-like PNG16, ${name}: HEAD ${head.length} B, bands ${bytes.length} B (${(growth * 100).toFixed(4)} %)`);
 }
 
 // Small frames with a test-sized band: heights that are not multiples of the
@@ -232,43 +241,47 @@ assert.deepEqual(Array.from(zlibHeader(6, Z_RLE)), [0x78, 0x01]);
     [1, 41, 30], // one column: 7-byte rows, 4 per band
     [1, 1, 1] // one pixel
   ];
-  for (const [width, height, bandBytes] of cases) {
-    const pixels = photoLike16(width, height);
-    const { plan } = await assertSameSamplesAsHead(pixels, width, height, { bandBytes });
-    if (bandBytes === 100) assert.equal(plan.rowsPerBand, 1);
-    if (bandBytes === 1 << 30) assert.equal(plan.bands.length, 1);
+  for (const [, deflater] of DEFLATERS) {
+    for (const [width, height, bandBytes] of cases) {
+      const pixels = photoLike16(width, height);
+      const { plan } = await assertSameSamplesAsHead(pixels, width, height, { bandBytes }, deflater);
+      if (bandBytes === 100) assert.equal(plan.rowsPerBand, 1);
+      if (bandBytes === 1 << 30) assert.equal(plan.bands.length, 1);
+    }
   }
 }
 
 // The 8-bit fallbacks (v * 257): opaque (RGB) and with real alpha (RGBA).
-for (const alpha of [false, true]) {
-  const width = 41, height = 23;
-  const pixels = random8(width, height, alpha);
-  const { strict } = await assertSameSamplesAsHead(pixels, width, height, { bandBytes: 700 });
-  assert.equal(strict.channels, alpha ? 4 : 3);
-  // A plain Uint8Array behaves like the clamped one.
-  await assertSameSamplesAsHead(new Uint8Array(pixels), width, height, { bandBytes: 700 });
+for (const [, deflater] of DEFLATERS) {
+  for (const alpha of [false, true]) {
+    const width = 41, height = 23;
+    const pixels = random8(width, height, alpha);
+    const { strict } = await assertSameSamplesAsHead(pixels, width, height, { bandBytes: 700 }, deflater);
+    assert.equal(strict.channels, alpha ? 4 : 3);
+    // A plain Uint8Array behaves like the clamped one.
+    await assertSameSamplesAsHead(new Uint8Array(pixels), width, height, { bandBytes: 700 }, deflater);
+  }
 }
 
 // Extremes of the 16-bit range, which wrap in the Sub filter.
-{
+for (const [, deflater] of DEFLATERS) {
   const width = 17, height = 9;
   const pixels = Uint16Array.from({ length: width * height * 4 }, (_, i) => [0, 65535, 1, 65534, 0x8000, 0x7FFF][i % 6]);
-  await assertSameSamplesAsHead(pixels, width, height, { bandBytes: 300 });
+  await assertSameSamplesAsHead(pixels, width, height, { bandBytes: 300 }, deflater);
 }
 
 // Z_RLE is lossless too (flagged, not the default).
-{
+for (const [, deflater] of DEFLATERS) {
   const width = 64, height = 50;
   const pixels = photoLike16(width, height);
-  const bytes = await bytesOf(encodePng16Blob(pixels, width, height, pako, { strategy: Z_RLE, bandBytes: 4000 }));
+  const bytes = await bytesOf(encodePng16Blob(pixels, width, height, deflater, { strategy: Z_RLE, bandBytes: 4000 }));
   assert.deepEqual(Array.from(bytes.subarray(41, 43)), [0x78, 0x01], 'RLE zlib header in the first IDAT');
   assert.deepEqual(strictDecode(bytes).samples, expectedSamples(pixels));
 }
 
 // ------------------------------------------------ bands are independent
 
-{
+for (const [, deflater] of DEFLATERS) {
   // Encoding the bands out of order, one by one, then assembling gives the
   // same file as the serial encoder: a band depends on its rows only.
   const width = 29, height = 31, bandBytes = 800;
@@ -277,10 +290,11 @@ for (const alpha of [false, true]) {
   const results = new Array(bands.length);
   for (const band of [...bands].reverse()) {
     const samples = pixels.slice(band.y * width * 4, (band.y + band.rows) * width * 4);
-    results[band.index] = encodePng16Band({ samples, width, rows: band.rows, channels: 3, index: band.index, isLast: band.index === bands.length - 1 }, pako.Deflate);
+    results[band.index] = encodePng16Band({ samples, width, rows: band.rows, channels: 3, index: band.index, isLast: band.index === bands.length - 1 }, deflater.Deflate);
   }
   const assembled = await bytesOf(assemblePng16Blob({ width, height, channels: 3, idats: results.map((r) => new Blob(r.parts)), adler: combineBandAdlers(results) }));
-  assert.deepEqual(assembled, await bytesOf(encodePng16Blob(pixels, width, height, pako, { bandBytes })));
+  assert.deepEqual(assembled, await bytesOf(encodePng16Blob(pixels, width, height, deflater, { bandBytes })));
+  if (deflater !== pako) continue; // the decoder check below needs one file
 
   // A wrong Adler-32 is caught by the strict decoder, which is what makes the
   // checks above meaningful (UPNG does not verify it).
