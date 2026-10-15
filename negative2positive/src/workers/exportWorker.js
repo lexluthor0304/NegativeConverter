@@ -10,13 +10,12 @@
  * transferred its plane keeps its pixels; after a write it cannot, and the
  * bridge reports the plane as lost.
  */
-// pako 3.x dropped the default export — use named imports.
 import './isolationProbe.js'; // first: answers the page's isolation probe (#264)
-import * as pako from 'pako';
 import { applyAdjustmentsToPixels, computeAdjustmentParams } from './pixelAdjustments.js';
 import { applyAdjustmentsToPixels16, downconvertPlane16 } from './pixelAdjustments16.js';
 import { encodePng16Blob, encodeTiffBlob } from './imageEncoders.js';
 import { encodePng16Band } from './png16Bands.js';
+import { loadPng16Zlib, png16DeflateVariant, runWithPng16Fallback } from './pngDeflateWasm.js';
 import { computeGainMap } from './gainMap.js';
 import { buildLinearPositive, encodeLinearDngBlob } from '../app/linearDng.js';
 import { toImage16 } from '../app/multiShot.js';
@@ -230,7 +229,9 @@ function handleGainMap16(msg) {
 // One request per 16-bit file (#250 Part 2): adjust the unadjusted plane in
 // place and encode it. Only the Blob goes back; the adjusted plane never
 // exists on the main thread. PNG metadata is attached there, at Blob level.
-function handleAdjust16AndEncode(msg) {
+// Asynchronous for PNG (the deflate module may still be loading, #301): it
+// reports its own errors, as handleEncodeImage does.
+async function handleAdjust16AndEncode(msg) {
   const { id, inputBuffer, width, height, settings, quality, format, metadata, level, strategy, bandBytes } = msg;
   let prepared;
   try {
@@ -240,13 +241,18 @@ function handleAdjust16AndEncode(msg) {
     postError(id, err, { input: inputBuffer });
     return;
   }
-  const plane = runAdjustPlane16(id, prepared, width, height, quality);
-  self.postMessage({ type: 'progress', id, phase: 'encoding', percent: 10 });
-  const blob = format === 'tiff'
-    ? encodeTiffBlob(plane, width, height, 16, metadata || null, { ownedPlane: true })
-    : encodePng16Blob(plane, width, height, pako, { level, strategy, bandBytes });
-  self.postMessage({ type: 'progress', id, phase: 'encoding', percent: 100 });
-  self.postMessage({ type: 'blobResult', id, blob });
+  try {
+    const zlib = format === 'png' ? await loadPng16Zlib() : null;
+    const plane = runAdjustPlane16(id, prepared, width, height, quality);
+    self.postMessage({ type: 'progress', id, phase: 'encoding', percent: 10 });
+    const blob = format === 'tiff'
+      ? encodeTiffBlob(plane, width, height, 16, metadata || null, { ownedPlane: true })
+      : runWithPng16Fallback(zlib, (deflater) => encodePng16Blob(plane, width, height, deflater, { level, strategy, bandBytes }));
+    self.postMessage({ type: 'progress', id, phase: 'encoding', percent: 100 });
+    self.postMessage({ type: 'blobResult', id, blob });
+  } catch (err) {
+    postError(id, err);
+  }
 }
 
 // --------------------------------------------------------- PNG8 and JPEG
@@ -349,27 +355,42 @@ function viewSamples(buffer, sourceBits) {
 
 // The whole frame in this worker, band after band: a batch lane without a
 // band pool, or the fallback when the pool cannot start. Same bytes as the pool.
-function handleEncodePng16(msg) {
+async function handleEncodePng16(msg) {
   const { id, pixelData, width, height, sourceBits, level, strategy, bandBytes } = msg;
-  const data = viewSamples(pixelData, sourceBits);
+  try {
+    const data = viewSamples(pixelData, sourceBits);
+    const zlib = await loadPng16Zlib();
 
-  self.postMessage({ type: 'progress', id, phase: 'encoding', percent: 10 });
+    self.postMessage({ type: 'progress', id, phase: 'encoding', percent: 10 });
 
-  const blob = encodePng16Blob(data, width, height, pako, { level, strategy, bandBytes });
+    const blob = runWithPng16Fallback(zlib, (deflater) => encodePng16Blob(data, width, height, deflater, { level, strategy, bandBytes }));
 
-  self.postMessage({ type: 'progress', id, phase: 'encoding', percent: 100 });
-  self.postMessage({ type: 'blobResult', id, blob });
+    self.postMessage({ type: 'progress', id, phase: 'encoding', percent: 100 });
+    self.postMessage({ type: 'blobResult', id, blob });
+  } catch (err) {
+    postError(id, err);
+  }
 }
 
 // One band of the PNG16 band pool: its RGBA rows in, its IDAT chunk out as a
 // Blob built here, so the compressed bytes leave this heap at once and the
-// main thread only assembles Blob references.
-function handleEncodePng16Band(msg) {
+// main thread only assembles Blob references. `deflate` names the deflater
+// that ran ('simd', 'scalar' or 'pako') for the export's perf trace.
+async function handleEncodePng16Band(msg) {
   const { id, pixelData, width, rows, channels, sourceBits, index, isLast, level, strategy } = msg;
-  const band = encodePng16Band({
-    samples: viewSamples(pixelData, sourceBits), width, rows, channels, index, isLast, level, strategy
-  }, pako);
-  self.postMessage({ type: 'bandResult', id, blob: new Blob(band.parts), adler: band.adler, length: band.length });
+  try {
+    const samples = viewSamples(pixelData, sourceBits);
+    const zlib = await loadPng16Zlib();
+    const band = runWithPng16Fallback(zlib, (deflater) => encodePng16Band({
+      samples, width, rows, channels, index, isLast, level, strategy
+    }, deflater));
+    self.postMessage({
+      type: 'bandResult', id, blob: new Blob(band.parts), adler: band.adler, length: band.length,
+      deflate: png16DeflateVariant()
+    });
+  } catch (err) {
+    postError(id, err);
+  }
 }
 
 function handleEncodeTiff(msg) {

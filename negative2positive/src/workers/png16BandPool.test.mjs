@@ -7,10 +7,12 @@
 // The file must not depend on how many workers encode the bands, and every
 // failure mode must stop (terminate) the workers busy with that frame.
 import assert from 'node:assert/strict';
-import * as pako from 'pako';
+import { AsyncLocalStorage } from 'node:async_hooks';
 
-let deliver = null;
-globalThis.self = { onmessage: null, postMessage(message) { deliver(message); } };
+// The handler answers through self.postMessage, for PNG16 after an await
+// (the deflate module, #301): the call chain names the worker it answers.
+const replyTo = new AsyncLocalStorage();
+globalThis.self = { onmessage: null, postMessage(message) { replyTo.getStore()?.(message); } };
 await import('./exportWorker.js');
 const workerHandler = self.onmessage;
 
@@ -27,6 +29,8 @@ const { createPng16BandPool, createExportWorkerBridge, computeWorkerTimeoutMs, i
 const { encodePng16Blob } = await import('./imageEncoders.js');
 const { encodePng16Blob: mainThreadEncodePng16 } = await import('../app/exportImageEncoders.js');
 const { planPng16Bands } = await import('./png16Bands.js');
+// The deflater the in-process workers use (#301).
+const png16Zlib = await (await import('./pngDeflateWasm.js')).loadPng16Zlib();
 
 /**
  * A worker that answers asynchronously with the real handler. `behaviour`
@@ -61,10 +65,9 @@ function createWorkerFactory({ behaviour = () => 'run', delayMs = 1 } = {}) {
           this.onerror(new Error('band worker crashed'));
           return;
         }
-        const replies = [];
-        deliver = (reply) => replies.push(reply);
-        workerHandler({ data: received });
-        for (const reply of replies) if (!this.terminated) this.onmessage({ data: reply });
+        // Replies arrive asynchronously, as from a real worker.
+        const reply = (message) => queueMicrotask(() => { if (!this.terminated) this.onmessage({ data: message }); });
+        replyTo.run(reply, () => workerHandler({ data: received }));
       }, delayMs);
     }
 
@@ -102,7 +105,7 @@ assert.equal(planPng16Bands(W, H, 3, { bandBytes: BAND_BYTES }).bands.length, 12
 
 for (const imageData of [frame16(W, H), frame8(W, H, false), frame8(W, H, true)]) {
   const source = imageData.__image16 ? imageData.__image16.data : imageData.data;
-  const reference = await bytesOf(encodePng16Blob(source, W, H, pako, { bandBytes: BAND_BYTES }));
+  const reference = await bytesOf(encodePng16Blob(source, W, H, png16Zlib, { bandBytes: BAND_BYTES }));
   for (const size of [1, 2, 6]) {
     const { factory, stats } = createWorkerFactory({ delayMs: size === 6 ? 3 : 1 });
     const pool = createPng16BandPool({ size, workerFactory: factory });
@@ -111,6 +114,7 @@ for (const imageData of [frame16(W, H), frame8(W, H, false), frame8(W, H, true)]
     assert.ok(blob instanceof Blob, `pool of ${size} produced a file`);
     assert.equal(blob.type, 'image/png');
     assert.deepEqual(await bytesOf(blob), reference, `pool of ${size}: same bytes as the serial encoder`);
+    assert.equal(pool.lastDeflate, png16Zlib.variant, 'every band ran the deflate module');
     const channels = imageData.__image16 ? 3 : (imageData.data.some((v, i) => i % 4 === 3 && v !== 255) ? 4 : 3);
     assert.equal(stats.posts.length, planPng16Bands(W, H, channels, { bandBytes: BAND_BYTES }).bands.length, 'one message per band');
     assert.ok(stats.posts.every((m) => m.channels === channels), 'the channel count is decided once for the frame');

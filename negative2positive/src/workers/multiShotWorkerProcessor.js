@@ -16,11 +16,11 @@
 // with stage align | warp | exposure | frame | merge | encode, then
 // { type: 'result', blob | null, width, height, used, skipped } or
 // { type: 'error', code: 'memory' | 'failed' | 'opencv', message }.
-import * as pako from 'pako';
 import { matchAlignment, warpImageData, warpPlane16 } from '../app/imageAlignment.js';
 import { coverageRect, estimateExposureRatio, mergeRows, mergeScale, toImage16 } from '../app/multiShot.js';
 import { describeMultiShotError } from '../app/multiShotErrors.js';
 import { encodePng16Blob } from './imageEncoders.js';
+import { loadPng16Zlib, runWithPng16Fallback } from './pngDeflateWasm.js';
 
 // About 0.6 MP per band at 9536 px wide: a progress message every ~0.1 s.
 export const MERGE_BAND_ROWS = 64;
@@ -123,8 +123,9 @@ export function createMultiShotWorkerProcessor({
     release();
     post({ type: 'progress', stage: 'encode' });
     await yieldTurn();
-    // The export worker's 16-bit PNG call; the page adds the iCCP chunk.
-    const blob = encodePng16Blob(out, rect.width, rect.height, pako);
+    // The export worker's 16-bit PNG call and deflater; the page adds the iCCP chunk.
+    const zlib = await loadPng16Zlib();
+    const blob = runWithPng16Fallback(zlib, (deflater) => encodePng16Blob(out, rect.width, rect.height, deflater));
     post({ type: 'result', blob, width: rect.width, height: rect.height, used, skipped });
   }
 
