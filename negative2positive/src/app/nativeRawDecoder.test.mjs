@@ -55,10 +55,15 @@ console.warn = () => {};
   assert.ok(connect.includes('rawdecode:') && connect.includes('http://rawdecode.localhost'), 'CSP connect-src lists the rawdecode scheme');
 }
 
-// The page's libraw-wasm release is the one package.json declares.
+// The page's libraw-wasm release is the one package.json declares: since
+// #302 the vendored build, whose own package.json carries the version.
 {
   const pkg = JSON.parse(readFileSync(new URL('../../../package.json', import.meta.url), 'utf8'));
-  assert.equal(LIBRAW_WASM_VERSION, pkg.dependencies['libraw-wasm'].replace(/^[\^~>=<\s]+/, ''));
+  const spec = pkg.dependencies['libraw-wasm'];
+  const declared = spec.startsWith('file:')
+    ? JSON.parse(readFileSync(new URL(`../../../${spec.slice('file:'.length)}/package.json`, import.meta.url), 'utf8')).version
+    : spec.replace(/^[\^~>=<\s]+/, '');
+  assert.equal(LIBRAW_WASM_VERSION, declared);
 }
 
 // --- the gate ---------------------------------------------------------------------
@@ -72,9 +77,13 @@ console.warn = () => {};
   assert.equal(decideNativeRawDecode({ info: { ...info, platform: 'windows-x86_64' }, parity, librawWasm: '1.7.0' }).reason, 'platform-unverified');
   assert.equal(decideNativeRawDecode({ info, parity, librawWasm: '1.7.0', override: 'off' }).enabled, false);
   assert.equal(decideNativeRawDecode({ info: { ...info, platform: 'linux-x86_64' }, parity, override: 'on' }).enabled, true, 'support override');
-  // What ships: the deterministic libraw-wasm is not released, so no desktop decodes natively by default.
-  assert.equal(NATIVE_RAW_PARITY.librawWasm, null);
-  assert.equal(decideNativeRawDecode({ info }).enabled, false);
+  // What ships (#302): the page runs the vendored deterministic build, verified
+  // on macOS arm64 and x86_64, so macOS decodes natively and nothing else does.
+  assert.equal(NATIVE_RAW_PARITY.librawWasm, LIBRAW_WASM_VERSION);
+  assert.deepEqual(decideNativeRawDecode({ info }), { enabled: true, reason: 'parity' });
+  assert.equal(decideNativeRawDecode({ info: { ...info, platform: 'macos-x86_64' } }).enabled, true);
+  assert.equal(decideNativeRawDecode({ info: { ...info, platform: 'linux-x86_64' } }).reason, 'platform-unverified');
+  assert.equal(decideNativeRawDecode({ info: { ...info, platform: 'windows-x86_64' } }).reason, 'platform-unverified');
   assert.deepEqual([...NATIVE_RAW_PARITY.platforms], ['macos-aarch64', 'macos-x86_64']);
 }
 
@@ -83,8 +92,8 @@ console.warn = () => {};
   resetNativeRawProbe();
   let asked = 0;
   const core = { invoke: async (command) => { asked++; assert.equal(command, 'native_raw_info'); return { available: true, platform: 'macos-aarch64' }; } };
-  assert.equal((await probeNativeRawDecoder({ core, override: null })).enabled, false);
-  assert.equal((await probeNativeRawDecoder({ core, override: 'on' })).enabled, false, 'cached per page');
+  assert.deepEqual((await probeNativeRawDecoder({ core, override: null })).enabled, true, 'macOS arm64 is verified (#302)');
+  assert.equal((await probeNativeRawDecoder({ core, override: 'off' })).enabled, true, 'cached per page');
   assert.equal(asked, 1);
   resetNativeRawProbe();
   assert.equal((await probeNativeRawDecoder({ core: null, override: null })).reason, 'not-desktop');

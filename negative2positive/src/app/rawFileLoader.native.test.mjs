@@ -107,6 +107,7 @@ function reset(overrides = {}) {
     wasmOpenBytes: null,
     wasmOpenSettings: null,
     onProcess: null,
+    platform: 'macos-aarch64', // what native_raw_info reports
   }, overrides);
   bitmapDecodes = 0;
 }
@@ -118,7 +119,7 @@ const core = {
     await Promise.resolve();
     switch (command) {
       case 'native_raw_info':
-        return { available: true, openmp: true, maxThreads: 8, libraw: '0.22.1-Release', platform: 'macos-aarch64', scheme: 'rawdecode', uploadChunkBytes: 8 * 1024 * 1024 };
+        return { available: true, openmp: true, maxThreads: 8, libraw: '0.22.1-Release', platform: scene.platform, scheme: 'rawdecode', uploadChunkBytes: 8 * 1024 * 1024 };
       case 'native_raw_begin':
         scene.sessions++;
         scene.uploads = [];
@@ -469,14 +470,13 @@ function isolate(on) {
   assert.deepEqual(scene.wasmOpenBytes, container);
 }
 
-// The desktop with the gate off (what ships until the deterministic
-// libraw-wasm is pinned) and a webview without SharedArrayBuffer (macOS
-// WKWebView reports isolation without it): `new LibRaw()` and nothing native
-// beyond the probe.
+// A desktop the gate does not name (Linux, Windows: unverified) and a webview
+// without SharedArrayBuffer: `new LibRaw()` and nothing native beyond the
+// probe.
 {
   globalThis.localStorage = { getItem: () => null };
   resetNativeRawProbe();
-  reset();
+  reset({ platform: 'linux-x86_64' });
   librawTest.constructed = [];
   const SavedSharedArrayBuffer = globalThis.SharedArrayBuffer;
   delete globalThis.SharedArrayBuffer;
@@ -487,6 +487,22 @@ function isolate(on) {
   }
   assert.deepEqual(scene.calls, ['native_raw_info'], 'the gate is asked, nothing is decoded natively');
   assert.deepEqual(librawTest.constructed, ['single']);
+  globalThis.localStorage = savedStorage;
+  resetNativeRawProbe();
+}
+
+// What ships on macOS since #302: the gate names the vendored build and the
+// platform, so without any override the file decodes natively and no WASM
+// decoder is constructed.
+{
+  globalThis.localStorage = { getItem: () => null };
+  resetNativeRawProbe();
+  reset({ platform: 'macos-aarch64' });
+  librawTest.constructed = [];
+  assertPlanes(await loadRawFile(makeContainer().buffer, 'frame.nef', {}), 'gate on: macOS decodes natively');
+  assert.deepEqual(scene.calls.slice(0, 2), ['native_raw_info', 'native_raw_begin'], 'the gate says native');
+  assert.ok(scene.calls.includes('native_raw_process'), 'LibRaw ran in the shell');
+  assert.deepEqual(librawTest.constructed, [], 'no WASM decoder');
   globalThis.localStorage = savedStorage;
   resetNativeRawProbe();
 }

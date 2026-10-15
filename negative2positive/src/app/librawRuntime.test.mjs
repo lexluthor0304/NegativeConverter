@@ -2,9 +2,11 @@ import assert from 'node:assert/strict';
 import LibRaw from 'libraw-wasm';
 import { librawThreadSupport, planLibRawThreads, createLibRaw, probeLibRawWorker, resetLibRawRuntime, watchLibRawWorker, THREADED_START_TIMEOUT_MS } from './librawRuntime.js';
 
-// The published libraw-wasm (1.6.0) has no thread flag: the app keeps
-// constructing it exactly as before.
-assert.equal(librawThreadSupport(LibRaw), null, 'the installed libraw-wasm is not a threaded build');
+// The installed libraw-wasm is the vendored deterministic build (#302), which
+// ships the multi-threaded module and says so on its class (the page still
+// caps its threads, planLibRawThreads below). A build without the flag, like
+// the published 1.6.0, keeps `new LibRaw()` exactly as before.
+assert.deepEqual(librawThreadSupport(LibRaw), { threads: true, maxThreads: 16 }, 'the installed libraw-wasm is the threaded build');
 assert.equal(librawThreadSupport(null), null);
 assert.equal(librawThreadSupport(class {}), null);
 assert.equal(librawThreadSupport(Object.assign(class {}, { features: { threads: false } })), null);

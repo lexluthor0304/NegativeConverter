@@ -12,3 +12,6 @@ negative2positive/public/codecs/*.wasm binary
 # the SHA-256 in the build info by pngDeflateWasm.test.mjs.
 negative2positive/src/workers/png-deflate-build-info.txt text eol=lf
 negative2positive/src/workers/*.wasm binary
+# The vendored LibRaw-Wasm build (#302) is held to BUILD-INFO.txt byte for
+# byte (librawVendor.test.mjs): no line-ending conversion on any checkout.
+negative2positive/vendor/libraw-wasm/** -text

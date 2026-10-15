@@ -1,0 +1,21 @@
+libraw-wasm 1.6.0-deterministic.45b40c0 (#302)
+source:     https://github.com/lexluthor0304/LibRaw-Wasm.git @ 45b40c07e08f46a3330a7aa2945f5d389daf592a (ybouane/LibRaw-Wasm#30)
+            LibRaw 0.22.1, Little-CMS 2.19.1, libjpeg 9f (Emscripten port), musl 1.2.6 math (portable-math/)
+toolchain:  emcc (Emscripten gcc/clang-like replacement + linker emulating GNU ld) 6.0.4-git
+            node v26.5.1, esbuild from the commit's package-lock.json
+built by:   scripts/build-libraw-wasm.sh (FORCE_LIBS=1 bash compileLibraw.sh, which ends with node build.js)
+
+file                          sha256
+dist/index.d.ts               76160d08355abfc7f89b7b3cd9a6e733fa6c727e0debd7968e952ce5f23b2ee6
+dist/index.js                 0fee5f882e064aa5eb42641a9c84840806a0c0743f5741b9370ae51e49c6c0c7
+dist/index.js.map             af73f873e329fde5f6be08f2c5f4af7b706c3dfabb9d34b14580c1b140bc0f48
+dist/libraw-threaded.js       1af5c8d27ff8ac317e55ac50780e54cdc127bf8f6906f4c8ad611e100fa263a6
+dist/libraw-threaded.js.map   2a14444e25487aef6f619a10f12666a67bf7145ea773dab80cfa2983815fbaa8
+dist/libraw-threaded.wasm     34b45fd2ce42c14b45fb54d5ca5f859a32767cdee4b5da7f5978c82aae528bba
+dist/libraw.js                d9c4f252a5ab2ef2c32e5f2ac5193900f6e01e27ff2e97e622af67732ec79e9e
+dist/libraw.js.map            b542a535e4aafb49ee81a768d2b3bbae21e16ec841c8ce892d453f3d06631e2d
+dist/libraw.wasm              34d74124c903899fad2fec1dfb0845ed95b6503b45ea783eab7dfe260daa29dc
+dist/worker-threaded.js       f951bb7498d3128eb333afd0801671877df6ee0fa932d5e0199ddd5de13d40e4
+dist/worker-threaded.js.map   29b97d316c43b3545c484cbc42e6934238bcb7ef8a88da9ce321fc973a10e224
+dist/worker.js                6c5969a701d0c64fda3bca5c956f126ae036f9f351036bcfe932a7083cdb3f24
+dist/worker.js.map            1c830e61cf3542114913352b0962a1b23c28e4c59f59610d6b494996e020ad13

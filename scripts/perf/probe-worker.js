@@ -10,7 +10,8 @@
 (function installNcPerfWorkerProbe(global) {
   'use strict';
   if (global.__ncPerfWorker || typeof global.__ncPerfWorkerEmit !== 'function') return;
-  if (global.name === 'em-pthread') return;
+  // 'em-pthread', or 'em-pthread-mt' in the threaded LibRaw build (#302).
+  if (typeof global.name === 'string' && global.name.indexOf('em-pthread') === 0) return;
   global.__ncPerfWorker = true;
   var emit = global.__ncPerfWorkerEmit;
   var origin = global.performance.timeOrigin;

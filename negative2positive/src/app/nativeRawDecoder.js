@@ -34,18 +34,17 @@ export const NATIVE_RAW_UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024;
 
 // The libraw-wasm release the page decodes with.
 // scripts/check-pinned-versions.mjs keeps it equal to package.json.
-export const LIBRAW_WASM_VERSION = '1.6.0';
+export const LIBRAW_WASM_VERSION = '1.6.0-deterministic.45b40c0';
 
 // Where native decodes are verified identical to a libraw-wasm release: the
 // RGB16 SHA-256 of every gate fixture at 1, 4 and 8 threads (the src-tauri
 // native_raw parity tests) equals the WASM gate's
 // (src-tauri/native/wasm-parity-hashes.json, docs/native-raw-decode.md).
-// macOS arm64, and x86_64 (run under Rosetta 2), match the deterministic
-// libraw-wasm rebuild of #264 part B, which is not released yet: until
-// package.json pins that release and it is entered here, desktops keep
-// decoding with WASM.
+// macOS arm64 (cargo test) and x86_64 (the same flags, run under Rosetta 2)
+// match the vendored deterministic build (#302) on every fixture, the 60 MP
+// M11 DNG included, so macOS decodes natively; other desktops keep WASM.
 export const NATIVE_RAW_PARITY = Object.freeze({
-  librawWasm: null,
+  librawWasm: '1.6.0-deterministic.45b40c0',
   platforms: Object.freeze(['macos-aarch64', 'macos-x86_64']),
 });
 

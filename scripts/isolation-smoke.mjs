@@ -425,8 +425,11 @@ export async function runIsolationSmoke({ send, sendTo, onCdpEvent, evaluate, wa
     if (cdpWorkers) {
       const badWorkers = checkedWorkers.filter((entry) => entry.isolated !== true);
       if (badWorkers.length) fail(`worker targets not cross-origin isolated: ${JSON.stringify(badWorkers)}`);
-      const librawWorkers = checkedWorkers.filter((entry) => /libraw/.test(entry.url) && entry.name !== 'em-pthread');
-      const librawThreads = checkedWorkers.filter((entry) => /libraw-threaded/.test(entry.url) && entry.name === 'em-pthread');
+      // Emscripten's pthread pool workers: 'em-pthread', and 'em-pthread-mt'
+      // in the threaded LibRaw build (#302), which renames its own.
+      const isPthread = (entry) => /^em-pthread/.test(entry.name || '');
+      const librawWorkers = checkedWorkers.filter((entry) => /libraw/.test(entry.url) && !isPthread(entry));
+      const librawThreads = checkedWorkers.filter((entry) => /libraw-threaded/.test(entry.url) && isPthread(entry));
       console.log(`isolation: ${checkedWorkers.length} worker targets isolated (${librawWorkers.length} LibRaw, ${librawThreads.length} LibRaw pthreads)`);
       if (!librawWorkers.length) fail(`no LibRaw worker target was seen: ${JSON.stringify(checkedWorkers.map((entry) => entry.url))}`);
       if (threadedLibRaw && !librawThreads.length) console.log('note: no LibRaw pthread target was attached in time');

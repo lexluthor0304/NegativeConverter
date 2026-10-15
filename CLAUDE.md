@@ -111,7 +111,7 @@ src-tauri/                      # Tauri desktop packaging
 
 ### Key Technologies
 - **HTML5 Canvas / WebGL** for image rendering and manipulation
-- **libraw-wasm** (npm) for RAW file decoding (CR2, NEF, ARW, DNG, RW2). The desktop build also
+- **libraw-wasm** for RAW file decoding (CR2, NEF, ARW, DNG, RW2): since #302 a deterministic build with an optional multi-threaded module, vendored as `negative2positive/vendor/libraw-wasm` (`file:` dependency, rebuilt by `scripts/build-libraw-wasm.sh` from ybouane/LibRaw-Wasm#30) until upstream releases it. The desktop build also
   links the same LibRaw natively (`src-tauri/vendor/libraw`, built by `src-tauri/native/build_libraw.rs`,
   so `npm run test:rust` compiles it); `nativeRawDecoder.js` uses it only where its output is verified
   identical to the page's libraw-wasm (`docs/native-raw-decode.md`). Which decoder runs where (native,

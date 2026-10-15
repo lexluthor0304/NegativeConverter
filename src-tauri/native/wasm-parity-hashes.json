@@ -1,5 +1,5 @@
 {
-  "about": "What the native decoder must reproduce (#264): the RGB16 SHA-256 of libraw-wasm's deterministic rebuild (LibRaw 0.22.1, no fast-math, -ffp-contract=off, musl 1.2.6 libm; #264 part B, libraw-wasm branch perf229-264 @ 14af432, not released yet), identical for its single-threaded build and its threaded build at 1-8 threads, and the metadata(true) fields the page reads. Hashes are over imageData().data (width*height*3 native-endian uint16) with rawFileLoader.js's options, outputBps 16; halfRgb16 with halfSize. `metadata` is the worker's metadata(true) object before index.js post-processes thumb_format, desc and timestamp, restricted to the keys the native object has (native_raw.rs RawMetadata); libraw-wasm 1.6.0 and the deterministic build report the same values for every file here. The HE-compressed NEFs have no hashes: LibRaw cannot decode them; their `embeddedPreview` is what the app's loader falls back to, the embedded JPEG at 1703835 (SHA-256 of the 8-bit plane decoded by Chrome), which the WASM RGB16 gate holds (scripts/raw-decode-gate-smoke.mjs, `--raw-decode-gate-only`). Files are matched by name and size; the camera files are not in the repository.",
+  "about": "What the native decoder must reproduce (#264): the RGB16 SHA-256 of libraw-wasm's deterministic rebuild (LibRaw 0.22.1, no fast-math, -ffp-contract=off, musl 1.2.6 libm; #264 part B, libraw-wasm branch perf229-264 @ 14af432; the app vendors the same build from ybouane/LibRaw-Wasm#30 @ 45b40c0 since #302, which the WASM gate holds to these hashes), identical for its single-threaded build and its threaded build at 1-8 threads, and the metadata(true) fields the page reads. Hashes are over imageData().data (width*height*3 native-endian uint16) with rawFileLoader.js's options, outputBps 16; halfRgb16 with halfSize. `metadata` is the worker's metadata(true) object before index.js post-processes thumb_format, desc and timestamp, restricted to the keys the native object has (native_raw.rs RawMetadata); libraw-wasm 1.6.0 and the deterministic build report the same values for every file here. The HE-compressed NEFs have no hashes: LibRaw cannot decode them; their `embeddedPreview` is what the app's loader falls back to, the embedded JPEG at 1703835 (SHA-256 of the 8-bit plane decoded by Chrome), which the WASM RGB16 gate holds (scripts/raw-decode-gate-smoke.mjs, `--raw-decode-gate-only`). Files are matched by name and size; the camera files are not in the repository.",
   "files": {
     "_DSC3111.NEF": {
       "bytes": 13727369,
@@ -153,6 +153,16 @@
             "body": ""
           }
         }
+      }
+    },
+    "L1009967.dng": {
+      "bytes": 76054028,
+      "size": "9536x6336",
+      "rgb16": "be64623a95441caa7ba79e1e523af6a2ef832cd109d3826aa8c75190e527c4bf",
+      "halfRgb16": "71d9118ef232699dfa032b47e3eb3064170cb29a662e4665e10f48e97669a389",
+      "libraw-wasm 1.6.0": {
+        "rgb16": "cf7f5689a553ce831878179a2bea3f560ec4f5c46367f824ae9df086feaa5bc4",
+        "halfRgb16": "71d9118ef232699dfa032b47e3eb3064170cb29a662e4665e10f48e97669a389"
       }
     },
     "DSC_8800.NEF": {

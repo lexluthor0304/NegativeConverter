@@ -3,6 +3,8 @@ node_modules/
 
 # 构建输出
 dist/
+# The vendored LibRaw-Wasm build (#302) is source, not build output.
+!negative2positive/vendor/libraw-wasm/dist/
 build/
 # UI 字体子集：scripts/build-ui-fonts.mjs 在 dev/build 启动时生成
 negative2positive/src/assets/fonts/ui/
