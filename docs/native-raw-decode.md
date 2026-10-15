@@ -5,11 +5,10 @@ The web app decodes RAW files with LibRaw compiled to WebAssembly
 links the same LibRaw release natively (`src-tauri/src/native_raw.rs`) and can
 decode on every core with OpenMP, outside WebContent. It does so only where the
 native output is verified bit-identical to the libraw-wasm release the page
-runs; everywhere else the page keeps libraw-wasm. Today that is nowhere by
-default (see [The gate](#the-gate)). The page has run the deterministic
-build the native decoder matches since #302 (vendored, `docs/raw-decoding.md`);
-what is left before macOS decodes natively is the native parity run on the
-fixtures and the M11 DNGs, then naming that build in `NATIVE_RAW_PARITY`.
+runs; everywhere else the page keeps libraw-wasm. Since #302 that is macOS
+(arm64 and x86_64): the page runs the vendored deterministic build the
+native decoder matches (`docs/raw-decoding.md`), verified again on every
+fixture and the 60 MP M11 DNG (see [The gate](#the-gate)).
 
 ## What runs where
 
@@ -169,6 +168,27 @@ and fail in `unpack()` with LIBRAW_FILE_UNSUPPORTED (−2) natively as in WASM.
 The metadata of all six fixtures equals libraw-wasm's. The 60 MP M11 DNGs
 were not decoded here.
 
+### Verified again (2026-10-15, #302, M1 Pro)
+
+Against the vendored build the page now runs, with the M11 DNG added to
+`wasm-parity-hashes.json` (recorded by the WASM gate's record mode, its
+single-threaded and threaded decodes identical):
+
+- arm64, the app's build: `npm run test:rust` with `NATIVE_RAW_FILES` =
+  `_DSC3111.NEF`, `_DSC5290.dng`, `L1009967.dng` and the four HE NEFs as
+  `NATIVE_RAW_HE_FILES`: 15 tests pass, 6 decodes compared with the gate
+  (full and half size at 1, 4 and 8 threads), the planes equal
+  `packRGBToImage16(dcraw_make_mem_image())` for every flip, the HE NEFs fail
+  in `unpack()`, the metadata equals libraw-wasm's.
+- x86_64 under Rosetta 2: a driver over the vendored sources with
+  `build_libraw.rs`'s flags (macOS 10.15, the libomp x86_64 slice), the
+  same three files at 1, 4 and 8 threads, full and half size: all 18 RGB16
+  hashes equal the gate's.
+
+`L1009967.dng` (Leica M11, 9536×6336) decodes natively in 3.2 s on one
+thread, 1.77 s on 4 and 1.54 s on 8 (the test build; libraw-wasm 1.6.0
+took 5.4 s on one core).
+
 ## The gate
 
 `nativeRawDecoder.js`:
@@ -180,17 +200,16 @@ were not decoded here.
   output was verified against, and the `<os>-<arch>` keys (`native_raw_info`)
   where it was. Native decoding is on only when both match.
 
-Today `librawWasm` is `null`: the app still runs libraw-wasm 1.6.0, whose
-output differs from the deterministic build (the flagged decoder change of
-part B), so desktops keep decoding with WASM. `package.json` pins 1.6.0
-exactly. When the deterministic libraw-wasm is released, follow
-`docs/raw-decoding.md` ("When the deterministic libraw-wasm is released"):
-pin it, run the WASM RGB16 gate (`--raw-decode-gate-only`) against
+Since #302 `librawWasm` is `'1.6.0-deterministic.45b40c0'`, the vendored
+deterministic build `package.json` depends on, and `platforms` lists macOS
+arm64 and x86_64, where that build and the native decoder were verified
+identical (above). When the page moves to another libraw-wasm (an npm
+release of the same PR, or a rebuild), follow `docs/raw-decoding.md` again:
+run the WASM RGB16 gate (`--raw-decode-gate-only`) against
 `src-tauri/native/wasm-parity-hashes.json`, run `npm run test:rust` with the
-fixtures on each platform, then set `NATIVE_RAW_PARITY.librawWasm` to it.
+fixtures on each platform, then name the new version here.
 
-macOS arm64 and x86_64 then decode natively. Add another platform after its
-parity test passes there.
+Add another platform after its parity test passes there.
 
 Support / measurement override: `localStorage.nc_native_raw = 'on'` decodes
 natively wherever the decoder is built in (even unverified), `'off'` never.

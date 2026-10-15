@@ -24,7 +24,7 @@ loadRawFile ── createRawDecoder (nativeRawDecoder.js)
 
 | where | decoder | threads | when it cannot decode |
 |---|---|---|---|
-| desktop app whose native LibRaw passes the gate (`NATIVE_RAW_PARITY`: the pinned libraw-wasm release and the platform it was verified on; **no platform today**) | native LibRaw 0.22.1 with OpenMP, in the app process | every core; 2 for a background lane | LibRaw rejects the file (unsupported, corrupt, too big): the embedded JPEG, no second LibRaw attempt. Anything else (IPC, transfer, a step timeout, memory, lossy DNG, other settings): libraw-wasm below, with the same bytes and settings |
+| desktop app whose native LibRaw passes the gate (`NATIVE_RAW_PARITY`: the pinned libraw-wasm release and the platform it was verified on; macOS arm64 and x86_64 since #302) | native LibRaw 0.22.1 with OpenMP, in the app process | every core; 2 for a background lane | LibRaw rejects the file (unsupported, corrupt, too big): the embedded JPEG, no second LibRaw attempt. Anything else (IPC, transfer, a step timeout, memory, lossy DNG, other settings): libraw-wasm below, with the same bytes and settings |
 | a page with shared memory (`crossOriginIsolated` **and** `SharedArrayBuffer`) and a libraw-wasm that ships the threaded build (`LibRaw.features.threads`: the vendored build since #302, not 1.6.0) | libraw-wasm's threaded build, `new LibRaw({ threads })` | min(cores, 8); 2 for a background lane | an instance that does not start (its worker, pthread pool or 4 GB shared memory; `runtimeInfo()` rejects or does not answer in 8 s) decodes on `new LibRaw()` instead, before any bytes are handed over, and the page stops asking for threads |
 | everywhere else | `new LibRaw()`, exactly as before #264 | 1 | as before |
 
@@ -51,12 +51,12 @@ Export All's decodes (`processFileWithSettings` and the decode-ahead
 `prepare`) run at `'user'` priority, uncapped.
 
 What each target runs today (the vendored deterministic build
-`1.6.0-deterministic.45b40c0`, #302; the native gate still off):
+`1.6.0-deterministic.45b40c0`, #302; the native gate on for macOS):
 
 | target | isolated | SharedArrayBuffer | RAW decoder |
 |---|---|---|---|
 | Chrome, Vite dev/preview (and the production site, same headers) | yes | yes | the threaded build, `new LibRaw({ threads })`: min(cores, 8), 2 in a background lane |
-| macOS desktop (WKWebView, `tauri://localhost`) | the flag says yes | **no** | `new LibRaw()` (the same build's single-threaded module); native LibRaw once the gate names this build (below) |
+| macOS desktop (WKWebView, `tauri://localhost`) | the flag says yes | **no** | native LibRaw on every core (2 for a background lane); a failure that is not the file's own decodes the same bytes with the build's single-threaded module, `new LibRaw()` |
 | Windows WebView2, Linux WebKitGTK | not checked | not checked | `new LibRaw()` (or threaded, if they turn out to share memory); native is not built on Windows and not verified on Linux |
 
 ## Output
@@ -118,13 +118,13 @@ of the deterministic build needs:
 2. The WASM gate on the fixtures: passed. Every fixture decodes to the
    deterministic hashes recorded here, single-threaded and threaded at 1,
    2, 4 and 8 threads, isolated and not; the HE NEFs yield no image.
-3. The M11 DNGs: `L1009967.dng` decodes deterministically at every thread
-   count (the table above). Its gate entry (`RAW_DECODE_GATE_RECORD=1`,
-   with the half-size decode and the metadata) is still to be recorded.
-4. `npm run test:rust` with the fixtures, the M11 DNG among them, on each
-   desktop platform; then set `NATIVE_RAW_PARITY.librawWasm =
-   '1.6.0-deterministic.45b40c0'`. macOS (arm64 and x86_64) then decodes
-   natively. Still to do: the native build needs several GB of free disk.
+3. The M11 DNGs: `L1009967.dng` is in the gate (recorded with
+   `RAW_DECODE_GATE_RECORD=1`, full and half size; every configuration
+   identical). The rest of the 2026-09-23 roll can be added the same way.
+4. Native parity: done on macOS arm64 (`npm run test:rust` with the
+   fixtures and the M11 DNG) and x86_64 (under Rosetta 2;
+   `docs/native-raw-decode.md`), and `NATIVE_RAW_PARITY.librawWasm` names
+   the build: macOS decodes natively.
 5. The output change is flagged in the release notes of #302's release.
 
 On an isolated web page the threaded build runs at once: the page needs
