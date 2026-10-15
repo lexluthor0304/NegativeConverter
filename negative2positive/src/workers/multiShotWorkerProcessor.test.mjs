@@ -8,7 +8,10 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import * as pako from 'pako';
+import { loadPng16Zlib } from './pngDeflateWasm.js';
+
+// The worker encodes with the export worker's deflater (#301); so does the reference.
+const png16Zlib = await loadPng16Zlib();
 
 globalThis.ImageData ||= class ImageData {
   constructor(data, width, height) { Object.assign(this, { data, width, height }); }
@@ -72,7 +75,7 @@ function headMerge(images, mode) {
   }
   if (frames.length < 2) return { blob: null, used: frames.length };
   const merged = head.mergeFrames(frames, { mode, region: head.coverageRect(frames), opaque: true });
-  return { blob: encodePng16Blob(merged.data, merged.width, merged.height, pako), used: frames.length };
+  return { blob: encodePng16Blob(merged.data, merged.width, merged.height, png16Zlib), used: frames.length };
 }
 
 // A Worker stand-in: messages cross with structured clone and transfer (so

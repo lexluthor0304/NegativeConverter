@@ -1,7 +1,8 @@
 // #257: the PNG16 band encoder with real browser Workers. The Node tests run
 // the worker handler in process; this proves the same bytes with real
-// Workers, structured clone and Blob hand-off, and that a cancel terminates
-// the band workers. Part 2 checks that a Studio 16-bit PNG export goes
+// Workers, structured clone and Blob hand-off, that the page and the band
+// workers deflate with the WebAssembly module (#301), and that a cancel
+// terminates the band workers. Part 2 checks that a Studio 16-bit PNG export goes
 // through the band pool and releases its workers when it ends.
 import { join } from 'node:path';
 
@@ -16,7 +17,7 @@ export async function runPng16BandSmoke({ send, evaluate, waitFor, wait, fail, i
   // ---- 1. same bytes with 1, 2 and 6 workers, one worker and the main thread ----
   const parity = await evaluate(`(async () => {
     const { createPng16BandPool, createExportWorkerBridge, isAbortError } = await import('/src/workers/workerBridge.js');
-    const { encodePng16Blob } = await import('/src/app/exportImageEncoders.js');
+    const { encodePng16Blob, png16DeflateVariant } = await import('/src/app/exportImageEncoders.js');
     const { planPng16Bands } = await import('/src/workers/png16Bands.js');
     const { loadPngFile } = await import('/src/app/pngFileLoader.js');
     const W = 613, H = 401, bandBytes = 60000; // 3679-byte rows: 16 rows per band, 26 bands
@@ -54,10 +55,12 @@ export async function runPng16BandSmoke({ send, evaluate, waitFor, wait, fail, i
         const bands = planPng16Bands(W, H, channels, { bandBytes }).bands.length;
         const reference = await bytesOf(encodePng16Blob(image, { bandBytes }));
         const pools = {};
+        const deflate = { mainThread: png16DeflateVariant() };
         for (const size of [1, 2, 6]) {
           const pool = createPng16BandPool({ size });
           try {
             pools[size] = same(await bytesOf(await pool.encode(image, { bandBytes })), reference);
+            deflate[size] = pool.lastDeflate;
           } finally {
             pool.dispose();
           }
@@ -69,7 +72,7 @@ export async function runPng16BandSmoke({ send, evaluate, waitFor, wait, fail, i
         const expected = image.__image16 ? plane : Uint16Array.from(image.data, v => v * 257);
         const zlib = await inflateIdat(reference);
         out.cases.push({
-          label, bands, pools, oneWorker,
+          label, bands, pools, oneWorker, deflate,
           samples: same(decoded.__image16?.data, Uint16Array.from(expected, (v, i) => i % 4 === 3 && channels === 3 ? 65535 : v)),
           idats: zlib.types.filter(t => t === 'IDAT').length,
           adlerVerified: zlib.filtered === (W * channels * 2 + 1) * H
@@ -118,11 +121,14 @@ export async function runPng16BandSmoke({ send, evaluate, waitFor, wait, fail, i
     if (!c.pools[1] || !c.pools[2] || !c.pools[6] || !c.oneWorker) fail(`PNG16 bytes depend on the worker count (${c.label}): ` + JSON.stringify(c));
     if (!c.samples) fail(`PNG16 samples changed (${c.label}): ` + JSON.stringify(c));
     if (c.idats !== c.bands + 1 || !c.adlerVerified) fail(`PNG16 IDAT layout or Adler-32 wrong (${c.label}): ` + JSON.stringify(c));
+    // #301: the page and every band worker deflate with zlib-rs (Chrome
+    // validates WASM SIMD), not the pako fallback.
+    if (Object.values(c.deflate).some((variant) => variant !== 'simd')) fail(`PNG16 did not deflate with the WebAssembly module (${c.label}): ` + JSON.stringify(c.deflate));
   }
   if (!parity.cancel.aborted || parity.cancel.ms > 1000 || parity.cancel.terminated < 3 || parity.cancel.postsAfter !== 0) {
     fail('cancelling a PNG16 encode must terminate every band worker within 1 s: ' + JSON.stringify(parity.cancel));
   }
-  if (parity.warnings.some(w => /falling back/.test(w))) fail('the band pool fell back: ' + JSON.stringify(parity.warnings));
+  if (parity.warnings.some(w => /falling back|WebAssembly deflate/.test(w))) fail('the band pool or the deflate module fell back: ' + JSON.stringify(parity.warnings));
 
   // ---- 2. a Studio 16-bit PNG export uses the band pool and releases it ----
   const doc = await send('DOM.getDocument');

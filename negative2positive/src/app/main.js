@@ -21585,10 +21585,14 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         const ownPool = !png16Pool && !bridge ? createOperationPng16Pool(1) : null;
         const pool = png16Pool || ownPool;
         let bands = 0;
+        let deflate = null;
         try {
           if (pool) {
             blob = await pool.encode(frame, { ...settings, onProgress, signal });
-            if (blob) bands = pool.size;
+            if (blob) {
+              bands = pool.size;
+              deflate = pool.lastDeflate;
+            }
           }
           if (!blob && exportWorkers.isWorkerAvailable()) {
             blob = await exportWorkers.workerEncodePng16(frame, { ...settings, onProgress, signal, transferPlane, onRestore });
@@ -21598,12 +21602,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           if (ownPool) ownPool.dispose();
         }
         if (blob) {
-          trace.end({ bytes: blob.size || 0, worker: true, bandWorkers: bands });
+          trace.end({ bytes: blob.size || 0, worker: true, bandWorkers: bands, deflate });
           return attachMetadataToBlob(blob, 'png', metadata);
         }
-        const { encodePng16Blob } = await getExportImageEncoders();
+        const { encodePng16Blob, png16DeflateVariant } = await getExportImageEncoders();
         blob = encodePng16Blob(frame, settings);
-        trace.end({ bytes: blob.size || 0, worker: false });
+        trace.end({ bytes: blob.size || 0, worker: false, deflate: png16DeflateVariant() });
         return attachMetadataToBlob(blob, 'png', metadata);
       }
 

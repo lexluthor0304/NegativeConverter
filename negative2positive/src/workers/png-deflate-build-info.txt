@@ -1,0 +1,10 @@
+png-deflate (#301): zlib-rs raw deflate behind a C ABI, for workers/pngDeflateWasm.js
+source:    wasm/png-deflate (Cargo.lock), built by scripts/build-png-deflate-wasm.sh
+zlib-rs:   0.6.8 (Zlib licence)
+toolchain: rustc 1.95.0 (59807616e 2026-04-14)
+           cargo 1.95.0 (f2d3ce0bd 2026-03-21)
+target:    wasm32-unknown-unknown, release profile (opt-level 3, lto, codegen-units 1, panic abort, strip)
+
+module                 sha256                                                              bytes  rustflags
+png-deflate.wasm       e4544278ca69e3f53cf02d314f25f7f516f253494722ce353c690177e2984d90    83590  (none)
+png-deflate-simd.wasm  7edc75ae70fe502d1541d7b07186cd5b6c486aa40d964efb44cf26f025b94b80    83097  -C target-feature=+simd128

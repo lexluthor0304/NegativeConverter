@@ -21,9 +21,16 @@ globalThis.self = {
 await import('./exportWorker.js');
 assert.equal(typeof self.onmessage, 'function', 'exportWorker must install an onmessage handler');
 
-function send(message) {
+// A request's final reply. PNG16 encodes wait for the deflate module (#301),
+// so their replies come a few turns after the message.
+const FINAL_REPLIES = new Set(['result', 'blobResult', 'bandResult', 'imageResult', 'dngResult', 'error']);
+async function send(message) {
   posted.length = 0;
   self.onmessage({ data: message });
+  const deadline = Date.now() + 10_000;
+  while (!posted.some((p) => p.message.id === message.id && FINAL_REPLIES.has(p.message.type)) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
   return posted.map((p) => p.message);
 }
 
@@ -83,14 +90,14 @@ const copyOf = (view) => view.buffer.slice(view.byteOffset, view.byteOffset + vi
 // ------------------------------------------- PNG16: 8-bit fallback vs 16-bit
 
 {
-  const samples = png16Samples(await blobOf(send({
+  const samples = png16Samples(await blobOf(await send({
     type: 'encodePng16', id: 1, pixelData: copyOf(EIGHT_BIT), sourceBits: 8, width: WIDTH, height: HEIGHT
   })));
   assert.deepEqual(Array.from(samples), Array.from(EIGHT_BIT).map((v) => v * 257));
 }
 
 {
-  const samples = png16Samples(await blobOf(send({
+  const samples = png16Samples(await blobOf(await send({
     type: 'encodePng16', id: 2, pixelData: copyOf(SIXTEEN_BIT), sourceBits: 16, width: WIDTH, height: HEIGHT
   })));
   assert.equal(samples[0], 0x1234, 'the worker must write genuine 16-bit samples');
@@ -103,14 +110,14 @@ const copyOf = (view) => view.buffer.slice(view.byteOffset, view.byteOffset + vi
 // -------------------------------------------------------------------- TIFF16
 
 {
-  const samples = tiff16Samples(await blobOf(send({
+  const samples = tiff16Samples(await blobOf(await send({
     type: 'encodeTiff', id: 3, pixelData: copyOf(EIGHT_BIT), sourceBits: 8, width: WIDTH, height: HEIGHT, bitDepth: 16
   })));
   assert.deepEqual(Array.from(samples), Array.from(EIGHT_BIT).map((v) => v * 257));
 }
 
 {
-  const samples = tiff16Samples(await blobOf(send({
+  const samples = tiff16Samples(await blobOf(await send({
     type: 'encodeTiff', id: 4, pixelData: copyOf(SIXTEEN_BIT), sourceBits: 16, width: WIDTH, height: HEIGHT, bitDepth: 16
   })));
   assert.equal(samples[0], 0x1234);
@@ -120,7 +127,7 @@ const copyOf = (view) => view.buffer.slice(view.byteOffset, view.byteOffset + vi
 // ------------------------------------------- progress + applyAdjustments path
 
 {
-  const messages = send({
+  const messages = await send({
     type: 'encodePng16', id: 5, pixelData: copyOf(EIGHT_BIT), sourceBits: 8, width: WIDTH, height: HEIGHT
   });
   assert.deepEqual(
@@ -132,7 +139,7 @@ const copyOf = (view) => view.buffer.slice(view.byteOffset, view.byteOffset + vi
 {
   const identity = new Uint8Array(256);
   for (let i = 0; i < 256; i++) identity[i] = i;
-  const messages = send({
+  const messages = await send({
     type: 'applyAdjustments',
     id: 6,
     inputBuffer: copyOf(EIGHT_BIT),
@@ -152,7 +159,7 @@ const copyOf = (view) => view.buffer.slice(view.byteOffset, view.byteOffset + vi
 // ------------------------------------------------------------ error handling
 
 {
-  const messages = send({ type: 'nonsense', id: 7 });
+  const messages = await send({ type: 'nonsense', id: 7 });
   assert.equal(messages.length, 1);
   assert.equal(messages[0].type, 'error');
   assert.match(messages[0].message, /Unknown message type/);
@@ -160,7 +167,7 @@ const copyOf = (view) => view.buffer.slice(view.byteOffset, view.byteOffset + vi
 
 {
   // A throwing handler must report back rather than strand the request.
-  const messages = send({ type: 'encodePng16', id: 8, pixelData: copyOf(EIGHT_BIT), sourceBits: 8, width: -1, height: 1 });
+  const messages = await send({ type: 'encodePng16', id: 8, pixelData: copyOf(EIGHT_BIT), sourceBits: 8, width: -1, height: 1 });
   assert.equal(messages.at(-1).type, 'error');
   assert.equal(messages.at(-1).id, 8);
 }
@@ -178,7 +185,9 @@ const { applyAdjustmentsToPixels16, downconvertPlane16 } = await import('./pixel
 const { encodeTiffBlob, encodePng16Blob, HOST_LITTLE_ENDIAN } = await import('./imageEncoders.js');
 const { computeGainMap } = await import('./gainMap.js');
 const { analyzeExpiredFilm, EXPIRED_RESCUE_DEFAULTS, EXPIRED_SPATIAL_VERSION } = await import('../pipeline/expiredRescue.js');
-const pako = await import('pako');
+// The deflater the worker's PNG16 encodes use (#301).
+const { loadPng16Zlib } = await import('./pngDeflateWasm.js');
+const png16Zlib = await loadPng16Zlib();
 
 // Not multiples of 4: partial gain-map blocks, odd strides.
 const IW = 37;
@@ -259,7 +268,7 @@ for (const [name, settings] of Object.entries(recipes)) {
     const expected8 = new Uint8ClampedArray(pixels.length);
     applyAdjustmentsToPixels(pixels, expected8, IW * IH, params, quality, null, 500000, null);
     const input8 = pixels.slice().buffer;
-    const replies8 = send({ type: 'applyAdjustments', id: 100, inputBuffer: input8, width: IW, height: IH, settings: structuredClone(settings), quality });
+    const replies8 = await send({ type: 'applyAdjustments', id: 100, inputBuffer: input8, width: IW, height: IH, settings: structuredClone(settings), quality });
     const result8 = replies8.find((m) => m.type === 'result');
     assert.ok(result8, `${label}: 8-bit result`);
     assert.equal(result8.data, input8, `${label}: the 8-bit handler returns the buffer it received`);
@@ -271,7 +280,7 @@ for (const [name, settings] of Object.entries(recipes)) {
     applyAdjustmentsToPixels16(plane, expected16, IW * IH, params, quality, null, 500000, null);
     for (const planeOnly of [true, false]) {
       const input16 = plane.slice().buffer;
-      const replies16 = send({ type: 'applyAdjustments16', id: 101, inputBuffer: input16, width: IW, height: IH, settings: structuredClone(settings), quality, planeOnly });
+      const replies16 = await send({ type: 'applyAdjustments16', id: 101, inputBuffer: input16, width: IW, height: IH, settings: structuredClone(settings), quality, planeOnly });
       const result16 = replies16.find((m) => m.type === 'result');
       assert.equal(result16.data, input16, `${label}: the 16-bit handler returns the buffer it received`);
       assert.equal(result16.bits, 16);
@@ -285,13 +294,13 @@ for (const [name, settings] of Object.entries(recipes)) {
 {
   // An error before the pass writes the input hands the input back.
   const input = makePlane16().buffer;
-  const replies = send({ type: 'applyAdjustments16', id: 102, inputBuffer: input, width: IW, height: IH, settings: { ...baseSettings(), curves: null }, quality: 'full' });
+  const replies = await send({ type: 'applyAdjustments16', id: 102, inputBuffer: input, width: IW, height: IH, settings: { ...baseSettings(), curves: null }, quality: 'full' });
   const error = replies.find((m) => m.type === 'error');
   assert.ok(error, 'a bad recipe is an error');
   assert.equal(error.returned.input, input, 'the unwritten plane goes back with the error');
   assert.deepEqual(posted.at(-1).transfers, [input]);
   const input8 = new Uint8ClampedArray(IW * IH * 4).buffer;
-  const replies8 = send({ type: 'applyAdjustments', id: 103, inputBuffer: input8, width: IW + 1, height: IH, settings: baseSettings(), quality: 'full' });
+  const replies8 = await send({ type: 'applyAdjustments', id: 103, inputBuffer: input8, width: IW + 1, height: IH, settings: baseSettings(), quality: 'full' });
   assert.equal(replies8.find((m) => m.type === 'error').returned.input, input8, 'a size mismatch is caught before any write');
 }
 
@@ -304,14 +313,14 @@ async function bytesOf(blob) {
 const tiffMetadata = { exif: { Make: 'Synthetic', DateTimeOriginal: '2026:09:25 12:00:00' }, xmp: '<x:xmpmeta xmlns:x="adobe:ns:meta/"></x:xmpmeta>' };
 for (const [name, settings] of Object.entries({ identity: baseSettings(), ...recipes })) {
   const plane = makePlane16(11);
-  const adjusted = send({ type: 'applyAdjustments16', id: 110, inputBuffer: plane.slice().buffer, width: IW, height: IH, settings: structuredClone(settings), quality: 'full', planeOnly: true })
+  const adjusted = (await send({ type: 'applyAdjustments16', id: 110, inputBuffer: plane.slice().buffer, width: IW, height: IH, settings: structuredClone(settings), quality: 'full', planeOnly: true }))
     .find((m) => m.type === 'result');
   const adjustedPlane = new Uint16Array(adjusted.data);
   for (const format of ['tiff', 'png']) {
     const separate = format === 'tiff'
-      ? await blobOf(send({ type: 'encodeTiff', id: 111, pixelData: adjustedPlane.slice().buffer, sourceBits: 16, width: IW, height: IH, bitDepth: 16, metadata: tiffMetadata }))
-      : await blobOf(send({ type: 'encodePng16', id: 111, pixelData: adjustedPlane.slice().buffer, sourceBits: 16, width: IW, height: IH }));
-    const fusedReplies = send({ type: 'adjust16AndEncode', id: 112, inputBuffer: plane.slice().buffer, width: IW, height: IH, settings: structuredClone(settings), quality: 'full', format, metadata: format === 'tiff' ? tiffMetadata : null });
+      ? await blobOf(await send({ type: 'encodeTiff', id: 111, pixelData: adjustedPlane.slice().buffer, sourceBits: 16, width: IW, height: IH, bitDepth: 16, metadata: tiffMetadata }))
+      : await blobOf(await send({ type: 'encodePng16', id: 111, pixelData: adjustedPlane.slice().buffer, sourceBits: 16, width: IW, height: IH }));
+    const fusedReplies = await send({ type: 'adjust16AndEncode', id: 112, inputBuffer: plane.slice().buffer, width: IW, height: IH, settings: structuredClone(settings), quality: 'full', format, metadata: format === 'tiff' ? tiffMetadata : null });
     const replyTypes = fusedReplies.filter((m) => m.type !== 'progress').map((m) => m.type);
     assert.deepEqual(replyTypes, ['blobResult'], `${name}/${format}: only the Blob comes back`);
     const fused = await blobOf(fusedReplies);
@@ -319,14 +328,14 @@ for (const [name, settings] of Object.entries({ identity: baseSettings(), ...rec
     // And the shipped (main-thread, copying) encoder writes the same file.
     const shipped = format === 'tiff'
       ? await bytesOf(encodeTiffBlob(adjustedPlane.slice(), IW, IH, 16, tiffMetadata))
-      : await bytesOf(encodePng16Blob(adjustedPlane.slice(), IW, IH, pako));
+      : await bytesOf(encodePng16Blob(adjustedPlane.slice(), IW, IH, png16Zlib));
     sameArray(fused, shipped, `${name}/${format}: == the copying encoder`);
   }
 }
 
 {
   const input = makePlane16().buffer;
-  const replies = send({ type: 'adjust16AndEncode', id: 113, inputBuffer: input, width: IW, height: IH, settings: baseSettings(), quality: 'full', format: 'jpeg' });
+  const replies = await send({ type: 'adjust16AndEncode', id: 113, inputBuffer: input, width: IW, height: IH, settings: baseSettings(), quality: 'full', format: 'jpeg' });
   assert.equal(replies.at(-1).returned.input, input, 'an unsupported format is refused before the plane is written');
 }
 
