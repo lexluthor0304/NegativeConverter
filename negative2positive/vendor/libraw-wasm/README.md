@@ -36,7 +36,7 @@ bash scripts/build-libraw-wasm.sh
 ```
 
 The script checks out the pinned commit, runs the PR's own build
-(`FORCE_LIBS=1 bash compileLibraw.sh && node build.js`) and copies `dist/`
+(`FORCE_LIBS=1 bash compileLibraw.sh`, which ends with `node build.js`) and copies `dist/`
 here. It also writes `package.json` and `BUILD-INFO.txt`, which holds the
 SHA-256 of every file.
 

@@ -3,7 +3,7 @@ source:     https://github.com/lexluthor0304/LibRaw-Wasm.git @ 45b40c07e08f46a33
             LibRaw 0.22.1, Little-CMS 2.19.1, libjpeg 9f (Emscripten port), musl 1.2.6 math (portable-math/)
 toolchain:  emcc (Emscripten gcc/clang-like replacement + linker emulating GNU ld) 6.0.4-git
             node v26.5.1, esbuild from the commit's package-lock.json
-built by:   scripts/build-libraw-wasm.sh (FORCE_LIBS=1 bash compileLibraw.sh && node build.js)
+built by:   scripts/build-libraw-wasm.sh (FORCE_LIBS=1 bash compileLibraw.sh, which ends with node build.js)
 
 file                          sha256
 dist/index.d.ts               76160d08355abfc7f89b7b3cd9a6e733fa6c727e0debd7968e952ce5f23b2ee6

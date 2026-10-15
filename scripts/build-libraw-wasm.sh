@@ -36,8 +36,9 @@ git -C "$WORK/src" checkout --quiet "$COMMIT"
 (
   cd "$WORK/src"
   npm ci --ignore-scripts --no-audit --no-fund
+  # Builds the libraries, both modules and, last, dist/ (it runs build.js,
+  # whose renaming of the threaded glue cannot run twice).
   FORCE_LIBS=1 bash compileLibraw.sh
-  node build.js
 )
 
 rm -rf "$OUT/dist"
@@ -69,7 +70,7 @@ EOF
   echo "            LibRaw 0.22.1, Little-CMS 2.19.1, libjpeg 9f (Emscripten port), musl 1.2.6 math (portable-math/)"
   echo "toolchain:  $(emcc --version | head -1)"
   echo "            node $(node --version), esbuild from the commit's package-lock.json"
-  echo "built by:   scripts/build-libraw-wasm.sh (FORCE_LIBS=1 bash compileLibraw.sh && node build.js)"
+  echo "built by:   scripts/build-libraw-wasm.sh (FORCE_LIBS=1 bash compileLibraw.sh, which ends with node build.js)"
   echo
   echo "file                          sha256"
   (cd "$OUT" && for f in dist/*; do printf '%-29s %s\n' "$f" "$(shasum -a 256 "$f" | cut -d' ' -f1)"; done)
