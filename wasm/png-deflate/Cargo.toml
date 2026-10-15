@@ -1,0 +1,21 @@
+[package]
+name = "png-deflate"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "MIT"
+description = "Raw deflate for the 16-bit PNG encoder, compiled to WebAssembly (zlib-rs behind a C ABI)"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# No C allocator on wasm32-unknown-unknown: zlib-rs allocates through Rust's.
+zlib-rs = { version = "=0.6.8", default-features = false, features = ["rust-allocator"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

@@ -8,3 +8,7 @@ negative2positive/public/codecs/opencv-simd-glue.js text eol=lf
 negative2positive/public/codecs/opencv-simd-build-info.txt text eol=lf
 negative2positive/public/codecs/opencv-LICENSE.txt text eol=lf
 negative2positive/public/codecs/*.wasm binary
+# The PNG16 deflate modules and their build information (#301) are held to
+# the SHA-256 in the build info by pngDeflateWasm.test.mjs.
+negative2positive/src/workers/png-deflate-build-info.txt text eol=lf
+negative2positive/src/workers/*.wasm binary
