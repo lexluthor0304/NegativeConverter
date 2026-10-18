@@ -54,6 +54,17 @@ export const IDLE_CHECK_DELAY_MS = 10_000;
 export const IDLE_RETAINED_TARGET_BYTES = 1 * GIB;
 // localStorage key: RAM in GiB for benchmarks and the 2-lane parity run.
 export const RAM_OVERRIDE_KEY = 'nc_memory_ram_gib_v1';
+// iOS (#298 P0): the device's RAM is not what the WebContent process may use.
+// iOS ends a WKWebView content process at its own per-process limit, well
+// under the macOS active limit above. Measured on an 8 GB iPhone 15 Pro Max
+// (docs/ios-p0-feasibility.md): planned as its full RAM, a 60 MP DNG is
+// admitted and the WebContent process is killed; planned as 4 GiB, every
+// file up to 24 MP converts and the 60 MP one is refused by the RAW
+// admission. So iOS plans half of its RAM, at most 4 GiB, and 2 GiB when the
+// RAM is unknown; devices with less RAM still have to be measured.
+export const IOS_PLAN_RAM_FRACTION = 0.5;
+export const IOS_PLAN_RAM_MAX_BYTES = 4 * GIB;
+export const IOS_PLAN_RAM_UNKNOWN_BYTES = 2 * GIB;
 
 export const PRIORITIES = Object.freeze(['foreground', 'user', 'background']);
 
@@ -87,6 +98,17 @@ export function resolveMemoryRam({ overrideGib = null, desktopTotalBytes = null,
   if (positive(desktopTotalBytes)) return { ramBytes: desktopTotalBytes, source: 'desktop', known: true };
   if (positive(deviceMemory)) return { ramBytes: Math.round(deviceMemory * GIB), source: 'deviceMemory', known: true };
   return { ramBytes: null, source: 'unknown', known: false };
+}
+
+/**
+ * The RAM the budget plans with: the resolved figure, capped on iOS (`os` is
+ * the desktop command's `std::env::consts::OS`). The debug override is kept:
+ * it exists to run the budget at a chosen size.
+ */
+export function planningRamBytes({ ramBytes = null, os = null, source = null } = {}) {
+  if (os !== 'ios' || source === 'override') return ramBytes;
+  if (!positive(ramBytes)) return IOS_PLAN_RAM_UNKNOWN_BYTES;
+  return Math.min(Math.floor(ramBytes * IOS_PLAN_RAM_FRACTION), IOS_PLAN_RAM_MAX_BYTES);
 }
 
 /**

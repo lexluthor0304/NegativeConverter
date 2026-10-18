@@ -61,6 +61,9 @@ coverage/
 *.bak
 *.orig
 
+# iOS device self-test fixtures (#298): real RAW files copied in for one build
+negative2positive/public/p0-fixtures/
+
 # RAW 图片文件（测试用）
 *.dng
 *.DNG

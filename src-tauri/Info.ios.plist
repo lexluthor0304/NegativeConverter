@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Merged with Info.plist into the generated iOS Info.plist by the Tauri
+         CLI. Exports land in the app's Documents directory (lib.rs,
+         mobile_export_directory, #298); these two keys show it in the Files
+         app under "On My iPhone / iPad" and let other apps open the files
+         in place. -->
+    <key>UIFileSharingEnabled</key>
+    <true/>
+    <key>LSSupportsOpeningDocumentsInPlace</key>
+    <true/>
+    <!-- iOS 26+ SDKs require the UIScene lifecycle, and the iOS 27 SDK traps an
+         app without it at launch (TN3187). tao 0.37 (Tauri 2.12) hands the
+         window and the lifecycle callbacks to its TaoSceneDelegate whenever
+         this manifest is present; one scene, as the Studio is one window
+         (tao 0.35.3 needed UIApplicationSupportsMultipleScenes true and
+         crashed release builds, tao#1340, #298). -->
+    <key>UIApplicationSceneManifest</key>
+    <dict>
+        <key>UIApplicationSupportsMultipleScenes</key>
+        <false/>
+        <key>UISceneConfigurations</key>
+        <dict>
+            <key>UIWindowSceneSessionRoleApplication</key>
+            <array>
+                <dict>
+                    <key>UISceneConfigurationName</key>
+                    <string>Default Configuration</string>
+                    <key>UISceneDelegateClassName</key>
+                    <string>TaoSceneDelegate</string>
+                </dict>
+            </array>
+        </dict>
+    </dict>
+</dict>
+</plist>

@@ -42,9 +42,12 @@ pub fn build() {
         Some(value) if is_off(value) => false,
         Some(value) if !value.is_empty() => true,
         // Windows needs a verified MSVC build of LibRaw and musl first.
-        _ => matches!(target_os.as_str(), "macos" | "linux"),
+        // iOS (#298): one thread, no OpenMP; the only RAW decoder there, as
+        // both vendored libraw-wasm builds need shared memory, which
+        // WKWebView does not expose.
+        _ => matches!(target_os.as_str(), "macos" | "linux" | "ios"),
     };
-    if !wanted || !matches!(target_os.as_str(), "macos" | "linux" | "windows") {
+    if !wanted || !matches!(target_os.as_str(), "macos" | "linux" | "ios" | "windows") {
         return;
     }
 
@@ -132,7 +135,7 @@ pub fn build() {
             fs::read(path).unwrap_or_default().hash(&mut hasher);
         }
         openmp.describe().hash(&mut hasher);
-        for key in ["TARGET", "CC", "CXX", "CFLAGS", "CXXFLAGS", "MACOSX_DEPLOYMENT_TARGET"] {
+        for key in ["TARGET", "CC", "CXX", "CFLAGS", "CXXFLAGS", "MACOSX_DEPLOYMENT_TARGET", "IPHONEOS_DEPLOYMENT_TARGET", "SDKROOT"] {
             env::var(key).unwrap_or_default().hash(&mut hasher);
         }
         for unit in [Unit::LibRaw, Unit::PortableMath, Unit::Shim] {
@@ -276,7 +279,7 @@ fn link_cpp_stdlib(target_os: &str, msvc: bool) {
         return;
     }
     match target_os {
-        "macos" => println!("cargo:rustc-link-lib=c++"),
+        "macos" | "ios" => println!("cargo:rustc-link-lib=c++"),
         _ => println!("cargo:rustc-link-lib=stdc++"),
     }
 }
