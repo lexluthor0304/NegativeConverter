@@ -108,9 +108,11 @@ message; the refused file never enters the photo list.
   company team), through a scratch `--config` file. After the account was
   renewed, a build with the committed config (company team, real identifier)
   reached Apple and failed only because the team has no registered devices:
-  register the test iPhone in Certificates, Identifiers & Profiles (or build
-  once with `-allowProvisioningDeviceRegistration`) and the real identifier
-  signs locally. The Xcode account session
+  one `xcodebuild … -destination id=<udid> -allowProvisioningUpdates
+  -allowProvisioningDeviceRegistration build` on `src-tauri/gen/apple`
+  registered the iPhone, created the team's development certificate and the
+  profile for `com.neoanaloglab.negativeconverter`; the company-signed build
+  then installed and launched with no trust prompt. The Xcode account session
   had expired and had to be renewed in Xcode → Settings → Accounts, and the
   developer profile had to be trusted on the phone (Settings → General → VPN
   & Device Management) before the first launch; uninstalling the app removes
