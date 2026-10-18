@@ -13,14 +13,15 @@
     <key>LSSupportsOpeningDocumentsInPlace</key>
     <true/>
     <!-- iOS 26+ SDKs require the UIScene lifecycle, and the iOS 27 SDK traps an
-         app without it at launch (TN3187). tao's TaoSceneDelegate takes over
-         when this manifest is present; tao 0.35.3 engages it only with
-         UIApplicationSupportsMultipleScenes true, and its release builds hit
-         a use-after-free fixed in tao 0.37 / Tauri 2.12 (tao#1340, #298). -->
+         app without it at launch (TN3187). tao 0.37 (Tauri 2.12) hands the
+         window and the lifecycle callbacks to its TaoSceneDelegate whenever
+         this manifest is present; one scene, as the Studio is one window
+         (tao 0.35.3 needed UIApplicationSupportsMultipleScenes true and
+         crashed release builds, tao#1340, #298). -->
     <key>UIApplicationSceneManifest</key>
     <dict>
         <key>UIApplicationSupportsMultipleScenes</key>
-        <true/>
+        <false/>
         <key>UISceneConfigurations</key>
         <dict>
             <key>UIWindowSceneSessionRoleApplication</key>
