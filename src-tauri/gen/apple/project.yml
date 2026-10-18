@@ -31,7 +31,12 @@ targets:
     sources:
       - path: Sources
       - path: Assets.xcassets
+      # Exclude built static libs: regenerating with xcodegen after a build
+      # otherwise turns the per-configuration libapp.a copies into colliding
+      # resources ("Multiple commands produce …/libapp.a"). They are linked
+      # via LIBRARY_SEARCH_PATHS, never bundled as resources.
       - path: Externals
+        excludes: ["**/*.a"]
       - path: negative-converter_iOS
       - path: assets
         buildPhase: resources
@@ -81,7 +86,8 @@ targets:
       - sdk: UIKit.framework
       - sdk: WebKit.framework
     preBuildScripts:
-      - script: npm run -- tauri ios xcode-script -v --platform ${PLATFORM_DISPLAY_NAME:?} --sdk-root ${SDKROOT:?} --framework-search-paths "${FRAMEWORK_SEARCH_PATHS:?}" --header-search-paths "${HEADER_SEARCH_PATHS:?}" --gcc-preprocessor-definitions "${GCC_PREPROCESSOR_DEFINITIONS:-}" --configuration ${CONFIGURATION:?} ${FORCE_COLOR} ${ARCHS:?}
+      - script: |
+          npm run -- tauri ios xcode-script -v --platform "${PLATFORM_DISPLAY_NAME:?}" --sdk-root "${SDKROOT:?}" --framework-search-paths "${FRAMEWORK_SEARCH_PATHS:?}" --header-search-paths "${HEADER_SEARCH_PATHS:?}" --gcc-preprocessor-definitions "${GCC_PREPROCESSOR_DEFINITIONS:-}" --configuration "${CONFIGURATION:?}" ${FORCE_COLOR} ${ARCHS:?}
         name: Build Rust Code
         basedOnDependencyAnalysis: false
         outputFiles:
