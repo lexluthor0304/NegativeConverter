@@ -123,6 +123,24 @@ jobs:
           APPLE_SIGNING_IDENTITY: ${{ matrix.os == 'macos-latest' && '-' || '' }}
         run: npm run tauri:build
 
+      # #282: the wry fork's process-wide memory-pressure default has to keep
+      # reaching WebKitGTK after every wry bump. The app prints what it applied
+      # before the first webview (docs/memory-budget.md, "Linux"), so a short
+      # headless run is enough to see that line.
+      - name: Verify the WebKitGTK memory-pressure startup line
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get install -y xvfb
+          set +e
+          timeout 20 xvfb-run -a ./src-tauri/target/release/negative-converter > startup.log 2>&1
+          set -e
+          grep '^\[memory\]' startup.log || true
+          if ! grep -q '^\[memory\] WebKitGTK memory-limit [0-9]\+ MB of [0-9]\+ MB' startup.log; then
+            echo "::error::the WebKitGTK memory-limit startup line is missing (docs/memory-budget.md, Linux)"
+            cat startup.log
+            exit 1
+          fi
+
       - name: Verify macOS artifact signatures
         if: matrix.os == 'macos-latest'
         run: |
