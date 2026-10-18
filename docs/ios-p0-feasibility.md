@@ -134,11 +134,15 @@ message; the refused file never enters the photo list.
    `negative2positive/test-fixtures/`, the real RAWs from the repo root, and
    a `plan.json` listing them (`{"fixtures": [{"file": "...", "type": "..."}]}`,
    optional `timeoutMs`, `export: false`).
-2. `NC_P0_FIXTURES=1 npm run build:web` (the sync step refuses a build that
-   carries the fixtures without that variable), then
-   `npx tauri ios build --debug --export-method debugging`, with
-   `--config <file>` setting a personal `identifier` and
-   `bundle.iOS.developmentTeam` when the company team is not in Xcode.
+2. `NC_P0_FIXTURES=1 npm run build:web`, then
+   `NC_P0_FIXTURES=1 npx tauri ios build --debug --export-method debugging`,
+   with `--config <file>` setting a personal `identifier` and
+   `bundle.iOS.developmentTeam` when the company team is not in Xcode. The
+   variable gates the fixtures twice: Vite removes `dist/p0-fixtures` at the
+   end of every build without it (`scripts/p0-fixtures.mjs`), and `build.rs`
+   refuses to embed a `dist` that still carries the directory, so an Xcode
+   archive, a `tauri build` or a `cargo test` after a self-test build fails
+   until the web assets are rebuilt (the #305 review's finding).
 3. `xcrun devicectl device install app --device <udid> "src-tauri/gen/apple/build/arm64/Negative Converter.ipa"`,
    then launch with the self-test environment:
    `xcrun devicectl device process launch --terminate-existing -e '{"NC_P0_SELFTEST":"4"}' --device <udid> <bundle id>`
