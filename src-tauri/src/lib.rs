@@ -5,11 +5,19 @@ use std::collections::HashSet;
 use std::io::ErrorKind;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+#[cfg(desktop)]
 use std::process::Command;
 use std::sync::Mutex;
 use tauri::State;
 mod display_proxy_store;
 mod export_stream;
+// The watch folder is desktop work: its folder picker (rfd) has no mobile
+// backend and the sandbox has no folder to watch. The mobile file keeps the
+// commands the page invokes and the state the page-load hook resets (#298).
+#[cfg(desktop)]
+mod import_folder;
+#[cfg(mobile)]
+#[path = "import_folder_mobile.rs"]
 mod import_folder;
 mod memory_info;
 mod native_raw;
@@ -346,7 +354,7 @@ fn current_installer_name() -> Option<&'static str> {
 #[tauri::command]
 fn get_desktop_update_capability() -> DesktopUpdateCapability {
     describe_update_capability(
-        cfg!(feature = "updater"),
+        cfg!(all(feature = "updater", desktop)),
         std::env::consts::OS,
         current_installer_name(),
         updater_target_override(UPDATER_TARGET_OVERRIDE),
@@ -435,13 +443,35 @@ fn sanitize_diagnostics_line(line: &str) -> String {
 /// Puts the page's GL facts and frame-time summaries in the same terminal log
 /// as the `[linux-compat]` lines, where the README's troubleshooting looks.
 #[tauri::command]
-fn log_webview_diagnostics(line: String) {
+fn log_webview_diagnostics(app: tauri::AppHandle, line: String) {
     let line = sanitize_diagnostics_line(&line);
     if !line.is_empty() {
         eprintln!("[webview] {line}");
+        p0_append(&app, &format!("[webview] {line}"));
     }
 }
 
+/// #298 P0: with `NC_P0_SELFTEST` set, every diagnostics line is also appended
+/// to Documents/p0-diagnostics.log, which `devicectl device copy from` reads:
+/// `devicectl device process launch --console` shows none of an iOS app's
+/// stderr. Debug mobile builds only.
+#[cfg(all(mobile, debug_assertions))]
+fn p0_append(app: &tauri::AppHandle, line: &str) {
+    if std::env::var_os("NC_P0_SELFTEST").is_none() {
+        return;
+    }
+    let Ok(directory) = tauri::Manager::path(app).document_dir() else { return };
+    let _ = std::fs::create_dir_all(&directory);
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(directory.join("p0-diagnostics.log")) {
+        let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+        let _ = writeln!(file, "{at} {line}");
+    }
+}
+
+#[cfg(not(all(mobile, debug_assertions)))]
+fn p0_append(_app: &tauri::AppHandle, _line: &str) {}
+
+#[cfg(desktop)]
 #[tauri::command]
 fn pick_export_file_path(grants: State<'_, ExportGrants>, suggested_name: String) -> Option<String> {
     let path = rfd::FileDialog::new()
@@ -452,6 +482,7 @@ fn pick_export_file_path(grants: State<'_, ExportGrants>, suggested_name: String
     Some(normalized.to_string_lossy().to_string())
 }
 
+#[cfg(desktop)]
 #[tauri::command]
 fn pick_export_directory(grants: State<'_, ExportGrants>) -> Option<String> {
     let path = rfd::FileDialog::new().pick_folder()?;
@@ -459,9 +490,51 @@ fn pick_export_directory(grants: State<'_, ExportGrants>) -> Option<String> {
     Some(path.to_string_lossy().to_string())
 }
 
+/// iOS (#298 P0): the webview has no save panel, so exports go to the app's
+/// Documents directory, which the Files app shows under "On My iPhone / iPad"
+/// (UIFileSharingEnabled and LSSupportsOpeningDocumentsInPlace in
+/// Info.ios.plist). The grant keeps the write boundary a picked folder gives
+/// on desktop. The share sheet and saving to Photos are the P2 work.
+#[cfg(mobile)]
+fn mobile_export_directory(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let directory = tauri::Manager::path(app)
+        .document_dir()
+        .map_err(|err| format!("documents directory unavailable: {err}"))?;
+    std::fs::create_dir_all(&directory)
+        .map_err(|err| format!("documents directory could not be created: {err}"))?;
+    Ok(directory)
+}
+
+#[cfg(mobile)]
+#[tauri::command]
+fn pick_export_file_path(app: tauri::AppHandle, grants: State<'_, ExportGrants>, suggested_name: String) -> Option<String> {
+    let directory = mobile_export_directory(&app).ok()?;
+    let path = build_unique_export_path(&directory, &suggested_name);
+    grants.grant_file(&path);
+    Some(path.to_string_lossy().to_string())
+}
+
+#[cfg(mobile)]
+#[tauri::command]
+fn pick_export_directory(app: tauri::AppHandle, grants: State<'_, ExportGrants>) -> Option<String> {
+    let directory = mobile_export_directory(&app).ok()?;
+    grants.grant_directory(&directory);
+    Some(directory.to_string_lossy().to_string())
+}
+
+#[cfg(mobile)]
+async fn pick_save_path_on_main_thread(
+    app: &tauri::AppHandle,
+    suggested_name: String,
+) -> Result<Option<PathBuf>, String> {
+    let directory = mobile_export_directory(app)?;
+    Ok(Some(build_unique_export_path(&directory, &suggested_name)))
+}
+
 /// Runs the save panel on the native main thread (AppKit/GTK require it) while
 /// the command itself stays off it, so the following write does not block the
 /// event loop.
+#[cfg(desktop)]
 async fn pick_save_path_on_main_thread(
     app: &tauri::AppHandle,
     suggested_name: String,
@@ -1182,6 +1255,7 @@ fn sanitize_external_url(url: &str) -> Result<&str, String> {
 
 /// Spawns the opener and reaps it on a helper thread; `spawn` alone leaves a
 /// zombie entry for every link the user clicks until the app quits.
+#[cfg(desktop)]
 fn spawn_and_reap(command: &mut Command) -> Result<(), String> {
     let mut child = command
         .spawn()
@@ -1209,9 +1283,17 @@ fn open_url_with_system_browser(url: &str) -> Result<(), String> {
         );
     }
 
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(all(unix, not(any(target_os = "macos", target_os = "ios"))))]
     {
         return spawn_and_reap(Command::new("xdg-open").arg(url));
+    }
+
+    // iOS has no process to spawn; UIApplication.open needs a native bridge
+    // (#298 P2). The page shows the address in a toast when this fails.
+    #[cfg(target_os = "ios")]
+    {
+        let _ = url;
+        return Err("opening links in the browser is not available on iOS yet".to_string());
     }
 
     #[allow(unreachable_code)]
@@ -1253,7 +1335,7 @@ pub fn run() {
     // Registering the hook replaces Tauri's default handler, which only
     // reloads; this one records the termination for the page and releases
     // what the dead page owned before it reloads the webview itself.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     let builder = builder.on_web_content_process_terminate(|webview| {
         let at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1261,12 +1343,13 @@ pub fn run() {
             .unwrap_or(0);
         let record = tauri::Manager::state::<WebContentTerminations>(webview).record(at);
         eprintln!("[webview] WebContent process terminated ({} this run); reloading", record.count);
+        p0_append(&tauri::Manager::app_handle(webview).clone(), &format!("[webview] WebContent process terminated ({} this run); reloading", record.count));
         reset_page_owned_state(webview);
         if let Err(err) = webview.reload() {
             eprintln!("[webview] reload after termination failed: {err}");
         }
     });
-    #[cfg(feature = "updater")]
+    #[cfg(all(feature = "updater", desktop))]
     let builder = builder.plugin(tauri_plugin_process::init()).plugin({
         let mut updater = tauri_plugin_updater::Builder::new();
         if let Some(target) = updater_target_override(UPDATER_TARGET_OVERRIDE) {
@@ -1281,6 +1364,31 @@ pub fn run() {
             if let Ok(root) = display_proxy_store::root_for(app.handle()) {
                 if let Err(err) = display_proxy_store::prepare_root(&root) {
                     eprintln!("[display-proxies] cache directory unavailable: {err}");
+                }
+            }
+            // #298 P0: `devicectl device process launch -e '{"NC_P0_SELFTEST":"1"}'`
+            // opens the page with the flags the self-test (p0SelfTest.js) and
+            // the memory debug hook read. Debug mobile builds only.
+            #[cfg(all(mobile, debug_assertions))]
+            if let Some(value) = std::env::var_os("NC_P0_SELFTEST") {
+                if let Some(window) = tauri::Manager::get_webview_window(app, "main") {
+                    // A numeric value is the RAM (GiB) the memory budget plans with.
+                    let ram = value.to_string_lossy().trim().parse::<f64>().ok().filter(|v| *v > 1.0);
+                    let mut href = match ram {
+                        Some(gib) => format!("tauri://localhost/index.html?debug=1&p0=1&p0ram={gib}"),
+                        None => "tauri://localhost/index.html?debug=1&p0=1".to_string(),
+                    };
+                    // NC_P0_NATIVE_RAW=off|on: the page's native decoder override.
+                    if let Some(native) = std::env::var("NC_P0_NATIVE_RAW").ok().filter(|v| v == "off" || v == "on") {
+                        href.push_str(&format!("&p0native={native}"));
+                    }
+                    let url: tauri::Url = href.parse().expect("p0 url");
+                    let outcome = match window.navigate(url) {
+                        Ok(()) => "[p0] self-test page requested".to_string(),
+                        Err(err) => format!("[p0] navigate failed: {err}"),
+                    };
+                    eprintln!("{outcome}");
+                    p0_append(app.handle(), &outcome);
                 }
             }
             Ok(())

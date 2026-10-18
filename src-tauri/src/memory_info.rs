@@ -8,7 +8,7 @@
 //! `apply_linux_memory_pressure_settings` ran, #282; WebView2 has no such
 //! monitor).
 //!
-//! macOS reads `hw.memsize`, which the App Store sandbox allows. #252 uses
+//! macOS and iOS read `hw.memsize`, which the App Store sandbox allows. #252 uses
 //! the same command and signature.
 
 use serde::Serialize;
@@ -20,6 +20,8 @@ pub struct MemoryInfo {
     pub available_bytes: Option<u64>,
     /// "wkwebview" | "webkitgtk" | "webview2"
     pub engine: &'static str,
+    /// `std::env::consts::OS`; the page plans iOS by its own RAM rule (#298).
+    pub os: &'static str,
 }
 
 /// The webview engine of this build.
@@ -64,7 +66,7 @@ pub fn webkitgtk_memory_limit_mb(total_bytes: u64) -> u32 {
     u32::try_from(mb).unwrap_or(u32::MAX)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 fn read_physical_memory() -> Result<(u64, Option<u64>), String> {
     let mut total: u64 = 0;
     let mut length = std::mem::size_of::<u64>();
@@ -106,7 +108,7 @@ fn read_physical_memory() -> Result<(u64, Option<u64>), String> {
     Ok((status.ullTotalPhys, Some(status.ullAvailPhys)))
 }
 
-#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "ios"))))]
 fn read_physical_memory() -> Result<(u64, Option<u64>), String> {
     let text = std::fs::read_to_string("/proc/meminfo")
         .map_err(|err| format!("reading /proc/meminfo failed: {err}"))?;
@@ -124,6 +126,7 @@ pub fn memory_info() -> Result<MemoryInfo, String> {
         total_bytes,
         available_bytes,
         engine: webview_engine(),
+        os: std::env::consts::OS,
     })
 }
 
@@ -223,11 +226,12 @@ mod tests {
 
     #[test]
     fn memory_info_serialises_in_camel_case() {
-        let info = super::MemoryInfo { total_bytes: 16 * GIB, available_bytes: None, engine: "wkwebview" };
+        let info = super::MemoryInfo { total_bytes: 16 * GIB, available_bytes: None, engine: "wkwebview", os: "macos" };
         let json = serde_json::to_value(&info).unwrap();
         assert_eq!(json["totalBytes"], 16 * GIB);
         assert!(json["availableBytes"].is_null());
         assert_eq!(json["engine"], "wkwebview");
+        assert_eq!(json["os"], "macos");
     }
 
     #[test]

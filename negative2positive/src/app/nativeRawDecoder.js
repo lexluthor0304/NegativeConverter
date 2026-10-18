@@ -45,7 +45,10 @@ export const LIBRAW_WASM_VERSION = '1.6.0-deterministic.45b40c0';
 // M11 DNG included, so macOS decodes natively; other desktops keep WASM.
 export const NATIVE_RAW_PARITY = Object.freeze({
   librawWasm: '1.6.0-deterministic.45b40c0',
-  platforms: Object.freeze(['macos-aarch64', 'macos-x86_64']),
+  // ios-aarch64 (#298 P0): the same LibRaw sources and IEEE-strict flags as
+  // macOS, one thread; its parity is checked against the macOS export of
+  // the same files, not yet by the hash tests.
+  platforms: Object.freeze(['macos-aarch64', 'macos-x86_64', 'ios-aarch64']),
 });
 
 // A background lane leaves the cores to the photo on screen.

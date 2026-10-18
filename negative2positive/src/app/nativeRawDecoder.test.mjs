@@ -84,7 +84,8 @@ console.warn = () => {};
   assert.equal(decideNativeRawDecode({ info: { ...info, platform: 'macos-x86_64' } }).enabled, true);
   assert.equal(decideNativeRawDecode({ info: { ...info, platform: 'linux-x86_64' } }).reason, 'platform-unverified');
   assert.equal(decideNativeRawDecode({ info: { ...info, platform: 'windows-x86_64' } }).reason, 'platform-unverified');
-  assert.deepEqual([...NATIVE_RAW_PARITY.platforms], ['macos-aarch64', 'macos-x86_64']);
+  // ios-aarch64 (#298 P0): verified against the macOS export of the same files on the device, not by the hash tests yet.
+  assert.deepEqual([...NATIVE_RAW_PARITY.platforms], ['macos-aarch64', 'macos-x86_64', 'ios-aarch64']);
 }
 
 // --- the probe asks once and stays off outside the desktop app -----------------------

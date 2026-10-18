@@ -17,7 +17,7 @@ import { exportNameStem } from './exportFileName.js';
 import { frameNeedsReview } from './reviewQueue.js';
 import { yieldForJob, yieldToPaint, yieldTaskForJob, yieldTask } from './yieldToPaint.js';
 import { createHiddenJobGate, hiddenJobLimitsApply, estimateHiddenJobBytes, HIDDEN_BUDGET_BYTES } from './hiddenJobGate.js';
-import { createMemoryBudget, createRetainedLedger, createMemoryClaim, createIdleCheck, relievePressure, budgetFor, resolveMemoryRam, memoryEngine, hasPeriodicMemoryPurge, DECODED_BYTES_PER_PIXEL, IDLE_RETAINED_TARGET_BYTES, RAM_OVERRIDE_KEY } from './memoryBudget.js';
+import { createMemoryBudget, createRetainedLedger, createMemoryClaim, createIdleCheck, relievePressure, budgetFor, resolveMemoryRam, planningRamBytes, memoryEngine, hasPeriodicMemoryPurge, DECODED_BYTES_PER_PIXEL, IDLE_RETAINED_TARGET_BYTES, RAM_OVERRIDE_KEY } from './memoryBudget.js';
 import { createBackgroundGate, BACKGROUND_STEP_WAIT_CAP_MS, BACKGROUND_INPUT_QUIET_MS, BACKGROUND_BUSY_POLL_MS } from './backgroundGate.js';
 import { createSharedDecodes } from './sharedDecodes.js';
 import { pickBackgroundJob, travelDirection, displayDistance } from './backgroundPhotoScheduler.js';
@@ -12483,6 +12483,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         desktopTotalBytes: memoryRuntime.desktop?.totalBytes,
         deviceMemory: navigator.deviceMemory
       }), { engine: memoryEngine({ desktopEngine: memoryRuntime.desktop?.engine }) });
+      // iOS plans by its WebContent limit, not the device's RAM (#298).
+      memoryRuntime.ramBytes = planningRamBytes({ ramBytes: memoryRuntime.ramBytes, os: memoryRuntime.desktop?.os, source: memoryRuntime.source });
       memoryIdleCheck.setEnabled(hasPeriodicMemoryPurge(memoryRuntime.engine));
       applyMemoryCeiling();
     }
@@ -32349,6 +32351,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       void checkInterruptedJobs();
       updateWorkflowUI();
       studioWorkspace.sync();
+      // #298 P0: the device self-test (p0SelfTest.js) when the debug iOS build
+      // opened the page with ?p0=1 (NC_P0_SELFTEST=1, lib.rs).
+      if (new URLSearchParams(window.location.search).get('p0') === '1') {
+        import('./p0SelfTest.js').then(({ runP0SelfTest }) => runP0SelfTest()).catch((err) => console.error('[p0] self-test failed to start', err));
+      }
       // ?debugCounters=1 exposes the Studio flush and DOM-write counters and
       // the layout and loupe call counts to the smoke tests (#261).
       if (new URLSearchParams(window.location.search).get('debugCounters') === '1') {

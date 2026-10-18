@@ -29,14 +29,20 @@ perf-harness = []
 updater = ["dep:tauri-plugin-updater", "dep:tauri-plugin-process"]
 
 [dependencies]
-notify = "8.2"
 tauri = { version = "2", features = [] }
-tauri-plugin-updater = { version = "2", optional = true }
-tauri-plugin-process = { version = "2", optional = true }
 base64 = "0.22"
-rfd = "0.15"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# Desktop only (#298): rfd has no iOS or Android backend, the watch folder is
+# a desktop workflow (import_folder_mobile.rs stubs its commands), and a store
+# build never updates itself, so the default `updater` feature is inert on
+# mobile (the code checks `cfg(desktop)` as well). Cargo.lock is unchanged.
+[target.'cfg(not(any(target_os = "ios", target_os = "android")))'.dependencies]
+notify = "8.2"
+rfd = "0.15"
+tauri-plugin-updater = { version = "2", optional = true }
+tauri-plugin-process = { version = "2", optional = true }
 
 # Physical memory for the page's memory budget (get_memory_info, #258), and
 # statvfs plus the Time Machine exclusion of the display-proxy cache (#249).

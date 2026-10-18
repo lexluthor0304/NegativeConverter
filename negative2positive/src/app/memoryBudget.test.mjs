@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import {
   createMemoryBudget, createRetainedLedger, createMemoryClaim, createIdleCheck, relievePressure,
-  budgetFor, resolveMemoryRam, memoryEngine, hasPeriodicMemoryPurge,
-  GIB, UNKNOWN_RAM_BYTES, WAIT_RECHECK_MS, IDLE_CHECK_DELAY_MS, DECODED_BYTES_PER_PIXEL
+  budgetFor, resolveMemoryRam, memoryEngine, hasPeriodicMemoryPurge, planningRamBytes,
+  GIB, UNKNOWN_RAM_BYTES, WAIT_RECHECK_MS, IDLE_CHECK_DELAY_MS, DECODED_BYTES_PER_PIXEL,
+  IOS_PLAN_RAM_MAX_BYTES, IOS_PLAN_RAM_UNKNOWN_BYTES
 } from './memoryBudget.js';
 import { createPhotoSessionCache } from './photoSessionCache.js';
 
@@ -67,6 +68,20 @@ assert.equal(budgetFor({ ramBytes: 64 * GIB }), 14 * GIB);
 assert.equal(budgetFor({ ramBytes: null }), Math.floor(3.6 * GIB), 'unknown web memory is treated as 8 GiB');
 assert.equal(budgetFor(), budgetFor({ ramBytes: UNKNOWN_RAM_BYTES }));
 assert.equal(budgetFor({ ramBytes: 4 * GIB }), Math.floor(1.8 * GIB));
+
+// iOS plans by the WebContent limit, not the device's RAM (#298): half of
+// the RAM up to 4 GiB (an 8 GB iPhone: 4 GiB, a 16 GB iPad: 4 GiB, a 6 GB
+// iPhone: 3 GiB), 2 GiB when unknown; the debug override wins, and other
+// hosts are untouched. An 8 GB iPhone's budget is then 1.8 GiB, which admits
+// a 24 MP RAW and refuses a 60 MP one (docs/ios-p0-feasibility.md).
+assert.equal(planningRamBytes({ ramBytes: 8 * GIB, os: 'ios' }), IOS_PLAN_RAM_MAX_BYTES);
+assert.equal(planningRamBytes({ ramBytes: 16 * GIB, os: 'ios' }), IOS_PLAN_RAM_MAX_BYTES);
+assert.equal(planningRamBytes({ ramBytes: 6 * GIB, os: 'ios' }), 3 * GIB);
+assert.equal(planningRamBytes({ ramBytes: null, os: 'ios' }), IOS_PLAN_RAM_UNKNOWN_BYTES);
+assert.equal(planningRamBytes({ ramBytes: 8 * GIB, os: 'ios', source: 'override' }), 8 * GIB);
+assert.equal(planningRamBytes({ ramBytes: 16 * GIB, os: 'macos' }), 16 * GIB);
+assert.equal(planningRamBytes({ ramBytes: null }), null);
+assert.equal(budgetFor({ ramBytes: planningRamBytes({ ramBytes: 8 * GIB, os: 'ios' }) }), Math.floor(1.8 * GIB));
 // One formula whatever the engine.
 for (const engine of ['wkwebview', 'webkitgtk', 'webview2', 'chromium', 'webkit']) {
   assert.equal(budgetFor({ ramBytes: 16 * GIB, engine }), 6 * GIB);
