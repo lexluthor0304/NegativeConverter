@@ -12,6 +12,26 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  shared-ui:
+    name: Shared Studio regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run test:smoke -- --studio-shell-only
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: shared-studio-layouts
+          path: output/playwright
+          if-no-files-found: ignore
+          retention-days: 14
+
   mobile-ui:
     name: iPhone and iPad layout
     runs-on: ubuntu-latest

@@ -49,7 +49,9 @@ The independent `iOS CI` workflow builds unsigned device and simulator apps,
 including native Swift/plugin linkage. It uses Xcode 26.6 on `macos-26`, Rust
 1.95.0, Node 24 and the committed dependency locks. It does not use signing
 credentials, register devices, upload TestFlight builds or publish a release.
-The regular Desktop CI remains required for regressions.
+The same workflow runs `npm run test:smoke -- --studio-shell-only` independently
+for early feedback on the shared desktop/browser Studio. The regular Desktop
+CI still runs the full image-processing suite and four desktop builds.
 
 References: [Tauri capabilities](https://v2.tauri.app/security/capabilities/),
 [Tauri opener](https://v2.tauri.app/plugin/opener/), and

@@ -458,6 +458,15 @@ if (process.argv.includes('--mobile-shell-only')) {
   console.log('SMOKE PASS'); process.exit(0);
 }
 
+// Run the shared Studio regression independently of the long pipeline suite.
+// iOS shell work still has to preserve the ordinary desktop/browser editor.
+if (process.argv.includes('--studio-shell-only')) {
+  await runStudioSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, fixtures: [FIXTURE, FIXTURE2], root: ROOT });
+  if (isolationBlocks.length) fail(`requests blocked by COEP/CORP/COOP:\n${isolationBlocks.join('\n')}`);
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS'); process.exit(0);
+}
+
 // This scenario navigates and imports its own small fixtures. Exit here so
 // --auto-crop-only cannot continue through the unrelated camera/roll suites.
 if (process.argv.includes('--auto-crop-only')) {
