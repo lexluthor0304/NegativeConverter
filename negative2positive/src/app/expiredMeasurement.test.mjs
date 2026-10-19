@@ -322,7 +322,7 @@ for (const format of ['png', 'tiff']) {
   Object.assign(target,{
     processNegativeInFlight:null,fullResolutionRenderTimer:null,
     getCurrentQueueItem:()=>item,getExportInfo:()=>({format,bitDepth:format==='tiff'?16:8,mimeType:'image/'+format}),
-    buildActiveExportFileName:()=> 'output.'+format,isTauriDesktop:()=>false,
+    buildActiveExportFileName:()=> 'output.'+format,isTauriRuntime:()=>false,
     manualEditRevision:0, i18n:{en:{}}, currentLang:'en',getLoadingOverlay:()=>overlay,
     createExportWorkerBridge:()=>({dispose(){}}),createExportBands:()=>null,exportBands:null,
     ensureFullDecode:async()=>{

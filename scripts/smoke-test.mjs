@@ -1,3 +1,4 @@
+import { runMobileShellSmoke } from './mobile-shell-smoke.mjs';
 import { runRollFilmTypeSmoke } from './roll-film-type-smoke.mjs';
 import { runFolderImportSmoke } from './folder-import-smoke.mjs';
 import { runSimplicitySmoke } from './simplicity-smoke.mjs';
@@ -450,6 +451,12 @@ await send('Page.navigate', { url: `http://127.0.0.1:${PORT}/?lang=en` });
 await waitFor('app boot', `!!document.getElementById('studioImportAutoCrop')`);
 await installDialogAutoAccept();
 await wait(1500); // let main.js finish wiring
+
+if (process.argv.includes('--mobile-shell-only')) {
+  await runMobileShellSmoke({ send, evaluate, waitFor, wait, fail, port: PORT, root: ROOT, fixture: FIXTURE });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS'); process.exit(0);
+}
 
 // This scenario navigates and imports its own small fixtures. Exit here so
 // --auto-crop-only cannot continue through the unrelated camera/roll suites.

@@ -1,0 +1,78 @@
+name: iOS CI
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mobile-ui:
+    name: iPhone and iPad layout
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: node negative2positive/src/app/platform.test.mjs
+      - run: npm run test:smoke -- --mobile-shell-only
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: mobile-layouts
+          path: output/mobile-shell
+          if-no-files-found: ignore
+          retention-days: 14
+
+  native-build:
+    name: iOS (${{ matrix.target }})
+    runs-on: macos-26
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64
+            rust-target: aarch64-apple-ios
+          - target: aarch64-sim
+            rust-target: aarch64-apple-ios-sim
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      CARGO_BUILD_JOBS: 3
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: ${{ matrix.rust-target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+          key: ios-${{ matrix.target }}-xcode26.6
+      - name: Record toolchain
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          xcrun --sdk iphonesimulator --show-sdk-version
+          rustc --version
+      - run: npm ci
+      - run: npm run build:web
+      - name: Check the mobile configuration without the updater feature
+        run: cargo check --manifest-path src-tauri/Cargo.toml --locked --no-default-features --target ${{ matrix.rust-target }}
+      # No distribution certificates, device registration, TestFlight or store
+      # submission. Build and link Swift/plugins and the real app for both SDKs.
+      - name: Build unsigned iOS app
+        run: npm run tauri -- ios build --ci --debug --no-sign --archive-only --target ${{ matrix.target }}

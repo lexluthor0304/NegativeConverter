@@ -21,6 +21,8 @@ mod import_folder;
 mod import_folder;
 mod memory_info;
 mod native_raw;
+#[cfg(any(target_os = "ios", test))]
+mod webview_recovery;
 use memory_info::get_memory_info;
 use import_folder::{ImportWatch, watch_import_folder, stop_watch_import_folder, read_import_file};
 use export_stream::ExportStreams;
@@ -349,6 +351,56 @@ fn current_installer_name() -> Option<&'static str> {
         BundleType::App => Some("app"),
         _ => Some("other"),
     }
+}
+
+/// What the page may rely on from this shell (#298): the web build sees none
+/// of it, the desktop and the mobile builds differ in dialogs, folder
+/// watching, self-update and how an external link opens.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PlatformInfo {
+    shell: &'static str,
+    os: &'static str,
+    arch: &'static str,
+    mobile: bool,
+    capabilities: PlatformCapabilities,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PlatformCapabilities {
+    /// Native save/open panels and the folder picker (rfd).
+    native_dialogs: bool,
+    /// The desktop watch folder (import_folder.rs).
+    watch_folder: bool,
+    /// In-app updates (the `updater` feature on desktop builds).
+    updater: bool,
+    /// `open_external_url` (desktop) or the opener plugin (mobile).
+    external_links: bool,
+    /// Exports land in the app's Documents directory (Files app) instead of a picked path.
+    documents_export: bool,
+}
+
+fn platform_info() -> PlatformInfo {
+    let mobile = cfg!(mobile);
+    PlatformInfo {
+        shell: "tauri",
+        os: std::env::consts::OS,
+        arch: std::env::consts::ARCH,
+        mobile,
+        capabilities: PlatformCapabilities {
+            native_dialogs: !mobile,
+            watch_folder: !mobile,
+            updater: cfg!(all(feature = "updater", desktop)),
+            external_links: true,
+            documents_export: mobile,
+        },
+    }
+}
+
+#[tauri::command]
+fn get_platform_info() -> PlatformInfo {
+    platform_info()
 }
 
 #[tauri::command]
@@ -1332,6 +1384,8 @@ pub fn run() {
                 reset_page_owned_state(webview);
             }
         });
+    #[cfg(target_os = "ios")]
+    let builder = builder.manage(webview_recovery::ReloadBackoff::default());
     // Registering the hook replaces Tauri's default handler, which only
     // reloads; this one records the termination for the page and releases
     // what the dead page owned before it reloads the webview itself.
@@ -1345,10 +1399,31 @@ pub fn run() {
         eprintln!("[webview] WebContent process terminated ({} this run); reloading", record.count);
         p0_append(&tauri::Manager::app_handle(webview).clone(), &format!("[webview] WebContent process terminated ({} this run); reloading", record.count));
         reset_page_owned_state(webview);
+        // P0 measured three iOS terminations in 250 ms. A single delayed
+        // reload releases the old page's resources first and backs off on
+        // repeated failures. Desktop keeps its existing immediate recovery.
+        #[cfg(target_os = "ios")]
+        {
+            let policy = tauri::Manager::state::<webview_recovery::ReloadBackoff>(webview);
+            if let Some(delay_ms) = policy.schedule(at) {
+                let webview = webview.clone();
+                tauri::async_runtime::spawn_blocking(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                    tauri::Manager::state::<webview_recovery::ReloadBackoff>(&webview).ready();
+                    if let Err(err) = webview.reload() {
+                        eprintln!("[webview] delayed reload after termination failed: {err}");
+                    }
+                });
+            }
+        }
+        #[cfg(target_os = "macos")]
         if let Err(err) = webview.reload() {
             eprintln!("[webview] reload after termination failed: {err}");
         }
     });
+    // Mobile: external links through the opener plugin (#298).
+    #[cfg(mobile)]
+    let builder = builder.plugin(tauri_plugin_opener::init());
     #[cfg(all(feature = "updater", desktop))]
     let builder = builder.plugin(tauri_plugin_process::init()).plugin({
         let mut updater = tauri_plugin_updater::Builder::new();
@@ -1423,6 +1498,7 @@ pub fn run() {
             native_raw_process,
             native_raw_release,
             get_desktop_update_capability,
+            get_platform_info,
             get_webview_compositing,
             log_webview_diagnostics,
             open_external_url
@@ -1444,6 +1520,19 @@ mod tests {
         LEGACY_APPIMAGE_SHM_DEFAULT, MAX_DIAGNOSTICS_LINE_CHARS,
     };
     use std::path::PathBuf;
+
+    #[test]
+    fn platform_capabilities_match_the_compiled_shell() {
+        let info = super::platform_info();
+        assert_eq!(info.mobile, cfg!(mobile));
+        assert_eq!(info.capabilities.native_dialogs, cfg!(desktop));
+        assert_eq!(info.capabilities.watch_folder, cfg!(desktop));
+        assert_eq!(info.capabilities.updater, cfg!(all(feature = "updater", desktop)));
+        assert_eq!(info.capabilities.documents_export, cfg!(mobile));
+        let json = serde_json::to_value(info).expect("serializes");
+        assert_eq!(json["shell"], "tauri");
+        assert!(json["capabilities"]["watchFolder"].is_boolean());
+    }
 
     #[test]
     fn updater_target_override_ignores_blank_values() {

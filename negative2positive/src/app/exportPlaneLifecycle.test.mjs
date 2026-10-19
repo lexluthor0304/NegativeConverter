@@ -199,7 +199,7 @@ function createContext({ gainMap = 'on' } = {}) {
     processNegativeInFlight: null,
     getCurrentQueueItem: () => null,
     buildActiveExportFileName: () => 'frame.out',
-    isTauriDesktop: () => false,
+    isTauriRuntime: () => false,
     notifyReviewExport: () => {},
     // The export's Cancel button: `overlayCancel()` presses it once offered.
     getLoadingOverlay: () => ({

@@ -26,7 +26,7 @@ const target = {
   state: { sprocketPreviewEnabled: false },
   displayProxyStore: { budget: async () => 2 * GiB, bytes: 1.2 * GiB },
   learnedRecords: new Map([['kodak-portra-400', {}], ['fuji-c200', {}], ['ilford-hp5', {}]]),
-  isTauriDesktop: () => false, studioWorkspace: { sync() {} }
+  isTauriRuntime: () => false, studioWorkspace: { sync() {} }
 };
 const context = vm.createContext(new Proxy(target, {
   has: () => true,

@@ -44,6 +44,11 @@ rfd = "0.15"
 tauri-plugin-updater = { version = "2", optional = true }
 tauri-plugin-process = { version = "2", optional = true }
 
+# Mobile only (#298): external links open through the opener plugin's native
+# bridge (UIApplication.open); the desktop keeps its own `open_external_url`.
+[target.'cfg(any(target_os = "ios", target_os = "android"))'.dependencies]
+tauri-plugin-opener = "2"
+
 # Physical memory for the page's memory budget (get_memory_info, #258), and
 # statvfs plus the Time Machine exclusion of the display-proxy cache (#249).
 # Both versions are already in Cargo.lock (tauri's own dependencies).

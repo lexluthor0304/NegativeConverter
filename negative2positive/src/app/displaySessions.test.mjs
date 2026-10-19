@@ -1688,7 +1688,7 @@ for (const mismatch of ['size', 'depth', 'route']) {
   };
   h.target.prepareStudioPhoto = async () => { await c.processNegative({ quiet: true }); };
   Object.assign(h.target, {
-    isTauriDesktop: () => false,
+    isTauriRuntime: () => false,
     getExportInfo: () => ({ format: 'png', bitDepth: 8, extension: 'png' }),
     saveBlob: async () => { written++; return { saved: true }; }
   });
