@@ -2488,6 +2488,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // A recovery copy of the last roll exists in IndexedDB (see rollProject.js).
       projectRecoveryAvailable: false,
       mobileRecoveryRestoring: false,
+      mobileRecoveryEnabled: Boolean(mobileRecovery),
       // Flat field: session registry of gain maps and the current file's choice.
       flatFields: {},
       flatFieldActiveId: null,
@@ -23675,6 +23676,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           state.fileQueue[index].selected = selected;
           updateFileListUI();
           updateExportButtons();
+          if (state.mobileRecoveryEnabled) scheduleProjectRecovery();
         },
         onOpenFile: (index) => {
           switchToFile(index);
@@ -23956,7 +23958,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           studioWorkspace?.sync();
           // A failed target can leave the outgoing photo active too.
           await resumePhotoCropDraft(getCurrentQueueItem(), generation);
-          if (isCurrentLoad(generation)) kickBackgroundPhotoWork();
+          if (isCurrentLoad(generation)) {
+            kickBackgroundPhotoWork();
+            if (state.mobileRecoveryEnabled) scheduleProjectRecovery();
+          }
         }
       }
     }
@@ -24348,6 +24353,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       state.fileQueue.forEach(item => item.selected = true);
       updateFileListUI();
       updateExportButtons();
+      if (state.mobileRecoveryEnabled) scheduleProjectRecovery();
     });
 
     // Select none button
@@ -24355,6 +24361,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       state.fileQueue.forEach(item => item.selected = false);
       updateFileListUI();
       updateExportButtons();
+      if (state.mobileRecoveryEnabled) scheduleProjectRecovery();
     });
 
     // Save settings button
@@ -29242,6 +29249,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     function updateMobileRecoveryStatus(status, error = null) {
       const node = document.getElementById('mobileRecoveryStatus');
       const keys = { saving: 'mobileRecoverySaving', saved: 'mobileRecoverySaved', error: 'mobileRecoveryFailed', idle: 'mobileRecoveryIdle' };
+      if (error?.code === 'recovery-limits') keys.error = 'mobileRecoveryLimits';
       if (node) {
         node.dataset.i18n = keys[status] || keys.idle;
         node.textContent = getLocalizedText(node.dataset.i18n, '');
@@ -29249,7 +29257,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       }
       if (error) {
         console.warn('Native project recovery failed:', error);
-        showToast(getLocalizedText('mobileRecoveryFailed', 'Could not save this roll on the device. Keep the app open and export the project.'), 6000);
+        showToast(getLocalizedText(keys.error, 'Could not save this roll on the device. Keep the app open and export the project.'), 6000);
       }
     }
 

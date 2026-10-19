@@ -2,6 +2,9 @@
 // from the portable .ncroll.json recipe. Only opaque source IDs cross IPC.
 // Uploads are sequential binary chunks; checkpoints never race one another.
 export const RECOVERY_CHUNK_BYTES = 1024 * 1024;
+export const RECOVERY_FILE_LIMIT = 256;
+export const RECOVERY_SOURCE_LIMIT = 512 * 1024 * 1024;
+export const RECOVERY_PROJECT_LIMIT = 16 * 1024 * 1024;
 // Reopening currently reconstructs compressed File objects for the shared
 // loaders. Refuse a larger roll before reading it, rather than risk killing
 // WebContent. Lazy native file-backed sources are a separate P2 follow-up.
@@ -84,6 +87,13 @@ export function createMobileRecovery({ invoke, onStatus = () => {}, FileCtor = g
       return serial(async () => {
         if (request !== sequence) return false;
         try {
+          // Refuse before copying any original, not after filling the native
+          // store with a roll its checkpoint cannot represent.
+          if (entries.length > RECOVERY_FILE_LIMIT
+              || entries.some(({ file }) => !Number.isSafeInteger(file.size) || file.size < 1 || file.size > RECOVERY_SOURCE_LIMIT)
+              || typeof project !== 'string' || new TextEncoder().encode(project).byteLength > RECOVERY_PROJECT_LIMIT) {
+            throw Object.assign(new Error('The roll exceeds the native recovery storage limits'), { code: 'recovery-limits' });
+          }
           await open();
           const current = () => clearEpoch === clearing;
           const ids = [];

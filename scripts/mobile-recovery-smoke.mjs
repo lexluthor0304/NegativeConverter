@@ -93,6 +93,12 @@ export async function runMobileRecoverySmoke({ send, evaluate, waitFor, wait, fa
     await waitFor('recovery import', ready, 120000);
     await edit(17);
     await waitFor('durable edit', `${saved} && JSON.parse(__recoverySmoke.disk.checkpoint.project).files[0].settings?.coreExposure === 17`);
+    await tap('#studioToggleStrip');
+    await tap('.file-list-name[data-index="1"]');
+    await waitFor('active frame checkpoint', `${ready} && ${saved} && __recoverySmoke.disk.checkpoint.activeIndex===1`);
+    await tap('.file-list-name[data-index="0"]');
+    await waitFor('warm navigation checkpoint without an edit', `${ready} && ${saved} && __recoverySmoke.disk.checkpoint.activeIndex===0`);
+    await tap('#studioToggleStrip');
     const identity = await evaluate(`({ ids:__recoverySmoke.disk.checkpoint.queueIds, sources:__recoverySmoke.disk.checkpoint.sourceIds })`);
     if (new Set(identity.ids).size !== 2 || new Set(identity.sources).size !== 2) fail('Same-name native originals were collapsed');
     await send('Page.navigate', { url });
@@ -109,7 +115,12 @@ export async function runMobileRecoverySmoke({ send, evaluate, waitFor, wait, fa
     await evaluate(`__recoverySmoke.failCommit=true`); await edit(29);
     await waitFor('save failure visible', `document.getElementById('mobileRecoveryStatus').dataset.status==='error'`);
     if (await evaluate(`JSON.parse(__recoverySmoke.disk.checkpoint.project).files[0].settings.coreExposure`) !== 17) fail('Failed save replaced the checkpoint');
+    const notices = await evaluate(`Array.from(document.querySelectorAll('.toast-visible'), el => { const r=el.getBoundingClientRect(); return {left:r.left,right:r.right,scroll:el.scrollWidth,width:el.clientWidth}; })`);
+    if (!notices.length || notices.some(r => r.left < 0 || r.right > 390 || r.scroll > r.width + 1)) fail('Recovery notice is clipped: ' + JSON.stringify(notices));
+    const failureShot = await send('Page.captureScreenshot', { format: 'png' });
+    writeFileSync(join(output, 'iphone-recovery-failure.png'), Buffer.from(failureShot.result.data, 'base64'));
     await edit(31); await waitFor('save retry', `${saved} && JSON.parse(__recoverySmoke.disk.checkpoint.project).files[0].settings.coreExposure === 31`);
+    await waitFor('recovery notifications settle', `!document.querySelector('.toast-visible')`);
     await tap('#studioMenu > summary'); await wait(200);
     const shot = await send('Page.captureScreenshot', { format: 'png' });
     writeFileSync(join(output, 'iphone-recovery.png'), Buffer.from(shot.result.data, 'base64'));

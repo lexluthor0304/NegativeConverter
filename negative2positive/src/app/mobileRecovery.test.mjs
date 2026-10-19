@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { File } from 'node:buffer';
 import { readFileSync } from 'node:fs';
-import { createMobileRecovery, RECOVERY_CHUNK_BYTES } from './mobileRecovery.js';
+import { createMobileRecovery, RECOVERY_CHUNK_BYTES, RECOVERY_FILE_LIMIT, RECOVERY_SOURCE_LIMIT } from './mobileRecovery.js';
 import { buildRollProject, serializeRollProject, parseRollProject } from './rollProject.js';
 
 function bridge() {
@@ -159,6 +159,13 @@ for (const failed of ['mobile_recovery_append', 'mobile_recovery_commit']) {
 }
 
 const rust = readFileSync(new URL('../../../src-tauri/src/mobile_recovery.rs', import.meta.url), 'utf8');
+// Refuse an impossible checkpoint before the first source is copied.
+for (const files of [Array.from({ length: RECOVERY_FILE_LIMIT + 1 }, () => source()),
+  [{ name: 'huge.dng', size: RECOVERY_SOURCE_LIMIT + 1, type: '', lastModified: 0 }]]) {
+  const b = bridge(), c = b.controller();
+  await assert.rejects(c.save(saveInput(c, files)), error => error.code === 'recovery-limits');
+  assert.equal(b.calls.length, 0);
+}
 assert.match(rust, /pub const CHUNK_LIMIT: usize = 1024 \* 1024;/);
 assert.equal(RECOVERY_CHUNK_BYTES, 1024 * 1024);
 console.log('Mobile recovery: restart, binary copies, ordering, clear, failure and memory admission passed');

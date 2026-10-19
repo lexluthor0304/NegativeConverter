@@ -33,6 +33,11 @@
 .shell-mobile .studio-menu-content .header-link-btn > span { display: inline; position: static; width: auto; height: auto; margin: 0; overflow: visible; clip: auto; white-space: normal; }
 .shell-mobile #mobileRecoveryStatus { max-width: 28em; white-space: normal; overflow-wrap: anywhere; color: var(--text-secondary); margin: 8px 0; }
 .shell-mobile #mobileRecoveryStatus[data-status="error"] { color: var(--accent); }
+.shell-mobile #toastContainer {
+  left: calc(var(--safe-left) + 12px); right: calc(var(--safe-right) + 12px);
+  bottom: calc(var(--safe-bottom) + 12px); transform: none; align-items: stretch;
+}
+.shell-mobile .toast-message { max-width: 100%; box-sizing: border-box; white-space: normal; overflow-wrap: anywhere; }
 
 @media (max-width: 700px) {
   .shell-mobile .studio-header { display: grid; grid-template-columns: minmax(0, 1fr); padding: 6px 10px; gap: 4px; }
