@@ -118,24 +118,54 @@ For a failed fresh-install fixture run, preparation accepts
 ID, device and installed-app URL into the new manifest. Before installing, the
 runner copies both checkpoint generations, originals and Documents to
 `retry-backup`, and verifies that every stored original is byte-identical to a
-bundled fixture. The native-page harness also requires the prior incomplete
+bundled fixture. A fully empty source directory is accepted only when both
+checkpoint generations also have no files, source IDs or queue IDs. The
+native-page harness also requires the prior incomplete
 test marker and matching source metadata. Unknown data stops the retry. The
 new file selection replaces only that backed-up fixture roll; native clear and
 uninstall are never used. Export validation counts new files separately from
 the previous run's exports.
 
-The first P2 physical run on 2026-10-19 built, signed, installed and launched
-on iPhone 15 Pro Max. JPEG import reached the full frame and the native export
-reported a saved PNG. The harness then incorrectly expected a second input
-selection to append HEIC to the first roll; the real input handler correctly
-replaced it. That assertion stopped the run before termination/recovery and
-independent export-file validation. The corrected harness has a regression
-check for one complete file selection followed by four image visits/exports.
-This partial run is not whole-app recovery acceptance.
+The 2026-10-19 retry passed on a physical **iPhone 15 Pro Max, iOS 27.0
+(24A5408d)**. The native/frontend sources match `d967bc37`; the terminal runner
+also received the empty-checkpoint backup fix described above. The complete
+local JavaScript suite passed **382/382** test files, including the one-selection
+fixture regression. The native test imported all four originals, converted
+and exported each, saved exposure 17 on the first image and 31 on the second,
+and persisted the second image as active.
+
+| Source | Decoder dimensions | Verified PNG dimensions | PNG precision |
+| --- | --- | --- | --- |
+| JPEG | 1400 x 1284 | 1400 x 1284 | 8-bit |
+| HEIC | 1400 x 1284 | 1400 x 1284 | 8-bit |
+| NEF | 4000 x 2672 (native LibRaw) | 3625 x 2448 | 8-bit |
+| DNG | 6048 x 4024 (native LibRaw) | 4557 x 3025 | 8-bit |
+
+Export dimensions reflect the editor's applied crop. Native LibRaw decode
+reported 532 ms for NEF and 1080 ms for DNG on this run; these are observations,
+not performance acceptance thresholds. All PNG chunks/CRCs and full decompressed
+pixel streams were independently checked. The JPEG and DNG output images were
+also visually inspected for coherent, nonblank image content.
+
+After SIGKILL of the verified app PID and launch of a different app process,
+the editor restored four originals, their stable queue/source IDs, both exposure
+edits and the active image. Source SHA-256 values matched the bundled originals
+before and after termination. A fifth fresh export after restoration also
+passed PNG verification. Checkpoint revisions advanced from 13 to 16. The
+copied files and final `result.json` were independently read back again on the
+Mac. Local evidence is in
+`output/ios298-device-handoff-20261019-v4/run-20261019-173048/`;
+the frozen library SHA-256 is
+`668659f0cb0e4f2af06d252f44a4c9365bd4d13030ce56a50cdf71b54f2390ea`.
+The runner records its own hash separately from the preparation-time script
+hash and does not rerun a completed output directory.
 
 Evidence is written to a timestamped `run-*` directory: device/build/install
 results, launch PIDs, reassembled device events, copied originals/checkpoints,
 exported files and a final `result.json`. A prepared library or installed app
 alone is not a passing test. Programmatic editor controls on a physical phone
-still leave manual touch, rotation/background, a separate WebContent termination
-and physical iPad acceptance outstanding. No upload or App Store action occurs.
+still leave manual touch, rotation/background, a separate WebContent termination,
+physical iPad and lower-memory-device acceptance outstanding. This run used the
+default **8-bit** export; it does not establish 16-bit export acceptance.
+ResizeObserver loop notifications are retained in the device log. No upload
+or App Store action occurs.

@@ -213,6 +213,17 @@ def verify_retry_store(path, manifest):
     checkpoint_paths = list(path.glob('checkpoint-*.json'))
     assert checkpoint_paths, 'No backed-up checkpoint; refusing a retry'
     assert not list((path / 'sources').glob('*.part')), 'Original copying is still incomplete'
+    checkpoints = [json.loads(p.read_text()) for p in checkpoint_paths]
+    source_paths = list((path / 'sources').iterdir())
+    if not source_paths:
+        # The user may have cleared the test roll while we prepared a fix.
+        # Both generations must actually be empty; a missing original from a
+        # nonempty checkpoint is corruption and must never pass this branch.
+        for checkpoint in checkpoints:
+            project = json.loads(checkpoint['project'])
+            assert checkpoint['sourceIds'] == checkpoint['queueIds'] == project['files'] == [], 'Checkpoint references missing originals'
+            assert checkpoint['activeIndex'] == 0, 'Invalid empty-roll checkpoint'
+        return max(checkpoints, key=lambda c: c['revision'])
     known_ids = set()
     for metadata_path in (path / 'sources').glob('*.json'):
         metadata = json.loads(metadata_path.read_text())
@@ -223,8 +234,7 @@ def verify_retry_store(path, manifest):
         assert source.stat().st_size == metadata['size'] == wanted['size']
         assert digest(source) == metadata['sha256'] == wanted['sha256'], 'Original is not the bundled fixture'
         known_ids.add(metadata_path.stem)
-    assert known_ids and {p.stem for p in (path / 'sources').glob('*.bin')} == known_ids
-    checkpoints = [json.loads(p.read_text()) for p in checkpoint_paths]
+    assert known_ids and {p.stem for p in (path / 'sources').glob('*.bin')} == known_ids, 'Incomplete original/metadata pairs'
     for checkpoint in checkpoints:
         assert set(checkpoint['sourceIds']) <= known_ids
         project = json.loads(checkpoint['project'])
@@ -279,12 +289,19 @@ def png_facts(path):
 
 def execute(out, device):
     manifest = json.loads((out / 'manifest.json').read_text())
+    for result_path in sorted(out.glob('run-*/result.json'), reverse=True):
+        if json.loads(result_path.read_text()).get('wholeAppRecovery') == 'passed':
+            print(f'SAVED PHYSICAL VALIDATION ALREADY PASSED: {result_path.parent}', flush=True)
+            print('No new device commands were run. Prepare a new output directory for another validation.', flush=True)
+            return
     frozen = out / 'apple/Externals/arm64/debug/libapp.a'
     if digest(frozen) != manifest['librarySha256']:
         raise RuntimeError('Prepared native library changed; refusing to install')
     require_space(1.5)
     evidence = out / ('run-' + datetime.datetime.now().strftime('%Y%m%d-%H%M%S'))
     evidence.mkdir()
+    write_json(evidence / 'runner.json', {'scriptSha256': digest(Path(__file__)),
+        'preparedScriptSha256': manifest['sourceHashes']['scripts/ios-device-validation.py']})
 
     def device_command(args, name, timeout=60):
         result_path = evidence / (name + '.json')
@@ -423,5 +440,5 @@ if __name__ == '__main__':
     try:
         main()
     except Exception as error:
-        print(f'STOPPED: {error}', file=sys.stderr, flush=True)
+        print(f'STOPPED: {type(error).__name__}: {error}', file=sys.stderr, flush=True)
         raise SystemExit(1)
