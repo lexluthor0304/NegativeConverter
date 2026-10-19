@@ -33,6 +33,8 @@ tauri = { version = "2", features = [] }
 base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Streaming checksums for persistent mobile originals; already in Cargo.lock.
+sha2 = "0.10"
 
 # Desktop only (#298): rfd has no iOS or Android backend, the watch folder is
 # a desktop workflow (import_folder_mobile.rs stubs its commands), and a store
@@ -82,9 +84,6 @@ tauri-runtime-wry = { version = "2", default-features = false }
 wry = { git = "https://github.com/lexluthor0304/wry", rev = "547b9a08086e70ee831597d488a0b776dfe6d3e1" }
 
 [dev-dependencies]
-# RGB16 hashes in the native decoder's parity tests (#264). Already in
-# Cargo.lock (tauri-codegen, wry).
-sha2 = "0.10"
 # The parity tests compare LibRaw's floats with the ones libraw-wasm reported
 # (native/wasm-parity-hashes.json): parse them correctly rounded, not to the
 # default best-effort precision (off by one ulp for some values). Tests only.

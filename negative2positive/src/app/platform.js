@@ -1,7 +1,7 @@
 // Native capabilities come from the shell, never from a device's user agent
 // or touchscreen. Browser-only ?shell=mobile|desktop previews the same UI.
 export const WEB_CAPABILITIES = Object.freeze({
-  nativeDialogs: false, watchFolder: false, updater: false, externalLinks: true, documentsExport: false
+  nativeDialogs: false, watchFolder: false, updater: false, externalLinks: true, documentsExport: false, sourceRecovery: false
 });
 export const WEB_PLATFORM = Object.freeze({ shell: 'web', os: null, arch: null, mobile: false, capabilities: WEB_CAPABILITIES });
 const MOBILE_OS = new Set(['ios', 'android']);
@@ -41,7 +41,8 @@ export function normalizePlatform(info) {
       watchFolder: !mobile && capabilities.watchFolder === true,
       updater: !mobile && capabilities.updater === true,
       externalLinks: capabilities.externalLinks === true,
-      documentsExport: mobile && capabilities.documentsExport === true
+      documentsExport: mobile && capabilities.documentsExport === true,
+      sourceRecovery: mobile && capabilities.sourceRecovery === true
     }
   };
 }

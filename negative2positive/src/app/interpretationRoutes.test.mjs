@@ -89,7 +89,7 @@ async function fixture({ type = 'positive', mode = 'correct', manual = false, ro
     (depth === 16 ? applyPreparedAdjustmentsToBuffer16 : applyPreparedAdjustmentsToBuffer)(image, settings, output);
     return output;
   };
-  Object.assign(target, filmType, { RECIPE_KEYS, EXPIRED_RESCUE_DEFAULTS, EXPIRED_RESCUE_KEYS,
+  Object.assign(target, filmType, { mobileRecovery: null, RECIPE_KEYS, EXPIRED_RESCUE_DEFAULTS, EXPIRED_RESCUE_KEYS,
     sanitizeSemanticMap, sanitizeExpiredAnalysis, sanitizeExpiredRescueParams, analyzeExpiredFilm, defaultExpiredRescueParams,
     resolveAnalysisRegion, analysisPixelBounds, downsampleImageDataForMaxPixels, downsampleImageDataForMaxDim,
     hasWindowEdits, overlayWindowEdits, analysisAreaEdited, confirmedImageArea, mergeStudioColors, planeBuffersOf, sharesPlaneBuffers, markOwnedPlanes,
