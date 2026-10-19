@@ -37,6 +37,7 @@ tests.push(join(scriptsDir, 'check-third-party-notices.mjs'));
 tests.push([join(scriptsDir, 'check-dist-asset-names.mjs'), '--self-test']);
 // The export digests the import parity and gain-map smokes compare.
 tests.push(join(scriptsDir, 'export-parity-digest.test.mjs'));
+tests.push(join(repoRoot, '.github/scripts/prepare_ios_release.test.mjs'));
 
 // A test that leaves an open handle would otherwise hang the whole suite.
 const TIMEOUT_MS = 120_000;

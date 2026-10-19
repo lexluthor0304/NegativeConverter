@@ -23,6 +23,11 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      - name: Validate iOS release tooling without credentials
+        run: |
+          node .github/scripts/prepare_ios_release.test.mjs
+          python3 scripts/test-ios-package.py
+          ruby -c fastlane/Fastfile
       - run: npm run test:smoke -- --studio-shell-only
       - uses: actions/upload-artifact@v7
         if: always()

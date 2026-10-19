@@ -1,0 +1,9 @@
+Convert scanned film negatives into positive photographs on your iPhone or iPad.
+
+Import your scans, choose film conversion settings, and adjust exposure, white balance, color and curves in the Studio. Crop and rotate each frame, compare the result, and export PNG images to the app's folder in Files.
+
+Keep working on a roll across app restarts. Imported originals and applied edits are saved in app-owned storage. Large files and rolls are checked against the device's memory limits before processing or restoring.
+
+The interface is available in English, Japanese and Chinese. Photo processing takes place on your device without uploading your images to a server.
+
+Negative Converter includes LibRaw under the CDDL-1.0 license. LibRaw source: https://github.com/LibRaw/LibRaw. Third-party notices are available from the Studio menu. Any terms differing from the CDDL-1.0 are offered by NEO ANALOG LABO K.K. alone, not by LibRaw's developers.
