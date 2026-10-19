@@ -103,7 +103,7 @@ try {
   rmSync(root, { recursive: true, force: true });
 }
 
-// Site endpoints (#229 review R2-047). The desktop app posts its feedback to
+// Site endpoints (#229 review R2-047). Native apps post their feedback to
 // the site by full URL. The POST carries JSON, so the webview preflights it,
 // and a preflight that gets a redirect fails: the path must be the spelling
 // the site serves as is. Vercel answers the other one with a 308
@@ -112,16 +112,16 @@ const read = (...parts) => readFileSync(join(repoRoot, ...parts), 'utf8');
 const mainJs = read('negative2positive', 'src', 'app', 'main.js');
 const SITE_ORIGIN = 'https://negative-converter.tokugai.com';
 
-const feedback = mainJs.match(/const FEEDBACK_ENDPOINT = isTauriDesktop\(\)\s*\?\s*'([^']*)'\s*:\s*'([^']*)';/);
-assert.ok(feedback, "main.js: `const FEEDBACK_ENDPOINT = isTauriDesktop() ? '<desktop>' : '<web>';` not found");
-const [, desktopFeedback, webFeedback] = feedback;
+const feedback = mainJs.match(/const FEEDBACK_ENDPOINT = isTauriRuntime\(\)\s*\?\s*'([^']*)'\s*:\s*'([^']*)';/);
+assert.ok(feedback, "main.js: `const FEEDBACK_ENDPOINT = isTauriRuntime() ? '<native>' : '<web>';` not found");
+const [, nativeFeedback, webFeedback] = feedback;
 assert.ok(existsSync(join(repoRoot, 'negative2positive', 'api', 'feedback.mjs')), 'the feedback function is no longer /api/feedback');
 for (const config of ['vercel.json', join('negative2positive', 'vercel.json')]) {
   const trailingSlash = JSON.parse(read(config)).trailingSlash === true;
   const path = trailingSlash ? '/api/feedback/' : '/api/feedback';
   const why = `${config} has trailingSlash: ${trailingSlash}`;
   assert.equal(webFeedback, path, `main.js: the web feedback endpoint must be ${path} (${why})`);
-  assert.equal(desktopFeedback, `${SITE_ORIGIN}${path}`, `main.js: the desktop feedback endpoint must be ${SITE_ORIGIN}${path} (${why})`);
+  assert.equal(nativeFeedback, `${SITE_ORIGIN}${path}`, `main.js: the native feedback endpoint must be ${SITE_ORIGIN}${path} (${why})`);
 }
 // The function answers both desktop webview origins in production, and the
 // desktop's CSP lets the webview connect to the site.
@@ -133,7 +133,7 @@ const connectSrc = String(tauriConf?.app?.security?.csp || '').split(';')
   .map((directive) => directive.trim().split(/\s+/))
   .find(([name]) => name === 'connect-src')?.slice(1) || [];
 assert.ok(connectSrc.includes(SITE_ORIGIN), `tauri.conf.json: connect-src must allow ${SITE_ORIGIN}`);
-console.log(`feedback endpoint: ok (desktop ${desktopFeedback}, web ${webFeedback})`);
+console.log(`feedback endpoint: ok (native ${nativeFeedback}, web ${webFeedback})`);
 
 // Release manifests (#229 review R2-048). The release workflows upload
 // latest.json and updater.json to <public base>/<prefix>/ of the release

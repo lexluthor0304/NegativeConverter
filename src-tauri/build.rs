@@ -10,10 +10,12 @@ fn main() {
     // when the `updater` cargo feature is on. The Mac App Store build
     // (`scripts/build-mas.sh`) compiles with `--no-default-features`.
     // iOS and Android compile no updater plugin (Cargo.toml keeps it desktop
-    // only), so the updater capability stays out of those builds too (#298).
+    // only); updater.json names the desktop platforms, mobile.json the mobile
+    // ones, and Tauri skips a capability whose `platforms` exclude the target,
+    // so both builds can collect every file (#298).
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let mobile = matches!(target_os.as_str(), "ios" | "android");
-    let capabilities_pattern: &'static str = if std::env::var_os("CARGO_FEATURE_UPDATER").is_some() && !mobile {
+    let capabilities_pattern: &'static str = if std::env::var_os("CARGO_FEATURE_UPDATER").is_some() || mobile {
         "./capabilities/**/*"
     } else {
         "./capabilities/default.json"

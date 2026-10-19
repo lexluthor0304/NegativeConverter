@@ -225,8 +225,14 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       sharesPlaneBuffers
     } from './planeRelease.js';
     import { registerEvictablePlane, evictPlane } from './evictablePlanes.js';
+    import { resolvePlatform, applyPlatformClasses } from './platform.js';
 
     const DEBUG_UI = new URLSearchParams(window.location.search).get('debug') === '1';
+    // The shell this page runs in (#298): the web, or Tauri on a desktop or a
+    // mobile OS, from the shell's own answer. Its <html> classes decide what
+    // the stylesheet shows; `isTauriMobile()` below decides what runs.
+    const platformInfo = await resolvePlatform();
+    applyPlatformClasses(platformInfo);
     const WEBGL_DEBUG_ERRORS = new URLSearchParams(window.location.search).has('debugGL');
     // ?perf=1 (benchmark harness) also records every trace as User Timing.
     const { createPerfTrace, recordStages: recordPerfStages } = createPerfTraceFactory({
@@ -682,7 +688,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (offlineLink) {
         offlineLink.href = `./download.html?lang=${encodeURIComponent(lang)}`;
         // The desktop build must not advertise its own web download.
-        if (isTauriDesktop()) offlineLink.style.display = 'none';
+        if (isTauriRuntime()) offlineLink.style.display = 'none';
       }
       updateDesktopUpdateBannerText();
       if (stateReady) {
@@ -1076,7 +1082,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // Keep the trailing slash: the site sets `trailingSlash: true` and answers
     // /api/feedback with a 308, and the desktop's JSON POST is preflighted,
     // which fails on a redirect (scripts/check-updater-manifest.mjs).
-    const FEEDBACK_ENDPOINT = isTauriDesktop()
+    const FEEDBACK_ENDPOINT = isTauriRuntime()
       ? 'https://negative-converter.tokugai.com/api/feedback/'
       : '/api/feedback/';
     let feedbackType = 'bug';
@@ -1183,7 +1189,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
             message,
             website: document.getElementById('feedbackWebsite')?.value || '',
             lang: currentLang,
-            source: isTauriDesktop() ? 'desktop' : 'web',
+            source: isTauriMobile() ? (platformInfo.os || 'mobile') : (isTauriRuntime() ? 'desktop' : 'web'),
             images: feedbackImages.map((dataUrl) => ({
               type: 'image/jpeg',
               data: dataUrl.slice(dataUrl.indexOf(',') + 1)
@@ -1388,7 +1394,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           lensfunRuntime.lastError = '';
           return runtime;
         } catch (localErr) {
-          if (isTauriDesktop()) {
+          if (isTauriRuntime()) {
             // The desktop build bundles the lensfun assets and is expected to
             // work offline: do not fall back to a CDN it should never contact.
             lensfunRuntime.lastError = sanitizeLensRuntimeError(localErr);
@@ -1867,7 +1873,19 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     const SITE_ORIGIN = 'https://negative-converter.tokugai.com/';
 
     async function openExternalUrl(url) {
-      if (isTauriDesktop()) {
+      if (isTauriMobile()) {
+        // The opener plugin's native bridge (UIApplication.open on iOS); the
+        // desktop command below spawns the system browser instead.
+        try {
+          await window.__TAURI__.core.invoke('plugin:opener|open_url', { url, with: null });
+          return;
+        } catch (err) {
+          console.warn('Mobile open_url failed:', err);
+          showToast(getInterpolatedText('externalLinkFailed', { url }, `Could not open the link. Open it manually: ${url}`), 8000);
+          return;
+        }
+      }
+      if (isTauriRuntime()) {
         try {
           await window.__TAURI__.core.invoke('open_external_url', { url });
           return;
@@ -1901,7 +1919,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // the loaded queue, per-file settings, roll reference and undo history with
     // no way back. Route every outbound link to the system browser instead.
     function installDesktopExternalLinkHandler() {
-      if (!isTauriDesktop()) return;
+      if (!isTauriRuntime()) return;
       document.addEventListener('click', (event) => {
         if (event.defaultPrevented || event.button !== 0) return;
         if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
@@ -1929,7 +1947,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     installDesktopExternalLinkHandler();
 
     async function checkDesktopUpdate(options = {}) {
-      if (!isTauriDesktop()) return;
+      if (!hasPlatformCapability('updater')) return;
       const force = Boolean(options.force);
       if (!force && shouldSkipDesktopUpdateCheck()) return;
 
@@ -1985,7 +2003,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     async function loadDesktopUpdateCapability() {
-      if (!isTauriDesktop()) return null;
+      if (!isTauriRuntime()) return null;
       try {
         const capability = await window.__TAURI__.core.invoke('get_desktop_update_capability');
         desktopUpdateState.capability = capability && typeof capability === 'object' ? capability : null;
@@ -2127,7 +2145,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       });
     }
 
-    initDesktopUpdateCheck();
+    // A store app updates through its store: no banner, no manifest fetch (#298).
+    if (hasPlatformCapability('updater')) initDesktopUpdateCheck();
 
     window.addEventListener('beforeunload', () => {
       if (lensfunRuntime.client && typeof lensfunRuntime.client.dispose === 'function') {
@@ -2731,7 +2750,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const fill = document.getElementById('headerExportProgressFill');
       if (!container || !label || !file || !fill) return;
 
-      const show = isTauriDesktop() && desktopBatchExportState.active;
+      const show = isTauriRuntime() && desktopBatchExportState.active;
       container.classList.toggle('visible', show);
       container.setAttribute('aria-hidden', show ? 'false' : 'true');
 
@@ -2795,7 +2814,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     function isDesktopBatchExportLocked() {
-      return isTauriDesktop() && desktopBatchExportState.active;
+      return isTauriRuntime() && desktopBatchExportState.active;
     }
 
     function updateDesktopBatchExportControlLock() {
@@ -5699,7 +5718,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // ---- What the page runs on: WebGL renderer and webview compositing ----
 
     function logWebviewDiagnostics(line) {
-      if (!isTauriDesktop()) return;
+      if (!isTauriRuntime()) return;
       Promise.resolve(window.__TAURI__.core.invoke('log_webview_diagnostics', { line })).catch(() => {});
     }
 
@@ -5731,7 +5750,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     async function loadWebviewCompositing() {
-      if (isTauriDesktop()) {
+      if (isTauriRuntime()) {
         try {
           const compositing = await window.__TAURI__.core.invoke('get_webview_compositing');
           renderEnvironment.compositing = compositing && typeof compositing === 'object' ? compositing : null;
@@ -6203,7 +6222,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // which is what the per-platform check (docs/cross-origin-isolation.md)
     // needs; every worker and LibRaw with ?debug=1.
     function logIsolationWhenIdle() {
-      if (!isTauriDesktop() && !DEBUG_UI) return;
+      if (!isTauriRuntime() && !DEBUG_UI) return;
       const run = async () => {
         try {
           const { collectIsolationReport, formatIsolationLine } = await import('./isolationReport.js');
@@ -12470,7 +12489,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     async function loadDesktopMemoryInfo() {
-      if (isTauriDesktop()) {
+      if (isTauriRuntime()) {
         try {
           const info = await window.__TAURI__.core.invoke('get_memory_info');
           memoryRuntime.desktop = info && typeof info === 'object' ? info : null;
@@ -13460,7 +13479,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       workerFactory: typeof Worker === 'function'
         ? () => new Worker(new URL('../workers/displayProxyWorker.js', import.meta.url), { type: 'module' }) : null
     });
-    const desktopProxyInvoke = isTauriDesktop() ? (...args) => window.__TAURI__.core.invoke(...args) : null;
+    const desktopProxyInvoke = isTauriRuntime() ? (...args) => window.__TAURI__.core.invoke(...args) : null;
     // Free space the caches may count on: the volume's on the desktop, the
     // origin's quota left on the web. The store's budget reads the two
     // differently (R2-068: its 10 GiB floor is the volume's).
@@ -20235,11 +20254,21 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       exportDropdownMenu.classList.remove('show');
     });
 
-    function isTauriDesktop() {
+    function isTauriRuntime() {
       return typeof window !== 'undefined'
         && !!window.__TAURI__
         && !!window.__TAURI__.core
         && typeof window.__TAURI__.core.invoke === 'function';
+    }
+
+    // Shared native I/O uses the bridge; OS-specific operations require an
+    // explicit capability returned by the shell.
+    function hasPlatformCapability(name) {
+      return isTauriRuntime() && platformInfo.capabilities[name] === true;
+    }
+
+    function isTauriMobile() {
+      return isTauriRuntime() && platformInfo.shell === 'tauri' && platformInfo.mobile === true;
     }
 
     function downloadBlobInBrowser(blob, fileName) {
@@ -20266,7 +20295,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     async function pickDesktopSavePath(fileName) {
-      if (!isTauriDesktop()) return null;
+      if (!isTauriRuntime()) return null;
       const path = await window.__TAURI__.core.invoke('pick_export_file_path', {
         suggestedName: fileName
       });
@@ -20274,13 +20303,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     async function pickDesktopExportDirectory() {
-      if (!isTauriDesktop()) return null;
+      if (!isTauriRuntime()) return null;
       const path = await window.__TAURI__.core.invoke('pick_export_directory');
       return typeof path === 'string' && path ? path : null;
     }
 
     async function writeBlobToDesktopPath(blob, targetPath, mimeType = 'application/octet-stream', { onProgress = null, signal = null } = {}) {
-      if (!isTauriDesktop()) {
+      if (!isTauriRuntime()) {
         throw new Error('Desktop path writes require the Tauri runtime.');
       }
 
@@ -20290,7 +20319,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     async function writeBlobToDesktopDirectory(blob, directory, fileName, mimeType = 'application/octet-stream') {
-      if (!isTauriDesktop()) {
+      if (!isTauriRuntime()) {
         throw new Error('Desktop directory writes require the Tauri runtime.');
       }
 
@@ -20301,7 +20330,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
     async function saveBlob(blob, fileName, mimeType = 'application/octet-stream') {
       const normalizedBlob = normalizeExportBlob(blob, mimeType);
-      if (isTauriDesktop()) {
+      if (isTauriRuntime()) {
         const path = await pickDesktopSavePath(fileName);
         if (!path) return { saved: false, path: null };
         return writeBlobToDesktopPath(normalizedBlob, path, mimeType);
@@ -20680,7 +20709,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         stats,
         count: () => planBandCount({
           hardwareConcurrency: navigator.hardwareConcurrency,
-          inputRecently: isTauriDesktop() && backgroundGate.inputRecently(),
+          inputRecently: isTauriRuntime() && backgroundGate.inputRecently(),
           poolSize: size
         }),
         keepResident: () => !state.dustRemoval.enabled && !state.repairStrokes.length,
@@ -20739,7 +20768,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // Ask before rendering: even a cancelled 60 MP export used to allocate
       // full-resolution buffers and encode an image. Repeated cancellations
       // could exceed WKWebView's memory limit and reload the entire workspace.
-      const desktop = isTauriDesktop();
+      const desktop = isTauriRuntime();
       const targetPath = desktop ? await pickDesktopSavePath(fileName) : null;
       if (desktop && !targetPath) return { saved: false, path: null };
       if (currentItem !== getCurrentQueueItem()) {
@@ -20971,7 +21000,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const exportAllBtn = document.getElementById('exportAllBtn');
       if (!zipBtn || !exportAllBtn) return;
 
-      const desktop = isTauriDesktop();
+      const desktop = isTauriRuntime();
       zipBtn.style.display = desktop ? 'none' : '';
       const exportAllKey = desktop ? 'exportIndividualDesktop' : 'exportIndividual';
       exportAllBtn.textContent = getLocalizedText(exportAllKey, exportAllBtn.textContent || 'Export All Individually');
@@ -22607,7 +22636,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const bandCount = () => planBandCount({
         hardwareConcurrency: navigator.hardwareConcurrency,
         activeDecodes: decodesInFlight(),
-        inputRecently: isTauriDesktop() && backgroundGate.inputRecently(),
+        inputRecently: isTauriRuntime() && backgroundGate.inputRecently(),
         poolSize: bandPool ? bandPool.size : 1
       });
       const convertInBands = bandPool ? async (request) => {
@@ -22907,7 +22936,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           // during a batch: wait for input quiet and for a photo switch or a
           // foreground decode or conversion to end, at most 2 s. The batch's
           // own export lock never holds it (foregroundOnly).
-          if (isTauriDesktop()) await backgroundGate.idle({ signal, maxWaitMs: BACKGROUND_STEP_WAIT_CAP_MS, foregroundOnly: true });
+          if (isTauriRuntime()) await backgroundGate.idle({ signal, maxWaitMs: BACKGROUND_STEP_WAIT_CAP_MS, foregroundOnly: true });
           const headerPixels = await pixelsOf(job.file);
           const controller = new AbortController();
           const abort = () => controller.abort(signal.reason);
@@ -23473,7 +23502,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       await settlePendingCropDetection();
       await ensureFullDecode({ reason: 'export-all' });
       notifyReviewExport();
-      if (isTauriDesktop()) {
+      if (isTauriRuntime()) {
         await exportBatchIndividuallyDesktop();
         return;
       }
@@ -29436,7 +29465,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       remove: key => { localStorage.removeItem(key); },
       locks: typeof navigator !== 'undefined' && navigator.locks?.request && navigator.locks?.query ? navigator.locks : null,
       // The desktop app has one page: every marker at boot is interrupted.
-      heartbeatMs: isTauriDesktop() ? 0 : JOB_HEARTBEAT_MS,
+      heartbeatMs: isTauriRuntime() ? 0 : JOB_HEARTBEAT_MS,
       // This page's own running jobs: never interrupted for itself.
       running: new Set()
     };
@@ -29519,9 +29548,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // that proves alive by its heartbeat is looked at again once that
     // heartbeat could have gone stale.
     async function checkInterruptedJobs({ boot = true } = {}) {
-      const { interrupted, recheckInMs } = await findInterruptedJobMarkers(jobMarkerStorage, { singlePage: isTauriDesktop() });
+      const { interrupted, recheckInMs } = await findInterruptedJobMarkers(jobMarkerStorage, { singlePage: isTauriRuntime() });
       let termination = null;
-      if (boot && isTauriDesktop()) {
+      if (boot && isTauriRuntime()) {
         try { termination = await window.__TAURI__.core.invoke('take_web_content_termination'); } catch { termination = null; }
       }
       if (recheckInMs !== null) setTimeout(() => { void checkInterruptedJobs({ boot: false }); }, recheckInMs + 1000);
@@ -29639,7 +29668,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // with the options the job started with.
     async function resumeInterruptedExport(marker, { missingNote = '' } = {}) {
       const desktop = marker.kind === 'export-folder';
-      if (desktop && !isTauriDesktop()) { clearJobMarker(jobMarkerStorage, marker); return; }
+      if (desktop && !isTauriRuntime()) { clearJobMarker(jobMarkerStorage, marker); return; }
       let targetDirectory = desktop ? marker.destination : '';
       let exists = null;
       if (desktop) {
@@ -30823,7 +30852,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       watchRollSamples.clear();
       hotFolderBatch = []; clearTimeout(hotFolderBatchTimer); hotFolderBatchTimer = null;
       if (hotFolderUnlisten) { hotFolderUnlisten(); hotFolderUnlisten = null; }
-      if (isTauriDesktop()) await window.__TAURI__.core.invoke('stop_watch_import_folder');
+      if (isTauriRuntime()) await window.__TAURI__.core.invoke('stop_watch_import_folder');
       updateHotFolderUI();
     }
     function updateHotFolderUI() {
@@ -30905,7 +30934,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     function mountHotFolderUI() {
-      if (!isTauriDesktop()) return;
+      if (!hasPlatformCapability('watchFolder')) return;
       const button = document.createElement('button'); button.type = 'button'; button.id = 'studioWatchFolder';
       const existing = document.createElement('label'); existing.className = 'studio-watch-existing';
       existing.innerHTML = '<input type="checkbox" id="studioWatchExisting"><span data-i18n="watchFolderExisting"></span>';

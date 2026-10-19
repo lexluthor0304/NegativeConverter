@@ -145,7 +145,7 @@ export function validateFeedback(body) {
   const lang = typeof body.lang === 'string' && /^[a-z]{2}(-[A-Za-z0-9-]{1,10})?$/.test(body.lang)
     ? body.lang
     : 'unknown';
-  const source = body.source === 'desktop' ? 'desktop' : 'web';
+  const source = ['desktop', 'ios', 'android'].includes(body.source) ? body.source : 'web';
   const imageResult = validateImages(body.images);
   if (imageResult.error) return { error: imageResult.error };
   return { data: { type, message, lang, source, images: imageResult.images } };

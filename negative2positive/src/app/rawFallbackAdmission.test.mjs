@@ -99,7 +99,7 @@ function fixture(route = 'open-timeout', { retry = false, fails = false, workerS
     AbortController, DOMException, memoryBudget: budget, planDecodeAhead, estimateRawDecodeBytes,
     heldJobFrames: new Set(), navigator: { deviceMemory: 16 }, memoryRuntime: { engine: 'webview2' },
     hiddenJobs: { status: () => ({ hidden: false }) }, hiddenResidentBytes: () => 0,
-    isTauriDesktop: () => true, backgroundGate: { idle: async () => {} }, BACKGROUND_STEP_WAIT_CAP_MS: 2000,
+    isTauriRuntime: () => true, backgroundGate: { idle: async () => {} }, BACKGROUND_STEP_WAIT_CAP_MS: 2000,
     imagePixelsForBatch: async () => 16, isRawLikeFileName: () => true, isPngFile: () => false,
     markOwnedPlanes: value => value, releaseOwnedPlanes: () => { released++; }, DECODED_BYTES_PER_PIXEL: 12,
     defaultFilmBaseBuffer: () => 10, sharedPlanesAvailable: () => false, rememberImageDimensions() {},

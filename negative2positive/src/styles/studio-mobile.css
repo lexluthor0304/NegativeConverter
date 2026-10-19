@@ -1,0 +1,107 @@
+/* The native mobile editor shares Studio's controls and image pipeline.
+   Keep its chrome inside the notch/home indicator; desktop and web retain
+   their existing layout. Width, not a device name, selects the inspector. */
+.shell-mobile, .shell-mobile body.studio { overflow: clip; }
+.shell-mobile body.studio {
+  min-height: 0;
+  height: var(--viewport-h);
+  padding: var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left);
+}
+.shell-mobile :is(.studio-public-links, .github-link, .studio-discovery,
+  #uploadFolderBtn, #studioWatchControls, #desktopUpdateBanner, #studioLoupe),
+.shell-unknown :is(#uploadFolderBtn, #studioWatchControls, #desktopUpdateBanner) { display: none !important; }
+.shell-mobile .studio-header { min-height: 60px; padding: 6px 12px; gap: 10px; }
+.shell-mobile .studio-mark { font-size: 20px; }
+.shell-mobile .studio-actions { gap: 8px; }
+/* Camera/loupe is outside the current iOS acceptance scope.
+   Help retains the feedback, privacy and support links hidden from the bar. */
+.shell-mobile .studio :is(button, summary, select, .upload-btn, .zoom-btn) { min-height: 44px; }
+.shell-mobile .studio :is(.zoom-btn, .file-list-select-control) { min-width: 44px; min-height: 44px; }
+.shell-mobile .studio .slider-number-input { min-height: 44px; min-width: 52px; font-size: 16px; }
+.shell-mobile .studio :is(input[type="text"], input[type="number"], textarea, select) { font-size: 16px; }
+.shell-mobile .studio .slider-input { height: 28px; padding-block: 12px; margin-block: 0; background-clip: content-box; }
+.shell-mobile .studio .slider-input::-webkit-slider-thumb { width: 22px; height: 22px; }
+.shell-mobile .studio .slider-input::-moz-range-thumb { width: 22px; height: 22px; }
+.shell-mobile .studio :is(.controls-panel, .file-list-items, .studio-menu-content) { overscroll-behavior: contain; }
+.shell-mobile .studio :is(.studio-menu-content, .export-dropdown-menu) {
+  max-height: calc(100dvh - var(--safe-top) - var(--safe-bottom) - 120px);
+}
+.shell-mobile .studio .studio-image-status { flex-wrap: wrap; gap: 2px 8px; }
+.shell-mobile .studio .studio-batch-content { max-height: 60dvh; overflow-y: auto; white-space: normal; }
+.shell-mobile .studio-menu-content .header-link-btn { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 8px 0; color: var(--text-secondary); border: 0; background: transparent; box-shadow: none; }
+.shell-mobile .studio-menu-content .header-link-btn svg { width: 16px; height: 16px; flex-shrink: 0; }
+.shell-mobile .studio-menu-content .header-link-btn > span { display: inline; position: static; width: auto; height: auto; margin: 0; overflow: visible; clip: auto; white-space: normal; }
+
+@media (max-width: 700px) {
+  .shell-mobile .studio-header { display: grid; grid-template-columns: minmax(0, 1fr); padding: 6px 10px; gap: 4px; }
+  .shell-mobile .studio-brand { flex-direction: row; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+  .shell-mobile .studio-mark { font-size: 20px; }
+  .shell-mobile .studio-actions { width: 100%; justify-content: space-between; }
+  .shell-mobile #studioMenu > summary { max-width: none; white-space: nowrap; }
+  .shell-mobile .studio #exportBtn { min-width: 80px; }
+  .shell-mobile .studio .app-main { min-height: 0; }
+  /* Reserve space for the inspector instead of letting a multi-row strip
+     squeeze every adjustment below the viewport. Each pane scrolls itself. */
+  .shell-mobile .studio.studio-loaded .app-main,
+  .shell-mobile .studio.studio-loaded.studio-strip-hidden .app-main {
+    grid-template-rows: minmax(150px, 1fr) max-content minmax(180px, 1fr);
+  }
+  .shell-mobile .studio.studio-loaded.studio-panel-hidden .app-main {
+    grid-template-rows: minmax(150px, 1fr) max-content;
+  }
+  .shell-mobile .studio.studio-loaded.studio-lighttable:not(.studio-strip-hidden) .app-main {
+    grid-template-rows: minmax(180px, 1fr) minmax(160px, .9fr);
+  }
+  .shell-mobile .studio.studio-loaded.studio-lighttable.studio-panel-hidden:not(.studio-strip-hidden) .app-main {
+    grid-template-rows: minmax(0, 1fr);
+  }
+  .shell-mobile .studio.studio-lighttable:not(.studio-strip-hidden) .preview-section { display: none; }
+  .shell-mobile .studio.studio-lighttable:not(.studio-strip-hidden) .studio-filmstrip { grid-row: 1; }
+  .shell-mobile .studio.studio-lighttable:not(.studio-strip-hidden) .controls-panel { grid-row: 2; }
+  .shell-mobile .studio-strip-header { flex-wrap: wrap; gap: 0 6px; padding-bottom: 3px; }
+  .shell-mobile .studio-photo-sort { order: initial; flex-basis: auto; flex-shrink: 0; }
+  .shell-mobile .studio #studioPhotoSort { max-width: 170px; }
+  .shell-mobile #studioSelection { margin-left: 0; }
+  .shell-mobile .studio .preview-toolbar { flex-wrap: nowrap; justify-content: flex-start; overflow-x: auto; }
+  .shell-mobile .studio .preview-toolbar > * { flex-shrink: 0; }
+  .shell-mobile .studio .studio-tabs { overflow-x: auto; }
+  .shell-mobile .studio .studio-tabs button { min-width: 62px; }
+  .shell-mobile .studio .export-dropdown-menu { top: calc(var(--safe-top) + 86px); right: calc(var(--safe-right) + 10px); }
+}
+/* Short landscape windows need the side inspector even on a phone. */
+@media (max-width: 1000px) and (max-height: 540px) and (min-width: 600px) {
+  .shell-mobile .studio-header { display: flex; flex-wrap: nowrap; min-height: 48px; }
+  .shell-mobile .studio-brand > span:last-child { display: none; }
+  .shell-mobile .studio-actions { width: auto; }
+  .shell-mobile .studio.studio-loaded .app-main { grid-template-columns: minmax(0, 1fr) minmax(260px, 38%); grid-template-rows: minmax(0, 1fr) max-content; }
+  .shell-mobile .studio.studio-loaded.studio-panel-hidden .app-main { grid-template-columns: minmax(0, 1fr); }
+  .shell-mobile .studio .controls-panel { grid-column: 2; grid-row: 1 / 3; }
+  .shell-mobile .studio .preview-section { grid-column: 1; grid-row: 1; min-height: 0; }
+  .shell-mobile .studio .studio-filmstrip { grid-column: 1; grid-row: 2; }
+  .shell-mobile #studioFilename { display: none; }
+  .shell-mobile .studio .preview-section { padding-bottom: 4px; }
+  .shell-mobile .studio .preview-toolbar { padding-top: 4px; flex-wrap: nowrap; justify-content: flex-start; overflow-x: auto; }
+  .shell-mobile .studio .preview-toolbar > * { flex-shrink: 0; }
+  /* Light table is a photo-selection view. Give its thumbnails the full
+     viewer pane in short landscape windows; the inspector stays beside it. */
+  .shell-mobile .studio.studio-loaded.studio-lighttable:not(.studio-strip-hidden) .app-main { grid-template-rows: minmax(0, 1fr); }
+  .shell-mobile .studio.studio-lighttable:not(.studio-strip-hidden) .preview-section { display: none; }
+  .shell-mobile .studio.studio-lighttable:not(.studio-strip-hidden) :is(.studio-filmstrip, .controls-panel) { grid-row: 1; }
+}
+
+/* On compact native windows Photos expands the filmstrip on demand. */
+@media (max-width: 700px), (max-height: 540px) {
+  /* Keep the tools in one scrollable row so expanding Photos cannot push
+     the editor off a small screen. Popovers escape this scrollport. */
+  .shell-mobile .studio-strip-header { flex-wrap: nowrap; overflow-x: auto; overscroll-behavior-x: contain; scroll-padding-inline-start: 80px; }
+  .shell-mobile .studio-strip-header > * { flex-shrink: 0; }
+  .shell-mobile #studioToggleStrip { position: sticky; left: 0; z-index: 1; background: #202020; }
+  .shell-mobile .studio .studio-batch-content {
+    position: fixed; left: auto; right: calc(var(--safe-right) + 12px);
+    bottom: calc(var(--safe-bottom) + 12px);
+    width: min(290px, calc(100vw - var(--safe-left) - var(--safe-right) - 24px));
+    max-height: calc(100dvh - var(--safe-top) - var(--safe-bottom) - 100px);
+  }
+  .shell-mobile .studio-strip-hidden .studio-strip-header > :not(#studioToggleStrip):not(#studioSelection) { display: none; }
+  .shell-mobile .studio-strip-hidden #studioSelection { margin-left: auto; }
+}

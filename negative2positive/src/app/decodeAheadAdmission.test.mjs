@@ -21,7 +21,7 @@ function fixture() {
     AbortController, DOMException, planDecodeAhead, memoryBudget: budget, heldJobFrames: new Set(),
     navigator: { deviceMemory: 16 }, memoryRuntime: { engine: 'webview2' },
     hiddenJobs: { status: () => ({ hidden: false }) }, hiddenResidentBytes: () => 0,
-    isTauriDesktop: () => true, backgroundGate: { idle: () => idle.promise }, BACKGROUND_STEP_WAIT_CAP_MS: 2000,
+    isTauriRuntime: () => true, backgroundGate: { idle: () => idle.promise }, BACKGROUND_STEP_WAIT_CAP_MS: 2000,
     imagePixelsForBatch: async () => 16, isRawLikeFileName: () => true, isPngFile: () => false,
     markOwnedPlanes: value => value, releaseOwnedPlanes: value => { value.released = true; },
     coveredMemoryClaim: () => ({ fixed: true, atDecode: async () => {} }),
