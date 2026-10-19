@@ -46,7 +46,7 @@
     grid-template-rows: minmax(150px, 1fr) max-content;
   }
   .shell-mobile .studio.studio-loaded.studio-lighttable:not(.studio-strip-hidden) .app-main {
-    grid-template-rows: minmax(150px, 1fr) minmax(150px, 35dvh) minmax(180px, 1fr);
+    grid-template-rows: minmax(140px, 1fr) minmax(140px, 32dvh) minmax(160px, 1fr);
   }
   .shell-mobile .studio.studio-loaded.studio-lighttable.studio-panel-hidden:not(.studio-strip-hidden) .app-main {
     grid-template-rows: minmax(150px, 1fr) minmax(150px, 50dvh);
@@ -71,10 +71,30 @@
   .shell-mobile .studio .controls-panel { grid-column: 2; grid-row: 1 / 3; }
   .shell-mobile .studio .preview-section { grid-column: 1; grid-row: 1; min-height: 0; }
   .shell-mobile .studio .studio-filmstrip { grid-column: 1; grid-row: 2; }
+  .shell-mobile #studioFilename { display: none; }
+  .shell-mobile .studio .preview-section { padding-bottom: 4px; }
+  .shell-mobile .studio .preview-toolbar { padding-top: 4px; flex-wrap: nowrap; justify-content: flex-start; overflow-x: auto; }
+  .shell-mobile .studio .preview-toolbar > * { flex-shrink: 0; }
+  /* Light table is a photo-selection view. Give its thumbnails the full
+     viewer pane in short landscape windows; the inspector stays beside it. */
+  .shell-mobile .studio.studio-loaded.studio-lighttable:not(.studio-strip-hidden) .app-main { grid-template-rows: minmax(0, 1fr); }
+  .shell-mobile .studio.studio-lighttable:not(.studio-strip-hidden) .preview-section { display: none; }
+  .shell-mobile .studio.studio-lighttable:not(.studio-strip-hidden) :is(.studio-filmstrip, .controls-panel) { grid-row: 1; }
 }
 
 /* On compact native windows Photos expands the filmstrip on demand. */
 @media (max-width: 700px), (max-height: 540px) {
+  /* Keep the tools in one scrollable row so expanding Photos cannot push
+     the editor off a small screen. Popovers escape this scrollport. */
+  .shell-mobile .studio-strip-header { flex-wrap: nowrap; overflow-x: auto; overscroll-behavior-x: contain; scroll-padding-inline-start: 80px; }
+  .shell-mobile .studio-strip-header > * { flex-shrink: 0; }
+  .shell-mobile #studioToggleStrip { position: sticky; left: 0; z-index: 1; background: #202020; }
+  .shell-mobile .studio .studio-batch-content {
+    position: fixed; left: auto; right: calc(var(--safe-right) + 12px);
+    bottom: calc(var(--safe-bottom) + 12px);
+    width: min(290px, calc(100vw - var(--safe-left) - var(--safe-right) - 24px));
+    max-height: calc(100dvh - var(--safe-top) - var(--safe-bottom) - 100px);
+  }
   .shell-mobile .studio-strip-hidden .studio-strip-header > :not(#studioToggleStrip):not(#studioSelection) { display: none; }
   .shell-mobile .studio-strip-hidden #studioSelection { margin-left: auto; }
 }

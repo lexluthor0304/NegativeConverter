@@ -11,7 +11,7 @@ export async function runMobileShellSmoke({ send, evaluate, waitFor, wait, fail,
     writeFileSync(join(output, name + '.png'), Buffer.from(shot.result.data, 'base64'));
   };
   const tap = async selector => {
-    await evaluate(`document.querySelector(${JSON.stringify(selector)}).scrollIntoView({ block: 'nearest', inline: 'nearest' })`);
+    await evaluate(`document.querySelector(${JSON.stringify(selector)}).scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' })`);
     const point = await evaluate(`(() => {
       const el = document.querySelector(${JSON.stringify(selector)}), r = el.getBoundingClientRect();
       const x = r.x + r.width / 2, y = r.y + r.height / 2;
@@ -54,6 +54,7 @@ export async function runMobileShellSmoke({ send, evaluate, waitFor, wait, fail,
       if (layout.scrollWidth > width + 1 || layout.canvas.height < 60 || layout.panel.height < 100 || layout.panel.bottom > height - bottom + 1) fail('mobile layout clips the editor: ' + JSON.stringify({ name, lang, ...layout }));
       for (const control of ['add', 'export']) if (layout[control].height < 44 || layout[control].width < 44) fail('mobile primary touch target too small: ' + control);
       const withinScreen = async selector => {
+        await waitFor('visible ' + selector, `getComputedStyle(document.querySelector(${JSON.stringify(selector)})).opacity === '1'`);
         const rect = await evaluate(`(() => {
           const el = document.querySelector(${JSON.stringify(selector)}), r = el.getBoundingClientRect();
           return { x:r.x, y:r.y, right:r.right, bottom:r.bottom, width:r.width, height:r.height, clientWidth:el.clientWidth, scrollWidth:el.scrollWidth };
@@ -79,7 +80,24 @@ export async function runMobileShellSmoke({ send, evaluate, waitFor, wait, fail,
         await waitFor('photos expand', `document.getElementById('studioToggleStrip').getAttribute('aria-expanded') === 'true'`);
         await withinScreen('#controlsPanel');
         await withinScreen('#fileListSection');
+        const viewerHeight = await evaluate(`document.getElementById('canvasContainer').getBoundingClientRect().height`);
+        if (viewerHeight < 40) {
+          await capture(`${name}-${lang}-viewer-clipped`);
+          fail('expanded Photos leaves no usable viewer: ' + JSON.stringify({ name, lang, viewerHeight }));
+        }
         if (lang === 'en') await capture(`${name}-photos`);
+        await tap('#studioBatchMenu > summary');
+        await waitFor('batch tools open', `document.getElementById('studioBatchMenu').open`);
+        await withinScreen('.studio-batch-content');
+        if (lang === 'en') await capture(`${name}-batch`);
+        await tap('.studio-mark');
+        await waitFor('batch tools close', `!document.getElementById('studioBatchMenu').open`);
+        await tap('#studioToggleLightTable');
+        await waitFor('light table opens', `document.getElementById('studioToggleLightTable').getAttribute('aria-pressed') === 'true'`);
+        await withinScreen('#controlsPanel');
+        await withinScreen('#fileListSection');
+        if (lang === 'en') await capture(`${name}-lighttable`);
+        await tap('#studioToggleLightTable');
         await tap('#studioToggleStrip');
       }
       await tap('#studioTab-composition');
