@@ -1,0 +1,144 @@
+name: iOS App Store release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Upload for internal testing or submit for automatic App Store release
+        type: choice
+        options: [testflight, app-store]
+        default: testflight
+
+permissions:
+  contents: read
+
+# Never cancel a running upload/submission. Keep the iOS version sequence separate
+# from desktop-release.yml and its v* tags.
+concurrency:
+  group: ios-app-store-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build, verify and upload iOS
+    if: >-
+      github.repository == 'lexluthor0304/NegativeConverter' &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'workflow_dispatch' || vars.IOS_RELEASE_CHANNEL != '')
+    runs-on: macos-26
+    timeout-minutes: 120
+    permissions:
+      contents: write
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      CARGO_BUILD_JOBS: 3
+      CARGO_INCREMENTAL: 0
+      NC_P0_FIXTURES: '0'
+      IOS_RELEASE_CHANNEL: ${{ github.event_name == 'workflow_dispatch' && inputs.channel || vars.IOS_RELEASE_CHANNEL }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - name: Prepare independent iOS version and check submission readiness
+        id: version
+        run: node .github/scripts/prepare_ios_release.mjs
+      - name: Check credentials without printing their values
+        env:
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+          IOS_CERTIFICATE: ${{ secrets.MAS_CERT_DIST_P12 }}
+          IOS_CERTIFICATE_PASSWORD: ${{ secrets.MAS_CERT_PASSWORD }}
+          IOS_MOBILE_PROVISION: ${{ secrets.IOS_PROVISION_PROFILE }}
+        run: |
+          set -euo pipefail
+          for name in ASC_API_KEY_ID ASC_API_ISSUER_ID ASC_API_KEY_P8 IOS_CERTIFICATE IOS_CERTIFICATE_PASSWORD IOS_MOBILE_PROVISION; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing iOS release credential: $name"
+              exit 1
+            fi
+          done
+          umask 077
+          printf '%s' "$IOS_MOBILE_PROVISION" | base64 --decode > "$RUNNER_TEMP/ios.mobileprovision"
+          python3 scripts/verify-ios-package.py --profile "$RUNNER_TEMP/ios.mobileprovision"
+          rm "$RUNNER_TEMP/ios.mobileprovision"
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: aarch64-apple-ios
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+          key: ios-appstore-xcode26.6
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4'
+      - run: npm ci
+      - name: Check the shared editor and mobile layout
+        run: |
+          npm test
+          npm run test:smoke -- --studio-shell-only
+          npm run test:smoke -- --mobile-shell-only
+      - name: Check iOS store assets before building or uploading
+        if: env.IOS_RELEASE_CHANNEL == 'app-store'
+        run: node scripts/check-ios-store-assets.mjs
+      - name: Build production web assets without device fixtures
+        run: |
+          npm run build:web
+          test ! -e negative2positive/dist/p0-fixtures
+      - name: Archive and export a distribution-signed iPhone and iPad app
+        env:
+          IOS_CERTIFICATE: ${{ secrets.MAS_CERT_DIST_P12 }}
+          IOS_CERTIFICATE_PASSWORD: ${{ secrets.MAS_CERT_PASSWORD }}
+          IOS_MOBILE_PROVISION: ${{ secrets.IOS_PROVISION_PROFILE }}
+          IOS_CONFIG_PATH: ${{ steps.version.outputs.config }}
+        run: |
+          xcodebuild -version
+          npm run tauri -- ios build --ci --target aarch64 --export-method app-store-connect --config "$IOS_CONFIG_PATH"
+      - name: Verify exported signature, profile, identity and device families
+        env:
+          APP_VERSION: ${{ steps.version.outputs.version }}
+          BUILD_NUMBER: ${{ steps.version.outputs.build }}
+        run: python3 scripts/verify-ios-package.py --export-dir src-tauri/gen/apple/build/arm64 --output output/ios-release
+      - name: Preserve the verified IPA and its provenance
+        uses: actions/upload-artifact@v7
+        with:
+          name: ios-${{ steps.version.outputs.version }}-${{ steps.version.outputs.build }}
+          path: |
+            output/ios-release/NegativeConverter.ipa
+            output/ios-release/verification.json
+            output/ios-release/plan.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Install the release uploader
+        run: gem install fastlane --no-document
+      - name: Upload to TestFlight or submit for automatic release
+        env:
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+          APP_VERSION: ${{ steps.version.outputs.version }}
+          IPA_PATH: ${{ github.workspace }}/output/ios-release/NegativeConverter.ipa
+        run: fastlane ios publish
+      - name: Record successful iOS review submission
+        if: env.IOS_RELEASE_CHANNEL == 'app-store'
+        env:
+          IOS_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          git tag "$IOS_TAG" "$GITHUB_SHA"
+          git push origin "refs/tags/$IOS_TAG"
+      - name: Report the actual delivery stage
+        env:
+          APP_VERSION: ${{ steps.version.outputs.version }}
+          BUILD_NUMBER: ${{ steps.version.outputs.build }}
+        run: |
+          if [ "$IOS_RELEASE_CHANNEL" = app-store ]; then
+            echo "iOS $APP_VERSION ($BUILD_NUMBER) submitted for Apple review; configured for automatic release after approval. Approval and public availability are not yet verified." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "iOS $APP_VERSION ($BUILD_NUMBER) uploaded and processed for internal TestFlight testing; not submitted to App Review." >> "$GITHUB_STEP_SUMMARY"
+          fi
