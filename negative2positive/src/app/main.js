@@ -79,7 +79,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     import { MultiShotError, describeMultiShotError } from './multiShotErrors.js';
     import { sanitizeRollMetadata, sanitizeFrameMetadata, buildExportMetadata, frameNumberFor } from './analogMetadata.js';
     import { attachMetadataToBlob } from './exportMetadata.js';
-    import { buildRollProject, serializeRollProject, parseRollProject, matchProjectFiles, hashFileForProject, projectFileName, isProjectFileName, saveProjectRecovery, loadProjectRecovery, clearProjectRecovery, projectThumbnailContext, restorableProjectThumbnail } from './rollProject.js';
+    import { buildRollProject, serializeRollProject, parseRollProject, matchProjectFiles, hashFileForProject, projectFileName, isProjectFileName, saveProjectRecovery as saveWebProjectRecovery, loadProjectRecovery as loadWebProjectRecovery, clearProjectRecovery as clearWebProjectRecovery, projectThumbnailContext, restorableProjectThumbnail } from './rollProject.js';
+    import { createMobileRecovery } from './mobileRecovery.js';
     import { encodeRecipe, decodeRecipe, recipeDiff, describeRecipeChange, RECIPE_KEYS } from './recipes.js';
     import qrcode from 'qrcode-generator';
     import { layoutContactSheet, pagesFor, renderContactSheetPage, contactSheetHeader, normalizeLayoutId, normalizePageId } from './contactSheet.js';
@@ -233,6 +234,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // the stylesheet shows; `isTauriMobile()` below decides what runs.
     const platformInfo = await resolvePlatform();
     applyPlatformClasses(platformInfo);
+    const mobileRecovery = platformInfo.capabilities.sourceRecovery && !platformInfo.simulated
+      ? createMobileRecovery({ invoke: window.__TAURI__.core.invoke, onStatus: updateMobileRecoveryStatus }) : null;
     const WEBGL_DEBUG_ERRORS = new URLSearchParams(window.location.search).has('debugGL');
     // ?perf=1 (benchmark harness) also records every trace as User Timing.
     const { createPerfTrace, recordStages: recordPerfStages } = createPerfTraceFactory({
@@ -2484,6 +2487,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       frameMetadata: sanitizeFrameMetadata({}),
       // A recovery copy of the last roll exists in IndexedDB (see rollProject.js).
       projectRecoveryAvailable: false,
+      mobileRecoveryRestoring: false,
       // Flat field: session registry of gain maps and the current file's choice.
       flatFields: {},
       flatFieldActiveId: null,
@@ -2814,7 +2818,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     function isDesktopBatchExportLocked() {
-      return isTauriRuntime() && desktopBatchExportState.active;
+      return (isTauriRuntime() && desktopBatchExportState.active) || Boolean(state.mobileRecoveryRestoring);
     }
 
     function updateDesktopBatchExportControlLock() {
@@ -24446,6 +24450,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     });
 
     function createQueueItemId(file) {
+      if (mobileRecovery) return mobileRecovery.itemId(file);
       return `${file.name}::${file.size}::${file.lastModified || 0}`;
     }
 
@@ -29216,6 +29221,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     document.querySelectorAll('[data-meta-roll]').forEach((input) => {
       input.addEventListener('input', () => {
         state.rollMetadata = sanitizeRollMetadata({ ...state.rollMetadata, [input.dataset.metaRoll]: input.value });
+        scheduleProjectRecovery();
       });
     });
     document.querySelectorAll('[data-meta-frame]').forEach((input) => {
@@ -29230,7 +29236,54 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // ===========================================
     let pendingProject = null;
     let recoveredProject = null;
+    let recoveredNativeProject = null;
     let projectRecoveryTimer = null;
+
+    function updateMobileRecoveryStatus(status, error = null) {
+      const node = document.getElementById('mobileRecoveryStatus');
+      const keys = { saving: 'mobileRecoverySaving', saved: 'mobileRecoverySaved', error: 'mobileRecoveryFailed', idle: 'mobileRecoveryIdle' };
+      if (node) {
+        node.dataset.i18n = keys[status] || keys.idle;
+        node.textContent = getLocalizedText(node.dataset.i18n, '');
+        node.dataset.status = status;
+      }
+      if (error) {
+        console.warn('Native project recovery failed:', error);
+        showToast(getLocalizedText('mobileRecoveryFailed', 'Could not save this roll on the device. Keep the app open and export the project.'), 6000);
+      }
+    }
+
+    function saveProjectRecovery(text) {
+      if (!mobileRecovery) return saveWebProjectRecovery(text);
+      return mobileRecovery.save({ project: text, items: state.fileQueue, activeIndex: state.currentFileIndex });
+    }
+
+    async function loadProjectRecovery() {
+      if (!mobileRecovery) return loadWebProjectRecovery();
+      const record = await mobileRecovery.open();
+      return record.checkpoint ? { text: record.checkpoint.project, savedAt: record.checkpoint.savedAt, native: record } : null;
+    }
+
+    async function clearProjectRecovery() {
+      clearTimeout(projectRecoveryTimer);
+      projectRecoveryTimer = null;
+      recoveredProject = recoveredNativeProject = null;
+      state.projectRecoveryAvailable = false;
+      try {
+        if (mobileRecovery) await mobileRecovery.clear();
+        else await clearWebProjectRecovery();
+      } catch (error) { console.warn('Project recovery clear failed:', error); }
+    }
+
+    function writeProjectRecovery() {
+      clearTimeout(projectRecoveryTimer);
+      projectRecoveryTimer = null;
+      if (!state.fileQueue.length || state.mobileRecoveryRestoring) return;
+      try {
+        const text = serializeRollProject(buildCurrentProject());
+        void saveProjectRecovery(text).catch(error => console.warn('Project recovery save failed:', error));
+      } catch (error) { console.warn('Project recovery failed:', error); }
+    }
 
     async function queueItemHash(item) {
       if (item.hash === undefined) {
@@ -29317,36 +29370,70 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
     // Recovery copy: a debounced snapshot in IndexedDB so a crash does not lose the roll.
     function scheduleProjectRecovery() {
+      if (state.mobileRecoveryRestoring) return;
+      if (mobileRecovery && state.fileQueue.length) {
+        mobileRecovery.dirty();
+        // Once a new roll is in use its checkpoints replace the startup
+        // offer; do not offer a record whose originals GC may have reclaimed.
+        recoveredNativeProject = null;
+        state.projectRecoveryAvailable = false;
+      }
       if (projectRecoveryTimer) clearTimeout(projectRecoveryTimer);
-      projectRecoveryTimer = setTimeout(() => {
-        projectRecoveryTimer = null;
-        if (!state.fileQueue.length) return;
-        try {
-          const text = serializeRollProject(buildCurrentProject());
-          saveProjectRecovery(text).catch((error) => console.warn('Project recovery save failed:', error));
-        } catch (error) {
-          console.warn('Project recovery failed:', error);
-        }
-      }, 2500);
+      projectRecoveryTimer = setTimeout(writeProjectRecovery, mobileRecovery ? 750 : 2500);
     }
+
+    // Checkpoints run while editing; these are only best-effort flushes, not
+    // the sole save point (iOS need not deliver a final lifecycle callback).
+    document.addEventListener('visibilitychange', () => {
+      if (mobileRecovery && document.hidden && projectRecoveryTimer) writeProjectRecovery();
+    });
+    window.addEventListener('pagehide', () => {
+      if (mobileRecovery && projectRecoveryTimer) writeProjectRecovery();
+    });
 
     async function offerProjectRecovery() {
       try {
         const record = await loadProjectRecovery();
-        if (!record || Date.now() - (record.savedAt || 0) > 14 * 24 * 3600 * 1000) return;
+        if (!record || state.fileQueue.length || (!record.native && Date.now() - (record.savedAt || 0) > 14 * 24 * 3600 * 1000)) return;
         const project = parseRollProject(record.text);
         if (!project.files.length) return;
         recoveredProject = project;
+        recoveredNativeProject = record.native || null;
         state.projectRecoveryAvailable = true;
         studioWorkspace?.sync();
-        showToast(getLocalizedText('projectRecoveryAvailable', 'A recovery copy of the last roll is available under Batch tools.'), 5000);
+        showToast(getLocalizedText(record.native ? 'mobileRecoveryAvailable' : 'projectRecoveryAvailable', 'A recovery copy of the last roll is available.'), 5000);
       } catch (error) {
         console.warn('Project recovery unavailable:', error);
+        if (mobileRecovery) updateMobileRecoveryStatus('error', error);
       }
     }
 
-    function restoreRecoveredProject() {
+    async function restoreRecoveredProject() {
       if (!recoveredProject) return;
+      if (mobileRecovery && recoveredNativeProject) {
+        if (state.fileQueue.length || state.mobileRecoveryRestoring) return;
+        state.mobileRecoveryRestoring = true;
+        updateDesktopBatchExportControlLock();
+        try {
+          const restored = await mobileRecovery.restore(recoveredNativeProject);
+          pendingProject = parseRollProject(restored.project);
+          addFilesToQueue(restored.files, { automaticRoll: false });
+          state.mobileRecoveryRestoring = false;
+          await applyPendingProject({ exactFiles: restored.files, activeIndex: restored.activeIndex });
+          recoveredNativeProject = null;
+          state.projectRecoveryAvailable = false;
+        } catch (error) {
+          if (error?.name !== 'AbortError') {
+            console.warn('Native restore failed:', error);
+            void appAlert(getLocalizedText(error?.code === 'restore-too-large' ? 'mobileRecoveryTooLarge' : 'mobileRecoveryRestoreFailed', 'The saved roll could not be opened. Its originals are still on this device.'));
+          }
+        } finally {
+          state.mobileRecoveryRestoring = false;
+          updateDesktopBatchExportControlLock();
+          studioWorkspace?.sync();
+        }
+        return;
+      }
       pendingProject = recoveredProject;
       if (state.fileQueue.length) void applyPendingProject();
       else showToast(getLocalizedText('projectNeedsFiles', 'Project read. Add the original photos to restore it.'), 4000);
@@ -29369,13 +29456,17 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // Matches the queued photos to the project (hash, then name and size,
     // then name), restores their settings and order plus the roll-level
     // state, reports what is missing or changed, and opens the first photo.
-    async function applyPendingProject() {
+    async function applyPendingProject({ exactFiles = null, activeIndex = 0 } = {}) {
       const project = pendingProject;
       if (!project || !state.fileQueue.length) return;
       pendingProject = null;
       const hashes = new Map();
       for (const item of state.fileQueue) hashes.set(item.file, await queueItemHash(item));
-      const result = matchProjectFiles(project, state.fileQueue.map((item) => item.file), hashes);
+      // Native recovery already has the exact source/order mapping, including
+      // same-name, same-size originals; never rematch those by filename/hash.
+      const result = exactFiles && exactFiles.length === project.files.length
+        ? { matched: project.files.map((entry, index) => ({ entry, file: exactFiles[index] })), changed: [], missing: [], extra: [] }
+        : matchProjectFiles(project, state.fileQueue.map((item) => item.file), hashes);
       const byFile = new Map(state.fileQueue.map((item) => [item.file, item]));
       const ordered = [];
       for (const { entry, file } of [...result.matched, ...result.changed]) {
@@ -29443,7 +29534,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       }
       // switchToFile is the path that restores a queued item's saved settings.
       state.currentFileIndex = -1;
-      if (state.fileQueue.length) await switchToFile(0);
+      if (state.fileQueue.length) await switchToFile(Math.max(0, Math.min(state.fileQueue.length - 1, activeIndex)));
       scheduleProjectRecovery();
       void offerInterruptedJobResume({ rollFrames }).catch(error => notifyExportError(error));
     }
@@ -32377,6 +32468,21 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const labMatchDrawer = document.getElementById('studioLabMatch');
       labMatchDrawer?.addEventListener('toggle', () => { if (labMatchDrawer.open) warmAnalysisWorker(); });
       void offerProjectRecovery();
+      if (mobileRecovery) {
+        const status = document.createElement('p');
+        status.id = 'mobileRecoveryStatus';
+        status.setAttribute('role', 'status');
+        const menu = document.querySelector('#studioMenu .studio-menu-content');
+        // The filmstrip is hidden with an empty editor. Recovery must be
+        // reachable before importing any new photo, including after a kill.
+        const restore = document.getElementById('studioRestoreProject');
+        if (restore) {
+          menu?.append(restore);
+          restore.addEventListener('click', () => { document.getElementById('studioMenu').open = false; });
+        }
+        menu?.append(status);
+        updateMobileRecoveryStatus(mobileRecovery.status);
+      }
       void checkInterruptedJobs();
       updateWorkflowUI();
       studioWorkspace.sync();

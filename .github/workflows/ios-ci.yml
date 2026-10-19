@@ -44,6 +44,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: node negative2positive/src/app/platform.test.mjs
+      - run: node negative2positive/src/app/mobileRecovery.test.mjs
       - run: npm run test:smoke -- --mobile-shell-only
       - uses: actions/upload-artifact@v7
         if: always()

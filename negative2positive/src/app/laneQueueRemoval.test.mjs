@@ -30,6 +30,7 @@ function withQueue(f) {
   const disposed = [];
   const loads = [];
   Object.assign(c, {
+    mobileRecovery: null,
     uiDebugCounters: { fileListRenders: 0 }, fileListRefreshDeferrals: 0, fileListRefreshDeferred: false, loadGeneration: 1,
     supersedeActivation: noop, invalidatePhotoActivation: noop, syncEmbeddedPreviewQueue: noop, updateReviewFilter: noop,
     renderFileList: noop, studioWorkspace: null, updateAutoFrameButtons: noop, syncBatchUIState: noop,

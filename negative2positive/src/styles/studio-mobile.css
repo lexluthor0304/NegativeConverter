@@ -31,6 +31,8 @@
 .shell-mobile .studio-menu-content .header-link-btn { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 8px 0; color: var(--text-secondary); border: 0; background: transparent; box-shadow: none; }
 .shell-mobile .studio-menu-content .header-link-btn svg { width: 16px; height: 16px; flex-shrink: 0; }
 .shell-mobile .studio-menu-content .header-link-btn > span { display: inline; position: static; width: auto; height: auto; margin: 0; overflow: visible; clip: auto; white-space: normal; }
+.shell-mobile #mobileRecoveryStatus { max-width: 28em; white-space: normal; overflow-wrap: anywhere; color: var(--text-secondary); margin: 8px 0; }
+.shell-mobile #mobileRecoveryStatus[data-status="error"] { color: var(--accent); }
 
 @media (max-width: 700px) {
   .shell-mobile .studio-header { display: grid; grid-template-columns: minmax(0, 1fr); padding: 6px 10px; gap: 4px; }

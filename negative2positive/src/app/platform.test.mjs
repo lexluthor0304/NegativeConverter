@@ -17,6 +17,9 @@ for (const search of ['', '?shell=desktop', '?shell=web']) {
 assert.equal((await resolvePlatform({ invoke: async () => desktop, navigator: { maxTouchPoints: 10 }, search: '' })).mobile, false);
 assert.equal(normalizePlatform({ ...ios, mobile: false, capabilities: desktop.capabilities }).capabilities.updater, false);
 assert.equal(normalizePlatform({ ...ios, capabilities: desktop.capabilities }).capabilities.watchFolder, false);
+assert.equal(normalizePlatform({ ...ios, capabilities: { sourceRecovery: true } }).capabilities.sourceRecovery, true);
+assert.equal(normalizePlatform({ ...desktop, capabilities: { sourceRecovery: true } }).capabilities.sourceRecovery, false);
+assert.ok(!simulatedPlatform('?shell=mobile').capabilities.sourceRecovery, 'layout preview has no native source store');
 assert.equal(normalizePlatform({ ...desktop, capabilities: { ...desktop.capabilities, updater: false } }).capabilities.updater, false, 'store build has no updater');
 for (const answer of [null, {}, [], { shell: 'web' }, { shell: 'tauri', os: 'ios invalid' }]) {
   const resolved = await resolvePlatform({ invoke: async () => answer, search: '' });

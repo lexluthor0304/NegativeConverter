@@ -20,6 +20,7 @@ mod import_folder;
 #[path = "import_folder_mobile.rs"]
 mod import_folder;
 mod memory_info;
+mod mobile_recovery;
 mod native_raw;
 #[cfg(any(target_os = "ios", test))]
 mod webview_recovery;
@@ -379,6 +380,8 @@ struct PlatformCapabilities {
     external_links: bool,
     /// Exports land in the app's Documents directory (Files app) instead of a picked path.
     documents_export: bool,
+    /// App-owned source copies and atomic recovery checkpoints.
+    source_recovery: bool,
 }
 
 fn platform_info() -> PlatformInfo {
@@ -394,6 +397,7 @@ fn platform_info() -> PlatformInfo {
             updater: cfg!(all(feature = "updater", desktop)),
             external_links: true,
             documents_export: mobile,
+            source_recovery: mobile,
         },
     }
 }
@@ -776,6 +780,7 @@ fn take_web_content_termination(state: State<'_, WebContentTerminations>) -> Opt
 /// spilled display proxy: the previous page (killed, crashed or navigated
 /// away) can no longer finish, listen to or read them.
 fn reset_page_owned_state<R: tauri::Runtime, M: tauri::Manager<R>>(manager: &M) {
+    manager.state::<mobile_recovery::MobileRecovery>().invalidate();
     let cleared = manager.state::<ExportStreams>().clear();
     if cleared > 0 {
         eprintln!("[export] dropped {cleared} unfinished export stream(s) from the previous page");
@@ -1370,6 +1375,7 @@ pub fn run() {
         .manage(ImportWatch::default())
         .manage(WebContentTerminations::default())
         .manage(NativeRawDecodes::default())
+        .manage(mobile_recovery::MobileRecovery::default())
         // Decoded RAW planes for the page's workers (#264). The copy of a
         // part runs off the main thread, which WKWebView calls this from.
         .register_asynchronous_uri_scheme_protocol(native_raw::PIXEL_SCHEME, |ctx, request, responder| {
@@ -1469,6 +1475,15 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            mobile_recovery::mobile_recovery_open,
+            mobile_recovery::mobile_recovery_begin,
+            mobile_recovery::mobile_recovery_append,
+            mobile_recovery::mobile_recovery_finish,
+            mobile_recovery::mobile_recovery_abort,
+            mobile_recovery::mobile_recovery_commit,
+            mobile_recovery::mobile_recovery_read,
+            mobile_recovery::mobile_recovery_verify,
+            mobile_recovery::mobile_recovery_clear,
             display_proxy_store::display_proxy_write,
             display_proxy_store::display_proxy_read,
             display_proxy_store::display_proxy_list,
