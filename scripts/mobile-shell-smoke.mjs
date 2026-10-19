@@ -68,6 +68,8 @@ export async function runMobileShellSmoke({ send, evaluate, waitFor, wait, fail,
       await tap('#studioMenu > summary');
       await waitFor('help menu opens', `document.getElementById('studioMenu').open`);
       await withinScreen('.studio-menu-content');
+      await withinScreen('#feedbackBtn');
+      await withinScreen('#privacyDetailsLink');
       if (lang === 'en') await capture(`${name}-help`);
       await tap('#studioMenu > summary');
       await tap('#exportBtn');
@@ -80,6 +82,8 @@ export async function runMobileShellSmoke({ send, evaluate, waitFor, wait, fail,
         await waitFor('photos expand', `document.getElementById('studioToggleStrip').getAttribute('aria-expanded') === 'true'`);
         await withinScreen('#controlsPanel');
         await withinScreen('#fileListSection');
+        await withinScreen('#studioHeader');
+        await withinScreen('.file-list-item');
         const viewerHeight = await evaluate(`document.getElementById('canvasContainer').getBoundingClientRect().height`);
         if (viewerHeight < 40) {
           await capture(`${name}-${lang}-viewer-clipped`);
@@ -96,6 +100,8 @@ export async function runMobileShellSmoke({ send, evaluate, waitFor, wait, fail,
         await waitFor('light table opens', `document.getElementById('studioToggleLightTable').getAttribute('aria-pressed') === 'true'`);
         await withinScreen('#controlsPanel');
         await withinScreen('#fileListSection');
+        await withinScreen('#studioHeader');
+        await withinScreen('.file-list-item');
         if (lang === 'en') await capture(`${name}-lighttable`);
         await tap('#studioToggleLightTable');
         await tap('#studioToggleStrip');
@@ -103,6 +109,7 @@ export async function runMobileShellSmoke({ send, evaluate, waitFor, wait, fail,
       await tap('#studioTab-composition');
       await waitFor('composition tab', `document.getElementById('studioTab-composition').getAttribute('aria-selected') === 'true'`);
       await tap('#studioTab-edit');
+      await withinScreen('#studioHeader');
       await capture(`${name}-${lang}`);
       console.log('ok: mobile layout/import/touch tabs', name, lang, JSON.stringify(layout.viewport));
     }

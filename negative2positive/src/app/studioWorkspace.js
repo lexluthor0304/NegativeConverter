@@ -508,6 +508,9 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
   if (languages) $('studioLanguages').append(languages);
   move('buildBadge', $('studioLanguages'));
   ['offlineDownloadLink', 'feedbackBtn', 'privacyDetailsLink', 'shopLink'].forEach(id => move(id, $('studioPublicLinks')));
+  if (document.documentElement?.classList.contains('shell-mobile')) {
+    ['feedbackBtn', 'privacyDetailsLink'].forEach(id => move(id, $('studioLinks')));
+  }
   const guide = document.querySelector('.header-site-links');
   if (guide) $('studioLinks').append(guide);
   // LibRaw (CDDL-1.0), musl and libomp are compiled into the apps; their

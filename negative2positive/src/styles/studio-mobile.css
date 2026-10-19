@@ -1,6 +1,7 @@
 /* The native mobile editor shares Studio's controls and image pipeline.
    Keep its chrome inside the notch/home indicator; desktop and web retain
    their existing layout. Width, not a device name, selects the inspector. */
+.shell-mobile, .shell-mobile body.studio { overflow: clip; }
 .shell-mobile body.studio {
   min-height: 0;
   height: var(--viewport-h);
@@ -27,6 +28,9 @@
 }
 .shell-mobile .studio .studio-image-status { flex-wrap: wrap; gap: 2px 8px; }
 .shell-mobile .studio .studio-batch-content { max-height: 60dvh; overflow-y: auto; white-space: normal; }
+.shell-mobile .studio-menu-content .header-link-btn { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 8px 0; color: var(--text-secondary); border: 0; background: transparent; box-shadow: none; }
+.shell-mobile .studio-menu-content .header-link-btn svg { width: 16px; height: 16px; flex-shrink: 0; }
+.shell-mobile .studio-menu-content .header-link-btn > span { display: inline; position: static; width: auto; height: auto; margin: 0; overflow: visible; clip: auto; white-space: normal; }
 
 @media (max-width: 700px) {
   .shell-mobile .studio-header { display: grid; grid-template-columns: minmax(0, 1fr); padding: 6px 10px; gap: 4px; }
@@ -46,11 +50,14 @@
     grid-template-rows: minmax(150px, 1fr) max-content;
   }
   .shell-mobile .studio.studio-loaded.studio-lighttable:not(.studio-strip-hidden) .app-main {
-    grid-template-rows: minmax(140px, 1fr) minmax(140px, 32dvh) minmax(160px, 1fr);
+    grid-template-rows: minmax(180px, 1fr) minmax(160px, .9fr);
   }
   .shell-mobile .studio.studio-loaded.studio-lighttable.studio-panel-hidden:not(.studio-strip-hidden) .app-main {
-    grid-template-rows: minmax(150px, 1fr) minmax(150px, 50dvh);
+    grid-template-rows: minmax(0, 1fr);
   }
+  .shell-mobile .studio.studio-lighttable:not(.studio-strip-hidden) .preview-section { display: none; }
+  .shell-mobile .studio.studio-lighttable:not(.studio-strip-hidden) .studio-filmstrip { grid-row: 1; }
+  .shell-mobile .studio.studio-lighttable:not(.studio-strip-hidden) .controls-panel { grid-row: 2; }
   .shell-mobile .studio-strip-header { flex-wrap: wrap; gap: 0 6px; padding-bottom: 3px; }
   .shell-mobile .studio-photo-sort { order: initial; flex-basis: auto; flex-shrink: 0; }
   .shell-mobile .studio #studioPhotoSort { max-width: 170px; }
