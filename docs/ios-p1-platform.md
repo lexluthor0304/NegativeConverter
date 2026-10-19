@@ -13,8 +13,8 @@ update manifests. Feedback preserves `ios`/`android` as its source.
 
 The mobile shell keeps the existing Studio, neutral palette and pixel fonts.
 It hides the desktop folder picker, watch-folder controls, update banner,
-marketing bar and camera loupe (camera permission is not part of the first
-release). Feedback, privacy and help remain reachable through the menu.
+marketing bar and camera loupe (the mobile camera workflow has not been
+validated). Feedback, privacy and help remain reachable through the menu.
 Safe-area padding accounts for the notch and home indicator. Primary controls
 have 44 px touch targets; text/number fields use 16 px to avoid focus zoom.
 On compact windows the Photos button expands the filmstrip on demand. Short
@@ -22,8 +22,10 @@ landscape windows use the side inspector. The photo-processing algorithms
 and desktop layout are shared with the existing app.
 
 `npm run test:smoke -- --mobile-shell-only` exercises import/conversion and
-real touch input on the editor tabs at 375x667, 390x844, 844x390, 820x1180,
-1180x820 and 540x900, for English, Chinese and Japanese. Screenshots are written
+real touch input on the editor tabs, help/export menus and compact filmstrip
+at 375x667, 390x844, 844x390, 820x1180, 1180x820 and 540x900, for English,
+Chinese and Japanese, including simulated notch/home-indicator insets.
+Screenshots are written
 to `output/mobile-shell/`. This is Chromium layout coverage, not iOS/device
 acceptance, Photos/Files picker coverage or a native export test.
 
@@ -55,7 +57,10 @@ References: [Tauri capabilities](https://v2.tauri.app/security/capabilities/),
 
 Local validation on 2026-10-19: 82 Rust unit tests passed; both
 `aarch64-apple-ios` and `aarch64-apple-ios-sim` passed `cargo check --locked
---offline --no-default-features`. Web build passed. Local Chrome smoke could
+--offline --no-default-features`. Web build passed. The full JS run passed
+379 of 380 files; its only failure was the feedback endpoint check still
+matching the renamed `isTauriDesktop()` function. After updating that check
+to `isTauriRuntime()`, it passed independently. Local Chrome smoke could
 not start: Chrome exited with SIGABRT before loading the app. The computer-use
 browser also could not load its request-header policy. Native install/launch
 and the new opener/reload behavior have not been revalidated on a device.

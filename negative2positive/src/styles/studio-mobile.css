@@ -12,7 +12,7 @@
 .shell-mobile .studio-header { min-height: 60px; padding: 6px 12px; gap: 10px; }
 .shell-mobile .studio-mark { font-size: 20px; }
 .shell-mobile .studio-actions { gap: 8px; }
-/* Camera/loupe is not part of the first iOS release (no camera permission).
+/* Camera/loupe is outside the current iOS acceptance scope.
    Help retains the feedback, privacy and support links hidden from the bar. */
 .shell-mobile .studio :is(button, summary, select, .upload-btn, .zoom-btn) { min-height: 44px; }
 .shell-mobile .studio :is(.zoom-btn, .file-list-select-control) { min-width: 44px; min-height: 44px; }
@@ -33,7 +33,7 @@
   .shell-mobile .studio-brand { flex-direction: row; align-items: baseline; gap: 8px; flex-wrap: wrap; }
   .shell-mobile .studio-mark { font-size: 20px; }
   .shell-mobile .studio-actions { width: 100%; justify-content: space-between; }
-  .shell-mobile #studioMenu > summary { white-space: nowrap; }
+  .shell-mobile #studioMenu > summary { max-width: none; white-space: nowrap; }
   .shell-mobile .studio #exportBtn { min-width: 80px; }
   .shell-mobile .studio .app-main { min-height: 0; }
   /* Reserve space for the inspector instead of letting a multi-row strip
