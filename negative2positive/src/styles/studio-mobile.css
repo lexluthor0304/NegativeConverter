@@ -26,7 +26,7 @@
   max-height: calc(100dvh - var(--safe-top) - var(--safe-bottom) - 120px);
 }
 .shell-mobile .studio .studio-image-status { flex-wrap: wrap; gap: 2px 8px; }
-.shell-mobile .studio .studio-batch-content { max-height: 60dvh; overflow-y: auto; }
+.shell-mobile .studio .studio-batch-content { max-height: 60dvh; overflow-y: auto; white-space: normal; }
 
 @media (max-width: 700px) {
   .shell-mobile .studio-header { display: grid; grid-template-columns: minmax(0, 1fr); padding: 6px 10px; gap: 4px; }
