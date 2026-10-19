@@ -71,8 +71,13 @@ export async function runMobileRecoverySmoke({ send, evaluate, waitFor, wait, fa
   const tap = async selector => {
     await evaluate(`document.querySelector(${JSON.stringify(selector)}).scrollIntoView({block:'nearest',inline:'nearest',behavior:'instant'})`);
     const p = await evaluate(`(() => { const e = document.querySelector(${JSON.stringify(selector)}), r = e.getBoundingClientRect();
-      const x = r.x+r.width/2, y = r.y+r.height/2; return { x,y,ok:r.width>0&&r.height>0&&!e.disabled&&e.contains(document.elementFromPoint(x,y)) }; })()`);
-    if (!p.ok) fail('Recovery control cannot be reached: ' + selector);
+      const x = r.x+r.width/2, y = r.y+r.height/2, hit = document.elementFromPoint(x,y);
+      return { x,y,width:r.width,height:r.height,hit:hit?.className,ok:r.width>0&&r.height>0&&!e.disabled&&e.contains(hit) }; })()`);
+    if (!p.ok) {
+      const shot = await send('Page.captureScreenshot', { format: 'png' });
+      writeFileSync(join(output, 'recovery-unreachable.png'), Buffer.from(shot.result.data, 'base64'));
+      fail('Recovery control cannot be reached: ' + selector + ' ' + JSON.stringify(p));
+    }
     await send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: p.x, y: p.y }] });
     await send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
   };
@@ -94,6 +99,7 @@ export async function runMobileRecoverySmoke({ send, evaluate, waitFor, wait, fa
     await edit(17);
     await waitFor('durable edit', `${saved} && JSON.parse(__recoverySmoke.disk.checkpoint.project).files[0].settings?.coreExposure === 17`);
     await tap('#studioToggleStrip');
+    await waitFor('recovery photos expanded', `document.getElementById('studioToggleStrip').getAttribute('aria-expanded')==='true'`);
     await tap('.file-list-name[data-index="1"]');
     await waitFor('active frame checkpoint', `${ready} && ${saved} && __recoverySmoke.disk.checkpoint.activeIndex===1`);
     await tap('.file-list-name[data-index="0"]');

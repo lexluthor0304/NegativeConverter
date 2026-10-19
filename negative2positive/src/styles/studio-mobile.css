@@ -17,6 +17,10 @@
    Help retains the feedback, privacy and support links hidden from the bar. */
 .shell-mobile .studio :is(button, summary, select, .upload-btn, .zoom-btn) { min-height: 44px; }
 .shell-mobile .studio :is(.zoom-btn, .file-list-select-control) { min-width: 44px; min-height: 44px; }
+/* A 44 px selection label covered the centre of an 88 px compact tile.
+   Leave a full touch target between its selection and review controls. */
+.shell-mobile .studio:not(.studio-lighttable) .file-list-item { flex-basis: 144px; width: 144px; height: 76px; }
+.shell-mobile .studio-lighttable .file-list-items { grid-template-columns: repeat(auto-fill, minmax(144px, 1fr)); }
 .shell-mobile .studio .slider-number-input { min-height: 44px; min-width: 52px; font-size: 16px; }
 .shell-mobile .studio :is(input[type="text"], input[type="number"], textarea, select) { font-size: 16px; }
 .shell-mobile .studio .slider-input { height: 28px; padding-block: 12px; margin-block: 0; background-clip: content-box; }

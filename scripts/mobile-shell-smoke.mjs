@@ -84,6 +84,7 @@ export async function runMobileShellSmoke({ send, evaluate, waitFor, wait, fail,
         await withinScreen('#fileListSection');
         await withinScreen('#studioHeader');
         await withinScreen('.file-list-item');
+        await tap('.file-list-name[data-index="0"]');
         const viewerHeight = await evaluate(`document.getElementById('canvasContainer').getBoundingClientRect().height`);
         if (viewerHeight < 40) {
           await capture(`${name}-${lang}-viewer-clipped`);
