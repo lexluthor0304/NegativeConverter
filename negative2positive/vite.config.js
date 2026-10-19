@@ -6,6 +6,7 @@ import { uiFontsPlugin } from '../scripts/build-ui-fonts.mjs';
 import { displayProxyBuildHashes } from '../scripts/display-proxy-hashes.mjs';
 import { opencvAssetsPlugin } from '../scripts/opencv-assets.mjs';
 import { CROSS_ORIGIN_ISOLATION_HEADERS, isolatedOutputNames } from '../scripts/cross-origin-isolation.mjs';
+import { p0FixturesPlugin } from '../scripts/p0-fixtures.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -49,7 +50,7 @@ export default defineConfig({
   // build start (scripts/build-ui-fonts.mjs, #262).
   // OpenCV as one compiled-once wasm file plus a small glue (#252 part 5),
   // for the page and for the worker bundles that import it.
-  plugins: [uiFontsPlugin(), opencvAssetsPlugin(), ...(localLibRawDist ? [localLibRawPlugin(localLibRawDist)] : [])],
+  plugins: [uiFontsPlugin(), opencvAssetsPlugin(), p0FixturesPlugin(), ...(localLibRawDist ? [localLibRawPlugin(localLibRawDist)] : [])],
   server: {
     host: '127.0.0.1',
     port: 4173,
