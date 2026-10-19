@@ -32497,7 +32497,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // #298 P0: the device self-test (p0SelfTest.js) when the debug iOS build
       // opened the page with ?p0=1 (NC_P0_SELFTEST=1, lib.rs).
       if (new URLSearchParams(window.location.search).get('p0') === '1') {
-        import('./p0SelfTest.js').then(({ runP0SelfTest }) => runP0SelfTest()).catch((err) => console.error('[p0] self-test failed to start', err));
+        import('./p0SelfTest.js').then(({ runP0SelfTest }) => runP0SelfTest({ mobileRecovery })).catch((err) => console.error('[p0] self-test failed to start', err));
       }
       // ?debugCounters=1 exposes the Studio flush and DOM-write counters and
       // the layout and loupe call counts to the smoke tests (#261).
