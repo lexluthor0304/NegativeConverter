@@ -37,6 +37,15 @@ class DistributionValidation(unittest.TestCase):
             with self.assertRaises(ValueError):
                 ios.validate_profile(changed, self.now)
 
+    def test_signer_must_belong_to_profile(self):
+        profile = {"DeveloperCertificates": [b"permitted-certificate"]}
+        ios.validate_signing_certificate(b"permitted-certificate", profile)
+        for certificate in [b"another-certificate", b""]:
+            with self.assertRaises(ValueError):
+                ios.validate_signing_certificate(certificate, profile)
+        with self.assertRaises(ValueError):
+            ios.validate_signing_certificate(b"permitted-certificate", {})
+
     def test_ipa_identity_and_both_families(self):
         info = {"CFBundleIdentifier": ios.BUNDLE_ID, "CFBundleShortVersionString": "1.0.0",
                 "CFBundleVersion": "1.1", "UIDeviceFamily": [1, 2],

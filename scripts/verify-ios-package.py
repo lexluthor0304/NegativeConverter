@@ -41,6 +41,11 @@ def decode_profile(path):
     return plistlib.loads(subprocess.check_output(["security", "cms", "-D", "-i", str(path)]))
 
 
+def validate_signing_certificate(certificate, profile):
+    require(bool(certificate) and certificate in profile.get("DeveloperCertificates", []),
+            "The IPA signing certificate is not permitted by its provisioning profile")
+
+
 def validate_info(info, version, build):
     require(info.get("CFBundleIdentifier") == BUNDLE_ID, "Wrong IPA bundle ID")
     require(info.get("CFBundleShortVersionString") == version, "Wrong IPA marketing version")
@@ -68,10 +73,18 @@ def verify_ipa(export_dir, output, version, build):
         app = apps[0]
         info = plistlib.loads((app / "Info.plist").read_bytes())
         validate_info(info, version, build)
-        profile = validate_profile(decode_profile(app / "embedded.mobileprovision"))
-        subprocess.run(["codesign", "--verify", "--deep", "--strict", str(app)], check=True)
+        profile_data = decode_profile(app / "embedded.mobileprovision")
+        profile = validate_profile(profile_data)
+        subprocess.run(["codesign", "--verify", "--deep", "--strict",
+                        "--test-requirement", "anchor apple generic", str(app)], check=True)
+        certificate_prefix = unpacked / "signer"
+        subprocess.run(["codesign", "--display", f"--extract-certificates={certificate_prefix}",
+                        str(app)], check=True, stderr=subprocess.DEVNULL)
+        certificate_path = unpacked / "signer0"
+        require(certificate_path.is_file(), "Unable to extract the IPA signing certificate")
+        validate_signing_certificate(certificate_path.read_bytes(), profile_data)
         entitlements = plistlib.loads(subprocess.check_output(
-            ["codesign", "--display", "--entitlements", ":-", str(app)], stderr=subprocess.DEVNULL))
+            ["codesign", "--display", "--entitlements=:-", str(app)], stderr=subprocess.DEVNULL))
         require(not entitlements.get("get-task-allow", False), "IPA signature permits debugging")
         require(entitlements.get("application-identifier") == f"{TEAM_ID}.{BUNDLE_ID}", "Wrong signed application ID")
         require(entitlements.get("com.apple.developer.team-identifier") == TEAM_ID, "Wrong signed team")
@@ -85,7 +98,7 @@ def verify_ipa(export_dir, output, version, build):
         digest = hashlib.file_digest(stream, "sha256").hexdigest()
     report = {**profile, "version": version, "build": build, "sha256": digest,
               "deviceFamilies": ["iPhone", "iPad"], "architectures": archs,
-              "signatureVerified": True, "fixtureFree": True,
+              "signatureVerified": True, "signerMatchesProfile": True, "fixtureFilesInPackage": False,
               "commit": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()}
     (output / "verification.json").write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps(report, indent=2))

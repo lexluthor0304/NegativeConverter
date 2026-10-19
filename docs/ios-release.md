@@ -112,9 +112,13 @@ Before upload, the workflow runs the shared JS tests and Studio/mobile layout
 regressions, builds the production web assets without `NC_P0_FIXTURES=1`, then
 builds and verifies the exact exported IPA. `scripts/verify-ios-package.py`
 checks ZIP integrity, a distribution profile, its expiry/team/bundle identity,
-`codesign --verify --deep --strict`, signed entitlements, arm64 device code,
+`codesign --verify --deep --strict` with an Apple trust requirement, an exact
+match between the signing certificate and the profile's permitted certificates,
+signed entitlements, arm64 device code,
 both device families, minimum iOS 17.0, exact version/build and absence of
-`p0-fixtures`. A simulator or development-signed app is refused.
+`p0-fixtures` files in the package. Vite and the native build guard additionally
+prevent fixture assets from being embedded into the executable. A simulator or
+development-signed app is refused.
 
 The workflow artifact contains the verified IPA, SHA-256/signature report and
 release plan with source SHA. A green upload or review submission does not prove
