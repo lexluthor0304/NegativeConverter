@@ -77,8 +77,11 @@ def verify_ipa(export_dir, output, version, build):
         validate_info(info, version, build)
         profile_data = decode_profile(app / "embedded.mobileprovision")
         profile = validate_profile(profile_data)
+        # codesign reads -R/--test-requirement as a file path unless the text is
+        # prefixed with "=" (man codesign); without it: "invalid requirement
+        # specification" (third TestFlight dispatch, 2026-10-26).
         subprocess.run(["codesign", "--verify", "--deep", "--strict",
-                        "--test-requirement", "anchor apple generic", str(app)], check=True)
+                        "--test-requirement", "=anchor apple generic", str(app)], check=True)
         certificate_prefix = unpacked / "signer"
         subprocess.run(["codesign", "--display", f"--extract-certificates={certificate_prefix}",
                         str(app)], check=True, stderr=subprocess.DEVNULL)
