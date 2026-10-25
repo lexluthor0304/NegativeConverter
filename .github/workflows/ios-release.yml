@@ -48,25 +48,37 @@ jobs:
       - name: Prepare independent iOS version and check submission readiness
         id: version
         run: node .github/scripts/prepare_ios_release.mjs
-      - name: Check credentials without printing their values
+      # The manual signing that `tauri ios build --ci` configures refuses
+      # Xcode-managed profiles, so the lane owns a manually managed App Store
+      # profile created through the App Store Connect API for the exact
+      # distribution certificate in MAS_CERT_DIST_P12 (first dispatch failed
+      # on "Provisioning profile … is Xcode managed", 2026-10-26).
+      - name: Check credentials and fetch the manual App Store profile
         env:
           ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
           ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
           ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
           IOS_CERTIFICATE: ${{ secrets.MAS_CERT_DIST_P12 }}
           IOS_CERTIFICATE_PASSWORD: ${{ secrets.MAS_CERT_PASSWORD }}
-          IOS_MOBILE_PROVISION: ${{ secrets.IOS_PROVISION_PROFILE }}
         run: |
           set -euo pipefail
-          for name in ASC_API_KEY_ID ASC_API_ISSUER_ID ASC_API_KEY_P8 IOS_CERTIFICATE IOS_CERTIFICATE_PASSWORD IOS_MOBILE_PROVISION; do
+          for name in ASC_API_KEY_ID ASC_API_ISSUER_ID ASC_API_KEY_P8 IOS_CERTIFICATE IOS_CERTIFICATE_PASSWORD; do
             if [ -z "${!name}" ]; then
               echo "::error::Missing iOS release credential: $name"
               exit 1
             fi
           done
           umask 077
-          printf '%s' "$IOS_MOBILE_PROVISION" | base64 --decode > "$RUNNER_TEMP/ios.mobileprovision"
+          printf '%s' "$IOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/ios.p12"
+          pem="$(openssl pkcs12 -in "$RUNNER_TEMP/ios.p12" -clcerts -nokeys -passin env:IOS_CERTIFICATE_PASSWORD 2>/dev/null \
+            || openssl pkcs12 -legacy -in "$RUNNER_TEMP/ios.p12" -clcerts -nokeys -passin env:IOS_CERTIFICATE_PASSWORD)"
+          rm "$RUNNER_TEMP/ios.p12"
+          sha1="$(printf '%s\n' "$pem" | openssl x509 -noout -fingerprint -sha1 | sed 's/.*=//; s/://g')"
+          echo "signing certificate SHA-1 $sha1"
+          node scripts/ios-ensure-store-profile.mjs --bundle-id com.neoanaloglab.negativeconverter \
+            --certificate-sha1 "$sha1" --name "Negative Converter iOS App Store" --out "$RUNNER_TEMP/ios.mobileprovision"
           python3 scripts/verify-ios-package.py --profile "$RUNNER_TEMP/ios.mobileprovision"
+          echo "IOS_MOBILE_PROVISION=$(base64 < "$RUNNER_TEMP/ios.mobileprovision" | tr -d '\n')" >> "$GITHUB_ENV"
           rm "$RUNNER_TEMP/ios.mobileprovision"
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
@@ -93,11 +105,11 @@ jobs:
         run: |
           npm run build:web
           test ! -e negative2positive/dist/p0-fixtures
+      # IOS_MOBILE_PROVISION comes from the profile step above (GITHUB_ENV).
       - name: Archive and export a distribution-signed iPhone and iPad app
         env:
           IOS_CERTIFICATE: ${{ secrets.MAS_CERT_DIST_P12 }}
           IOS_CERTIFICATE_PASSWORD: ${{ secrets.MAS_CERT_PASSWORD }}
-          IOS_MOBILE_PROVISION: ${{ secrets.IOS_PROVISION_PROFILE }}
           IOS_CONFIG_PATH: ${{ steps.version.outputs.config }}
         run: |
           xcodebuild -version

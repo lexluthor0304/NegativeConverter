@@ -25,6 +25,8 @@ def validate_profile(profile, now=None):
     now = now or datetime.datetime.now(datetime.timezone.utc)
     require(profile.get("TeamIdentifier") == [TEAM_ID], "Wrong distribution team")
     require("iOS" in profile.get("Platform", []), "An iOS profile is required, not a Mac profile")
+    require(profile.get("IsXcodeManaged") is not True,
+            "Xcode-managed profile; the manual signing of the release lane needs a manually managed App Store profile")
     require("ProvisionedDevices" not in profile and not profile.get("ProvisionsAllDevices"),
             "An App Store distribution profile is required, not development/ad-hoc/enterprise")
     entitlements = profile.get("Entitlements", {})
