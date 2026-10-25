@@ -31,15 +31,21 @@ fn main() {
 /// `negative2positive/public/p0-fixtures`, an ignored directory. Vite drops
 /// them from `dist` unless `NC_P0_FIXTURES=1` (scripts/p0-fixtures.mjs), but
 /// an Xcode archive or a `tauri build` embeds whatever `dist` holds without
-/// rebuilding the web assets, so the embed itself refuses a stale copy.
+/// rebuilding the web assets, so the embed itself refuses a stale copy. The
+/// opt-in is `NC_P0_FIXTURES=1` on cargo's environment or the `p0-fixtures`
+/// cargo feature: `tauri ios build` runs cargo from an Xcode script phase
+/// whose environment the CLI scrubs, so there only `--features p0-fixtures`
+/// reaches this script (ios-ci.yml "Store screenshots").
 fn refuse_self_test_fixtures() {
     println!("cargo:rerun-if-env-changed=NC_P0_FIXTURES");
     let manifest = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let fixtures = manifest.join("../negative2positive/dist/p0-fixtures");
     println!("cargo:rerun-if-changed={}", fixtures.display());
-    if fixtures.is_dir() && std::env::var("NC_P0_FIXTURES").ok().as_deref() != Some("1") {
+    let opted_in = std::env::var("NC_P0_FIXTURES").ok().as_deref() == Some("1")
+        || std::env::var_os("CARGO_FEATURE_P0_FIXTURES").is_some();
+    if fixtures.is_dir() && !opted_in {
         panic!(
-            "negative2positive/dist/p0-fixtures would be embedded in the app: run `npm run build:web` to drop the device self-test fixtures, or set NC_P0_FIXTURES=1 for a self-test build (docs/ios-p0-feasibility.md)"
+            "negative2positive/dist/p0-fixtures would be embedded in the app: run `npm run build:web` to drop the device self-test fixtures, or opt in for a self-test build with NC_P0_FIXTURES=1 or `--features p0-fixtures` (docs/ios-p0-feasibility.md)"
         );
     }
 }

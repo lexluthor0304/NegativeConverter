@@ -24,6 +24,11 @@ cc = "1"
 default = ["updater"]
 # Only the local performance launcher enables this isolated cache path.
 perf-harness = []
+# Self-test builds that embed negative2positive/public/p0-fixtures (#298):
+# build.rs refuses a `dist/p0-fixtures` directory unless NC_P0_FIXTURES=1 or
+# this feature is on. `tauri ios build` runs cargo from an Xcode script phase
+# with a scrubbed environment, so it needs `--features p0-fixtures` instead.
+p0-fixtures = []
 # In-app updates via tauri-plugin-updater. The Mac App Store build turns this
 # off (`scripts/build-mas.sh`): App Store apps must not update themselves.
 updater = ["dep:tauri-plugin-updater", "dep:tauri-plugin-process"]

@@ -116,8 +116,10 @@ jobs:
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
       CARGO_BUILD_JOBS: 3
       CARGO_INCREMENTAL: 0
-      # Embeds the fixture into this simulator build only; device and release
-      # builds keep the fixture guard (docs/ios-p0-feasibility.md).
+      # Keeps the fixture in the web build for this simulator job only; the
+      # cargo side opts in with `--features p0-fixtures` because the Xcode
+      # script phase does not see this variable. Device and release builds
+      # keep the fixture guard (docs/ios-p0-feasibility.md).
       NC_P0_FIXTURES: "1"
     steps:
       - uses: actions/checkout@v7
@@ -157,7 +159,7 @@ jobs:
         if: steps.fixture.outputs.present == 'true'
         run: |
           npm run build:web
-          npm run tauri -- ios build --ci --debug --no-sign --archive-only --target aarch64-sim
+          npm run tauri -- ios build --ci --debug --no-sign --archive-only --target aarch64-sim --features p0-fixtures
       - name: Capture iPhone and iPad screenshots
         if: steps.fixture.outputs.present == 'true'
         run: |
