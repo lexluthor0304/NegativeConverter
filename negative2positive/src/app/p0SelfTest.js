@@ -220,15 +220,18 @@ export async function runP0SelfTest({ mobileRecovery } = {}) {
   if (plan.screenshot) {
     // App Store screenshots (ios-ci.yml "Store screenshots", scripts/
     // ios-store-screenshots.sh): keep the converted photo on screen, hide the
-    // ?debug=1 badge and widget (main.js recreates the widget, so hide it with
-    // a rule rather than removing it), drop stale toasts, then tell the runner
-    // the frame is ready; it screenshots the simulator on `screenshot-ready`.
-    const style = document.createElement('style');
-    style.textContent = '#debugWidget, #buildBadge { display: none !important; }';
-    document.head.appendChild(style);
+    // ?debug=1 badge and widget, drop stale toasts, then tell the runner the
+    // frame is ready; it screenshots the simulator on `screenshot-ready`.
+    // Inline CSSOM writes: an injected <style> rule did not take effect in the
+    // simulator build (Tauri hashes the page's styles into the CSP, which makes
+    // WebKit ignore 'unsafe-inline'), and main.js recreates a removed widget on
+    // its next update, so the elements are hidden in place.
+    const hide = (id) => document.getElementById(id)?.style.setProperty('display', 'none', 'important');
+    for (const id of ['debugWidget', 'buildBadge']) hide(id);
     document.getElementById('toastContainer')?.replaceChildren();
     document.activeElement?.blur?.();
     await sleep(plan.screenshotSettleMs || 1500);
+    for (const id of ['debugWidget', 'buildBadge']) hide(id);
     await report('screenshot-ready', { fixtures: fixtures.length, frame: frameFacts(), errors: errors.splice(0) });
   }
   sessionStorage.removeItem(PROGRESS_KEY);

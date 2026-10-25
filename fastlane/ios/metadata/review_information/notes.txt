@@ -1,0 +1,8 @@
+Negative Converter turns photographed or scanned film negatives into positives entirely on the device. No account, sign-in, purchase or network access is needed; nothing is uploaded.
+
+To test the core flow, download this sample 35 mm colour negative (JPEG) and import it with "Select File" or "Add photos":
+https://raw.githubusercontent.com/lexluthor0304/NegativeConverter/main/negative2positive/test-fixtures/store-negative.jpg
+
+The app detects the frame, inverts and colour-corrects it, and shows the positive within a few seconds. "Export" saves the result into the app's Documents folder (Files app > On My iPhone / On My iPad > Negative Converter). Any photo of a film negative on a light source works the same way.
+
+This iPhone/iPad version shares the application record with the Mac app that is already on the App Store (same bundle identifier).
