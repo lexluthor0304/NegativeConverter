@@ -54,12 +54,16 @@ The uploader reuses `ASC_API_KEY_ID`, `ASC_API_ISSUER_ID` and base64
 `IOS_CERTIFICATE_PASSWORD`. The identity must be **Apple Distribution** with
 its private key; the Mac installer certificate is not used.
 
-Add `IOS_PROVISION_PROFILE`: base64 of an **iOS App Store Connect distribution**
-`.mobileprovision` for this exact team and bundle ID, containing the distribution
-certificate above. A Mac `.provisionprofile`, development profile, ad-hoc or
-enterprise profile is rejected before building. The current repository's secret
-values and existence were not inspected. No private keys belong in the repo,
-logs or build artifacts.
+No provisioning profile secret is needed: the lane fetches or creates a
+manually managed **iOS App Store** profile named `Negative Converter iOS App
+Store` through the App Store Connect API (`scripts/ios-ensure-store-profile.mjs`)
+for the exact Apple Distribution certificate inside `MAS_CERT_DIST_P12`, and
+recreates it when that certificate changes or the profile stops being active.
+Xcode-managed profiles (`iOS Team Store Provisioning Profile: …`) are rejected
+by `scripts/verify-ios-package.py --profile`, because `tauri ios build --ci`
+configures manual signing and xcodebuild refuses them (the first dispatch on
+2026-10-26 failed that way). The API key therefore needs a role that can manage
+provisioning (Admin, or Developer with access to certificates and profiles).
 
 After adding iOS to the record and configuring the profile, run the workflow
 on `main` with channel `testflight` for the first distribution validation.
