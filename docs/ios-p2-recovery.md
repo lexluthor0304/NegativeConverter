@@ -160,12 +160,31 @@ the frozen library SHA-256 is
 The runner records its own hash separately from the preparation-time script
 hash and does not rerun a completed output directory.
 
+The same harness passed on a physical **iPad Air 11-inch (M2), iPadOS 26.6.2
+(23G90)** on 2026-10-25 from the stack head `d1ba86bc` (frozen library SHA-256
+`03964708369478efd0e9f479614d7f1d062e784b43aba0e21a4c43644dd60928`, evidence
+`output/ios-device-validation/run-20261025-201632/`). The iPad was paired with
+`xcrun devicectl manage pair`, Developer Mode was switched on by hand on the
+device (`devmodectl` refuses devices with a passcode), and one
+`xcodebuild … -destination id=<udid> -allowProvisioningDeviceRegistration`
+on the prepared project copy added it to the team profile. The memory plan
+reported half of the device RAM (`ramBytes` 4007231488, budget 1803254169) via
+the native memory command. All four originals imported as one roll in 3.0 s,
+native LibRaw decoded the NEF in 431 ms and the DNG in 1038 ms, exports took
+0.5 s (JPEG, HEIC), 0.9 s (NEF) and 1.1 s (DNG) with the same verified PNG
+dimensions as the iPhone table above, and the whole-app SIGKILL/relaunch restored
+all four sources, both exposure edits and the active image; checkpoint revisions
+advanced from 9 to 12. WKWebView on iPadOS reports a desktop Safari user agent
+(`Macintosh; Intel Mac OS X 10_15_7`, platform `MacIntel`), which is why
+`platform.js` must not rely on user-agent heuristics. The runner now names the
+validated device in its pass line and `result.json`.
+
 Evidence is written to a timestamped `run-*` directory: device/build/install
 results, launch PIDs, reassembled device events, copied originals/checkpoints,
 exported files and a final `result.json`. A prepared library or installed app
 alone is not a passing test. Programmatic editor controls on a physical phone
-still leave manual touch, rotation/background, a separate WebContent termination,
-physical iPad and lower-memory-device acceptance outstanding. This run used the
+still leave manual touch, rotation/background, a separate WebContent termination
+and lower-memory-device acceptance outstanding. This run used the
 default **8-bit** export; it does not establish 16-bit export acceptance.
 ResizeObserver loop notifications are retained in the device log. No upload
 or App Store action occurs.

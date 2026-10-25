@@ -412,12 +412,15 @@ def execute(out, device):
     after_exports = [png_facts(p) for p in (evidence / 'after/Documents').rglob('*.png')]
     assert len(after_exports) > len(exports), 'No additional export was written after restore'
     device_command(['info', 'processes'], 'processes-after')
-    write_json(evidence / 'result.json', {'installed': True, 'wholeAppRecovery': 'passed',
+    hardware = json.loads((evidence / 'device.json').read_text())['result']['hardwareProperties']
+    marketing = hardware.get('marketingName') or hardware.get('productType') or 'device'
+    pending = ['Manual touch/rotation/background validation', 'Separate WebContent termination']
+    pending.append('Physical iPhone' if 'iPad' in marketing else 'Physical iPad')
+    write_json(evidence / 'result.json', {'installed': True, 'wholeAppRecovery': 'passed', 'device': marketing,
         'sourceHashes': 'matched bundled fixtures before and after process termination',
         'recipeExposure': [17, 31], 'activeIndex': 1, 'beforePid': first_pid, 'afterPid': second_pid,
-        'exportsBefore': exports, 'exportsAfter': after_exports,
-        'pending': ['Manual touch/rotation/background validation', 'Separate WebContent termination', 'Physical iPad']})
-    print(f'PHYSICAL IPHONE IMPORT/EXPORT + WHOLE-APP RECOVERY PASS. Evidence: {evidence}', flush=True)
+        'exportsBefore': exports, 'exportsAfter': after_exports, 'pending': pending})
+    print(f'PHYSICAL {marketing.upper()} IMPORT/EXPORT + WHOLE-APP RECOVERY PASS. Evidence: {evidence}', flush=True)
 
 
 def main():
