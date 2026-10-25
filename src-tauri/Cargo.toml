@@ -24,6 +24,11 @@ cc = "1"
 default = ["updater"]
 # Only the local performance launcher enables this isolated cache path.
 perf-harness = []
+# Self-test builds that embed negative2positive/public/p0-fixtures (#298):
+# build.rs refuses a `dist/p0-fixtures` directory unless NC_P0_FIXTURES=1 or
+# this feature is on. `tauri ios build` runs cargo from an Xcode script phase
+# with a scrubbed environment, so it needs `--features p0-fixtures` instead.
+p0-fixtures = []
 # In-app updates via tauri-plugin-updater. The Mac App Store build turns this
 # off (`scripts/build-mas.sh`): App Store apps must not update themselves.
 updater = ["dep:tauri-plugin-updater", "dep:tauri-plugin-process"]
@@ -33,6 +38,8 @@ tauri = { version = "2", features = [] }
 base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Streaming checksums for persistent mobile originals; already in Cargo.lock.
+sha2 = "0.10"
 
 # Desktop only (#298): rfd has no iOS or Android backend, the watch folder is
 # a desktop workflow (import_folder_mobile.rs stubs its commands), and a store
@@ -43,6 +50,11 @@ notify = "8.2"
 rfd = "0.15"
 tauri-plugin-updater = { version = "2", optional = true }
 tauri-plugin-process = { version = "2", optional = true }
+
+# Mobile only (#298): external links open through the opener plugin's native
+# bridge (UIApplication.open); the desktop keeps its own `open_external_url`.
+[target.'cfg(any(target_os = "ios", target_os = "android"))'.dependencies]
+tauri-plugin-opener = "2"
 
 # Physical memory for the page's memory budget (get_memory_info, #258), and
 # statvfs plus the Time Machine exclusion of the display-proxy cache (#249).
@@ -77,9 +89,6 @@ tauri-runtime-wry = { version = "2", default-features = false }
 wry = { git = "https://github.com/lexluthor0304/wry", rev = "547b9a08086e70ee831597d488a0b776dfe6d3e1" }
 
 [dev-dependencies]
-# RGB16 hashes in the native decoder's parity tests (#264). Already in
-# Cargo.lock (tauri-codegen, wry).
-sha2 = "0.10"
 # The parity tests compare LibRaw's floats with the ones libraw-wasm reported
 # (native/wasm-parity-hashes.json): parse them correctly rounded, not to the
 # default best-effort precision (off by one ulp for some values). Tests only.

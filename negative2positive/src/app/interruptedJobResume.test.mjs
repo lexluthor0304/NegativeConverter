@@ -71,7 +71,7 @@ function page({ storage, desktop = false, folderFiles = new Map() }) {
       if (command === 'exported_files_exist') return args.paths.map(path => folderFiles.has(path));
       throw new Error('unexpected ' + command);
     } } } } : {},
-    isTauriDesktop: () => desktop,
+    isTauriRuntime: () => desktop,
     appAlert: async (message) => { log.alerts.push(message); },
     appConfirm: async (message) => { log.confirms.push(message); return log.answers.length ? log.answers.shift() : true; },
     showToast: (message) => { log.toasts.push(message); },

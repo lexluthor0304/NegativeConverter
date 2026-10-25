@@ -103,15 +103,22 @@ async function probe() {
 }
 
 async function importFixture(fixture, timeoutMs) {
-  const url = `./p0-fixtures/${fixture.file}`;
+  return importFixtures([fixture], timeoutMs);
+}
+
+async function importFixtures(fixtures, timeoutMs) {
   const t0 = performance.now();
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`${url}: HTTP ${response.status}`);
-  const blob = await response.blob();
-  const fetchMs = Math.round(performance.now() - t0);
-  const file = new File([blob], fixture.file, { type: fixture.type || blob.type || 'application/octet-stream' });
   const transfer = new DataTransfer();
-  transfer.items.add(file);
+  let bytes = 0;
+  for (const fixture of fixtures) {
+    const url = `./p0-fixtures/${fixture.file}`;
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`${url}: HTTP ${response.status}`);
+    const blob = await response.blob();
+    bytes += blob.size;
+    transfer.items.add(new File([blob], fixture.file, { type: fixture.type || blob.type || 'application/octet-stream' }));
+  }
+  const fetchMs = Math.round(performance.now() - t0);
   const input = document.getElementById('fileInput');
   input.files = transfer.files;
   const filenameBefore = document.getElementById('studioFilename')?.textContent ?? null;
@@ -138,7 +145,7 @@ async function importFixture(fixture, timeoutMs) {
   const photos = document.querySelectorAll('.file-list-name').length;
   let twoStage = null;
   try { const s = window.__ncTwoStage?.status?.(); twoStage = s && { pending: s.pending, provisional: s.provisional, swapped: s.swapped, fullDecode: s.fullDecode, mode: s.mode, base: s.base }; } catch (error) { twoStage = String(error); }
-  return { bytes: blob.size, fetchMs, startedMs: started, importMs: Math.round(performance.now() - t1), settledMs, twoStageMs, twoStage, filename, photos, becameCurrent: filename !== filenameBefore || photos !== photosBefore, rawLog: rawLog.splice(0) };
+  return { bytes, fetchMs, startedMs: started, importMs: Math.round(performance.now() - t1), settledMs, twoStageMs, twoStage, filename, photos, becameCurrent: filename !== filenameBefore || photos !== photosBefore, rawLog: rawLog.splice(0) };
 }
 
 async function exportCurrent(timeoutMs) {
@@ -151,7 +158,7 @@ async function exportCurrent(timeoutMs) {
   return { ms: Math.round(performance.now() - t0), settledMs: ms, toastsBefore: before, toasts: toasts() };
 }
 
-export async function runP0SelfTest() {
+export async function runP0SelfTest({ mobileRecovery } = {}) {
   // ?p0ram=<GiB> (NC_P0_SELFTEST=<GiB>): run the memory budget at that RAM
   // through the debug override main.js reads at boot; reload once to apply.
   const params = new URLSearchParams(location.search);
@@ -180,6 +187,13 @@ export async function runP0SelfTest() {
     await report('fatal', { message: `plan.json: ${error}` });
     return;
   }
+  if (plan.deviceRecovery) {
+    const { runDeviceRecovery } = await import('./p0DeviceRecovery.js');
+    await runDeviceRecovery({ plan, mobileRecovery, invoke, report, waitFor,
+      studioSettled, importFixtures, exportCurrent, frameFacts, memorySnapshot,
+      takeRawLog: () => rawLog.splice(0), errors });
+    return;
+  }
   const fixtures = plan.fixtures || [];
   for (let index = progress; index < fixtures.length; index++) {
     const fixture = fixtures[index];
@@ -202,6 +216,20 @@ export async function runP0SelfTest() {
     }
     await sleep(plan.pauseMs || 1500);
     await report('idle', { index, file: fixture.file, memory: memorySnapshot() });
+  }
+  if (plan.screenshot) {
+    // App Store screenshots (ios-ci.yml "Store screenshots", scripts/
+    // ios-store-screenshots.sh): keep the converted photo on screen, hide the
+    // ?debug=1 badge and widget (main.js recreates the widget, so hide it with
+    // a rule rather than removing it), drop stale toasts, then tell the runner
+    // the frame is ready; it screenshots the simulator on `screenshot-ready`.
+    const style = document.createElement('style');
+    style.textContent = '#debugWidget, #buildBadge { display: none !important; }';
+    document.head.appendChild(style);
+    document.getElementById('toastContainer')?.replaceChildren();
+    document.activeElement?.blur?.();
+    await sleep(plan.screenshotSettleMs || 1500);
+    await report('screenshot-ready', { fixtures: fixtures.length, frame: frameFacts(), errors: errors.splice(0) });
   }
   sessionStorage.removeItem(PROGRESS_KEY);
   await report('done', { fixtures: fixtures.length, errors: errors.splice(0) });

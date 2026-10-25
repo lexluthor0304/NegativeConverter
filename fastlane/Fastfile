@@ -56,3 +56,61 @@ platform :mac do
     )
   end
 end
+
+# iOS has its own assets and version sequence. The existing mac lane above is
+# unchanged. The workflow selects TestFlight while acceptance is in progress;
+# App Store releases submit automatically and go live when Apple approves.
+platform :ios do
+  desc "Upload an iOS build or submit it for automatic App Store release"
+  lane :publish do
+    channel = ENV.fetch("IOS_RELEASE_CHANNEL")
+    UI.user_error!("Unknown iOS release channel") unless ["testflight", "app-store"].include?(channel)
+    repo_root = ENV.fetch("GITHUB_WORKSPACE", File.expand_path("..", __dir__))
+    ios_root = File.join(repo_root, "fastlane", "ios")
+    if channel == "app-store"
+      require "json"
+      ready = JSON.parse(File.read(File.join(ios_root, "release.json"))).fetch("appStoreSubmissionReady")
+      UI.user_error!("iOS acceptance is incomplete; see docs/ios-release.md") unless ready == true
+      sh("node", File.join(repo_root, "scripts", "check-ios-store-assets.mjs"))
+    end
+    api_key = app_store_connect_api_key(
+      key_id: ENV.fetch("ASC_API_KEY_ID"),
+      issuer_id: ENV.fetch("ASC_API_ISSUER_ID"),
+      key_content: ENV.fetch("ASC_API_KEY_P8"),
+      is_key_content_base64: true
+    )
+    if channel == "testflight"
+      upload_to_testflight(
+        api_key: api_key,
+        app_identifier: "com.neoanaloglab.negativeconverter",
+        apple_id: "6797694070",
+        ipa: ENV.fetch("IPA_PATH"),
+        distribute_external: false,
+        skip_submission: true,
+        skip_waiting_for_build_processing: false
+      )
+    else
+      deliver(
+        api_key: api_key,
+        app_identifier: "com.neoanaloglab.negativeconverter",
+        platform: "ios",
+        ipa: ENV.fetch("IPA_PATH"),
+        app_version: ENV.fetch("APP_VERSION"),
+        metadata_path: File.join(ios_root, "metadata"),
+        screenshots_path: File.join(ios_root, "screenshots"),
+        skip_screenshots: false,
+        overwrite_screenshots: true,
+        run_precheck_before_submit: false,
+        precheck_include_in_app_purchases: false,
+        force: true,
+        reject_if_possible: false,
+        submit_for_review: true,
+        automatic_release: true,
+        submission_information: {
+          add_id_info_uses_idfa: false,
+          content_rights_contains_third_party_content: false
+        }
+      )
+    end
+  end
+end

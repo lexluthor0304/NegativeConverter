@@ -4,6 +4,7 @@ import '../styles/studio.css';
 import '../styles/pixel-fonts.css';
 import '../styles/studio-pixel.css';
 import '../styles/photo-switch-feedback.css';
+import '../styles/studio-mobile.css';
 
 export const studioText = {
   zh: {
@@ -414,6 +415,10 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
   const writer = createDiffedWriter();
   const set = writer.set;
   body.classList.add('studio');
+  if (document.documentElement?.classList.contains('shell-mobile') &&
+      window.matchMedia('(max-width: 700px), (max-height: 540px)').matches) {
+    body.classList.add('studio-strip-hidden');
+  }
   const header = $('studioHeader');
   header.className = 'studio-header';
   header.innerHTML = `
@@ -503,6 +508,9 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
   if (languages) $('studioLanguages').append(languages);
   move('buildBadge', $('studioLanguages'));
   ['offlineDownloadLink', 'feedbackBtn', 'privacyDetailsLink', 'shopLink'].forEach(id => move(id, $('studioPublicLinks')));
+  if (document.documentElement?.classList.contains('shell-mobile')) {
+    ['feedbackBtn', 'privacyDetailsLink'].forEach(id => move(id, $('studioLinks')));
+  }
   const guide = document.querySelector('.header-site-links');
   if (guide) $('studioLinks').append(guide);
   // LibRaw (CDDL-1.0), musl and libomp are compiled into the apps; their

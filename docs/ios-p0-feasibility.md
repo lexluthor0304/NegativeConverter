@@ -135,7 +135,9 @@ message; the refused file never enters the photo list.
    a `plan.json` listing them (`{"fixtures": [{"file": "...", "type": "..."}]}`,
    optional `timeoutMs`, `export: false`).
 2. `NC_P0_FIXTURES=1 npm run build:web`, then
-   `NC_P0_FIXTURES=1 npx tauri ios build --debug --export-method debugging`,
+   `npx tauri ios build --debug --export-method debugging --features p0-fixtures`
+   (the CLI runs cargo from an Xcode script phase with a scrubbed environment,
+   so the cargo-side opt-in is the `p0-fixtures` feature, not the variable),
    with `--config <file>` setting a personal `identifier` and
    `bundle.iOS.developmentTeam` when the company team is not in Xcode. The
    variable gates the fixtures twice: Vite removes `dist/p0-fixtures` at the

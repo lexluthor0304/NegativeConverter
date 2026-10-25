@@ -105,7 +105,7 @@ function fixture(route = 'png16') {
     AbortController, DOMException, planDecodeAhead, memoryBudget: f.budget, heldJobFrames: new Set(),
     navigator: { deviceMemory: 16 }, memoryRuntime: { engine: 'webview2' },
     hiddenJobs: { status: () => ({ hidden: false }) }, hiddenResidentBytes: () => 0,
-    isTauriDesktop: () => true, backgroundGate: { idle: async () => {} }, BACKGROUND_STEP_WAIT_CAP_MS: 2000,
+    isTauriRuntime: () => true, backgroundGate: { idle: async () => {} }, BACKGROUND_STEP_WAIT_CAP_MS: 2000,
     imagePixelsForBatch: async () => 16, isRawLikeFileName, isPngFile,
     markOwnedPlanes: value => value, releaseOwnedPlanes: value => { value.released = true; },
     DECODED_BYTES_PER_PIXEL: 12, estimateRawDecodeBytes, loadPngImageData, loadStandardImage,

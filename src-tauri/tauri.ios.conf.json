@@ -3,7 +3,8 @@
   "app": {
     "security": {
       "capabilities": [
-        "default"
+        "default",
+        "mobile"
       ]
     }
   },

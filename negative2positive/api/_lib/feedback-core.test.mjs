@@ -104,6 +104,10 @@ assert.deepEqual(validateFeedback({ message: 'hi', website: 'http://spam.com' })
 // An empty honeypot value is what real browsers submit.
 assert.equal(validateFeedback({ message: 'hi', website: '' }).spam, undefined);
 
+for (const source of ['ios', 'android']) {
+  assert.equal(validateFeedback({ message: 'Mobile feedback', source }).data.source, source);
+}
+
 // --- validateFeedback: normalization ---
 {
   const { data } = validateFeedback({ message: '  hello  ', type: 'bug', lang: 'zh', source: 'desktop' });
