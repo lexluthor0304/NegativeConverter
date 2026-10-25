@@ -217,6 +217,20 @@ export async function runP0SelfTest({ mobileRecovery } = {}) {
     await sleep(plan.pauseMs || 1500);
     await report('idle', { index, file: fixture.file, memory: memorySnapshot() });
   }
+  if (plan.screenshot) {
+    // App Store screenshots (ios-ci.yml "Store screenshots", scripts/
+    // ios-store-screenshots.sh): keep the converted photo on screen, hide the
+    // ?debug=1 badge and widget (main.js recreates the widget, so hide it with
+    // a rule rather than removing it), drop stale toasts, then tell the runner
+    // the frame is ready; it screenshots the simulator on `screenshot-ready`.
+    const style = document.createElement('style');
+    style.textContent = '#debugWidget, #buildBadge { display: none !important; }';
+    document.head.appendChild(style);
+    document.getElementById('toastContainer')?.replaceChildren();
+    document.activeElement?.blur?.();
+    await sleep(plan.screenshotSettleMs || 1500);
+    await report('screenshot-ready', { fixtures: fixtures.length, frame: frameFacts(), errors: errors.splice(0) });
+  }
   sessionStorage.removeItem(PROGRESS_KEY);
   await report('done', { fixtures: fixtures.length, errors: errors.splice(0) });
 }

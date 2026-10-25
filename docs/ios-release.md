@@ -137,6 +137,9 @@ npm test
 `node scripts/check-ios-store-assets.mjs` is a submission check and currently
 fails because no native store screenshots have been supplied. Do not replace
 them with desktop screenshots or Chromium layout mocks.
+The `Store screenshots (simulator)` job in `ios-ci.yml` captures them from the
+iOS Simulator at the required sizes once `negative2positive/test-fixtures/
+store-negative.jpg` exists; see `fastlane/ios/screenshots/README.md`.
 
 ## Store copy and screenshots
 

@@ -13,3 +13,12 @@ Browser layout regression screenshots are not native App Store captures.
 
 Source (checked 2026-10-19):
 https://developer.apple.com/help/app-store-connect/reference/app-information/screenshot-specifications/
+
+Producing them: the `Store screenshots (simulator)` job in
+`.github/workflows/ios-ci.yml` builds the self-test simulator app with
+`negative2positive/test-fixtures/store-negative.jpg`, captures the import
+screen and the editor after a real conversion on an iPhone 17 Pro and an iPad
+Pro 13-inch simulator (`scripts/ios-store-screenshots.sh`), strips the alpha
+channel and runs `scripts/check-ios-store-assets.mjs`. Download the
+`ios-store-screenshots` artifact, review every image, then commit the PNGs
+here with their `iphone-medium-*` / `ipad13-*` names.

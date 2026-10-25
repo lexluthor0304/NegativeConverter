@@ -102,3 +102,85 @@ jobs:
       # submission. Build and link Swift/plugins and the real app for both SDKs.
       - name: Build unsigned iOS app
         run: npm run tauri -- ios build --ci --debug --no-sign --archive-only --target ${{ matrix.target }}
+
+  # App Store screenshots at the sizes App Store Connect requires (iPhone
+  # Dynamic Island medium 1206x2622, iPad 13-inch 2064x2752), captured from the
+  # simulator with the self-test fixture build. Review the artifact and commit
+  # the PNGs under fastlane/ios/screenshots/en-US/ (see its README). Skipped
+  # until negative2positive/test-fixtures/store-negative.jpg exists.
+  store-screenshots:
+    name: Store screenshots (simulator)
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      CARGO_BUILD_JOBS: 3
+      CARGO_INCREMENTAL: 0
+      # Embeds the fixture into this simulator build only; device and release
+      # builds keep the fixture guard (docs/ios-p0-feasibility.md).
+      NC_P0_FIXTURES: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check for the screenshot fixture
+        id: fixture
+        run: |
+          if [ -f negative2positive/test-fixtures/store-negative.jpg ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::negative2positive/test-fixtures/store-negative.jpg is missing; store screenshots skipped"
+          fi
+      - if: steps.fixture.outputs.present == 'true'
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - if: steps.fixture.outputs.present == 'true'
+        uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: aarch64-apple-ios-sim
+      - if: steps.fixture.outputs.present == 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+          key: ios-aarch64-sim-xcode26.6
+      - if: steps.fixture.outputs.present == 'true'
+        run: npm ci
+      - name: Stage the fixture plan
+        if: steps.fixture.outputs.present == 'true'
+        run: |
+          mkdir -p negative2positive/public/p0-fixtures
+          cp negative2positive/test-fixtures/store-negative.jpg negative2positive/public/p0-fixtures/
+          printf '%s\n' '{"fixtures":[{"file":"store-negative.jpg","type":"image/jpeg"}],"export":false,"pauseMs":500,"screenshot":true}' \
+            > negative2positive/public/p0-fixtures/plan.json
+      - name: Build the simulator app with the fixture
+        if: steps.fixture.outputs.present == 'true'
+        run: |
+          npm run build:web
+          npm run tauri -- ios build --ci --debug --no-sign --archive-only --target aarch64-sim
+      - name: Capture iPhone and iPad screenshots
+        if: steps.fixture.outputs.present == 'true'
+        run: |
+          APP="$(find src-tauri/gen/apple/build -type d -name '*.app' -path '*Products/Applications*' 2>/dev/null | head -n 1)"
+          if [ -z "$APP" ]; then
+            APP="$(find src-tauri/gen/apple -type d -name '*.app' -not -path '*DerivedData*' 2>/dev/null | head -n 1)"
+          fi
+          if [ -z "$APP" ]; then
+            echo "no simulator .app found under src-tauri/gen/apple"
+            find src-tauri/gen/apple/build -maxdepth 4 2>/dev/null | head -n 50
+            exit 1
+          fi
+          echo "APP=$APP"
+          APP="$APP" OUT=output/ios-store-screenshots bash scripts/ios-store-screenshots.sh
+      - name: Validate with the store-asset checker
+        if: steps.fixture.outputs.present == 'true'
+        run: |
+          mkdir -p fastlane/ios/screenshots/en-US
+          cp output/ios-store-screenshots/*.png fastlane/ios/screenshots/en-US/
+          node scripts/check-ios-store-assets.mjs
+      - uses: actions/upload-artifact@v7
+        if: always() && steps.fixture.outputs.present == 'true'
+        with:
+          name: ios-store-screenshots
+          path: output/ios-store-screenshots/
+          if-no-files-found: warn
