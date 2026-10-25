@@ -4,6 +4,19 @@ on:
   push:
     branches:
       - main
+    # iPhone/iPad-only changes ship through ios-release.yml; they must not
+    # cut a desktop release (GitHub Release, R2 updater and Mac App Store).
+    paths-ignore:
+      - '.github/workflows/ios-ci.yml'
+      - '.github/workflows/ios-release.yml'
+      - '.github/scripts/prepare_ios_release*.mjs'
+      - 'fastlane/ios/**'
+      - 'docs/ios-*.md'
+      - 'scripts/ios-*'
+      - 'scripts/check-ios-store-assets.mjs'
+      - 'scripts/verify-ios-package.py'
+      - 'scripts/test-ios-package.py'
+      - 'negative2positive/test-fixtures/store-negative.jpg'
   workflow_dispatch:
 
 permissions:
