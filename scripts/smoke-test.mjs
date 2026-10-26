@@ -494,7 +494,7 @@ const twoStage = env => async () => {
   }
 };
 
-unit('inline scenarios', 1.0, async () => {
+unit('inline scenarios', 1.4, async () => {
 await send('Page.navigate', { url: `http://127.0.0.1:${PORT}/?lang=en` });
 await waitFor('app boot', `!!document.getElementById('studioImportAutoCrop')`);
 await installDialogAutoAccept();
@@ -1378,13 +1378,15 @@ if (restoredIndex !== 1 || JSON.stringify(beforeFailure) !== JSON.stringify(afte
 console.log('ok: failed decode preserves the previous image and active file');
 }
 
+  // These read the page the scenarios left (no navigation of their own), so
+  // they belong to this unit.
+  await runPerformanceUiSmoke({ evaluate, fail });
+  await runRawPostDecodeSmoke({ evaluate, fail });
+  await runRollFrameSmoke({ evaluate, fail });
+  if (!process.argv.some(arg => arg.endsWith('-only'))) await runSilverCoreCacheSmoke({ evaluate, fail });
 });
 
-unit('performance ui', 0.1, () => runPerformanceUiSmoke({ evaluate, fail }));
-unit('raw post-decode', 0.1, () => runRawPostDecodeSmoke({ evaluate, fail }));
-unit('roll frame', 0.1, () => runRollFrameSmoke({ evaluate, fail }));
 if (!process.argv.some(arg => arg.endsWith('-only'))) {
-  unit('silvercore cache', 0.1, () => runSilverCoreCacheSmoke({ evaluate, fail }));
   unit('compare preview', 0.3, () => runComparePreviewSmoke({ send, evaluate, waitFor, wait, fail, port: PORT }));
   unit('restart render', 0.2, () => runRestartRenderSmoke({ send, evaluate, waitFor, fail, port: PORT }));
   unit('photo session', 0.8, () => runPhotoSessionSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT }));
