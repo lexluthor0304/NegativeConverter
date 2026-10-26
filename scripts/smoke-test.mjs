@@ -448,6 +448,53 @@ await send('Audits.enable');
 // The fake-camera flags make headless Chrome reserve part of the window (the
 // viewport came out 1440x757); pin the layout the scenarios were written for.
 await send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+// ---- shards (CI): SMOKE_SHARD=k/n ----
+// The default run is a list of units: the inline scenarios below (one
+// unit) and every smoke module after them. SMOKE_SHARD=k/n runs the k-th of
+// n parts, planned from the units' weights (about their minutes on a CI
+// runner) so each part takes about the same time (desktop-ci.yml's smoke
+// matrix); a unit never splits. Without it every unit runs here, in order,
+// as before, and a *-only run ignores it. SMOKE_PLAN_ONLY=1 prints the plan
+// and exits.
+const SHARD = (() => {
+  const m = /^(\d+)\/(\d+)$/.exec(process.env.SMOKE_SHARD || '');
+  if (!m || process.argv.some(arg => arg.endsWith('-only'))) return null;
+  const k = Number(m[1]), n = Number(m[2]);
+  if (!(n >= 1 && k >= 1 && k <= n)) fail(`SMOKE_SHARD must be k/n with 1 <= k <= n, not ${process.env.SMOKE_SHARD}`);
+  return { k, n };
+})();
+const units = [];
+const unit = (name, weight, run) => { units.push({ name, weight, run }); };
+// Heaviest first onto the least loaded part: deterministic, and the two-stage
+// smoke's parts (a third of the whole run) land on different machines.
+function shardPlan(all, shard) {
+  if (!shard) return all;
+  const loads = Array.from({ length: shard.n }, () => 0);
+  const part = new Map();
+  for (const u of [...all].sort((a, b) => b.weight - a.weight)) {
+    let least = 0;
+    for (let i = 1; i < loads.length; i++) if (loads[i] < loads[least]) least = i;
+    loads[least] += u.weight;
+    part.set(u, least);
+  }
+  for (let i = 0; i < shard.n; i++) {
+    console.log(`smoke shard ${i + 1}/${shard.n} (${loads[i].toFixed(1)} weighted min): ${all.filter(u => part.get(u) === i).map(u => u.name).join(', ')}`);
+  }
+  return all.filter(u => part.get(u) === shard.k - 1);
+}
+// The two-stage smoke with a scene selection (TWO_STAGE_SCENES and the
+// interpretation-history cases' NC229_HISTORY_SHARD), restored afterwards.
+const twoStage = env => async () => {
+  const previous = Object.fromEntries(Object.keys(env).map(key => [key, process.env[key]]));
+  Object.assign(process.env, env);
+  try {
+    await runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, onCdpEvent, port: PORT, root: ROOT });
+  } finally {
+    for (const [key, value] of Object.entries(previous)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+  }
+};
+
+unit('inline scenarios', 1.0, async () => {
 await send('Page.navigate', { url: `http://127.0.0.1:${PORT}/?lang=en` });
 await waitFor('app boot', `!!document.getElementById('studioImportAutoCrop')`);
 await installDialogAutoAccept();
@@ -1331,67 +1378,83 @@ if (restoredIndex !== 1 || JSON.stringify(beforeFailure) !== JSON.stringify(afte
 console.log('ok: failed decode preserves the previous image and active file');
 }
 
-await runPerformanceUiSmoke({ evaluate, fail });
-await runRawPostDecodeSmoke({ evaluate, fail });
-await runRollFrameSmoke({ evaluate, fail });
+});
+
+unit('performance ui', 0.1, () => runPerformanceUiSmoke({ evaluate, fail }));
+unit('raw post-decode', 0.1, () => runRawPostDecodeSmoke({ evaluate, fail }));
+unit('roll frame', 0.1, () => runRollFrameSmoke({ evaluate, fail }));
 if (!process.argv.some(arg => arg.endsWith('-only'))) {
-  await runSilverCoreCacheSmoke({ evaluate, fail });
-  await runComparePreviewSmoke({ send, evaluate, waitFor, wait, fail, port: PORT });
-  await runRestartRenderSmoke({ send, evaluate, waitFor, fail, port: PORT });
-  await runPhotoSessionSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
-  await runPhotoStateSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
-  await runPhotoHeapSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
-  await runDisplaySessionSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
-  await runPhotoActivationSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
-  await runWebglPreviewSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
-  await runPreviewTierSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
-  await runStudioSyncSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
-  await runPreviewPathSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
-  await runGpuPreviewSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
-  await runDisplayModesSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
-  await runZoomDetailSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
+  unit('silvercore cache', 0.1, () => runSilverCoreCacheSmoke({ evaluate, fail }));
+  unit('compare preview', 0.3, () => runComparePreviewSmoke({ send, evaluate, waitFor, wait, fail, port: PORT }));
+  unit('restart render', 0.2, () => runRestartRenderSmoke({ send, evaluate, waitFor, fail, port: PORT }));
+  unit('photo session', 0.8, () => runPhotoSessionSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT }));
+  unit('photo state', 0.4, () => runPhotoStateSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT }));
+  unit('photo heap', 0.8, () => runPhotoHeapSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT }));
+  unit('display session', 2.8, () => runDisplaySessionSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT }));
+  unit('photo activation', 0.3, () => runPhotoActivationSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT }));
+  unit('webgl preview', 1.3, () => runWebglPreviewSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT }));
+  unit('preview tier', 1.6, () => runPreviewTierSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT }));
+  unit('studio sync', 0.2, () => runStudioSyncSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT }));
+  unit('preview path', 2.2, () => runPreviewPathSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT }));
+  unit('gpu preview', 2.8, () => runGpuPreviewSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT }));
+  unit('display modes', 1.7, () => runDisplayModesSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT }));
+  unit('zoom detail', 1.1, () => runZoomDetailSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT }));
 }
-if (!process.argv.includes('--auto-crop-only') && !process.argv.includes('--color-analysis-only') && !process.argv.includes('--film-edge-only') && !process.argv.includes('--darkroom-only') && !process.argv.includes('--camera-only') && !process.argv.includes('--roll-home-only') && !process.argv.includes('--technical-only')) await runStudioSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, fixtures: [FIXTURE, FIXTURE2], root: ROOT });
-if (!process.argv.includes('--color-analysis-only') && !process.argv.includes('--film-edge-only') && !process.argv.includes('--darkroom-only') && !process.argv.includes('--camera-only') && !process.argv.includes('--roll-home-only') && !process.argv.includes('--technical-only')) await runStudioAutoCropSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
-if (!process.argv.includes('--film-edge-only') && !process.argv.includes('--darkroom-only') && !process.argv.includes('--camera-only') && !process.argv.includes('--roll-home-only') && !process.argv.includes('--technical-only')) await runStudioColorAnalysisSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
+if (!process.argv.includes('--auto-crop-only') && !process.argv.includes('--color-analysis-only') && !process.argv.includes('--film-edge-only') && !process.argv.includes('--darkroom-only') && !process.argv.includes('--camera-only') && !process.argv.includes('--roll-home-only') && !process.argv.includes('--technical-only')) unit('studio', 0.9, () => runStudioSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, fixtures: [FIXTURE, FIXTURE2], root: ROOT }));
+if (!process.argv.includes('--color-analysis-only') && !process.argv.includes('--film-edge-only') && !process.argv.includes('--darkroom-only') && !process.argv.includes('--camera-only') && !process.argv.includes('--roll-home-only') && !process.argv.includes('--technical-only')) unit('studio auto crop', 0.3, () => runStudioAutoCropSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT }));
+if (!process.argv.includes('--film-edge-only') && !process.argv.includes('--darkroom-only') && !process.argv.includes('--camera-only') && !process.argv.includes('--roll-home-only') && !process.argv.includes('--technical-only')) unit('studio colour analysis', 0.2, () => runStudioColorAnalysisSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT }));
 if (!process.argv.includes('--darkroom-only') && !process.argv.includes('--camera-only') && !process.argv.includes('--roll-home-only') && !process.argv.includes('--technical-only')) {
-  await runFilmEdgeSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
-  await runRollAnalysisSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
-  await runLightTableSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+  unit('film edge', 0.2, () => runFilmEdgeSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT }));
+  unit('roll analysis', 0.3, () => runRollAnalysisSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT }));
+  unit('light table', 0.9, () => runLightTableSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT }));
 }
-if (!process.argv.includes('--film-edge-only') && !process.argv.includes('--camera-only') && !process.argv.includes('--roll-home-only') && !process.argv.includes('--technical-only')) await runDarkroomSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
-if (!process.argv.includes('--film-edge-only') && !process.argv.includes('--darkroom-only') && !process.argv.includes('--roll-home-only') && !process.argv.includes('--technical-only')) await runCameraSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
-if (!process.argv.includes('--film-edge-only') && !process.argv.includes('--darkroom-only') && !process.argv.includes('--camera-only') && !process.argv.includes('--technical-only')) await runRollHomeSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
-if (!process.argv.includes('--film-edge-only') && !process.argv.includes('--darkroom-only') && !process.argv.includes('--camera-only') && !process.argv.includes('--roll-home-only')) await runTechnicalDepthSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
-if (!process.argv.includes('--film-edge-only') && !process.argv.includes('--darkroom-only') && !process.argv.includes('--camera-only') && !process.argv.includes('--roll-home-only') && !process.argv.includes('--technical-only')) await runWorkspaceUiSmoke({ send, sendTo, evaluate, waitFor, fail, port: PORT, root: ROOT });
-if (process.env.AUTOFRAME_RAW_DIR) await runStudioRawAutoFrameSmoke({ send, evaluate, waitFor, fail, port: PORT, root: ROOT, directory: process.env.AUTOFRAME_RAW_DIR });
+if (!process.argv.includes('--film-edge-only') && !process.argv.includes('--camera-only') && !process.argv.includes('--roll-home-only') && !process.argv.includes('--technical-only')) unit('darkroom', 1.6, () => runDarkroomSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT }));
+if (!process.argv.includes('--film-edge-only') && !process.argv.includes('--darkroom-only') && !process.argv.includes('--roll-home-only') && !process.argv.includes('--technical-only')) unit('camera', 0.9, () => runCameraSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT }));
+if (!process.argv.includes('--film-edge-only') && !process.argv.includes('--darkroom-only') && !process.argv.includes('--camera-only') && !process.argv.includes('--technical-only')) unit('roll home', 0.3, () => runRollHomeSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT }));
+if (!process.argv.includes('--film-edge-only') && !process.argv.includes('--darkroom-only') && !process.argv.includes('--camera-only') && !process.argv.includes('--roll-home-only')) unit('technical depth', 0.4, () => runTechnicalDepthSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT }));
+if (!process.argv.includes('--film-edge-only') && !process.argv.includes('--darkroom-only') && !process.argv.includes('--camera-only') && !process.argv.includes('--roll-home-only') && !process.argv.includes('--technical-only')) unit('workspace ui', 0.2, () => runWorkspaceUiSmoke({ send, sendTo, evaluate, waitFor, fail, port: PORT, root: ROOT }));
+if (process.env.AUTOFRAME_RAW_DIR) unit('raw auto frame', 1.0, () => runStudioRawAutoFrameSmoke({ send, evaluate, waitFor, fail, port: PORT, root: ROOT, directory: process.env.AUTOFRAME_RAW_DIR }));
 
-if (!process.argv.some(arg => arg.endsWith('-only'))) await runPositiveImportSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
-if (!process.argv.some(arg => arg.endsWith('-only'))) await runBwRollImportSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
-if (!process.argv.some(arg => arg.endsWith('-only'))) await runExpiredFilmSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
-if (!process.argv.some(arg => arg.endsWith('-only'))) await runNativeFilmFontSmoke({ send, evaluate, waitFor, wait, fail, port: PORT, root: ROOT });
-if (!process.argv.some(arg => arg.endsWith('-only'))) await runExportGainMapSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
-if (!process.argv.some(arg => arg.endsWith('-only'))) await runPng16BandSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
-if (!process.argv.some(arg => arg.endsWith('-only'))) await runExportOwnershipSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
-if (!process.argv.some(arg => arg.endsWith('-only'))) await runRepairReleaseSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
-if (!process.argv.some(arg => arg.endsWith('-only'))) await runDustUndoSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
-if (!process.argv.some(arg => arg.endsWith('-only'))) await runBatchPipelineSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+if (!process.argv.some(arg => arg.endsWith('-only'))) unit('positive import', 0.3, () => runPositiveImportSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT }));
+if (!process.argv.some(arg => arg.endsWith('-only'))) unit('bw roll import', 0.5, () => runBwRollImportSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT }));
+if (!process.argv.some(arg => arg.endsWith('-only'))) unit('expired film', 0.6, () => runExpiredFilmSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT }));
+if (!process.argv.some(arg => arg.endsWith('-only'))) unit('native film font', 0.2, () => runNativeFilmFontSmoke({ send, evaluate, waitFor, wait, fail, port: PORT, root: ROOT }));
+if (!process.argv.some(arg => arg.endsWith('-only'))) unit('export gain map', 0.2, () => runExportGainMapSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT }));
+if (!process.argv.some(arg => arg.endsWith('-only'))) unit('png16 bands', 0.4, () => runPng16BandSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT }));
+if (!process.argv.some(arg => arg.endsWith('-only'))) unit('export ownership', 0.3, () => runExportOwnershipSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT }));
+if (!process.argv.some(arg => arg.endsWith('-only'))) unit('repair release', 1.4, () => runRepairReleaseSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT }));
+if (!process.argv.some(arg => arg.endsWith('-only'))) unit('dust undo', 1.2, () => runDustUndoSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT }));
+if (!process.argv.some(arg => arg.endsWith('-only'))) unit('batch pipeline', 0.6, () => runBatchPipelineSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT }));
 
-if (!process.argv.some(arg => arg.endsWith('-only'))) await runSimplicitySmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+if (!process.argv.some(arg => arg.endsWith('-only'))) unit('simplicity', 0.6, () => runSimplicitySmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT }));
 
-if (!process.argv.some(arg => arg.endsWith('-only'))) await runRollFilmTypeSmoke({send,evaluate,waitFor,wait,fail,installDialogAutoAccept,port:PORT});
-if (!process.argv.some(arg => arg.endsWith('-only'))) await runFolderImportSmoke({send,evaluate,waitFor,wait,fail,installDialogAutoAccept,port:PORT,root:ROOT});
-if (!process.argv.some(arg => arg.endsWith('-only'))) await runPhotoSortSmoke({send,evaluate,waitFor,wait,fail,installDialogAutoAccept,port:PORT,root:ROOT});
-if (!process.argv.some(arg => arg.endsWith('-only'))) await runHiddenJobSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
-if (!process.argv.some(arg => arg.endsWith('-only'))) await runMemoryBudgetSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
-if (!process.argv.some(arg => arg.endsWith('-only'))) await runGeometrySmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
-if (!process.argv.some(arg => arg.endsWith('-only'))) await runAutoFrameImportSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
-if (!process.argv.some(arg => arg.endsWith('-only'))) await runPerfHarnessSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
-if (!process.argv.some(arg => arg.endsWith('-only'))) await runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, onCdpEvent, port: PORT, root: ROOT });
-if (!process.argv.some(arg => arg.endsWith('-only'))) await runFirstPhotoSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
-if (!process.argv.some(arg => arg.endsWith('-only'))) await runEmbeddedPreviewSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
-if (!process.argv.some(arg => arg.endsWith('-only'))) await runCropApplySmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
-if (!process.argv.some(arg => arg.endsWith('-only'))) await runIsolationSmoke({ send, sendTo, onCdpEvent, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+if (!process.argv.some(arg => arg.endsWith('-only'))) unit('roll film type', 0.2, () => runRollFilmTypeSmoke({send,evaluate,waitFor,wait,fail,installDialogAutoAccept,port:PORT}));
+if (!process.argv.some(arg => arg.endsWith('-only'))) unit('folder import', 0.2, () => runFolderImportSmoke({send,evaluate,waitFor,wait,fail,installDialogAutoAccept,port:PORT,root:ROOT}));
+if (!process.argv.some(arg => arg.endsWith('-only'))) unit('photo sort', 0.3, () => runPhotoSortSmoke({send,evaluate,waitFor,wait,fail,installDialogAutoAccept,port:PORT,root:ROOT}));
+if (!process.argv.some(arg => arg.endsWith('-only'))) unit('hidden job', 0.9, () => runHiddenJobSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT }));
+if (!process.argv.some(arg => arg.endsWith('-only'))) unit('memory budget', 0.2, () => runMemoryBudgetSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT }));
+if (!process.argv.some(arg => arg.endsWith('-only'))) unit('geometry', 0.5, () => runGeometrySmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT }));
+if (!process.argv.some(arg => arg.endsWith('-only'))) unit('auto-frame import', 0.3, () => runAutoFrameImportSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT }));
+if (!process.argv.some(arg => arg.endsWith('-only'))) unit('perf harness', 0.5, () => runPerfHarnessSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT }));
+if (!process.argv.some(arg => arg.endsWith('-only'))) if (SHARD) {
+  unit('two-stage import (settle, during, crop, history, roll, lanes)', 11.5, twoStage({ TWO_STAGE_SCENES: 'settle,during,crop,crop-leave,crop-history,interpretation-history,roll,adopt,failure-lanes' }));
+  unit('two-stage import (crop interpretation history 1/2)', 12.5, twoStage({ TWO_STAGE_SCENES: 'crop-interpretation-history', NC229_HISTORY_SHARD: '1/2' }));
+  unit('two-stage import (crop interpretation history 2/2)', 12.5, twoStage({ TWO_STAGE_SCENES: 'crop-interpretation-history', NC229_HISTORY_SHARD: '2/2' }));
+} else unit('two-stage import', 36, () => runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, onCdpEvent, port: PORT, root: ROOT }));
+if (!process.argv.some(arg => arg.endsWith('-only'))) unit('first photo', 0.3, () => runFirstPhotoSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT }));
+if (!process.argv.some(arg => arg.endsWith('-only'))) unit('embedded preview', 0.6, () => runEmbeddedPreviewSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT }));
+if (!process.argv.some(arg => arg.endsWith('-only'))) unit('crop apply', 1.6, () => runCropApplySmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT }));
+if (!process.argv.some(arg => arg.endsWith('-only'))) unit('isolation', 0.6, () => runIsolationSmoke({ send, sendTo, onCdpEvent, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT }));
+
+
+// ---- the run: every unit in order, or this shard's ----
+const planned = shardPlan(units, SHARD);
+if (process.env.SMOKE_PLAN_ONLY) { console.log('SMOKE PLAN ONLY'); process.exit(0); }
+for (const u of planned) {
+  const started = Date.now();
+  await u.run();
+  console.log(`smoke unit done: ${u.name} (${Math.round((Date.now() - started) / 1000)} s)`);
+}
 
 // ---- nothing the isolated page loads is blocked (#264) ----
 if (isolationBlocks.length) fail(`requests blocked by COEP/CORP/COOP:\n${isolationBlocks.join('\n')}`);
