@@ -39,6 +39,7 @@ tests.push([join(scriptsDir, 'check-dist-asset-names.mjs'), '--self-test']);
 // The export digests the import parity and gain-map smokes compare.
 tests.push(join(scriptsDir, 'export-parity-digest.test.mjs'));
 tests.push(join(repoRoot, '.github/scripts/prepare_ios_release.test.mjs'));
+tests.push(join(repoRoot, '.github/scripts/asc_mas_state.test.mjs'));
 
 // Test files run in parallel, each in its own node process: TEST_JOBS, else
 // one per core up to four (the 383 files took 11.5 min one after another on

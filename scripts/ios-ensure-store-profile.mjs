@@ -10,7 +10,8 @@
 // Arguments:   --bundle-id <identifier> --certificate-sha1 <hex>
 //              --name <profile name> --out <path.mobileprovision>
 import { writeFileSync } from 'node:fs';
-import { createHash, createSign } from 'node:crypto';
+import { createHash } from 'node:crypto';
+import { ascClientFromEnv } from './asc-api.mjs';
 
 const args = Object.fromEntries(process.argv.slice(2).map((value, index, list) =>
   value.startsWith('--') ? [value.slice(2), list[index + 1]] : null).filter(Boolean));
@@ -23,30 +24,13 @@ function fail(message) {
   process.exit(1);
 }
 
-const b64url = (buffer) => Buffer.from(buffer).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-const now = Math.floor(Date.now() / 1000);
-const header = b64url(JSON.stringify({ alg: 'ES256', kid: process.env.ASC_API_KEY_ID, typ: 'JWT' }));
-const payload = b64url(JSON.stringify({ iss: process.env.ASC_API_ISSUER_ID, iat: now, exp: now + 900, aud: 'appstoreconnect-v1' }));
-const signer = createSign('SHA256');
-signer.update(`${header}.${payload}`);
-const key = Buffer.from(process.env.ASC_API_KEY_P8, 'base64').toString('utf8');
-const token = `${header}.${payload}.${b64url(signer.sign({ key, dsaEncoding: 'ieee-p1363' }))}`;
-
+const request = ascClientFromEnv();
 async function api(method, path, body) {
-  const response = await fetch(`https://api.appstoreconnect.apple.com${path}`, {
-    method,
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  if (response.status === 204) return null;
-  const text = await response.text();
-  let json;
-  try { json = JSON.parse(text); } catch { json = { raw: text.slice(0, 300) }; }
-  if (!response.ok) {
-    const detail = JSON.stringify(json.errors ?? json).slice(0, 700);
-    fail(`${method} ${path} -> HTTP ${response.status}: ${detail}`);
+  try {
+    return await request(method, path, body);
+  } catch (error) {
+    fail(error.message);
   }
-  return json;
 }
 
 const bundleIdentifier = args['bundle-id'];
