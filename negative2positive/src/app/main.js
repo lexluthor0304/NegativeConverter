@@ -2968,7 +2968,6 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
     function getUndoLabel(label) {
       if (label === 'rollFilmType') return getLocalizedText('applyFilmTypeToRoll', 'Apply film type to roll');
-      if (studioWorkspace && label === 'colorCorrect') return studioWorkspace.text('colorCorrect');
       if (studioWorkspace && label === 'studioStyle') return studioWorkspace.text('look');
       if (studioWorkspace && label === 'studioReset') return studioWorkspace.text('reset');
       const map = undoLabelMap[currentLang] || undoLabelMap.en;
@@ -8039,6 +8038,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // 非同期変換は結果を保存してよいが、切り抜き草稿の画布を変更しない。
       // The CSS box follows at once; the 2D backing, when a frame is drawn.
       fitStep3CanvasBox();
+      if (!expiredRescueUiReady && state.currentStep >= 3) updateExpiredRescueUI();
     }
 
     // The display fields of a frame just applied. A full-resolution render
@@ -9485,7 +9485,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           let processed;
           try {
             processed = await convertFromCurrentSource(state, {
-              preview: false, includeAnalysisPreview: false,
+              // The rescue measures the analysis preview of the frame it
+              // reads (a retype measures this exact frame), so the frame
+              // brings it while the rescue is on; off, nothing reads it.
+              preview: false, includeAnalysisPreview: Boolean(state.expiredEnabled),
               // #237's own worker above 16 MP; below it the shared worker,
               // with the photo activation's signal (#243).
               signal: abort?.controller.signal || options.signal || null,
@@ -9549,7 +9552,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           // Input also postpones a fill that waits for it (a stroke's, #229 review R1-104).
           if (hasSmallPreview && repairedPreviewMasks && (!repairedSource || repairedPreviewTimer)) scheduleRepairedPreviewAfterInput();
           const previewRef = state.conversionPreviewImageData;
-          const previewProcessed = await convertFromCurrentSource(state, { preview: hasSmallPreview, interactive: true, includeAnalysisPreview: false, retain16,
+          // The settled tick brings the analysis preview the rescue measures
+          // (a retype or Reset measures the frame on screen, which for a
+          // display-size source is this one); ticks with newer input queued
+          // skip it, and so does a photo without the rescue.
+          const measurable = Boolean(state.expiredEnabled) && !coreReprocessScheduled && !_coreReprocessPending;
+          const previewProcessed = await convertFromCurrentSource(state, { preview: hasSmallPreview, interactive: true, includeAnalysisPreview: measurable, retain16,
             previewSource: repairedSource });
           if (!previewProcessed) return false;
           // Conversion and CPU adjustments overlap, but a fast conversion must
@@ -10188,7 +10196,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (sourceData) displayNegative(sourceData);
     }
 
-    async function processNegative({ quiet = false, automatic = true, provisional = false } = {}) {
+    async function processNegative({ quiet = false, automatic = true, provisional = false, measureAt = null } = {}) {
       if (processNegativeInFlight) return processNegativeInFlight;
 
       // A crop-area hit converts again only when a conversion read the miss
@@ -10299,11 +10307,34 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           // What the conversion reads of a session's record (#249): the
           // display level it restored, a descriptor's colour-analysis sample.
           const records = [proxy && pendingSource, !state.loadedBaseImageData && state.baseDescriptor].filter(Boolean);
+          // The two-stage swap (settleProvisionalPhoto): the full base's first
+          // measurement at the settled recipe, before the window's edits of
+          // the conversion, as one decode's import took it; a frame of its
+          // own at this pass's size, then the pass converts the edited
+          // settings without measuring again.
+          if (measureAt && automatic && state.expiredEnabled && !state.expiredAnalysis) {
+            const settledSettings = { ...captureSnapshot('conversion').settings, ...measureAt };
+            const frame = await convertFromCurrentSource(settledSettings, { preview: hasPreviewSource });
+            if (!isCurrentConversion()) { releaseOwnedPlanes(frame, frame?.__wbSample, frame?.__analysisPreview); return; }
+            if (frame) {
+              try {
+                const analysis = await measureExpiredAnalysisForExport(frame, { ...settledSettings, autoFrameMeta: state.autoFrame.lastDiagnostics }, baseSizeSource());
+                if (!isCurrentConversion()) return;
+                if (analysis && state.expiredEnabled && !state.expiredAnalysis) {
+                  applyExpiredAnalysisDefaults(state, analysis);
+                  expiredAnalysisKey = expiredSourceKey();
+                }
+              } finally {
+                releaseOwnedPlanes(frame, frame.__wbSample, frame.__analysisPreview);
+              }
+            }
+          }
           // With the first frame the worker converts the viewport-independent
           // auto-WB sample (#248 part 3).
           let processed;
           for (;;) {
             const conversionSettings = captureSnapshot('conversion').settings;
+            const areaAtDispatch = analysisAreaOf(state.autoFrame?.lastDiagnostics);
             const wbRecipe = automatic ? whiteBalanceMeasurementSettings(conversionSettings) : null;
             const wbMeasurement = automatic ? provisionalWhiteBalanceMeasurement(conversionSettings, wbRecipe) || { settings: wbRecipe, live: liveGeometry() } : null;
             processed = await convertFromCurrentSource(conversionSettings, { preview: hasPreviewSource, wbSample: automatic });
@@ -10314,9 +10345,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
             }
             if (!isCurrentConversion()) { releaseOwnedPlanes(processed, processed.__wbSample, processed.__analysisPreview); return; }
             if (!filmInterpretationChanged(state, conversionSettings) && state.expiredEnabled === conversionSettings.expiredEnabled
-              && cropMeasurementInputsMatch(state, conversionSettings)) break;
-            // A type/mode edit during dispatch or historical measurement:
-            // finish this same source's automatic pass in its current mode.
+              && cropMeasurementInputsMatch(state, conversionSettings)
+              && (!automatic || analysisAreaOf(state.autoFrame?.lastDiagnostics) === areaAtDispatch)) break;
+            // A type/mode edit during dispatch or historical measurement, or
+            // a crop-area hit that landed meanwhile (the analysis area whose
+            // sample the rescue measures): finish this same source's
+            // automatic pass in its current mode, converted with its sample.
             releaseOwnedPlanes(processed, processed.__wbSample, processed.__analysisPreview);
           }
           if (processed.__wbSample) {
@@ -15368,6 +15402,26 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       noteFullDecodeChange(record);
     }
 
+    // The full base's expired-film measurement, as one decode's import takes
+    // it: on the settled recipe, before the window's edits of the conversion
+    // (exposure, white balance, film base, curves, a look), since a rescued
+    // frame keeps its first measurement across such edits and one decode
+    // measured before them. The settled values of the edited keys, for
+    // processNegative's `measureAt` (it converts a frame of its own for them
+    // at its display size); null when the first conversion is that frame
+    // already, or when only geometry, the interpretation or a measurement
+    // input (film base, semantic map, roll frame) changed: those measure
+    // again by their own keys or inputs, as they do in the window of one
+    // decode (R1-017, R1-074), so the pass measures them as edited.
+    function settledMeasurementSettings(settled, edits) {
+      if (!settled || !state.expiredEnabled || state.expiredAnalysis) return null;
+      const own = new Set(['cropRegion', 'rotationAngle', 'mirrored', 'autoFrameMeta', 'filmType', 'positiveMode', 'filmTypeSource', 'filmTypeConfidence', 'filmTypeReason',
+        'filmBase', 'semanticMap', 'rollFrame']);
+      const keys = Object.keys(edits || {}).filter(key => !own.has(key) && !key.startsWith('expired') && Object.hasOwn(settled, key));
+      if (!keys.length || filmInterpretationChanged(state, settled)) return null;
+      return Object.fromEntries(keys.map(key => [key, structuredClone(settled[key])]));
+    }
+
     // From the full decode to the exact photo (#255): HEAD's settings for it
     // computed off-state, the swap, one conversion of the full base with the
     // automatic measurements of today's import. A background job: no
@@ -15400,7 +15454,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         if (!current()) return;
         if (step >= 3) {
           const revision = manualEditRevision;
-          await processNegative({ quiet: true });
+          await processNegative({ quiet: true, measureAt: settledMeasurementSettings(computed.settings, provisional.swapEdits) });
           if (!current()) return;
           // An edit that landed while the full base converted: its slider
           // render had no source (the stand-in's went with the swap).
@@ -18788,6 +18842,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         tasks: runOpenCvTask.stats, detection: cropDetectionStats, cropView: cropViewStats,
         pendingDetection: () => Boolean(cropDetection),
         converting: () => Boolean(processNegativeInFlight),
+        expiredMeasurements: () => expiredMeasurementLog.map(entry => ({ ...entry })),
         settle: () => settlePendingCropDetection(),
         failWorker: (failing = true) => { analysisWorkerFailing = Boolean(failing); },
         proxyReady: () => {
@@ -19881,8 +19936,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         markCurrentFileDirty();
 
         await afterGeometry(ready, async isCurrent => {
-          // With the rescue on, the conversion waits for the detection, as
-          // before, but after the paint and off the main thread.
+          // With the rescue on (every photo's default now, the automatic
+          // colour correction), the conversion waits for the detection, as
+          // before, but after the paint and off the main thread: the
+          // measurement is taken once per source, so it must read the
+          // frame inside the area the detection decides.
           if (detection && state.expiredEnabled) {
             await detection.settled;
             if (!isCurrent()) return;
@@ -21805,7 +21863,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         repairStrokes: [],
         look: null,
         ...EXPIRED_RESCUE_DEFAULTS,
-        expiredEnabled: Boolean(state.expiredSession),
+        // The automatic colour correction (the former one-click button):
+        // every photo starts rescued and maybeAnalyzeExpiredRescue measures
+        // it once per conversion source, with no undo step. The Expired tab
+        // stays reserved for the explicit session; its checkbox turns the
+        // correction off per photo.
+        expiredEnabled: true,
         expiredAnalysis: null,
         expiredBrightnessUserOverride: false,
         expiredContrastUserOverride: false,
@@ -27664,12 +27727,14 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
     // A fogged, borderless positive scan (a lab's JPEG of an expired roll) has
     // nothing to crop, and the fog makes the image-window detector see the
-    // subject as the window: in the rescue flow such a photo keeps its full
-    // frame and skips the detection altogether (on a large scan the worker
-    // times out and the main-thread fallback freezes the page for a minute).
-    // The colour analysis then uses the frame inside the border buffer.
+    // subject as the window: in the explicit expired-roll session such a
+    // photo keeps its full frame and skips the detection altogether (on a
+    // large scan the worker times out and the main-thread fallback freezes
+    // the page for a minute). The colour analysis then uses the frame inside
+    // the border buffer. The automatic colour correction of every other
+    // photo (expiredEnabled by default) does not change how it is framed.
     function expiredImportKeepsFullFrame(settings) {
-      return Boolean(settings?.expiredEnabled) && sanitizePresetType(settings?.filmType || 'color') === 'positive';
+      return Boolean(state.expiredSession) && Boolean(settings?.expiredEnabled) && sanitizePresetType(settings?.filmType || 'color') === 'positive';
     }
 
     function hasCurrentExpiredAnalysis() {
@@ -27678,14 +27743,35 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     // The sample the rescue measures: the engine's analysis-area preview when
-    // the conversion produced one, otherwise the positive inside the colour
-    // analysis region (its 16-bit plane when there is one). Without a region
-    // the same border buffer as the engine's histogram keeps a rebate or a
-    // scanner edge out of the measurement.
+    // the conversion produced one (the colour-analysis sample of the base,
+    // converted with the frame's levels: the same pixels whether the frame
+    // is the opened photo's display level, a light-table tile or an export
+    // lane's full frame, so a photo measures the same opened or not),
+    // otherwise the positive inside the colour analysis region (its 16-bit
+    // plane when there is one). Without a region the same border buffer as
+    // the engine's histogram keeps a rebate or a scanner edge out of the
+    // measurement.
     // `placement` says where the sample sits in the frame (normalised), so
     // the spatial stage measured on it lands on the right pixels of the
     // full frame.
+    // What each measurement read (__ncAnalysis.expiredMeasurements, the
+    // smokes' parity checks); absent in the unit tests' harnesses.
+    const expiredMeasurementLog = [];
+
     function expiredAnalysisSample(processed, settings, sourceImageData) {
+      const sample = expiredAnalysisSampleFor(processed, settings, sourceImageData);
+      if (typeof expiredMeasurementLog === 'object') {
+        expiredMeasurementLog.push({
+          frame: [processed.width, processed.height], plane: processed.__image16?.data instanceof Uint16Array ? 16 : 8,
+          analysisPreview: Boolean(processed.__analysisPreview), sample: [sample.image.width, sample.image.height],
+          exposure: settings.coreExposure ?? null, interpretation: `${settings.filmType}|${settings.positiveMode}`,
+          region: sample.options.region ? { ...sample.options.region } : null, source: sourceImageData ? [sourceImageData.width, sourceImageData.height] : null
+        });
+        if (expiredMeasurementLog.length > 64) expiredMeasurementLog.shift();
+      }
+      return sample;
+
+      function expiredAnalysisSampleFor(processed, settings, sourceImageData) {
       const roi = resolveAnalysisRegion(settings, sourceImageData);
       const borderBuffer = Math.max(0, Math.min(0.3, sanitizeNumeric(settings.coreBorderBuffer, 10, 0, 30) / 100));
       const whole = { left: 0, top: 0, width: 1, height: 1 };
@@ -27695,6 +27781,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         width: rect.width * (1 - 2 * amount),
         height: rect.height * (1 - 2 * amount)
       });
+      if (processed.__analysisPreview) {
+        return { image: processed.__analysisPreview, options: {}, placement: inset(roi || whole, borderBuffer) };
+      }
       if (processed.__image16 && processed.__image16.data instanceof Uint16Array) {
         return {
           image: processed,
@@ -27702,15 +27791,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           placement: whole
         };
       }
-      if (processed.__analysisPreview) {
-        return { image: processed.__analysisPreview, options: {}, placement: inset(roi || whole, borderBuffer) };
-      }
       const base = downsampleImageDataForMaxPixels(processed, 600000);
       return {
         image: roi ? cropImageData(base, analysisPixelBounds(base.width, base.height, roi, 0.02)) : base,
         options: { borderBuffer: roi ? 0 : borderBuffer },
         placement: roi ? inset(roi, 0.02) : whole
       };
+      }
     }
 
     // OpenCV's part of the measurement: the fog surface and the local mean
@@ -27831,12 +27918,18 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       }
     }
 
-    // A frame's first measurement sets brightness and contrast from what it
-    // measured, unless the user (or a sync) already moved them off the defaults.
+    // A measurement sets brightness and contrast from what it measured while
+    // they are automatic: at their defaults, or at what the previous
+    // measurement set. A crop, a confirmed area, a retype or a semantic map
+    // measures the frame again and the strengths follow, as a fresh decode of
+    // that frame (a batch lane) sets them from its one measurement; values
+    // the user (or a sync) moved stay.
     function applyExpiredAnalysisDefaults(target, analysis, { force = false } = {}) {
       const auto = defaultExpiredRescueParams(analysis);
-      if (force || (!target.expiredBrightnessUserOverride && target.expiredBrightness === EXPIRED_RESCUE_DEFAULTS.expiredBrightness)) target.expiredBrightness = auto.expiredBrightness;
-      if (force || (!target.expiredContrastUserOverride && target.expiredContrast === EXPIRED_RESCUE_DEFAULTS.expiredContrast)) target.expiredContrast = auto.expiredContrast;
+      const previous = target.expiredAnalysis ? defaultExpiredRescueParams(target.expiredAnalysis) : null;
+      const automatic = key => !target[`${key}UserOverride`]
+        && (target[key] === EXPIRED_RESCUE_DEFAULTS[key] || (previous !== null && target[key] === previous[key]));
+      for (const key of ['expiredBrightness', 'expiredContrast']) if (force || automatic(key)) target[key] = auto[key];
       target.expiredAnalysis = analysis;
     }
 
@@ -27891,12 +27984,21 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       return getLocalizedText(`hue${hue[0].toUpperCase()}${hue.slice(1)}`, hue);
     }
 
+    // Whether the last refresh saw a converted frame: a refresh made while
+    // the frame was being rebuilt leaves the controls disabled, and a photo
+    // without the rescue measures nothing that would refresh them again.
+    let expiredRescueUiReady = false;
     function updateExpiredRescueUI() {
       if (!stateReady) return;
       const section = document.getElementById('expiredSection');
       const checkbox = document.getElementById('expiredEnabled');
       if (!section || !checkbox) return;
-      const ready = state.currentStep >= 3 && Boolean(state.processedImageData) && !document.body.dataset.studioBusy;
+      // Not the busy flag: this refresh runs on measurements, not on every
+      // Studio sync, so a flag read here would outlive the wait it belongs
+      // to (the controls stayed disabled after a gray-point wait). The
+      // Studio's inert panels are the lock while it is busy.
+      const ready = state.currentStep >= 3 && Boolean(state.processedImageData);
+      expiredRescueUiReady = ready;
       const enabled = Boolean(state.expiredEnabled);
       checkbox.checked = enabled;
       checkbox.disabled = !ready;
@@ -28003,7 +28105,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const changed = state.expiredSession !== next;
       state.expiredSession = next;
       if (next) expiredTabPending = true;
-      if (state.originalImageData && Boolean(state.expiredEnabled) !== next) setExpiredEnabled(next);
+      // Entering turns the rescue on for the open photo; leaving only hides
+      // the tab, since the correction is every photo's default.
+      if (next && state.originalImageData && !state.expiredEnabled) setExpiredEnabled(true);
       else updateExpiredRescueUI();
       if (next && state.processedImageData && expiredTabPending) {
         expiredTabPending = false;
@@ -32399,11 +32503,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         },
         onReset: () => {
           if (state.currentStep < 3) return;
-          // The rescue stays on (as the session's default) without a
-          // current measurement: Reset measures the frame on screen
-          // (refreshExpiredAfterColorReset), so it waits like any other
-          // measurement (R1-023).
-          if (state.expiredSession && state.processedImageData && !hasCurrentExpiredAnalysis()) void settleMeasurementInputs(resetStudioColors);
+          // The defaults turn the rescue on: without a current measurement
+          // Reset measures the frame on screen (refreshExpiredAfterColorReset),
+          // so it waits like any other measurement (R1-023).
+          if (state.processedImageData && !hasCurrentExpiredAnalysis()) void settleMeasurementInputs(resetStudioColors);
           else resetStudioColors();
         },
         onSync: async () => {
@@ -32429,10 +32532,6 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           document.getElementById('applyConvertBtn').click();
         },
         onExpiredMode: () => setExpiredSession(!state.expiredSession),
-        onColorCorrect: () => {
-          if (!state.processedImageData || state.cropping || singleExportActive || isDesktopBatchExportLocked() || document.body.dataset.studioBusy) return;
-          setExpiredEnabled(true, { reanalyze: true, undoLabel: 'colorCorrect' });
-        },
         onConfirm: message => appConfirm(message),
         onExportBorder: enabled => setExportSprocketMode(enabled),
         onAutoCrop: enabled => {
@@ -32466,12 +32565,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       });
       // The tools whose OpenCV half runs in the auto-frame worker (#245)
       // start it when they come into reach, hiding its cold boot after the
-      // 30 s idle release: colour correct on hover or focus, the Expired tab
-      // and the lab-match drawer on opening (crop mode in beginCropMode).
+      // 30 s idle release: the Expired tab and the lab-match drawer on
+      // opening (crop mode in beginCropMode).
       const warmAnalysisWorker = () => { void warmUpAutoFrameWorker(); };
-      const colorCorrectButton = document.getElementById('studioColorCorrect');
-      colorCorrectButton?.addEventListener('pointerenter', warmAnalysisWorker);
-      colorCorrectButton?.addEventListener('focus', warmAnalysisWorker);
       document.getElementById('studioTab-expired')?.addEventListener('click', warmAnalysisWorker);
       const labMatchDrawer = document.getElementById('studioLabMatch');
       labMatchDrawer?.addEventListener('toggle', () => { if (labMatchDrawer.open) warmAnalysisWorker(); });

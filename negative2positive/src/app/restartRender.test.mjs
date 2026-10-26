@@ -265,7 +265,7 @@ for (const failConversion of [false, true]) {
     }),
   });
   vm.runInContext(['whiteBalanceMeasurementSettings', 'provisionalWhiteBalanceMeasurement', 'provisionalUnits',
-    'liveGeometry', 'processNegative'].map(functionSource).join('\n'), context);
+    'liveGeometry', 'analysisAreaOf', 'processNegative'].map(functionSource).join('\n'), context);
   const oldConversion = context.processNegative();
   await new Promise(setImmediate);
   assert.equal(conversions.length, 1);
@@ -377,6 +377,8 @@ function largeFixture({ strokes = 0, dust = false, aiBrush = false } = {}) {
     installDisplayFor: noop, cancelDisplayPreviewRebuild: noop, buildPreviewSourceImageData: image => image,
     installDisplayPreview: (processed, preview) => { state.previewSourceImageData = preview; },
     initWebGLRenderer: () => false, fitStep3CanvasBox: noop,
+    // The rescue controls' refresh on a landed frame is not under test.
+    expiredRescueUiReady: false, updateExpiredRescueUI: noop,
     // The export barrier's other steps have nothing to wait for here.
     ensureFullDecode: async () => true, settlePendingCropDetection: async () => {},
     // The dust-off handler's UI.
@@ -731,7 +733,7 @@ function prepareFixture({ itemSettings = null, detectFrame = true, learned = 0 }
     'prepareStudioPhoto', 'startImportDetection', 'autoFrameDetectionFilmType', 'buildFinalImportSettings', 'importUserEdited', 'revealProvisionalPhoto',
     'whiteBalanceMeasurementSettings', 'provisionalWhiteBalanceMeasurement', 'provisionalUnits', 'liveGeometry', 'windowFrameIntent',
     'armSettledConversion', 'processNegative', 'scheduleFullResolutionRender', 'withPendingEditsOf',
-    'cropMeasurementInputsMatch',
+    'cropMeasurementInputsMatch', 'analysisAreaOf',
   ].map(functionSource).join('\n'), context);
   const answer = async (index = conversions.length - 1) => {
     conversions[index].reply.resolve({ width: 8, height: 6, id: `converted:${conversions[index].settings.id}` });

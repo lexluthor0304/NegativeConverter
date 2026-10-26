@@ -14,6 +14,7 @@ import {
   windowEditKeys, windowEdits, overlayWindowEdits, geometryEdits, hasWindowEdits, sameGeometry, analysisAreaEdited, confirmedImageArea
 } from './provisionalPhoto.js';
 import { sanitizeCropRect } from './imageGeometry.js';
+import { defaultExpiredRescueParams } from '../pipeline/expiredRescue.js';
 
 // ---- flag and start mode ----------------------------------------------------------
 for (const off of [null, undefined, '', 'off', 0, '0', -1, 'abc']) assert.equal(twoStageMinPixels(off), null, String(off));
@@ -137,7 +138,8 @@ for (const settings of saved) {
     filmBase: { r: 200, g: 140, b: 90, method: 'border' }, coreExposure: 0, exposure: 0,
     wbR: 1.1, wbG: 1, wbB: 0.9, wbAutoConfidence: 'high', wbUserOverride: false, grayPointSampled: false, wbSemanticApplied: false,
     curvePoints: { r: [{ x: 0, y: 0 }, { x: 255, y: 255 }] }, curves: { r: new Uint8Array([0, 1, 2]) },
-    filmEdge: { checked: true, found: false }, expiredAnalysis: null, learnedDefaults: null
+    filmEdge: { checked: true, found: false }, expiredAnalysis: null, learnedDefaults: null,
+    expiredEnabled: true, expiredBrightness: 12, expiredContrast: 30, expiredBrightnessUserOverride: false, expiredContrastUserOverride: false
   };
   const clone = () => structuredClone(settled);
   assert.deepEqual(windowEditKeys(settled, clone()), [], 'nothing changed');
@@ -151,6 +153,28 @@ for (const settings of saved) {
   assert.deepEqual(windowEditKeys(settled, live).sort(), ['autoFrameMeta', 'cropRegion', 'mirrored', 'rotationAngle']);
   live = clone(); live.grayPointSampled = true; live.wbR = 1.3;
   assert.deepEqual(windowEditKeys(settled, live).sort(), ['grayPointSampled', 'wbAutoConfidence', 'wbB', 'wbG', 'wbR', 'wbSemanticApplied', 'wbUserOverride']);
+  // The rescue's strengths follow its measurement (the stand-in's fog
+  // surface landing after the snapshot) until a slider move sets their flag.
+  live = clone(); live.expiredBrightness = 53; live.expiredContrast = 38;
+  assert.deepEqual(windowEditKeys(settled, live), [], 'measured strengths are not edits');
+  live = clone(); live.expiredBrightness = 17; live.expiredBrightnessUserOverride = true;
+  assert.deepEqual(windowEditKeys(settled, live).sort(), ['expiredBrightness', 'expiredBrightnessUserOverride']);
+  live = clone(); live.expiredBrightnessUserOverride = false; live.expiredBrightness = 53;
+  const overridden = { ...clone(), expiredBrightnessUserOverride: true, expiredBrightness: 17 };
+  assert.deepEqual(windowEditKeys(overridden, live).sort(), ['expiredBrightness', 'expiredBrightnessUserOverride'], 'a Reset in the window is an edit');
+  {
+    // The merge: the full decode's measured strength where the user has not
+    // taken it over (the Reset above), the user's where they have.
+    const bands = Array.from({ length: 8 }, () => ({ lum: 0.5, mean: [0.5, 0.5, 0.5], share: 0.125 }));
+    const expiredAnalysis = { version: 3, bands, lumLow: 0.1, lumHigh: 0.7, leveledMedian: 0.3 };
+    const measured = defaultExpiredRescueParams(expiredAnalysis);
+    assert.notEqual(measured.expiredBrightness, 53);
+    const automatic = { ...overridden, expiredAnalysis, expiredContrast: measured.expiredContrast };
+    let merged = overlayWindowEdits(automatic, windowEdits(overridden, live));
+    assert.deepEqual([merged.expiredBrightness, merged.expiredBrightnessUserOverride, merged.expiredContrast], [measured.expiredBrightness, false, measured.expiredContrast]);
+    merged = overlayWindowEdits(automatic, windowEdits(settled, { ...clone(), expiredBrightness: 17, expiredBrightnessUserOverride: true }));
+    assert.deepEqual([merged.expiredBrightness, merged.expiredBrightnessUserOverride], [17, true], 'the user\'s strength stays');
+  }
   live = clone(); live.filmType = 'bw'; live.filmTypeSource = 'manual';
   assert.deepEqual(windowEditKeys(settled, live).sort(), ['filmType', 'filmTypeConfidence', 'filmTypeReason', 'filmTypeSource', 'positiveMode']);
   live = clone(); live.curvePoints = { r: [{ x: 0, y: 10 }, { x: 255, y: 255 }] }; live.curves = { r: new Uint8Array([9, 9, 9]) };

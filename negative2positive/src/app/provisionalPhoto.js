@@ -1,5 +1,6 @@
 import { rotatedDimensions } from './imageGeometry.js';
 import { applyInterpretationPatch } from './filmTypeOverride.js';
+import { defaultExpiredRescueParams } from '../pipeline/expiredRescue.js';
 
 // The provisional window of a two-stage RAW import (#255): from the moment a
 // half-size stand-in of the photo is on screen until the exact full decode is
@@ -194,6 +195,13 @@ const WB_KEYS = ['wbR', 'wbG', 'wbB', 'wbAutoConfidence', 'wbSemanticApplied', '
 // Measurements only the analyses write. They are always taken from the full
 // decode (a conversion measures the expired-film analysis again).
 export const AUTOMATIC_ONLY_KEYS = Object.freeze(['expiredAnalysis', 'learnedDefaults', 'filmEdge']);
+// The expired-film rescue's brightness and contrast follow its measurement
+// (the stand-in's fog surface lands after the snapshot; the full decode is
+// measured again) until the user moves them: a slider move sets the flag.
+const EXPIRED_STRENGTHS = Object.freeze([
+  ['expiredBrightness', 'expiredBrightnessUserOverride'],
+  ['expiredContrast', 'expiredContrastUserOverride']
+]);
 // What Apply Crop and Confirm image area write into autoFrameMeta (#245):
 // the analysis area. The rest of it describes the auto-frame detection.
 export const ANALYSIS_META_KEYS = Object.freeze(['imageArea', 'analysisArea', 'analysisNeedsReview', 'frameIncomplete', 'method', 'importAuto']);
@@ -216,6 +224,11 @@ export function sameSettingValue(a, b) {
     if (!sameSettingValue(a[key], b[key])) return false;
   }
   return true;
+}
+
+function expiredStrengthTouched(settled, live, key, flag) {
+  if (Boolean(live[flag]) !== Boolean(settled[flag])) return true;
+  return Boolean(live[flag]) && !sameSettingValue(live[key], settled[key]);
 }
 
 function wbTouched(settled, live) {
@@ -268,6 +281,10 @@ export function windowEditKeys(settled, live) {
     if (group.test.some(key => !sameSettingValue(settled[key], live[key]))) for (const key of group.keys) touched.add(key);
   }
   if (wbTouched(settled, live)) for (const key of WB_KEYS) touched.add(key);
+  for (const [key, flag] of EXPIRED_STRENGTHS) {
+    grouped.add(key).add(flag);
+    if (expiredStrengthTouched(settled, live, key, flag)) touched.add(key).add(flag);
+  }
   // Apply Crop and Confirm image area change autoFrameMeta's analysis area,
   // with or without the geometry: the user's too.
   if (analysisAreaEdited(settled, live)) touched.add('autoFrameMeta');
@@ -289,11 +306,21 @@ export function windowEdits(settled, live) {
   return edits;
 }
 
-/** `settings` (automatic values of the full decode) with `edits` on top. */
+/**
+ * `settings` (automatic values of the full decode) with `edits` on top. A
+ * rescue strength the user has not taken over is that decode's measured
+ * value, whatever the stand-in measured (a Reset in the window carries its
+ * cleared flag, not the stand-in's value).
+ */
 export function overlayWindowEdits(settings, edits) {
   if (!settings || !edits) return settings;
   const patch = Object.fromEntries(Object.entries(edits).map(([key, value]) => [key, cloneValue(value)]));
-  return applyInterpretationPatch(settings, patch);
+  const merged = applyInterpretationPatch(settings, patch);
+  if (merged.expiredAnalysis && EXPIRED_STRENGTHS.some(([key, flag]) => key in patch && !merged[flag])) {
+    const automatic = defaultExpiredRescueParams(merged.expiredAnalysis);
+    for (const [key, flag] of EXPIRED_STRENGTHS) if (key in patch && !merged[flag]) merged[key] = automatic[key];
+  }
+  return merged;
 }
 
 /** The geometry part of `edits` (a user's crop, rotation or mirror), or null. */

@@ -147,6 +147,7 @@ function fixture({ search = '?twoStageMinMp=40&twoStageMode=sequential', settled
     backgroundGate: { lastInputAt: -Infinity, bump() {} },
     coreReprocessBusy: () => false, hasPendingCropDetection: () => false, settlePendingCropDetection: async () => {},
     whenGeometrySettled: async () => true,
+    settledMeasurementSettings: () => null,
     loadRawImageDataPreview: (buffer, name, options) => {
       const gate = deferred();
       stage1.push({ buffer, name, options, ...gate });

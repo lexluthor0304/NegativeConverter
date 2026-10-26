@@ -108,8 +108,9 @@ worker meanwhile (`startCropDetection`):
   restore would end the detection without its hit).
 - The measurements that persist settings read the positive, the analysis
   area and the white balance a hit decides: the gray-point click, the
-  expired rescue's analysis (one-click colour correction, turning the rescue
-  on, Analyze, and Reset colour when it measures) and lab match's rendering.
+  expired rescue's analysis (the automatic correction of every new photo,
+  turning the rescue on, Analyze, and Reset colour when it measures) and lab
+  match's rendering.
   They go through `settleMeasurementInputs`, which also waits for a dragged
   frame's 16-bit plane to come back from the preview worker (#233). With
   either pending, Studio is busy (panel, photo and strip inert) until both
@@ -171,8 +172,8 @@ runs (`app/openCvAnalysisTasks.js`):
   input the failed attempt had transferred, and warns once per type. A null
   result is a result.
 - The worker is started when the tools come into reach, to hide its cold
-  boot after the 30 s idle release (which stays): crop mode, hover or focus
-  on one-click colour correction, the Expired tab and the lab-match drawer.
+  boot after the 30 s idle release (which stays): crop mode, the Expired tab
+  and the lab-match drawer.
 - Parity (`openCvAnalysisTasks.test.mjs`) runs frozen copies of the
   functions before the split against the worker entry points through
   structured-clone transfers, with the real opencv-js build.

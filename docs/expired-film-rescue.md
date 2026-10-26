@@ -1,15 +1,35 @@
 # Expired film rescue (过期卷抢救)
 
-The ordinary Color pane exposes **One-click color correction / 一键色彩校正**
-as a prominent button above the CMYD Correction Console. It measures the
-converted photo and applies the same automatic rescue defaults to the current
-photo, without changing the roll's import mode, geometry, film type or active
-tab. The action is one undo step; CMYD remains available for manual refinement.
-Pressing it again remeasures the uncorrected conversion instead of stacking
-corrections. It measures the frame on screen with its 16-bit plane, inside
-the analysis area when there is one: right after a slider release (the plane
-still in the preview worker) or while Apply Crop's crop-area detection runs,
-the click waits for them, as do the rescue checkbox, Analyze and Reset colour
+Every photo is colour-corrected automatically: `createDefaultSettings` turns
+the rescue on for each new photo and `maybeAnalyzeExpiredRescue` measures the
+converted positive once per conversion source (file, crop, film type), right
+after the automatic conversion, with no undo step (the former **One-click
+color correction / 一键色彩校正** button did the same on demand and is gone).
+Pressing Reset colour measures the uncorrected conversion again instead of
+stacking corrections. CMYD remains available for manual refinement. The
+Expired tab and its per-photo checkbox, Analyze and Reset belong to the
+explicit expired-roll entry; leaving that entry hides the tab and keeps the
+correction. Because the measurement is taken once per source, Apply Crop
+converts after its crop-area detection has settled while the rescue is on
+(docs/crop-apply-and-analysis-worker.md); with the rescue switched off for a
+photo, Apply converts at once with the miss outcome as before. With an
+analysis area, a measurement reads the engine's analysis-area preview: the
+base's area sample converted with the frame's levels, the same pixels
+whether the frame is the opened photo's display level, a light-table tile or
+an export lane's full frame, so a photo measures the same opened or not
+(`expiredAnalysisSample`; the two-stage smoke's crop-then-leave scene holds
+the lane to the opened photo). The exact render and the settled preview-tier
+tick (`rerenderWithCoreControls`; for a display-size source that tick is the
+frame on screen) bring that preview while the rescue is on, ticks with newer
+input queued skip it, and `processNegative`'s automatic pass converts again
+when a crop-area hit lands during its dispatch, so the frame it measures
+carries the hit's sample. A two-stage swap whose window edited the
+conversion measures the full decode at the settled values first
+(`docs/two-stage-raw-import.md`). Without an
+area, measurements read the frame on screen with its 16-bit plane inside
+the border buffer. Right after a slider release (the
+plane still in the preview worker) or while Apply Crop's crop-area detection
+runs, they wait for them, as do the rescue checkbox, Analyze and Reset colour
 (`settleMeasurementInputs`, docs/crop-apply-and-analysis-worker.md).
 Preview, export, saved projects and color sync share the existing rescue
 settings.
@@ -150,8 +170,12 @@ Per photo, flat keys like every other colour setting: `expiredEnabled`,
 `spatial` part: fog surface coefficients, offsets, amplitude and the local
 mean grid). The strengths travel with "Sync color", recipes and
 "Apply strengths to selected"; the analysis is never copied, each frame is
-measured on its own tones. A frame's first measurement fills brightness and
-contrast unless they were already moved off the defaults.
+measured on its own tones. A measurement fills brightness and contrast
+while they are automatic: at the defaults, or at what the previous
+measurement set. A crop, a confirmed image area or a semantic map measures
+the frame again and they follow, as a fresh decode of that frame (a batch
+lane, a photo left inside a two-stage window) sets them from its one
+measurement; values the user moved stay.
 
 A measurement belongs to the interpretation it was taken on (film type and
 positive mode). A film-type change through a frame's recipe (the roll
@@ -211,7 +235,7 @@ Explicit recipe WB is sampled/user-owned after a copy. Brightness/contrast
 ownership (`expiredBrightnessUserOverride`, `expiredContrastUserOverride`) is
 stored with the frame and its history, so a recipe or slider value equal to an
 automatic/default value still survives remeasurement, including OpenCV's second
-phase. Reset/One-click colour correct restores automatic ownership. The recipe
+phase. Reset colour (and switching the rescue back on) restores automatic ownership. The recipe
 format continues to share strengths, never a per-frame measurement.
 
 `state.expiredSession` is the session-level entry: photos added while it is
@@ -245,7 +269,7 @@ node scripts/smoke-test.mjs --interpretation-routes-only
 
 `expiredMeasurement.test.mjs` runs the real main.js functions: a fog-surface
 request with other inputs measures again, and the stored measurement equals
-1703835's (frozen copy) when One-click colour correct resets the strengths
+1703835's (frozen copy) when the strengths are reset for a new measurement
 while a request is in flight; the open photo's automatic retype and "These
 are positives" measure the new mode, equal to the photo opened in that mode.
 

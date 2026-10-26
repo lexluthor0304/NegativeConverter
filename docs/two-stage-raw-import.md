@@ -148,8 +148,21 @@ instead (step 4 runs it on the full base). It then swaps in one task:
    settings and now) go over the new automatic settings. Geometry, film type
    and curves count as groups. White balance counts only once a gray point
    was sampled or the gains were set by hand; conversions re-estimate it
-   otherwise. `expiredAnalysis`, `learnedDefaults` and `filmEdge` always come
-   from the full decode. So does `autoFrameMeta`, with what the user did in
+   otherwise. The rescue's brightness and contrast likewise count only with
+   their override flag (a slider move): the stand-in's measurement, whose
+   fog surface lands after the snapshot, is not an edit, and a strength the
+   user has not taken over is the full decode's measured value even when a
+   Reset in the window cleared its flag (`overlayWindowEdits`).
+   `expiredAnalysis`, `learnedDefaults` and `filmEdge` always come
+   from the full decode: the swap's first conversion (`processNegative`)
+   measures the rescue, and when the window edited the conversion
+   (exposure, white balance, film base, curves, a look) it measures a frame
+   of its own at the settled values first (`settledMeasurementSettings`,
+   `measureAt`), as one decode's import measured before those edits; a
+   geometry or interpretation edit measures again by its own key, and a
+   measurement input (film base, semantic map, roll frame) by itself, so
+   those are measured as edited. So does
+   `autoFrameMeta`, with what the user did in
    the window replayed on it (`windowFrameMetaOnFull`): Restore full frame
    keeps its mode, and Apply Crop and Confirm image area, whose analysis
    fields (`ANALYSIS_META_KEYS`) count as an edit even without a geometry

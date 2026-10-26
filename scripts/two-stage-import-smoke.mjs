@@ -334,6 +334,9 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
     const all = JSON.parse(await evaluate(`JSON.stringify(${status}.automaticDefaults)`));
     return Object.fromEntries(Object.entries(all).sort(([x], [y]) => x.localeCompare(y)).map(([name, settings]) => [name, comparable(settings)]));
   };
+  // What each rescue measurement read (frame/sample, p = the engine's analysis
+  // preview, r = a region, @exposure, interpretation), for the parity scenes.
+  const rescueMeasurements = () => evaluate(`window.__ncAnalysis.expiredMeasurements().map(m => m.frame.join('x') + '/' + m.sample.join('x') + (m.analysisPreview ? 'p' : '') + (m.region ? 'r' : '') + '@' + m.exposure + ' ' + m.interpretation).join(' | ')`);
   const differingKeys = (a, b) => [...new Set([...Object.keys(a || {}), ...Object.keys(b || {})])]
     .filter(key => JSON.stringify(a?.[key]) !== JSON.stringify(b?.[key]));
   const same = (label, a, b) => {
@@ -600,7 +603,8 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
         const beforeExport = await evaluate('window.__ncTwoStage.queuedRecipes()');
         const all = await exportAllFormats(2, scene, [FORMATS[4], ...FORMATS.slice(0, 4)]);
         const afterExport = await evaluate('window.__ncTwoStage.queuedRecipes()');
-        return { all, beforeExport, afterExport, geometry: { cropRegion: geometry.cropRegion, rotationAngle: geometry.rotationAngle, mirrored: geometry.mirrored }, recipe: { confirm, crop } };
+        const measurements = await evaluate('window.__ncAnalysis.expiredMeasurements()');
+        return { all, beforeExport, afterExport, measurements, geometry: { cropRegion: geometry.cropRegion, rotationAngle: geometry.rotationAngle, mirrored: geometry.mirrored }, recipe: { confirm, crop } };
       };
       // Learned defaults (#229 review): their offsets are fractions, which an
       // opened photo's sliders snap; the photo left inside the window must
@@ -630,6 +634,21 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
       const learnedValues = settings => ({ coreTemperature: settings.coreTemperature, coreContrast: settings.coreContrast });
       same(label + ': learned values as the sliders show them', learnedValues(resolved.settings), learnedValues(reference.settings));
       same(label + ': settled crop white balance', wb(resolved.settings), wb(reference.settings));
+      // The rescue (every photo's default): the lane's one measurement of the
+      // cropped full decode, and the strengths it sets, must be what the
+      // opened photo ended with.
+      const rescue = settings => ({
+        ...Object.fromEntries(['expiredEnabled', 'expiredBrightness', 'expiredContrast', 'expiredBrightnessUserOverride', 'expiredContrastUserOverride', 'cropRegion', 'rotationAngle', 'mirrored', 'coreBorderBuffer'].map(key => [key, settings[key]])),
+        imageArea: settings.autoFrameMeta?.imageArea ?? null, analysisArea: settings.autoFrameMeta?.analysisArea ?? null, method: settings.autoFrameMeta?.method ?? null,
+        measured: settings.expiredAnalysis ? Object.fromEntries(['bits', 'samples', 'lumLow', 'lumHigh', 'lumMedian', 'leveledMedian', 'neutralShare'].map(key => [key, settings.expiredAnalysis[key]])) : null,
+        spatial: Boolean(settings.expiredAnalysis?.spatial), expiredAnalysis: settings.expiredAnalysis
+      });
+      // What each rescue measurement read (frame/sample, p = the engine's
+      // analysis preview, r = a region): the opened photo's display level,
+      // the tile lane and the export lane must measure the same sample.
+      const measured = run => run.measurements.map(m => `${m.frame.join('x')}/${m.sample.join('x')}${m.analysisPreview ? 'p' : ''}${m.region ? 'r' : ''}`).join(' ');
+      for (const [name, run] of [['two stages', staged], ['one stage', single]]) console.log(`${label}: crop then leave, ${name}: rescue measurements ${measured(run)}`);
+      same(label + ': settled crop rescue measurement', rescue(resolved.settings), rescue(reference.settings));
       for (const format of Object.keys(single.all)) sameExports(`${label}: crop then leave Export All ${format}`, staged.all[format], single.all[format]);
       console.log(`ok: ${label}: crop-hit then leave before stage 2 exports one stage's decoded samples in every format, with learned defaults`);
     }
@@ -727,6 +746,12 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
           if (staged) await evaluate('window.__ncTwoStage.holdFullDecodes()');
           await importFiles([cropFile]);
           await waitFor(scene + ': photo', `${ready} && ${filename(basename(cropFile))} && ${staged ? `${status}.pending` : exact}`, 150_000);
+          // The pending hits need Apply to convert before its detection
+          // answers; with the rescue on (every photo's default) Apply waits
+          // for it, so this photo runs with the rescue off (one history entry
+          // under the scene's own, which Undo and Redo never reach).
+          await evaluate(`document.getElementById('expiredEnabled').click()`);
+          await waitFor(scene + ': rescue off', `${ready} && !document.getElementById('expiredEnabled').checked && !window.__ncAnalysis.converting()`, 60_000);
           const base = (await evaluate(status)).base, scale = staged ? base.scale : 1;
           recipe ||= { confirm: { left: 0, top: 0, width: Math.floor(base.width * .35) / scale, height: Math.floor(base.height * .35) / scale },
             crop: { left: 0, top: 0, width: (base.width - 2) / scale, height: (base.height - 2) / scale } };
@@ -1134,6 +1159,7 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
         await waitFor(`${sceneLabel}: roll analysis committed`, `${rollCommitted} && ${ready} && ${exact} && !!${status}.settings?.rollFrame`, 900_000);
         await evaluate(releaseSemantic);
         const settled = await settledPhoto();
+        console.log(`${sceneLabel}: rescue measurements ${await rescueMeasurements()}`);
         if (recipeRender) return { ...settled, render: await exportAllFormats(2, `${sceneLabel} recipe render`) };
         return { ...settled, exports: await exportFormats(`${sceneLabel}`, formats) };
       };

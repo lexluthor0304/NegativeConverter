@@ -136,7 +136,13 @@ async function fixture({ type = 'positive', mode = 'correct', manual = false, ro
     setTimeout: callback => { timers.push(callback); },
     scheduleSilverSourceRefresh: () => { target.coreReprocessToken++; },
     flushScheduledCoreReprocess: async () => {
-      state.processedImageData = await convertFrameWithRouter({ imageData: base, settings: target.buildRouterSettings(state), options: { forceFullProcess: true } });
+      // As the core reprocess converts: with the colour-analysis sample of
+      // the frame's area, whose preview the rescue measures.
+      // The context's getColorAnalysisSample: the real one where a test
+      // installed it (interpretationHistory), else this harness's stub.
+      const analysisImageData = vm.runInContext('getColorAnalysisSample', c)(state);
+      state.processedImageData = await convertFrameWithRouter({ imageData: base, settings: target.buildRouterSettings(state),
+        options: { forceFullProcess: true, analysisImageData } });
       target.displayedFrameToken = target.coreReprocessToken;
     },
     settleMeasurementInputs: async (measure, current) => { if (current()) measure(); }

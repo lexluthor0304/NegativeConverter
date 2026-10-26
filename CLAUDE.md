@@ -149,8 +149,10 @@ a post-conversion stage on the positive: `pipeline/expiredRescue.js` measures
 fog, cast, crossover and exposure by density, and its colour table (over
 luminance) plus shared tone curve run first in the Step-3 adjustment chain
 (8-bit and 16-bit); `app/expiredRescueOpenCv.js` adds the OpenCV fog surface.
-Negatives convert as usual first; positives are rescued directly. See
-`docs/expired-film-rescue.md`.
+Negatives convert as usual first; positives are rescued directly. The stage is
+on for every photo by default (the automatic colour correction, measured once
+per conversion source with no undo step); the tab and its controls appear only
+in the explicit expired-roll session. See `docs/expired-film-rescue.md`.
 
 ### Rendering Strategy
 The app keeps dual-path rendering behavior:

@@ -43,6 +43,15 @@ const IMPORT_FIXTURE = `
     const input = document.getElementById('fileInput'); input.files = dt.files;
     input.dispatchEvent(new Event('change', { bubbles: true }));`;
 const READY = `document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy && !window.__ncGeometry.pending()`;
+// Every photo starts with the automatic colour correction (the expired
+// rescue) on, and a rescued frame's Apply waits for its crop-area detection.
+// These checks cover Apply's paint-first path, so the rescue is switched off
+// per photo; its own measurement barrier is covered by switching it back on
+// while a detection runs.
+const rescueOff = async ({ evaluate, waitFor }, label) => {
+  await evaluate(`(() => { const box = document.getElementById('expiredEnabled'); if (box.checked) box.click(); })()`);
+  await waitFor(label + ': rescue off', `${READY} && !document.getElementById('expiredEnabled').checked && !window.__ncAnalysis.converting()`, 60_000);
+};
 // What Studio says about the image area: the frame notice, the composition
 // pane's status and whether the filmstrip flags the frame for review.
 const AREA_STATE = `(async () => {
@@ -89,6 +98,7 @@ export async function runCropApplySmoke({ send, evaluate, waitFor, wait, fail, i
   await waitFor('crop apply fixture converted', `${ready} && document.getElementById('studioFilename').textContent === 'crop-apply.png'`, 150_000);
   await wait(1200);
   await waitForSemanticFixture({ evaluate, waitFor, fail, ready, label: 'crop apply fixture' });
+  await rescueOff({ evaluate, waitFor }, 'crop apply fixture');
   const realm = `({ cv: typeof window.cv, script: !!document.querySelector('script[data-opencv-loader]'), tasks: { ...window.__ncAnalysis.tasks } })`;
   const imported = await evaluate(realm);
   if (imported.cv !== 'undefined' || imported.script) fail('the page loaded OpenCV during import: ' + JSON.stringify(imported));
@@ -235,17 +245,17 @@ export async function runCropApplySmoke({ send, evaluate, waitFor, wait, fail, i
   await expectLoadingOverlayIdle({ evaluate, waitFor, fail }, 'Apply Crop');
   console.log(`ok: Apply showed the indeterminate strip (${overlayShows.length} overlay states, last ${overlayShows.at(-1) ? 'indeterminate' : 'progress'}); the hidden overlay is idle afterwards`);
 
-  // ---- One-click colour correction in the worker, then the page fallback ----
+  // ---- Switching the rescue on (the former one-click correction) measures in the worker, Analyse again then falls back to the page ----
   const correct = async (label) => {
     // Both measurements read the same settled full-resolution positive.
     await waitFor(label + ': full resolution settled', `${ready} && window.__ncAnalysis.fullResolution()`, 120_000);
     const count = await evaluate(`window.__ncAnalysis.tasks.worker + window.__ncAnalysis.tasks.fallback`);
-    await evaluate(`document.getElementById('studioTab-edit').click(); document.getElementById('studioColorCorrect').click()`);
+    await evaluate(`(() => { const box = document.getElementById('expiredEnabled'); if (!box.checked) box.click(); else document.getElementById('expiredAnalyzeBtn').click(); })()`);
     await waitFor(label, `window.__ncAnalysis.tasks.worker + window.__ncAnalysis.tasks.fallback > ${count} && !!(window.__ncAnalysis.expiredAnalysis() || {}).spatial`, 120_000);
     await wait(500);
     return evaluate(`JSON.stringify(window.__ncAnalysis.expiredAnalysis())`);
   };
-  await waitFor('colour correct enabled', `!document.getElementById('studioColorCorrect').disabled`, 30_000);
+  await waitFor('rescue switch enabled', `!document.getElementById('expiredEnabled').disabled`, 30_000);
   const inWorker = await correct('colour correct in the worker');
   const afterWorker = await evaluate(realm);
   if (afterWorker.cv !== 'undefined' || afterWorker.script || afterWorker.tasks.fallback) fail('colour correct booted OpenCV in the page: ' + JSON.stringify(afterWorker));
@@ -339,6 +349,7 @@ async function runEditWhileDetecting({ send, evaluate, waitFor, wait, fail, inst
     await waitFor(label + ': fixture converted', `${READY} && document.getElementById('studioFilename').textContent === 'crop-apply.png'`, 150_000);
     await wait(1200);
     await waitForSemanticFixture({ evaluate, waitFor, fail, ready: READY, label });
+    await rescueOff({ evaluate, waitFor }, label);
     // Confirm the top-left part of the stored window as the image area.
     await evaluate(`document.getElementById('studioTab-composition').click(); document.getElementById('studioConfirmAnalysis').click()`);
     await waitFor(label + ': image area mode', cropMode, 30_000);
@@ -463,7 +474,7 @@ async function runMeasureWhileWaiting({ send, evaluate, waitFor, wait, fail, ins
   // The gray-point click lands on the photo at the same place in every run.
   const measure = async kind => {
     if (kind === 'colourCorrect') {
-      await evaluate(`document.getElementById('studioTab-edit').click(); document.getElementById('studioColorCorrect').click()`);
+      await evaluate(`(() => { const box = document.getElementById('expiredEnabled'); if (!box.checked) box.click(); else document.getElementById('expiredAnalyzeBtn').click(); })()`);
       return;
     }
     const point = await evaluate(`(() => {
@@ -480,11 +491,13 @@ async function runMeasureWhileWaiting({ send, evaluate, waitFor, wait, fail, ins
   const landed = kind => (kind === 'colourCorrect'
     ? `!document.body.dataset.studioBusy && !!(window.__ncAnalysis.expiredAnalysis() || {}).spatial`
     : `!document.body.dataset.studioBusy && !document.getElementById('sampleWBBtn').classList.contains('active')`);
-  // The click waits: Studio busy, and nothing measured yet.
+  // The click waits: Studio busy, and nothing measured yet (the sampling
+  // mode and the rescue checkbox show the intent meanwhile; the rescue's
+  // state, like its measurement, follows once the wait is over).
   const expectWaiting = async (label, before) => {
     await wait(300);
     const now = await evaluate(`({ busy: document.body.dataset.studioBusy || null, view: ${view} })`);
-    if (now.busy !== 'true' || JSON.stringify({ ...now.view, sampling: null }) !== JSON.stringify({ ...before, sampling: null })) {
+    if (now.busy !== 'true' || JSON.stringify({ ...now.view, sampling: null, rescue: null }) !== JSON.stringify({ ...before, sampling: null, rescue: null })) {
       fail(label + ': the click did not wait: ' + JSON.stringify({ before, now }));
     }
   };
@@ -521,6 +534,7 @@ async function runMeasureWhileWaiting({ send, evaluate, waitFor, wait, fail, ins
     await waitFor(label + ': fixture converted', `${READY} && document.getElementById('studioFilename').textContent === 'crop-apply.png'`, 150_000);
     await wait(1200);
     await waitForSemanticFixture({ evaluate, waitFor, fail, ready: READY, label });
+    await rescueOff({ evaluate, waitFor }, label);
     // As in runEditWhileDetecting: an off-centre image area, then the default
     // draft around the window, which is detected again and hits.
     await evaluate(`document.getElementById('studioTab-composition').click(); document.getElementById('studioConfirmAnalysis').click()`);

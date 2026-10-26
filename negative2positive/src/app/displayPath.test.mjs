@@ -111,7 +111,7 @@ for (const failure of ['null', 'throw']) {
     appAlert: message => { alerts.push(message); }, getLocalizedText: (key, fallback) => fallback,
   });
   vm.runInContext([...DISPLAY_SESSION_HELPERS, 'whiteBalanceMeasurementSettings', 'provisionalWhiteBalanceMeasurement',
-    'provisionalUnits', 'liveGeometry', 'showNegativeAfterFailedConversion', 'processNegative'].map(functionSource).join('\n'), context);
+    'provisionalUnits', 'liveGeometry', 'analysisAreaOf', 'showNegativeAfterFailedConversion', 'processNegative'].map(functionSource).join('\n'), context);
   await context.processNegative({ quiet: true });
   await settle();
   assert.deepEqual(painted, [negative], `${failure}: the framed negative is painted once`);
