@@ -1078,6 +1078,10 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
         const initial = await evaluate(`${status}.settings`);
         same(scene + ': saved automatic WB', [initial.wbR, initial.wbG, initial.wbB], [1.17, 1, .86]);
         if (initial.wbUserOverride || initial.grayPointSampled) fail(scene + ': fixture became user-owned WB');
+        // The seeded rescue is explicit: the expired-roll session keeps it
+        // through positive edit mode, where the default correction turns off.
+        await evaluate(`document.getElementById('studioExpiredMode').click()`);
+        await waitFor(scene + ': expired-roll session', `document.getElementById('studioExpiredMode').getAttribute('aria-pressed') === 'true'`, 30_000);
         await evaluate(`(() => {
           document.querySelector('.film-type-btn[data-type="${after[0]}"]').click();
           const mode = document.getElementById('positiveModeSelect'); mode.value = '${after[1]}';
