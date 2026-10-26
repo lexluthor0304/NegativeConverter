@@ -16448,6 +16448,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     document.getElementById('positiveModeSelect').addEventListener('change', event => {
       pushUndo('filmType');
       Object.assign(state, withoutFilmTypeAnalysis(state, { ...state, positiveMode: event.target.value === 'edit' ? 'edit' : 'correct' }));
+      // Edit mode is the user's to edit: the automatic colour correction
+      // (every photo's default) is off there and back on in correct mode.
+      // The expired-roll session chose the rescue explicitly and keeps it.
+      if (!state.expiredSession) state.expiredEnabled = state.positiveMode === 'edit' ? false : RESCUE_DEFAULT_ON;
+      updateExpiredRescueUI();
       updateWBSliders();
       markCurrentFileDirty();
       remeasureExpiredAfterRetype();

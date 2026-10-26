@@ -282,6 +282,13 @@ export async function runInterpretationHistoryCropSmoke(ctx) {
       if (!rescue) await waitFor(scene + ' input conversion', `${ready} && !window.__ncAnalysis.converting()`, 120_000);
       return await evaluate(`${status}.settings`);
     };
+    // The rescue in positive edit mode is the expired-roll session's: outside
+    // it, edit mode turns the automatic correction off. The photo is rescued
+    // already, so entering the session adds no history entry.
+    if (rescue) {
+      await evaluate(`document.getElementById('studioExpiredMode').click()`);
+      await waitFor(scene + ' expired-roll session', `document.getElementById('studioExpiredMode').getAttribute('aria-pressed') === 'true'`, 30_000);
+    }
     let middleInputs, finalInputs;
     if (middle) {
       if (inputKind) middleInputs = await editInput(false);

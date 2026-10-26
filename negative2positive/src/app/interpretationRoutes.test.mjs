@@ -70,7 +70,7 @@ assert.ok(typeStart > 0 && typeEnd > typeStart && modeEnd > modeStart);
 async function fixture({ type = 'positive', mode = 'correct', manual = false, roll = null } = {}) {
   const h = createHarness(base), { context: c, target, state } = h;
   Object.assign(state, EXPIRED_RESCUE_DEFAULTS, { filmType: type, positiveMode: mode, currentStep: 3,
-    filmTypeSource: 'auto', expiredEnabled: true, semanticMap: structuredClone(map),
+    filmTypeSource: 'auto', expiredEnabled: true, expiredSession: true, semanticMap: structuredClone(map),
     filmBase: { r: 228, g: 194, b: 144, method: 'manual' }, filmBaseSet: true, coreBorderBuffer: 0,
     coreExposure: 19, expiredBrightness: 17, expiredContrast: 23, expiredNeutralize: 61,
     wbR: 1.17, wbG: 1, wbB: .86, wbAutoConfidence: 'high', wbUserOverride: manual,

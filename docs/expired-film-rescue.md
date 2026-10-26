@@ -9,7 +9,10 @@ Pressing Reset colour measures the uncorrected conversion again instead of
 stacking corrections. CMYD remains available for manual refinement. The
 Expired tab and its per-photo checkbox, Analyze and Reset belong to the
 explicit expired-roll entry; leaving that entry hides the tab and keeps the
-correction. Because the measurement is taken once per source, Apply Crop
+correction. A positive in edit mode is the user's to edit: outside the
+session the positive-mode select turns the correction off for edit mode
+and back on for correct mode (its export stays the source); the session
+keeps the rescue in either mode. Because the measurement is taken once per source, Apply Crop
 converts after its crop-area detection has settled while the rescue is on
 (docs/crop-apply-and-analysis-worker.md); with the rescue switched off for a
 photo, Apply converts at once with the miss outcome as before. With an
@@ -27,7 +30,17 @@ carries the hit's sample. A two-stage swap whose window edited the
 conversion measures the full decode at the settled values first
 (`docs/two-stage-raw-import.md`). Without an
 area, measurements read the frame on screen with its 16-bit plane inside
-the border buffer. Right after a slider release (the
+the border buffer. On a software WebGL renderer (CI's headless Chrome) a
+rescued photo keeps the CPU display (#253); the smoke harness starts its
+dev server with `VITE_GPU_DISPLAY_MODES=force` so its GL-pixel checks see
+the same display as on a GPU (`GPU_DISPLAY_MODES_FORCED`, the modes'
+self-test still decides), and builds leave it unset. The photo-session
+smokes (`scripts/photo-session-smoke.mjs` boots them with
+`?rescueDefault=off`, as does the GPU preview smoke) start their photos
+without the rescue: they compare
+the settled pixels of warm, cold, tiered and stored opens, which the
+rescue's second, asynchronous measurement would move between opens; the
+rescue has smokes of its own. Right after a slider release (the
 plane still in the preview worker) or while Apply Crop's crop-area detection
 runs, they wait for them, as do the rescue checkbox, Analyze and Reset colour
 (`settleMeasurementInputs`, docs/crop-apply-and-analysis-worker.md).
