@@ -80,7 +80,7 @@ jobs:
           python3 scripts/verify-ios-package.py --profile "$RUNNER_TEMP/ios.mobileprovision"
           echo "IOS_MOBILE_PROVISION=$(base64 < "$RUNNER_TEMP/ios.mobileprovision" | tr -d '\n')" >> "$GITHUB_ENV"
           rm "$RUNNER_TEMP/ios.mobileprovision"
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@1.120.0
         with:
           targets: aarch64-apple-ios
       - uses: Swatinem/rust-cache@v2
