@@ -86,7 +86,20 @@ export async function runStudioSmoke({ send, evaluate, waitFor, wait, fail, inst
   })()`);
   if (!cmyd.visible || !cmyd.beforeBasic) fail('CMYD must be visible before basic adjustments: ' + JSON.stringify(cmyd));
   await capture('studio-desktop.png');
+  // The continuous-preview check counts the WebGL display's uploads. A
+  // rescued photo (every photo's default) keeps the CPU display until the
+  // GPU display modes pass their self-test, and for good on a software
+  // renderer (#253; CI's headless Chrome), so the check runs with the
+  // rescue off for this photo and the default is put back afterwards.
+  const settledFrame = `!window.__ncAnalysis.converting() && !document.body.dataset.studioBusy && !document.querySelector('.loading-overlay.visible')`;
+  const rescue = async (enabled, label) => {
+    await evaluate(`(() => { const el = document.getElementById('expiredEnabled'); if (el.checked !== ${enabled}) el.click(); })()`);
+    await waitFor(`studio rescue ${label}`, `document.getElementById('expiredEnabled').checked === ${enabled} && ${settledFrame}`, 60_000);
+    await wait(500);
+  };
+  await rescue(false, 'off for the display check');
   await runRealtimePreviewSmoke({ send, evaluate, wait, fail });
+  await rescue(true, 'back on');
 
   // 設定 DOM の存在だけでなく、タブから到達でき、実画布に枠が描画されることを確認。
   const clickVisible = async id => {
