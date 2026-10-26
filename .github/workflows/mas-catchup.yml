@@ -1,0 +1,110 @@
+name: Mac App Store catch-up
+
+# A release merged while Apple still reviewed the previous Mac App Store
+# version is deferred by mas-publish.yml (App Store Connect allows one macOS
+# version in flight). Every two hours this compares the latest v* release
+# with App Store Connect and submits that release once the review is over.
+# On a pull request that changes the lane it only reports the state. See
+# docs/mas-release.md.
+on:
+  schedule:
+    - cron: '23 */2 * * *'
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/mas-catchup.yml'
+      - '.github/workflows/mas-publish.yml'
+      - '.github/scripts/asc_mas_state.mjs'
+      - 'scripts/asc-api.mjs'
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Compare the latest release with App Store Connect
+    if: github.repository == 'lexluthor0304/NegativeConverter'
+    runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.decide.outputs.publish }}
+      version: ${{ steps.latest.outputs.version }}
+      tag: ${{ steps.latest.outputs.tag }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Find the latest desktop release
+        id: latest
+        run: |
+          set -euo pipefail
+          tag="$(git ls-remote --tags --refs origin 'v*' | awk -F/ '{ print $3 }' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)"
+          if [ -z "$tag" ]; then
+            echo "No v* release tag on origin." >&2
+            exit 1
+          fi
+          echo "latest desktop release: $tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Ask App Store Connect
+        id: state
+        env:
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+          VERSION: ${{ steps.latest.outputs.version }}
+        run: |
+          set -euo pipefail
+          for name in ASC_API_KEY_ID ASC_API_ISSUER_ID ASC_API_KEY_P8; do
+            if [ -z "${!name}" ]; then
+              echo "::notice::Mac App Store catch-up skipped; missing secret $name"
+              echo "decision=skipped" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+          node .github/scripts/asc_mas_state.mjs --bundle-id com.neoanaloglab.negativeconverter --version "$VERSION"
+
+      - name: Decide
+        id: decide
+        env:
+          DECISION: ${{ steps.state.outputs.decision }}
+          REASON: ${{ steps.state.outputs.reason }}
+          VERSION: ${{ steps.latest.outputs.version }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          publish=false
+          case "$DECISION" in
+            publish)
+              if [ "$EVENT" = pull_request ]; then
+                echo "::notice::$VERSION would be submitted now ($REASON); a pull request only reports."
+              else
+                echo "Submitting $VERSION: $REASON."
+                publish=true
+              fi
+              ;;
+            blocked) echo "::notice::$VERSION waits: $REASON." ;;
+            done) echo "$VERSION: $REASON." ;;
+            *) echo "No decision ($DECISION); nothing to do." ;;
+          esac
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+
+  publish:
+    name: Publish to Mac App Store
+    needs: check
+    if: needs.check.outputs.publish == 'true'
+    # Same group as the release workflow's Mac App Store job: one submission at a time.
+    concurrency:
+      group: mas-publish
+      cancel-in-progress: false
+    uses: ./.github/workflows/mas-publish.yml
+    with:
+      version: ${{ needs.check.outputs.version }}
+      tag: ${{ needs.check.outputs.tag }}
+      ref: ${{ needs.check.outputs.tag }}
+    secrets: inherit

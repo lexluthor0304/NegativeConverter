@@ -1,11 +1,47 @@
 # Mac App Store auto-release
 
 Every push to `main` runs `.github/workflows/desktop-release.yml`. After the
-GitHub Release + R2 sync succeed, the `mas-appstore` job builds the sandboxed
-Mac App Store package (`scripts/build-mas.sh`), uploads it with fastlane
+GitHub Release + R2 sync succeed, the `mas-appstore` job calls the shared lane
+`.github/workflows/mas-publish.yml`, which builds the sandboxed Mac App Store
+package (`scripts/build-mas.sh`), uploads it with fastlane
 (`fastlane/Fastfile`, lane `mac mas_upload`), submits it for review, and lets
 it release automatically once Apple approves. If any required secret is
 missing the job skips with a notice instead of failing.
+
+## One version in flight: deferral and catch-up
+
+App Store Connect allows one macOS version in flight. While the previous
+release is still *Waiting for Review*, *In Review* or pending release, a new
+version cannot be created, and fastlane deliver dies on "You cannot create a
+new version of the App in the current state" (it hit v1.0.3x on 2026-10-09
+and v1.0.45 on 2026-10-27; `reject_if_possible` cannot cancel a review that
+Apple has started, and removing a waiting version from the queue would only
+send the app to the back of it).
+
+The lane therefore asks first. `.github/scripts/asc_mas_state.mjs` reads the
+app's macOS versions through the App Store Connect API
+(`scripts/asc-api.mjs`, the same ES256 JWT client as the iOS lane) and
+decides:
+
+| decision | meaning | lane |
+| --- | --- | --- |
+| `publish` | no version is in flight, or the release's own version is editable (`PREPARE_FOR_SUBMISSION`, rejected states) | build, upload, submit |
+| `blocked` | another version is `WAITING_FOR_REVIEW`, `IN_REVIEW`, `PENDING_*`, `PROCESSING_*` … | warning "deferred", job ends green |
+| `done` | the release's version is already there and not editable | notice, nothing to do |
+
+`.github/workflows/mas-catchup.yml` runs every two hours (and on
+`workflow_dispatch`): it takes the latest `v*` tag, asks the same question and,
+on `publish`, calls `mas-publish.yml` for that tag. A release deferred behind a
+review thus reaches the Mac App Store once Apple is done; releases that were
+superseded in the meantime are skipped on purpose (users get the latest). The
+two callers share the `mas-publish` concurrency group, so a catch-up never
+builds beside a release. On a pull request that touches the lane the catch-up
+workflow runs its check only and reports what it would do.
+
+Build numbers stay unique: the state script also lists the builds already
+uploaded for the version, and `set_mas_bundle_version.mjs` takes the larger of
+the attempt formula below and the next free number, so a catch-up after a
+failed submission never re-uses a `CFBundleVersion`.
 
 The web app on Vercel deploys on every merge regardless; this pipeline only
 concerns the packaged desktop app.
