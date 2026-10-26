@@ -299,8 +299,12 @@ export async function runGeometrySmoke({ send, evaluate, waitFor, wait, fail, in
     console.log('ok: an 8-bit scan at a non-right angle rotates once on a worker canvas (the page canvas\'s bytes), in the import and in the export chain');
 
     // A session kept without its planes (as a 60 MP session that does not
-    // fit the cache is) rebuilds them from its base when reopened.
-    await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en&debug=1` });
+    // fit the cache is) rebuilds them from its base when reopened. The
+    // photos start without the rescue (every photo's default): its second,
+    // asynchronous measurement can still be running when the photo is left,
+    // and the session is then kept differently; the rescue has smokes of
+    // its own.
+    await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en&debug=1&rescueDefault=off` });
     await waitFor('geometry workspace reboot', `!!document.getElementById('studioImportAutoCrop') && !!window.__ncGeometry`);
     await installDialogAutoAccept();
     await wait(300);
