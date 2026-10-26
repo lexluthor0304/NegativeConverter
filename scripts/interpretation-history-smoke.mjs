@@ -179,7 +179,11 @@ export async function runInterpretationHistoryCropSmoke(ctx) {
     cases.push([`${staged ? 'full' : 'warm'}-middle-${kind}-${rescue ? 'on' : 'off'}`, staged, rescue,
       'automatic', ['color', 'correct'], ['color', 'correct'], ['color', 'correct'], kind]);
   }
-  for (const [scene, staged, rescue, ownership, before, after, middle, inputKind, hitDispatch] of cases) {
+  // NC229_HISTORY_SHARD=k/n: the k-th of n parts of the cases, by index
+  // (scripts/smoke-test.mjs splits this scene across CI machines).
+  const historyShard = /^(\d+)\/(\d+)$/.exec(process.env.NC229_HISTORY_SHARD || '');
+  const shardedCases = historyShard ? cases.filter((_, index) => index % Number(historyShard[2]) === Number(historyShard[1]) - 1) : cases;
+  for (const [scene, staged, rescue, ownership, before, after, middle, inputKind, hitDispatch] of shardedCases) {
     if (process.env.NC229_HISTORY_BROWSER_CASE && !process.env.NC229_HISTORY_BROWSER_CASE.split(',').includes(scene)) continue;
     console.log('interpretation crop history scene:', scene);
     const seed = { ...seedRecipe, filmType: before[0], positiveMode: before[1], filmTypeSource: 'manual',

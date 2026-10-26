@@ -7,6 +7,16 @@ on:
     # iPhone/iPad-only changes ship through ios-release.yml; they must not
     # cut a desktop release (GitHub Release, R2 updater and Mac App Store).
     paths-ignore:
+      # Test, CI and documentation changes release nothing: the app is the
+      # same build. A pull request that also changes the app still releases.
+      - '.github/workflows/desktop-ci.yml'
+      - 'scripts/run-tests.mjs'
+      - 'scripts/smoke-test.mjs'
+      - 'scripts/*-smoke.mjs'
+      - 'negative2positive/src/**/*.test.mjs'
+      - 'negative2positive/test-fixtures/**'
+      - 'docs/**'
+      - 'CLAUDE.md'
       - '.github/workflows/ios-ci.yml'
       - '.github/workflows/ios-release.yml'
       - '.github/scripts/prepare_ios_release*.mjs'

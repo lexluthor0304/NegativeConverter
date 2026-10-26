@@ -31,7 +31,9 @@ npm run build:web
 Run tests (standalone Node assert scripts, colocated as `*.test.mjs` under
 `negative2positive/` and `scripts/perf/`, plus
 repo-wide consistency checks: SEO heads and FAQ structured data over the static
-pages, pinned dependency versions, and the two Vercel header configs):
+pages, pinned dependency versions, and the two Vercel header configs). The
+files run four at a time, each in its own process (`TEST_JOBS=1` for one
+after another):
 ```bash
 npm test
 ```
@@ -54,7 +56,11 @@ npm run test:smoke
 ```
 
 CI (`.github/workflows/desktop-ci.yml`) runs all three on every pull request
-before the four-platform Tauri build.
+before the four-platform Tauri build, as parallel jobs: the unit suite with
+the web build, the Rust tests, and the smoke in four shards (`SMOKE_SHARD=k/4`,
+planned from the smoke modules' weights in `scripts/smoke-test.mjs`;
+`SMOKE_PLAN_ONLY=1` prints the plan). A local `npm run test:smoke` still goes
+through every module in order.
 
 Interactive performance benchmark against the Lightroom-grade budgets of #229
 (production build in its own worktree, trusted input, `scripts/perf/budgets.json`;
