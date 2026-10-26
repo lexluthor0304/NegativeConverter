@@ -247,6 +247,17 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // runs on a software rasteriser (tests on CI), selftest-fail corrupts the idle
     // self-test so the session stays on the worker path.
     const GPU_PREVIEW_MODE = new URLSearchParams(window.location.search).get('gpuPreview') || 'auto';
+    // The smoke harness runs the GPU display modes (the look, the rescue) on
+    // a software renderer too (CI's headless Chrome is SwiftShader;
+    // scripts/smoke-test.mjs starts its dev server with
+    // VITE_GPU_DISPLAY_MODES=force), where users keep the CPU display (#253);
+    // the modes' self-test still decides. Builds leave it unset.
+    const GPU_DISPLAY_MODES_FORCED = import.meta.env.VITE_GPU_DISPLAY_MODES === 'force';
+    // ?rescueDefault=off: photos start without the expired-film rescue (the
+    // automatic colour correction). For the photo-session smokes, whose
+    // settled-pixel comparisons the rescue's second, asynchronous
+    // measurement would move; the rescue has smokes of its own.
+    const RESCUE_DEFAULT_ON = new URLSearchParams(window.location.search).get('rescueDefault') !== 'off';
     // The default export bridge, for the callers without an operation of their
     // own (contact sheet, multi-shot merge, watch folder). A single export
     // makes its own bridge and a batch export its own pool (#250); both pass
@@ -8940,7 +8951,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         displayModes.renderer = renderer;
       }
       if (displayModes.status === 'none') {
-        if (webglState.renderer?.software && GPU_PREVIEW_MODE !== 'force') return failDisplayModes('software renderer', 'unsupported');
+        if (webglState.renderer?.software && GPU_PREVIEW_MODE !== 'force' && !GPU_DISPLAY_MODES_FORCED) return failDisplayModes('software renderer', 'unsupported');
         if (!webgl2PrecisionOk(renderer.gl)) return failDisplayModes('highp precision', 'unsupported');
         renderer.startModesCompile();
         displayModes.status = 'compiling';
@@ -18843,6 +18854,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         pendingDetection: () => Boolean(cropDetection),
         converting: () => Boolean(processNegativeInFlight),
         expiredMeasurements: () => expiredMeasurementLog.map(entry => ({ ...entry })),
+        expiredSpatialPending: () => Boolean(expiredSpatialRun),
         settle: () => settlePendingCropDetection(),
         failWorker: (failing = true) => { analysisWorkerFailing = Boolean(failing); },
         proxyReady: () => {
@@ -21867,8 +21879,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         // every photo starts rescued and maybeAnalyzeExpiredRescue measures
         // it once per conversion source, with no undo step. The Expired tab
         // stays reserved for the explicit session; its checkbox turns the
-        // correction off per photo.
-        expiredEnabled: true,
+        // correction off per photo. (?rescueDefault=off for the smokes.)
+        expiredEnabled: RESCUE_DEFAULT_ON,
         expiredAnalysis: null,
         expiredBrightnessUserOverride: false,
         expiredContrastUserOverride: false,

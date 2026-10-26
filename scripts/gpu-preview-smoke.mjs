@@ -411,7 +411,11 @@ export async function runGpuPreviewSmoke({ send, evaluate, waitFor, fail, instal
   };
   const open = async (query, name) => {
     const origin = await evaluate('performance.timeOrigin');
-    await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en${query}` });
+    // A display-only drag converts nothing while its GPU inputs stay; the
+    // rescue's second, asynchronous measurement (every photo's default) is
+    // one more input, so this photo starts without it (the rescue has smokes
+    // of its own).
+    await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en&rescueDefault=off${query}` });
     await until('fresh GPU preview workspace', `performance.timeOrigin !== ${origin} && document.readyState === 'complete' && !!document.getElementById('studioImportAutoCrop')`);
     await installDialogAutoAccept();
     await evaluate(`(${installGpuProbe.toString()})()`);

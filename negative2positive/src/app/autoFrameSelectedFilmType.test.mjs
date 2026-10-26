@@ -81,7 +81,7 @@ const context = vm.createContext({
   state, console, Worker: function Worker() {}, OffscreenCanvas: function OffscreenCanvas() {},
   Uint8Array, Uint8ClampedArray, Uint16Array, Date,
   sanitizeFilmTypeOverride, cachedAutoDetectFilmBase, cachedDetectFilmType, detectedImportSettings, carryFilmStats, ROLL_MONOCHROME,
-  EXPIRED_RESCUE_DEFAULTS, sanitizeFrameMetadata, normalizeAngleDegrees, rotatedDimensions,
+  EXPIRED_RESCUE_DEFAULTS, RESCUE_DEFAULT_ON: true, sanitizeFrameMetadata, normalizeAngleDegrees, rotatedDimensions,
   AUTO_FRAME_MAX_SIDE: 1600, AUTO_FRAME_FORMAT_RATIOS, AUTO_FRAME_DEFAULT_120_FORMATS,
   AUTO_FRAME_SCORE_WEIGHTS: { area: .18, rectangularity: .20, orthogonality: .14, parallelism: .10, edgeSupport: .18, centerPrior: .08, aspect: .12 },
   createPerfTrace: () => ({ end() {} }), recordPerfStages() {}, canAutoApplyImportFrame, imageAreaFromDetection,

@@ -223,7 +223,11 @@ export function decodePng(dataUrl) {
 
 export async function bootPhotoSession({ send, evaluate, until, installDialogAutoAccept, port, query = '', keepAutoCrop = false }) {
     const origin = await evaluate('performance.timeOrigin');
-    await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en${query}` });
+    // The photo-session smokes compare the settled pixels of warm, cold,
+    // tiered and stored opens; the rescue's second, asynchronous measurement
+    // (every photo's default) would move them between opens, so their
+    // photos start without it. The rescue has smokes of its own.
+    await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en&rescueDefault=off${query}` });
     await until('fresh photo-session workspace', `performance.timeOrigin !== ${origin} && document.readyState === 'complete' && !!document.getElementById('applyFilmTypeToRollBtn')`);
     await installDialogAutoAccept();
     await evaluate(`(${installPhotoSessionProbe.toString()})()`);

@@ -135,6 +135,12 @@ const viteBin = join(ROOT, 'node_modules', 'vite', 'bin', 'vite.js');
 const vite = spawn(process.execPath, [viteBin, '--config', 'negative2positive/vite.config.js', '--port', String(PORT), '--strictPort'], {
   cwd: ROOT,
   stdio: ['ignore', 'pipe', 'pipe'],
+  // The GPU display modes (the look, the rescue, every photo's default)
+  // run on a software renderer here, as the display-modes smoke forces
+  // them: CI's headless Chrome is SwiftShader, where users keep the CPU
+  // display (#253). The GL-pixel checks of the smokes then see the same
+  // display as on a GPU; the modes' self-test still decides.
+  env: { ...process.env, VITE_GPU_DISPLAY_MODES: 'force' },
 });
 children.push(vite);
 for (const stream of [vite.stdout, vite.stderr]) stream.on('data', chunk => {

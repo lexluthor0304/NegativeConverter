@@ -283,7 +283,7 @@ for (const forced of [false, true]) {
   const renderer = { gl: {}, startModesCompile: () => compiled++, modesStatus: () => 'pending' };
   const displayModes = { renderer, status: 'none' };
   const context = vm.createContext({ displayModes, webglState: { renderer2: renderer, renderer: { software: true } },
-    GPU_PREVIEW_MODE: forced ? 'force' : 'auto', webgl2PrecisionOk: () => true,
+    GPU_PREVIEW_MODE: forced ? 'force' : 'auto', GPU_DISPLAY_MODES_FORCED: false, webgl2PrecisionOk: () => true,
     failDisplayModes: (reason, status) => { displayModes.status = status; },
     requestAnimationFrame() {}, scheduleDisplayModesWarmup() {}, resetDisplayModes() {} });
   vm.runInContext(functionSource('warmUpDisplayModes'), context);

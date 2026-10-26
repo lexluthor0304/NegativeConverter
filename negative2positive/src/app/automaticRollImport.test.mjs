@@ -970,7 +970,7 @@ const MERGE_FUNCTIONS = ['getImageDataPixelCount', 'clampBetween', 'sanitizeNume
   'autoFrameEffectiveAngle', 'rotate180CropRegion', 'mirrorCropForRotatedFrame', 'analyzeStudioImportFrame', 'mergeImportFilmEdge'];
 function useRealMerge(f) {
   Object.assign(f.context, {
-    detectedImportSettings, cachedDetectFilmType, cachedAutoDetectFilmBase, EXPIRED_RESCUE_DEFAULTS, sanitizeFrameMetadata,
+    detectedImportSettings, cachedDetectFilmType, cachedAutoDetectFilmBase, EXPIRED_RESCUE_DEFAULTS, RESCUE_DEFAULT_ON: true, sanitizeFrameMetadata,
     canAutoApplyImportFrame, imageAreaFromDetection, sanitizeFilmEdgeForSettings, normalizeAngleDegrees,
     recordPerfStages: () => {}, updateMetadataUI: () => {},
     // #278: no frame's focal length or aperture is known.

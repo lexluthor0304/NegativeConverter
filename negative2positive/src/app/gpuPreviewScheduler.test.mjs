@@ -329,6 +329,8 @@ const discreteStubs = {
   withoutFilmTypeAnalysis,
   pushUndo: noop, markCurrentFileDirty: noop, syncSliderFromState: noop, schedulePreviewUpdate: noop,
   updateEnlargerUI: noop, updateSlidersFromState: noop, updateWBSliders: noop, updateConsoleReadouts: noop,
+  // These photos run without the rescue (the positive-mode select keeps it off).
+  RESCUE_DEFAULT_ON: false, updateExpiredRescueUI: noop,
   showToast: noop, getInterpolatedText: () => '', formatAxisValue: () => '', setTestStripStep: noop,
   readTestStripStep: () => 10, renderTestStrip: async () => {}, captureSnapshot: () => ({}), commitUndoSnapshot: noop,
   enlargerSyncing: false, consoleChannelsEnabled: () => true, consoleColorKeysEnabled: () => true, CONSOLE_MAX_STEPS: 8,
