@@ -417,7 +417,8 @@ async function dumpDiagnostics(context) {
 // Mean luminance of the composited preview area, measured from a real
 // screenshot. This sees exactly what the user sees — including the WebGL
 // canvas, whose backbuffer cannot be read back via drawImage.
-async function previewLuminance() {
+// A screenshot of the preview: its mean luminance and its pixels.
+async function previewSample() {
   const rect = await evaluate(`(() => {
     const r = document.getElementById('canvasContainer').getBoundingClientRect();
     return { x: r.x, y: r.y, width: r.width, height: r.height };
@@ -430,7 +431,18 @@ async function previewLuminance() {
   const rgba = new Uint8Array(UPNG.toRGBA8(png)[0]);
   let sum = 0;
   for (let i = 0; i < rgba.length; i += 4) sum += rgba[i] + rgba[i + 1] + rgba[i + 2];
-  return sum / (rgba.length / 4 * 3);
+  return { mean: sum / (rgba.length / 4 * 3), rgba, width: png.width, height: png.height };
+}
+async function previewLuminance() {
+  return (await previewSample()).mean;
+}
+// How much two preview samples differ pixel by pixel (mean |a - b| over the
+// colour channels); null when their sizes differ.
+function previewChange(a, b) {
+  if (a.width !== b.width || a.height !== b.height || a.rgba.length !== b.rgba.length) return null;
+  let sum = 0;
+  for (let i = 0; i < a.rgba.length; i += 4) sum += Math.abs(a.rgba[i] - b.rgba[i]) + Math.abs(a.rgba[i + 1] - b.rgba[i + 1]) + Math.abs(a.rgba[i + 2] - b.rgba[i + 2]);
+  return sum / (a.rgba.length / 4 * 3);
 }
 
 await send('Page.enable');
@@ -859,7 +871,8 @@ console.log('ok: auto-frame worker matches main-thread analysis, UI heartbeat co
 
 await waitFor('auto frame ready for comparison', `document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy`,150000);
 await evaluate(`document.getElementById('beforeAfterBtn').click()`);
-const meanBefore = await previewLuminance();
+const negativeSample = await previewSample();
+const meanBefore = negativeSample.mean;
 await evaluate(`document.getElementById('beforeAfterBtn').click()`);
 if (!Number.isFinite(meanBefore)) fail('could not measure preview luminance');
 if (meanBefore < 3) fail('preview is black after load — decode may have failed');
@@ -1105,10 +1118,14 @@ if (process.argv.includes('--dust-only')) {
 
 // ---- 4. the on-screen preview must have changed (negative -> positive) ----
 await wait(1500); // allow the final render to composite
-const meanAfter = await previewLuminance();
-console.log(`ok: mean luminance ${meanBefore.toFixed(1)} -> ${meanAfter.toFixed(1)}`);
+const positiveSample = await previewSample();
+const meanAfter = positiveSample.mean;
+// The automatic colour correction can leave the positive's mean near the
+// negative's (a lifted dark positive); the pixels still change wholesale.
+const pixelChange = previewChange(negativeSample, positiveSample);
+console.log(`ok: mean luminance ${meanBefore.toFixed(1)} -> ${meanAfter.toFixed(1)}, pixel change ${pixelChange === null ? 'n/a' : pixelChange.toFixed(1)}`);
 if (meanAfter < 3) fail('preview is black after conversion — rendering is broken');
-if (Math.abs(meanAfter - meanBefore) < 8) {
+if (pixelChange === null ? Math.abs(meanAfter - meanBefore) < 8 : pixelChange < 16) {
   fail('preview barely changed after conversion — pipeline may be broken');
 }
 
