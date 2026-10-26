@@ -196,6 +196,8 @@ function fixture({ width = 3000, height = 2000, repairs = false, largePreviewFra
     carryStudioThumbnailSource: () => {}, updateDebugWidget: () => {},
     logWebviewDiagnostics: line => log.push(`log:${line}`), formatPreviewSessionLine: () => 'session',
     updateEnlargerUI: () => {},
+    // The rescue controls' refresh on a landed frame is not under test.
+    expiredRescueUiReady: false, updateExpiredRescueUI: () => {},
     // #237: the one routing rule, the viewport refresh and the repaired preview
     // run for real; these synthetic frames are below 16 MP, so the routing is
     // unchanged. No exact render or AI brush is involved.

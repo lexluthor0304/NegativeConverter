@@ -5,11 +5,11 @@
 //
 // - A retained preview frame (#233) keeps its 16-bit plane in the preview
 //   worker until a commit lands. The gray-point click and the expired
-//   rescue's analysis (One-click colour correct, the Analyze button, Reset
+//   rescue's analysis (turning the rescue on, the Analyze button, Reset
 //   colour, the expired-roll entry) wait for it and measure the 16-bit
 //   plane, as 1703835 did, not the 8-bit samples (or their 600k-pixel
 //   downsample).
-// - A pending crop-area detection (#245): One-click colour correct, the
+// - A pending crop-area detection (#245): turning the rescue on, the
 //   gray-point click, lab match, Copy recipe and Apply film type to roll
 //   wait for it, then use the hit's analysis area and white balance.
 // - A new load, an edit, leaving the sampling mode or turning the expired-roll
@@ -64,7 +64,6 @@ const MEASURE_FUNCTIONS = [
   ...(NAMED_ROLL_HANDLER ? ['applyFilmTypeToRoll'] : [])
 ];
 const INLINE_HANDLERS = [
-  inlineSource('onColorCorrect', '        onColorCorrect: () => {', '\n        },'),
   inlineSource('onReset', '        onReset: () => {', '\n        },'),
   inlineSource('expiredAnalyzeClick', "    document.getElementById('expiredAnalyzeBtn')?.addEventListener('click', () => {", '\n    });'),
   ...(NAMED_ROLL_HANDLER ? [] : [inlineSource('applyFilmTypeToRoll', "    document.getElementById('applyFilmTypeToRollBtn').addEventListener('click', async () => {", '\n    });')])
@@ -110,7 +109,8 @@ function measureContext(base = makeBase(90, 64, 7)) {
     // OpenCV's fog surface is the second phase, measured on the same frame.
     runExpiredSpatialAnalysis: () => Promise.resolve(false),
     // Reset colour's defaults: the session decides whether the rescue stays on.
-    createDefaultSettings: () => ({ ...EXPIRED_RESCUE_DEFAULTS, expiredEnabled: Boolean(h.state.expiredSession), coreExposure: 0 }),
+    // As main.js: the rescue (the automatic colour correction) is every photo's default.
+    createDefaultSettings: () => ({ ...EXPIRED_RESCUE_DEFAULTS, expiredEnabled: true, coreExposure: 0 }),
     // Lab match around our rendering: the reference, alignment and fit are stand-ins.
     labMatchRunning: false, labMatchReferenceFile: { name: 'lab.jpg' },
     decodeReferenceImage: async () => new TestImageData(8, 8),
@@ -251,7 +251,7 @@ function showRetained(t, frame) {
 
 // ---- R1-023: the expired rescue's analysis waits for the plane too ----
 {
-  // One-click colour correct right after a slider release: the analysis is
+  // Turning the rescue on (its checkbox, re-measuring) right after a slider release: the analysis is
   // the 16-bit plane's, the same as after the commit, not the 8-bit samples'.
   const run = async ({ retained }) => {
     const t = measureContext();
@@ -261,7 +261,7 @@ function showRetained(t, frame) {
       frame.__image16 = { width: frame.width, height: frame.height, data: plane };
       t.state.processedImageData = frame;
     }
-    t.c.onColorCorrect();
+    t.c.setExpiredEnabled(true, { reanalyze: true });
     if (retained) {
       assert.equal(t.state.expiredEnabled, false, 'colour correct waits for the plane');
       assert.equal(t.analysed.length, 0);
@@ -274,7 +274,7 @@ function showRetained(t, frame) {
     assert.equal(t.analysed[0].image, frame, 'measured on the frame itself');
     assert.equal(t.analysed[0].plane16, true, '...with its 16-bit plane, not the 600k-pixel 8-bit downsample');
     assert.equal(t.state.expiredEnabled, true);
-    assert.deepEqual(t.target.undoStack.map(entry => entry.label), ['colorCorrect']);
+    assert.deepEqual(t.target.undoStack.map(entry => entry.label), ['expiredEnabled']);
     return { analysis: t.state.expiredAnalysis, strengths: Object.fromEntries(EXPIRED_RESCUE_KEYS.map(key => [key, t.state[key]])) };
   };
   const atOnce = await run({ retained: true });
@@ -285,20 +285,21 @@ function showRetained(t, frame) {
   const { frame } = agedFrame();
   const t = measureContext();
   t.state.processedImageData = frame;
-  t.c.onColorCorrect();
+  t.c.setExpiredEnabled(true, { reanalyze: true });
   assert.equal(t.analysed[0].plane16, false);
   assert.notEqual(t.analysed[0].image, frame, 'without a plane the 8-bit downsample is measured');
   assert.notDeepEqual(t.state.expiredAnalysis, atOnce.analysis, 'and gives another analysis');
 }
 
 {
-  // The Analyze button and Reset colour (the rescue left on without a
-  // current measurement) wait the same way.
+  // The Analyze button and Reset colour (the defaults turn the rescue on, so
+  // without a current measurement Reset measures) wait the same way, in and
+  // outside the expired session.
   for (const action of ['analyze', 'reset']) {
     const t = measureContext();
     const { frame, plane } = agedFrame(800, 800);
     showRetained(t, frame);
-    Object.assign(t.state, { expiredEnabled: true, expiredSession: action === 'reset' });
+    Object.assign(t.state, { expiredEnabled: true, expiredSession: false });
     if (action === 'analyze') t.c.expiredAnalyzeClick();
     else t.c.onReset();
     assert.equal(t.analysed.length, 0, `${action}: waits for the plane`);
@@ -308,11 +309,15 @@ function showRetained(t, frame) {
     assert.deepEqual(t.analysed.map(entry => entry.plane16), [true], `${action}: measures the 16-bit plane`);
     assert.deepEqual(t.target.undoStack.map(entry => entry.label), [action === 'analyze' ? 'expiredAnalyze' : 'studioReset']);
   }
-  // Reset colour that measures nothing does not wait.
+  // Reset colour with a current measurement measures nothing and does not wait.
   const t = measureContext();
   const { frame } = agedFrame(64, 64);
+  t.state.processedImageData = frame;
+  t.c.runExpiredAnalysis(frame);
+  const measured = t.analysed.length;
   showRetained(t, frame);
   t.c.onReset();
+  assert.equal(t.analysed.length, measured, 'the current measurement is reused');
   assert.deepEqual(t.target.undoStack.map(entry => entry.label), ['studioReset'], 'a Reset without a measurement runs at once');
   assert.equal(t.body.dataset.studioBusy, undefined);
 }
@@ -448,14 +453,14 @@ const hitView = t => ({
 });
 
 {
-  // One-click colour correct during the detection: measured after the hit,
+  // Turning the rescue on during the detection: measured after the hit,
   // with its image area; the hit's auto white balance ran first, and the
-  // rescue then drops it, as when pressed after the hit.
+  // rescue then drops it, as when switched on after the hit.
   const run = async atOnce => {
     const t = detectionContext();
     await t.apply();
     if (!atOnce) await t.hitLands();
-    t.c.onColorCorrect();
+    t.c.setExpiredEnabled(true, { reanalyze: true });
     if (atOnce) {
       assert.equal(t.state.expiredEnabled, false, 'colour correct waits for the detection');
       assert.equal(t.body.dataset.studioBusy, 'true');
@@ -554,12 +559,12 @@ const hitView = t => ({
 {
   // A new load while they wait: nothing is measured or persisted, for
   // either photo.
-  for (const action of ['colorCorrect', 'grayPoint', 'labMatch', 'copyRecipe']) {
+  for (const action of ['rescueOn', 'grayPoint', 'labMatch', 'copyRecipe']) {
     const t = detectionContext();
     await t.apply();
     const before = hitView(t);
     let done = null;
-    if (action === 'colorCorrect') t.c.onColorCorrect();
+    if (action === 'rescueOn') t.c.setExpiredEnabled(true, { reanalyze: true });
     if (action === 'grayPoint') { t.state.samplingMode = 'whiteBalance'; t.c.handleSamplingClick(click(20, 30)); }
     if (action === 'labMatch') done = t.c.runLabMatch();
     if (action === 'copyRecipe') done = t.c.copyRecipe();

@@ -87,7 +87,19 @@ export async function runDisplaySessionSmoke({ send, evaluate, waitFor, fail, in
       document.querySelector('.bitdepth-btn[data-bitdepth="${depth}"]').click();
       document.getElementById('exportSingleBtn').click();
     })()`);
-    await until(`${depth}-bit display-session ${format.toUpperCase()} captured`, `!!window.__photoSessionProbe.exports[${index}]?.data && !document.getElementById('exportBtn').disabled`, 120000);
+    // What an export that never lands was waiting on (its barrier settles
+    // the crop-area detection and the rescue's spatial measurement).
+    const captured = `!!window.__photoSessionProbe.exports[${index}]?.data && !document.getElementById('exportBtn').disabled`;
+    const start = Date.now();
+    while (!(await evaluate(captured))) {
+      if (Date.now() - start > 120000) {
+        console.log('display-session export diagnostics:', JSON.stringify(await evaluate(`({ busy: document.body.dataset.studioBusy || null, exportDisabled: document.getElementById('exportBtn').disabled,
+          exports: window.__photoSessionProbe.exports.length, pendingDetection: window.__ncAnalysis?.pendingDetection(), converting: window.__ncAnalysis?.converting(),
+          spatialPending: window.__ncAnalysis?.expiredSpatialPending?.(), tasks: window.__ncAnalysis?.tasks, measurements: window.__ncAnalysis?.expiredMeasurements?.().slice(-4) })`)));
+        fail(`timeout waiting for ${depth}-bit display-session ${format.toUpperCase()} captured`);
+      }
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
     const data = await evaluate(`window.__photoSessionProbe.exports[${index}].data`);
     return format === 'tiff' ? decodeTiff(data) : decodePng(data);
   };

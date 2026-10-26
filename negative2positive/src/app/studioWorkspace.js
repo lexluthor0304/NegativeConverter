@@ -15,7 +15,6 @@ export const studioText = {
     importHint: '自动取景与转换 · 保留原文件 · 照片不上传', formats: '支持 HEIC、RAW、TIFF、PNG 和 JPEG',
     edit: '调色', editHint: '从自然的正片开始，找到你的色彩。', look: '色彩风格',
     natural: '自然', warm: '暖调', frontier: '鲜明', noritsu: '柔和',
-    colorCorrect: '一键色彩校正', colorCorrectHint: '自动校正偏色、雾化与明暗，之后可用 CMYD 微调。', colorCorrectApplied: '已应用色彩校正 · 可撤销或继续微调',
     basic: '基本调整', brightness: '亮度', contrast: '对比', temperature: '冷暖', tint: '色偏', saturation: '饱和',
     cool: '冷', warmEnd: '暖', green: '绿', magenta: '洋红',
     balance: '校正偏色', reset: '重置调色', more: '更多调整', repair: '修复',
@@ -65,7 +64,6 @@ export const studioText = {
     importHint: 'Auto frame & convert · Originals preserved · No uploads', formats: 'HEIC, RAW, TIFF, PNG and JPEG welcome',
     edit: 'Color', editHint: 'A natural starting point. A look that is yours.', look: 'Color style',
     natural: 'Natural', warm: 'Warm', frontier: 'Vivid', noritsu: 'Soft',
-    colorCorrect: 'One-click color correction', colorCorrectHint: 'Correct color cast, fog and tone, then fine-tune with CMYD.', colorCorrectApplied: 'Color correction applied · Undo or fine-tune below',
     basic: 'Adjustments', brightness: 'Brightness', contrast: 'Contrast', temperature: 'Warmth', tint: 'Tint', saturation: 'Saturation',
     cool: 'Cool', warmEnd: 'Warm', green: 'Green', magenta: 'Magenta',
     balance: 'Correct color cast', reset: 'Reset color', more: 'More adjustments', repair: 'Retouch',
@@ -114,7 +112,6 @@ export const studioText = {
     importHint: '自動取景・変換 · 元画像を保持 · 写真の送信なし', formats: 'HEIC・RAW・TIFF・PNG・JPEG に対応',
     edit: '色調整', editHint: '自然な仕上がりから、自分らしい色へ。', look: '色のスタイル',
     natural: '自然', warm: '暖色', frontier: '鮮やか', noritsu: '柔らか',
-    colorCorrect: 'ワンクリック色補正', colorCorrectHint: '色かぶり・かぶり・明暗を自動補正。CMYD で微調整できます。', colorCorrectApplied: '色補正を適用済み · 取り消し・微調整できます',
     basic: '基本調整', brightness: '明るさ', contrast: 'コントラスト', temperature: '色温度', tint: '色かぶり', saturation: '彩度',
     cool: '寒色', warmEnd: '暖色', green: '緑', magenta: 'マゼンタ',
     balance: '色かぶりを補正', reset: '色調整をリセット', more: '詳細な調整', repair: '修復',
@@ -243,7 +240,7 @@ export function createPhotoSwitchPresentation(feedback, { label = () => '' } = {
 // Elements the Studio flush writes (or reads), looked up once at mount.
 const STUDIO_SYNC_IDS = [
   'studioBatchActions', 'uploadPlaceholder', 'studioSampleHint', 'studioTab-expired', 'studioExpiredMode',
-  'studioColorCorrect', 'studioColorCorrectStatus', 'studioImportAutoCrop', 'studioAutoCrop', 'studioRestoreFrame',
+  'studioImportAutoCrop', 'studioAutoCrop', 'studioRestoreFrame',
   'studioConfirmAnalysis', 'studioAnalysisStatus', 'studioFrameNotice', 'studioColorControls', 'studioHistory',
   'studioExport', 'studioStatus', 'studioFilename', 'studioSelection', 'studioSync', 'exportZipBtn', 'exportSingleBtn',
   'exportAllBtn', 'studioUndo', 'studioRedo', 'undoBtn', 'redoBtn', 'studioRetry', 'studioApplyLens', 'studioResetAll',
@@ -405,7 +402,7 @@ export function createPhotoSortControl({ select, onSortFiles }) {
   };
 }
 
-export function mountStudioWorkspace({ getState, getLanguage, getText, isExportLocked, isCropAreaDetecting = () => false, onTabSelect = () => {}, onStyle, onReset, onResetAll, onRestart, onNewSession, onSync, onSortFiles, onRetry, onConfirm, onExportBorder, onAutoCrop, onRestoreFrame, onConfirmAnalysis, onMergeShots, onLoupe, onSaveProject, onOpenProject, onRestoreProject, onExpiredMode, onColorCorrect }) {
+export function mountStudioWorkspace({ getState, getLanguage, getText, isExportLocked, isCropAreaDetecting = () => false, onTabSelect = () => {}, onStyle, onReset, onResetAll, onRestart, onNewSession, onSync, onSortFiles, onRetry, onConfirm, onExportBorder, onAutoCrop, onRestoreFrame, onConfirmAnalysis, onMergeShots, onLoupe, onSaveProject, onOpenProject, onRestoreProject, onExpiredMode }) {
   const $ = id => document.getElementById(id);
   const t = key => (studioText[getLanguage()] || studioText.en)[key];
   const move = (id, target) => target.append($(id));
@@ -648,15 +645,6 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
     return drawer;
   };
   panes.edit.insertBefore($('consoleSection'), basic);
-  const colorCorrection = document.createElement('section');
-  colorCorrection.className = 'studio-color-correction';
-  colorCorrection.innerHTML = `<button type="button" id="studioColorCorrect" aria-describedby="studioColorCorrectHint">
-    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.6 6.4L21 12l-6.4 2.6L12 21l-2.6-6.4L3 12l6.4-2.6Z"/><path d="M20 2v4M18 4h4"/></svg>
-    <span data-studio="colorCorrect"></span></button>
-    <p id="studioColorCorrectHint" data-studio="colorCorrectHint"></p>
-    <p id="studioColorCorrectStatus" role="status" data-studio="colorCorrectApplied" hidden></p>`;
-  panes.edit.insertBefore(colorCorrection, $('consoleSection'));
-  $('studioColorCorrect').addEventListener('click', () => onColorCorrect?.());
   makeDrawer(panes.edit, 'studioTestStrip', 'testStrip', ['testStripSection']);
   makeDrawer(panes.edit, 'studioLabMatch', 'labMatch', ['labMatchSection']);
   makeDrawer(panes.edit, 'studioMetadata', 'metadata', ['metadataSection'], 'metadataHint');
@@ -912,7 +900,10 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
     // The sampling hint names the kind of sample; the loop below writes it.
     set(node.studioSampleHint, 'dataset.studio', state.samplingMode === 'filmBase' ? 'baseSampleHint' : 'sampleHint');
     for (const element of studioNodes) set(element, 'textContent', t(element.dataset.studio));
-    const expiredFlow = Boolean(state.expiredSession || state.expiredEnabled);
+    // The tab belongs to the explicit session: the rescue itself is on for
+    // every photo (main.js createDefaultSettings) as the automatic colour
+    // correction, which needs no tab of its own.
+    const expiredFlow = Boolean(state.expiredSession);
     set(body, '.studio-expired', expiredFlow);
     set(node['studioTab-expired'], 'hidden', !expiredFlow);
     if (!expiredFlow && activeTab === 'expired') selectTab('edit');
@@ -930,8 +921,6 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
     set(body, '.studio-opening', !loaded && Boolean(switching));
     const busy = body.dataset.studioBusy === 'true' || Boolean(switching);
     const locked = busy || state.cropping || isExportLocked();
-    set(node.studioColorCorrect, 'disabled', !ready || locked);
-    set(node.studioColorCorrectStatus, 'hidden', !ready || !state.expiredEnabled || !state.expiredAnalysis);
     for (const id of ['studioImportAutoCrop', 'studioAutoCrop']) set(node[id], 'checked', Boolean(state.autoFrame.onImport));
     set(node.studioRestoreFrame, 'disabled', !loaded || locked || !(state.cropRegion || state.rotationAngle || state.mirrored));
     const frameMeta = state.autoFrame.lastDiagnostics;

@@ -360,7 +360,8 @@ export async function runExpiredFilmSmoke({ send, evaluate, waitFor, wait, fail,
   await evaluate(`document.getElementById('studioExpiredMode').click()`);
   await wait(700);
   const left = await evaluate(`(() => ({ flow: document.body.classList.contains('studio-expired'), hidden: document.getElementById('studioTab-expired').hidden, enabled: document.getElementById('expiredEnabled').checked, active: document.querySelector('.studio-tabs [aria-selected="true"]').id }))()`);
-  if (left.flow || !left.hidden || left.enabled || left.active === 'studioTab-expired') fail(`leaving the flow: ${JSON.stringify(left)}`);
+  // Leaving keeps the correction: it is every photo's default, the tab is the session's.
+  if (left.flow || !left.hidden || !left.enabled || left.active === 'studioTab-expired') fail(`leaving the flow: ${JSON.stringify(left)}`);
   // Compare exported pixels: enabling rescue switches between WebGL and CPU
   // previews, and a hidden backing canvas can contain an older render.
   const exportColorPixels = async () => {
@@ -374,37 +375,38 @@ export async function runExpiredFilmSmoke({ send, evaluate, waitFor, wait, fail,
       return { width: c.width, height: c.height, pixels: c.toDataURL() };
     })()`);
   };
-  const ordinaryPixels = await exportColorPixels();
-  // Ordinary negative workflow exposes the same algorithm above CMYD, even
-  // with Advanced off. One action, one undo; geometry and manual CMYD survive.
+  const autoPixels = await exportColorPixels();
+  // The ordinary workflow corrects colour automatically (the former one-click
+  // button): no entry above CMYD, the rescue measured and on, its tab hidden,
+  // the session off. The checkbox (in the hidden tab) switches it off per
+  // photo in one undo step; geometry, type and the active tab stay.
   await evaluate(`(() => { document.getElementById('studioTab-edit').click(); const advanced = document.getElementById('studioAdvancedPanels'); if (advanced.getAttribute('aria-pressed') === 'true') advanced.click(); })()`);
-  const ordinary = await evaluate(`(() => {
-    const button = document.getElementById('studioColorCorrect');
-    const console = document.getElementById('consoleSection');
-    return { visible: button.getBoundingClientRect().height >= 44 && !button.disabled,
-      above: !!(button.compareDocumentPosition(console) & Node.DOCUMENT_POSITION_FOLLOWING),
-      label: button.textContent.trim(), advanced: document.getElementById('studioAdvancedPanels').getAttribute('aria-pressed') };
-  })()`);
-  if (!ordinary.visible || !ordinary.above || ordinary.label !== 'One-click color correction' || ordinary.advanced !== 'false') fail('ordinary color correction entry: ' + JSON.stringify(ordinary));
-  await evaluate(`document.getElementById('studioColorCorrect').click()`);
-  await waitFor('one-click color correction applied', `document.getElementById('expiredEnabled').checked && document.getElementById('expiredDiagnosis').dataset.state === 'analysed'`);
+  const ordinary = await evaluate(`(() => ({
+    button: !!document.getElementById('studioColorCorrect'),
+    enabled: document.getElementById('expiredEnabled').checked,
+    state: document.getElementById('expiredDiagnosis').dataset.state,
+    active: document.querySelector('.studio-tabs [aria-selected="true"]').id,
+    type: document.querySelector('.film-type-btn.active').dataset.type,
+    tabHidden: document.getElementById('studioTab-expired').hidden,
+    advanced: document.getElementById('studioAdvancedPanels').getAttribute('aria-pressed'),
+    session: document.getElementById('studioExpiredMode').getAttribute('aria-pressed') }))()`);
+  if (ordinary.button || !ordinary.enabled || ordinary.state !== 'analysed' || ordinary.active !== 'studioTab-edit' || ordinary.type !== 'color' || !ordinary.tabHidden || ordinary.advanced !== 'false' || ordinary.session !== 'false') fail('automatic colour correction in the ordinary workflow: ' + JSON.stringify(ordinary));
+  await capture('automatic-color-correction.png');
+  await evaluate(`document.getElementById('expiredEnabled').click()`);
+  await waitFor('automatic correction switched off', `!document.getElementById('expiredEnabled').checked`);
   await wait(1600);
-  const corrected = await evaluate(`(() => {
-    return {
-      active: document.querySelector('.studio-tabs [aria-selected="true"]').id,
-      type: document.querySelector('.film-type-btn.active').dataset.type,
-      status: !document.getElementById('studioColorCorrectStatus').hidden,
-      session: document.getElementById('studioExpiredMode').getAttribute('aria-pressed') };
-  })()`);
-  const correctedPixels = await exportColorPixels();
-  if (correctedPixels.pixels === ordinaryPixels.pixels || correctedPixels.width !== ordinaryPixels.width || correctedPixels.height !== ordinaryPixels.height || corrected.active !== 'studioTab-edit' || corrected.type !== 'color' || !corrected.status || corrected.session !== 'false') fail('ordinary one-click correction: ' + JSON.stringify(corrected));
-  await capture('one-click-color-correction.png');
+  const offPixels = await exportColorPixels();
+  if (offPixels.pixels === autoPixels.pixels || offPixels.width !== autoPixels.width || offPixels.height !== autoPixels.height) fail('switching the automatic correction off did not change the exported pixels');
   await evaluate(`document.getElementById('undoBtn').click()`);
-  await waitFor('one-click correction undo', `!document.getElementById('expiredEnabled').checked`);
+  await waitFor('automatic correction undo', `document.getElementById('expiredEnabled').checked`);
   await wait(1000);
   const undonePixels = await exportColorPixels();
-  if (undonePixels.pixels !== ordinaryPixels.pixels) fail('one-click correction undo changed exported pixels');
-  console.log('ok: ordinary negative one-click correction is prominent above CMYD, changes pixels, preserves geometry/type/tab, and undoes in one step');
+  if (undonePixels.pixels !== autoPixels.pixels) fail('undoing the switch-off changed exported pixels');
+  // Analyse again measures the frame once more, in the worker (counted below).
+  await evaluate(`document.getElementById('expiredAnalyzeBtn').click()`);
+  await waitFor('analyse again', `document.getElementById('expiredDiagnosis').dataset.state === 'analysed' && !document.body.dataset.studioBusy`);
+  await wait(1000);
+  console.log('ok: the ordinary workflow corrects colour automatically without a button; the checkbox switches it off, undo restores it, Analyse again re-measures');
 
   await evaluate(`document.getElementById('studioExpiredMode').click()`);
   await wait(700);
@@ -412,7 +414,7 @@ export async function runExpiredFilmSmoke({ send, evaluate, waitFor, wait, fail,
   if (!back.flow || !back.enabled || back.active !== 'studioTab-expired' || back.state !== 'analysed') fail(`re-entering the flow: ${JSON.stringify(back)}`);
   console.log('ok: menu entry leaves and re-enters the expired flow');
 
-  // The fog surface (interactive, one-click correction and the batch export
+  // The fog surface (interactive, Analyse again and the batch export
   // of a never-opened frame) was measured in the auto-frame worker: the page
   // never booted its own OpenCV (#245).
   const realm = await evaluate(`({ cv: typeof window.cv, script: !!document.querySelector('script[data-opencv-loader]'), tasks: { ...window.__ncAnalysis.tasks } })`);

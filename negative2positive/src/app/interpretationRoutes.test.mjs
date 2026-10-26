@@ -70,7 +70,7 @@ assert.ok(typeStart > 0 && typeEnd > typeStart && modeEnd > modeStart);
 async function fixture({ type = 'positive', mode = 'correct', manual = false, roll = null } = {}) {
   const h = createHarness(base), { context: c, target, state } = h;
   Object.assign(state, EXPIRED_RESCUE_DEFAULTS, { filmType: type, positiveMode: mode, currentStep: 3,
-    filmTypeSource: 'auto', expiredEnabled: true, semanticMap: structuredClone(map),
+    filmTypeSource: 'auto', expiredEnabled: true, expiredSession: true, semanticMap: structuredClone(map),
     filmBase: { r: 228, g: 194, b: 144, method: 'manual' }, filmBaseSet: true, coreBorderBuffer: 0,
     coreExposure: 19, expiredBrightness: 17, expiredContrast: 23, expiredNeutralize: 61,
     wbR: 1.17, wbG: 1, wbB: .86, wbAutoConfidence: 'high', wbUserOverride: manual,
@@ -136,7 +136,13 @@ async function fixture({ type = 'positive', mode = 'correct', manual = false, ro
     setTimeout: callback => { timers.push(callback); },
     scheduleSilverSourceRefresh: () => { target.coreReprocessToken++; },
     flushScheduledCoreReprocess: async () => {
-      state.processedImageData = await convertFrameWithRouter({ imageData: base, settings: target.buildRouterSettings(state), options: { forceFullProcess: true } });
+      // As the core reprocess converts: with the colour-analysis sample of
+      // the frame's area, whose preview the rescue measures.
+      // The context's getColorAnalysisSample: the real one where a test
+      // installed it (interpretationHistory), else this harness's stub.
+      const analysisImageData = vm.runInContext('getColorAnalysisSample', c)(state);
+      state.processedImageData = await convertFrameWithRouter({ imageData: base, settings: target.buildRouterSettings(state),
+        options: { forceFullProcess: true, analysisImageData } });
       target.displayedFrameToken = target.coreReprocessToken;
     },
     settleMeasurementInputs: async (measure, current) => { if (current()) measure(); }

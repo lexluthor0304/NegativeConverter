@@ -147,6 +147,10 @@ export async function runInterpretationHistoryCropSmoke(ctx) {
     }
     same('crop history original identity', await evaluate('window.__ncTwoStage.queuedRecipes().map(item => item.name)'), [filename]);
   };
+  // What each rescue measurement read (frame/sample, p = the engine's
+  // analysis preview, r = a region, @exposure, interpretation): the live
+  // flow and the independent reopen must measure the same sample.
+  const measured = `window.__ncAnalysis.expiredMeasurements().map(m => m.frame.join('x') + '/' + m.sample.join('x') + (m.analysisPreview ? 'p' : '') + (m.region ? 'r' : '') + '@' + m.exposure + ' ' + m.interpretation).join(' | ')`;
   const cases = [
     ['warm-middle-type-off', false, false, 'automatic', ['bw', 'correct'], ['positive', 'correct'], ['color', 'correct']],
     ['full-middle-type-off', true, false, 'automatic', ['bw', 'correct'], ['positive', 'correct'], ['color', 'correct']],
@@ -278,6 +282,13 @@ export async function runInterpretationHistoryCropSmoke(ctx) {
       if (!rescue) await waitFor(scene + ' input conversion', `${ready} && !window.__ncAnalysis.converting()`, 120_000);
       return await evaluate(`${status}.settings`);
     };
+    // The rescue in positive edit mode is the expired-roll session's: outside
+    // it, edit mode turns the automatic correction off. The photo is rescued
+    // already, so entering the session adds no history entry.
+    if (rescue) {
+      await evaluate(`document.getElementById('studioExpiredMode').click()`);
+      await waitFor(scene + ' expired-roll session', `document.getElementById('studioExpiredMode').getAttribute('aria-pressed') === 'true'`, 30_000);
+    }
     let middleInputs, finalInputs;
     if (middle) {
       if (inputKind) middleInputs = await editInput(false);
@@ -317,6 +328,7 @@ export async function runInterpretationHistoryCropSmoke(ctx) {
       if (hitDispatch) console.log('interpretation hit restoration:', JSON.stringify({ scene, phase,
         ...await evaluate('window.__ncHistoryInputs.restoration()') }));
       if ((middle || hitDispatch) && rescue && !recipe.expiredAnalysis) fail(scene + ' ' + phase + ': settled rescued history has no measurement before export');
+      if (rescue) console.log('interpretation crop history rescue measurements:', scene, phase, await evaluate(measured));
       const single = await diagnosticExport(scene + ' ' + phase, phase);
       const all = await exportAllFormats(1, scene + ' ' + phase + ' batch', formats);
       const batch = Object.fromEntries(Object.entries(all).map(([key, values]) => [key, Object.values(values)[0]]));
@@ -373,6 +385,7 @@ export async function runInterpretationHistoryCropSmoke(ctx) {
         if (Math.abs(wb.wbR - 1) + Math.abs(wb.wbB - 1) < .0001) fail(scene + ': actual independent color measurement must be nonunit');
         if (result.recipe.coreExposure !== measurementExposure) { await setSlider('coreExposure', result.recipe.coreExposure); await evaluate('window.__ncAnalysis.settle()'); }
       }
+      if (rescue) console.log('interpretation crop history rescue measurements:', scene, 'fresh-' + phase, await evaluate(measured));
       const fresh = await diagnosticExport(scene + ' ' + phase + ' independent full interpretation', 'fresh-' + phase);
       console.log('interpretation crop history comparison:', JSON.stringify({ scene, phase, actual: result.single, fresh }));
       sameExports(scene + ' ' + phase + ' independent exact samples/files', result.single, fresh);

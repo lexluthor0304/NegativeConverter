@@ -4,8 +4,8 @@
 // node negative2positive/src/app/expiredMeasurement.test.mjs
 //
 // - R1-074: a fog-surface request joins the run in flight only when it
-//   measures the same inputs. One whose inputs differ (the strengths One-click
-//   colour correct resets, a new semantic map, analysis area or plane)
+//   measures the same inputs. One whose inputs differ (the strengths a
+//   re-measure resets, a new semantic map, analysis area or plane)
 //   measures again and supersedes it, so the stored measurement is the one
 //   1703835 took: every request measured with the settings of its call.
 // - R1-017: an automatic retype (#231's flip of the open photo) and "These
@@ -206,7 +206,8 @@ function spatialContext({ at1703835 = false, unevenFog = 0 } = {}) {
   return { context, state, target, held, frame };
 }
 
-// One-click colour correct (setExpiredEnabled(true, { reanalyze: true }))
+// Re-measuring with the strengths reset (setExpiredEnabled(true, { reanalyze:
+// true }) when the rescue is switched back on; the former one-click button)
 // with the rescue already on: the strengths go back to the defaults and the
 // frame is measured again.
 function colourCorrect(context) {
@@ -491,4 +492,26 @@ for (const moved of [false, true]) {
   assert.equal(leader.state.expiredAnalysis, null, 'the B&W frame on screen is not measured as a positive');
   assert.equal(leader.measured.length, 1);
 }
-console.log('expiredMeasurement: a retype of the open photo measures its new mode and fills the strengths that measurement sets (R1-017)');
+// A measurement replacing one in place (a crop, a confirmed area or a
+// semantic map measures the frame again): strengths still at the previous
+// measurement's values follow it, as a fresh decode of that frame (a batch
+// lane) sets them from its one measurement; values the user moved stay.
+{
+  const { applyExpiredAnalysisDefaults } = fresh.positive.c;
+  const first = fresh.positive.state.expiredAnalysis;
+  const second = { ...first, leveledMedian: first.leveledMedian / 2, lumLow: Math.min(first.lumLow + 0.2, first.lumHigh - 0.1) };
+  assert.notDeepEqual(strengthsOf(defaultExpiredRescueParams(second)), strengthsOf(defaultExpiredRescueParams(first)), 'the fixture: the second measurement sets other strengths');
+  const target = { ...EXPIRED_RESCUE_DEFAULTS, expiredEnabled: true, expiredAnalysis: null, expiredBrightnessUserOverride: false, expiredContrastUserOverride: false };
+  applyExpiredAnalysisDefaults(target, first);
+  assert.deepEqual(strengthsOf(target), strengthsOf(defaultExpiredRescueParams(first)), 'the first measurement fills the defaults');
+  applyExpiredAnalysisDefaults(target, second);
+  assert.deepEqual(strengthsOf(target), strengthsOf(defaultExpiredRescueParams(second)), 'automatic strengths follow the next measurement');
+  target.expiredBrightness += 9; target.expiredBrightnessUserOverride = true;
+  const moved = target.expiredBrightness;
+  applyExpiredAnalysisDefaults(target, first);
+  assert.deepEqual(strengthsOf(target), [moved, defaultExpiredRescueParams(first).expiredContrast], 'a moved brightness stays, contrast follows');
+  target.expiredContrast += 3;
+  applyExpiredAnalysisDefaults(target, second);
+  assert.deepEqual(strengthsOf(target), [moved, defaultExpiredRescueParams(first).expiredContrast + 3], 'a contrast off the measured value (a sync) stays');
+}
+console.log('expiredMeasurement: a retype of the open photo measures its new mode and fills the strengths that measurement sets (R1-017); a re-measure moves the automatic strengths');

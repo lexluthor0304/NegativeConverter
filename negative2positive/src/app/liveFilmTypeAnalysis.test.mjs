@@ -29,7 +29,7 @@ for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
 }
 const image = { width, height, data: Uint8ClampedArray.from(data16, v => v >>> 8), __image16: { width, height, data: data16 } };
 function fixture(type, mode, { manualWb = false } = {}) {
-  const state = { ...EXPIRED_RESCUE_DEFAULTS, expiredEnabled: true, expiredBrightness: 17, expiredContrast: 23,
+  const state = { ...EXPIRED_RESCUE_DEFAULTS, expiredEnabled: true, expiredSession: true, expiredBrightness: 17, expiredContrast: 23,
     expiredNeutralize: 61, filmType: type, positiveMode: mode, coreExposure: 19, cropRegion: { left: 2, top: 3, width: 40, height: 30 },
     semanticMap: structuredClone(map), autoFrame: { lastDiagnostics: null }, processedImageData: image,
     wbR: 1.17, wbG: 1, wbB: 0.86, wbAutoConfidence: 'high', wbSemanticApplied: false,

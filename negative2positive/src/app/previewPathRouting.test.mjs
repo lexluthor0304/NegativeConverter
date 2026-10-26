@@ -199,6 +199,8 @@ function fixture({ large = true, repairs = false, strokes = 0, aiBrush = false, 
     // The background lanes' gate (#243).
     backgroundGate: { bump: noop },
     noteDustReplaced: noop, syncDustWorkerPin: noop,
+    // The rescue controls' refresh on a landed frame is not under test.
+    expiredRescueUiReady: false, updateExpiredRescueUI: noop,
     // No undo or redo restored a dust state here (#259).
     restoredDust: null,
     // No GPU preview (#239): these frames take the worker path.

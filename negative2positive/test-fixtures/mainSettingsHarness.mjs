@@ -46,7 +46,7 @@ const deps = {
   state, aiRepair, exactSettingsKey, normalizeAngleDegrees, sanitizeSemanticMap, sanitizeFilmEdgeForSettings,
   sanitizeRollFrameForSettings, normalizePaperId, normalizeToningId, sanitizeLocalExposureForSettings,
   sanitizeRepairStrokes, sanitizeLookForSettings, sanitizeExpiredRescueParams, sanitizeExpiredAnalysis,
-  EXPIRED_RESCUE_DEFAULTS, sanitizeFrameMetadata, computeSpline, sanitizeFilmBaseForSettings, sanitizeFilmTypeOverride,
+  EXPIRED_RESCUE_DEFAULTS, RESCUE_DEFAULT_ON: true, sanitizeFrameMetadata, computeSpline, sanitizeFilmBaseForSettings, sanitizeFilmTypeOverride,
   detectedImportSettings: () => ({ filmType: 'color', positiveMode: 'correct', filmTypeSource: 'manual' }),
   autoDetectFilmBase: () => ({ r: 205, g: 141, b: 92 }),
   cachedDetectFilmType: () => null,

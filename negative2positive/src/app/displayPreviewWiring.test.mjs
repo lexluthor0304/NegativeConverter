@@ -85,6 +85,8 @@ function fixture({ sourceSize = { width: 1200, height: 800 }, container = { widt
     // #242: new planes fit the CSS box; a CPU mode settles the new display
     // preview with the exact colour model.
     fitStep3CanvasBox: () => {}, scheduleFullUpdate: () => log.push('settle'),
+    // The rescue controls' refresh on a landed frame is not under test.
+    expiredRescueUiReady: false, updateExpiredRescueUI: () => {},
     schedulePreviewUpdate: () => log.push('redraw'), scheduleGpuPreviewWarmup: () => log.push('gpu-warmup'),
     gpuApplyUsable: () => false, GPU_PREVIEW_MODE: 'auto', hasFrameRepairs: () => false,
     repairedPreviewShown: null, dustDetectionTimer: null, fullResolutionRenderTimer: null,

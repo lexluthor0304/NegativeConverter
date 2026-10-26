@@ -17,6 +17,7 @@ on:
       - 'scripts/verify-ios-package.py'
       - 'scripts/test-ios-package.py'
       - 'negative2positive/test-fixtures/store-negative.jpg'
+      - 'src-tauri/gen/apple/**'
   workflow_dispatch:
 
 permissions:
