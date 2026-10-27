@@ -1,56 +1,63 @@
 # iPhone and iPad App Store automation
 
 `.github/workflows/ios-release.yml` builds, signs, verifies and uploads the iOS
-app on GitHub's macOS runner. The App Store lane submits for review and sets
-`automatic_release: true`: Apple approval releases the version without a
-separate manual publish action. Apple's review is still required.
+app on GitHub's macOS runner and submits it for review with
+`automatic_release: true`: Apple's approval releases the version without a
+separate publish action. Apple's review is still required.
 
 This is the same application record as the Mac app: Apple ID `6797694070`,
-bundle ID `com.neoanaloglab.negativeconverter`, team `X93Y44J36C`. Adding iOS
-to this record establishes universal purchase after both platforms are
-approved. Pricing and shared app information are not modified by this lane.
+bundle ID `com.neoanaloglab.negativeconverter`, team `X93Y44J36C`. Both
+platforms on one record form a universal purchase once both are approved.
+Pricing and shared app information are not modified by this lane.
 
-## Current delivery state (2026-10-19)
+## How a release happens
 
-The workflow, independent version generation, IPA validation and English store
-copy are prepared. They have **not** completed a signed GitHub Actions run,
-TestFlight upload, Apple review or public release. The App Store Connect page
-could not be accessed because the browser's administrator-policy check failed;
-this preparation did not add an iOS platform or change the store release option.
+Every push to `main` runs the workflow; so does a schedule (`53 */2 * * *`)
+and a manual dispatch. The cheap `check` job on Ubuntu runs
+`.github/scripts/prepare_ios_release.mjs`, which plans the next version and
+decides; only on `publish` does the macOS `publish` job build and submit.
 
-`fastlane/ios/release.json` deliberately records
-`appStoreSubmissionReady: false`. Both the workflow preflight and the Fastlane
-App Store lane reject submission while it is false. The workflow has no
-automatic push effect until the repository variable `IOS_RELEASE_CHANNEL` is
-configured. This is a first-release acceptance gate, not manual publishing
-after approval.
+| decision | when | run |
+| --- | --- | --- |
+| `publish` | something app-relevant changed since the last submitted `ios/v*` tag and no iOS version is in flight at App Store Connect | build, verify, upload, submit for review, tag `ios/vX.Y.Z` |
+| `skip` | the diff since the last `ios/v*` tag only touches tests, fixtures, benchmarks, docs, CI or the desktop/Mac lanes (`IGNORED_PATHS` in the script, the counterpart of `desktop-release.yml`'s `paths-ignore`) | notice, nothing built |
+| `blocked` | the previous iOS version is `WAITING_FOR_REVIEW`, `IN_REVIEW`, `PENDING_*`, `PROCESSING_*` … (App Store Connect allows one version per platform in flight; deliver would die on "You cannot create a new version of the App in the current state") | a push gets a "deferred" warning; the next scheduled run that finds Apple done submits `main` |
+| `paused` | `fastlane/ios/release.json` has `appStoreSubmissionReady: false` | notice; the committed switch to stop App Store submissions |
+| `done` | the planned version already exists at App Store Connect and is not editable, i.e. a submission succeeded but its tag was never pushed | notice; tag that commit as `ios/v<version>` by hand so the sequence moves on |
 
-The physical iPhone run in [P2 evidence](ios-p2-recovery.md#physical-device-harness)
-passed JPEG, HEIC, native NEF/DNG decode, 8-bit PNG export and whole-app
-termination/recovery. The exact P2 head `e6a89c95` passed all four
-[iOS CI jobs](https://github.com/lexluthor0304/NegativeConverter/actions/runs/39223945265)
-and all five [desktop CI jobs](https://github.com/lexluthor0304/NegativeConverter/actions/runs/39223945317).
-These are development-build results, not signed distribution validation.
+The in-flight question is `decideStorePublish` from
+`.github/scripts/asc_mas_state.mjs`, the same code the Mac App Store lane uses
+(`docs/mas-release.md`), asked for the `IOS` platform. A version Apple
+rejected (`DEVELOPER_REJECTED`, `METADATA_REJECTED`, …) does not block:
+deliver renames it to the new number and re-submits with the new build.
 
-Complete the following before changing submission readiness:
+The workflow holds one concurrency group (`ios-release`), so a scheduled or
+dispatched run waits for a running build and then sees the fresh App Store
+Connect state, a newer pending run replaces an older pending one (main's head
+carries that commit anyway), and a running upload is never cancelled. The
+publish job runs the planner again and fails loudly if the decision changed
+in between, which the group makes impossible in practice. A pull request that
+changes the lane files runs the check only, in its own group, and reports
+what it would do.
 
-- Validate a physical iPad, lower-memory admission/refusal, touch, rotation and
-  background/foreground behavior, plus separate WKWebView WebContent termination.
-- Complete native import/save/share integration and 16-bit export acceptance.
-- Run and install the distribution candidate through TestFlight on iPhone and
-  iPad; retain import, conversion, editing, export and recovery evidence.
-- Add the iOS platform to the existing record, initially version `1.0.0`, and
-  verify the current pricing, availability, privacy labels, export compliance,
-  review contact information and support URL. These shared record details have
-  not been freshly verified in this preparation.
-- Capture native iPhone and iPad screenshots and review the description against
-  the final tested feature set. Store asset validation must pass.
+Manual runs: `gh workflow run ios-release.yml --ref main -f channel=testflight`
+uploads a TestFlight build to the internal group (no store gates, no tag);
+`-f channel=app-store` is the same path as a push. Pushes always use
+`app-store`; there is no repository variable to set.
 
-## Credentials and activation
+## Current delivery state (2026-10-27)
+
+iOS 1.0.0 (build 14.1) was submitted for review on 2026-10-27 from commit
+`10294962` (tag `ios/v1.0.0`) after the TestFlight build was tried on an
+iPhone and an iPad. Approval and public availability were not yet verified at
+that time; once Apple approves, install from the App Store on both devices
+and check the listing. Earlier device evidence: [P2](ios-p2-recovery.md#physical-device-harness).
+
+## Credentials
 
 The uploader reuses `ASC_API_KEY_ID`, `ASC_API_ISSUER_ID` and base64
-`ASC_API_KEY_P8` from the existing Mac release. The build maps
-`MAS_CERT_DIST_P12` and `MAS_CERT_PASSWORD` to Tauri's `IOS_CERTIFICATE` and
+`ASC_API_KEY_P8` from the Mac release. The build maps `MAS_CERT_DIST_P12`
+and `MAS_CERT_PASSWORD` to Tauri's `IOS_CERTIFICATE` and
 `IOS_CERTIFICATE_PASSWORD`. The identity must be **Apple Distribution** with
 its private key; the Mac installer certificate is not used.
 
@@ -65,32 +72,20 @@ configures manual signing and xcodebuild refuses them (the first dispatch on
 2026-10-26 failed that way). The API key therefore needs a role that can manage
 provisioning (Admin, or Developer with access to certificates and profiles).
 
-After adding iOS to the record and configuring the profile, run the workflow
-on `main` with channel `testflight` for the first distribution validation.
-Alternatively, set the repository variable `IOS_RELEASE_CHANNEL=testflight`
-to upload automatically on each main push. This uploads and waits for processing;
-it does not invite external testers or submit to App Review. Configure an
-internal TestFlight group with automatic distribution in App Store Connect.
-
-After the acceptance evidence and store assets above are complete, set
-`appStoreSubmissionReady` to `true` in a reviewed change and set
-`IOS_RELEASE_CHANNEL=app-store`. Subsequent main pushes run the entire release
-sequence automatically. A workflow dispatch is also available for retries.
-Missing credentials fail an enabled run rather than reporting a successful
-publish. Existing submissions are not automatically withdrawn: Fastlane uses
-`reject_if_possible: false` and stops if Apple does not permit another version.
-
-The current work is stacked on the iOS branches. Do not merge the unfinished
-mobile feature stack merely to make a release workflow dispatch available;
-main merges also trigger the existing desktop/Mac App Store release.
+Missing credentials fail a publish rather than reporting a successful
+submission. Without the App Store Connect key the check job cannot ask about
+versions in flight and lets the publish job go ahead; deliver then reports
+the state itself. Existing submissions are never withdrawn: deliver runs with
+`reject_if_possible: false`.
 
 ## Independent versioning
 
 The first iOS version is `fastlane/ios/release.json`'s `initialVersion` (`1.0.0`).
 After a successful App Store **submission**, the workflow creates an `ios/v*`
-tag pointing to the uploaded commit. A later run bumps the highest iOS version's
-patch. Raising `initialVersion` above that sequence starts a new minor/major
-series. Desktop `v*` tags are ignored; Mac versions and files are not rewritten.
+tag pointing to the submitted commit. A later run bumps the highest iOS
+version's patch. Raising `initialVersion` above that sequence starts a new
+minor/major series. Desktop `v*` tags are ignored; Mac versions and files are
+not rewritten.
 
 `CFBundleVersion` is `<github.run_number>.<github.run_attempt>`, independently
 tracked by this workflow. A retry gets a different build number. Four/two-digit
@@ -101,14 +96,25 @@ a newer upload; use a new dispatch instead in that case.
 
 TestFlight runs do not tag a submitted version. Further test uploads and the
 eventual App Store upload use the same next marketing version, with distinct
-build numbers. The App Store lane builds a fresh candidate from its selected
-commit; preserve the validated source commit when doing the first submission.
+build numbers.
 
 Generated version overlays live only in `output/ios-release`. Tauri automatically
 merges `tauri.ios.conf.json`; the generated overlay changes the iOS version and
 bundle number. The archive is a release build exported with
 `--export-method app-store-connect`, suitable for both upload channels. The
 development project's `debugging` export setting is overridden explicitly.
+
+## What's New
+
+For every version after the first, the planner writes
+`fastlane/ios/metadata/en-US/release_notes.txt` in the runner's checkout from
+the commit subjects since the previous `ios/v*` tag (`whatsNew`): `ci`,
+`docs`, `test`, `chore`, `build`, `refactor`, `style`, `release` and `revert`
+subjects are dropped, `feat:` prefixes go, `fix:` becomes "Fixed:", `perf:`
+becomes "Performance:", PR numbers are removed and the text stays under
+Apple's 4000 characters. When nothing user-facing remains, the committed
+sentence in that file is uploaded instead. Nothing is committed back; the
+file in git is the fallback and the first version has no What's New.
 
 ## Verification and artifacts
 
@@ -125,25 +131,27 @@ prevent fixture assets from being embedded into the executable. A simulator or
 development-signed app is refused.
 
 The workflow artifact contains the verified IPA, SHA-256/signature report and
-release plan with source SHA. A green upload or review submission does not prove
-approval or public availability. After Apple approves, verify the public listing
-and install from the App Store on both iPhone and iPad.
+release plan with source SHA, decision and the app-relevant changes. A green
+upload or review submission does not prove approval or public availability.
+After Apple approves, verify the public listing and install from the App Store
+on both iPhone and iPad.
 
 Local checks that do not sign, build, contact Apple or need a phone:
 
 ```sh
 node .github/scripts/prepare_ios_release.test.mjs
+node .github/scripts/asc_mas_state.test.mjs
+IOS_RELEASE_CHANNEL=app-store node .github/scripts/prepare_ios_release.mjs   # plan + decision without Apple
 python3 scripts/test-ios-package.py
 ruby -c fastlane/Fastfile
 npm test
 ```
 
-`node scripts/check-ios-store-assets.mjs` is a submission check and currently
-fails because no native store screenshots have been supplied. Do not replace
-them with desktop screenshots or Chromium layout mocks.
-The `Store screenshots (simulator)` job in `ios-ci.yml` captures them from the
-iOS Simulator at the required sizes once `negative2positive/test-fixtures/
-store-negative.jpg` exists; see `fastlane/ios/screenshots/README.md`.
+`node scripts/check-ios-store-assets.mjs` checks the store copy and the native
+screenshot sets before any upload can replace them. Do not replace the
+captures with desktop screenshots or Chromium layout mocks; the `Store
+screenshots (simulator)` job in `ios-ci.yml` captures them from the iOS
+Simulator at the required sizes (`fastlane/ios/screenshots/README.md`).
 
 ## Store copy and screenshots
 
@@ -151,15 +159,13 @@ The iOS lane reads only `fastlane/ios/metadata` and `fastlane/ios/screenshots`;
 it never uploads `fastlane/screenshots`, the Mac set. The first locale is en-US.
 App description and keywords avoid unverified claims about RAW model coverage
 or 16-bit mobile export. Name, privacy policy, pricing and review contact data
-remain in the shared record and need the live checks above.
+remain in the shared record. A change to the store copy or screenshots counts
+as an app change and goes out with the next version.
 
 The screenshot checker requires native iPhone medium Dynamic Island captures
 and iPad 13-inch captures, one to ten opaque RGB PNGs per family. Exact accepted
 sizes are in the screenshot directory's README. It fully decodes each image,
-checks dimensions and rejects blank or missing sets before any upload can
-replace existing screenshots. Fastlane skips What's New for the first platform
-version; later releases use `release_notes.txt`, which should describe their
-actual user-visible changes.
+checks dimensions and rejects blank or missing sets.
 
 ## References
 

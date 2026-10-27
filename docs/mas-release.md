@@ -38,6 +38,10 @@ two callers share the `mas-publish` concurrency group, so a catch-up never
 builds beside a release. On a pull request that touches the lane the catch-up
 workflow runs its check only and reports what it would do.
 
+The iOS lane takes the same decision for the `IOS` platform through this
+script's `decideStorePublish` (`.github/scripts/prepare_ios_release.mjs`;
+`docs/ios-release.md`); its scheduled run is the iOS catch-up.
+
 Build numbers stay unique: the state script also lists the builds already
 uploaded for the version, and `set_mas_bundle_version.mjs` takes the larger of
 the attempt formula below and the next free number, so a catch-up after a
