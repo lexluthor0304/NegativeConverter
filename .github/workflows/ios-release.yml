@@ -1,32 +1,106 @@
 name: iOS App Store release
 
+# Every push to main submits the iPhone/iPad app for review, released
+# automatically on approval. The check job skips pushes that leave the app as
+# it was (tests, docs, CI, the Mac lanes) and defers while Apple still reviews
+# the previous iOS version; the two-hourly schedule then submits main once the
+# review is over. A dispatch can also upload to TestFlight. On a pull request
+# that changes the lane only the check runs. See docs/ios-release.md.
 on:
   push:
     branches: [main]
+  schedule:
+    - cron: '53 */2 * * *'
   workflow_dispatch:
     inputs:
       channel:
-        description: Upload for internal testing or submit for automatic App Store release
+        description: Upload for internal TestFlight testing, or submit for automatic App Store release
         type: choice
         options: [testflight, app-store]
         default: testflight
+  pull_request:
+    paths:
+      - '.github/workflows/ios-release.yml'
+      - '.github/scripts/prepare_ios_release*.mjs'
+      - '.github/scripts/asc_mas_state*.mjs'
+      - 'scripts/asc-api.mjs'
+      - 'fastlane/ios/release.json'
 
 permissions:
   contents: read
 
-# Never cancel a running upload/submission. Keep the iOS version sequence separate
-# from desktop-release.yml and its v* tags.
+# One run at a time: a scheduled or dispatched run waits for a push's build and
+# submission and then sees the fresh App Store Connect state; a newer pending
+# run replaces an older pending one, whose commit main's head carries anyway.
+# A running upload or submission is never cancelled. Pull requests get their
+# own group so they neither wait for nor displace a release.
 concurrency:
-  group: ios-app-store-release
-  cancel-in-progress: false
+  group: ${{ github.event_name == 'pull_request' && format('ios-release-pr-{0}', github.event.number) || 'ios-release' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  IOS_RELEASE_CHANNEL: ${{ github.event_name == 'workflow_dispatch' && inputs.channel || 'app-store' }}
 
 jobs:
-  release:
-    name: Build, verify and upload iOS
+  check:
+    name: Compare main with the last iOS submission and App Store Connect
     if: >-
       github.repository == 'lexluthor0304/NegativeConverter' &&
-      github.ref == 'refs/heads/main' &&
-      (github.event_name == 'workflow_dispatch' || vars.IOS_RELEASE_CHANNEL != '')
+      (github.event_name == 'pull_request' || github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      publish: ${{ steps.report.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The ios/v* tags and the diff since the last one.
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: Plan the next iOS version and decide
+        id: plan
+        env:
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+        run: node .github/scripts/prepare_ios_release.mjs
+      - name: Report
+        id: report
+        env:
+          DECISION: ${{ steps.plan.outputs.decision }}
+          REASON: ${{ steps.plan.outputs.reason }}
+          VERSION: ${{ steps.plan.outputs.version }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          publish=false
+          case "$DECISION" in
+            publish)
+              if [ "$EVENT" = pull_request ]; then
+                echo "::notice::iOS $VERSION would be built and submitted now ($REASON); a pull request only reports."
+              else
+                echo "iOS $VERSION goes ahead: $REASON."
+                publish=true
+              fi
+              ;;
+            blocked)
+              if [ "$EVENT" = push ]; then
+                echo "::warning::iOS $VERSION deferred: $REASON. The next scheduled run submits main once Apple is done."
+              else
+                echo "::notice::iOS $VERSION still waits: $REASON."
+              fi
+              ;;
+            *)
+              echo "::notice::iOS $VERSION: $REASON."
+              ;;
+          esac
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+
+  publish:
+    name: Build, verify and upload iOS
+    needs: check
+    if: needs.check.outputs.publish == 'true'
     runs-on: macos-26
     timeout-minutes: 120
     permissions:
@@ -36,7 +110,6 @@ jobs:
       CARGO_BUILD_JOBS: 3
       CARGO_INCREMENTAL: 0
       NC_P0_FIXTURES: '0'
-      IOS_RELEASE_CHANNEL: ${{ github.event_name == 'workflow_dispatch' && inputs.channel || vars.IOS_RELEASE_CHANNEL }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -45,9 +118,25 @@ jobs:
         with:
           node-version: 24
           cache: npm
-      - name: Prepare independent iOS version and check submission readiness
+      # The same plan as the check job's (the concurrency group kept other
+      # submissions out in between); this run also writes the Tauri version
+      # overlay and the generated What's New under fastlane/ios/metadata.
+      - name: Prepare the iOS version, build number and What's New
         id: version
+        env:
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
         run: node .github/scripts/prepare_ios_release.mjs
+      - name: Stop if the decision changed since the check
+        if: steps.version.outputs.decision != 'publish'
+        env:
+          DECISION: ${{ steps.version.outputs.decision }}
+          REASON: ${{ steps.version.outputs.reason }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          echo "::error::iOS $VERSION can no longer be submitted ($DECISION: $REASON); the next scheduled run decides again."
+          exit 1
       # The manual signing that `tauri ios build --ci` configures refuses
       # Xcode-managed profiles, so the lane owns a manually managed App Store
       # profile created through the App Store Connect API for the exact

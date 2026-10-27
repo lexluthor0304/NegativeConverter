@@ -15,7 +15,10 @@ when the App Store secrets are configured — builds, uploads, and submits the
 Mac App Store version too (see `docs/mas-release.md`). The direct-download
 builds then update themselves in-app from `updater.json` on R2
 (`docs/desktop-updater.md`); the App Store build is compiled without the
-`updater` cargo feature.
+`updater` cargo feature. The same merge submits the iPhone/iPad app for
+review when it changed the app and Apple is not still reviewing the previous
+iOS version; otherwise the two-hourly schedule submits it later
+(`docs/ios-release.md`).
 
 Run locally:
 ```bash
