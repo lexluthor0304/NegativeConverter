@@ -14,6 +14,11 @@ default_platform(:mac)
 platform :mac do
   desc "Upload the signed .pkg to App Store Connect and submit for review"
   lane :mas_upload do
+    # The ASC API key alone only proves identity, not that the caller is
+    # authorized to ship a production release. Require an explicit,
+    # separately-gated flag so a leaked/valid key cannot submit on its own.
+    UI.user_error!("RELEASE_AUTHORIZED must be 'true' to run mas_upload") unless ENV["RELEASE_AUTHORIZED"] == "true"
+
     api_key = app_store_connect_api_key(
       key_id: ENV.fetch("ASC_API_KEY_ID"),
       issuer_id: ENV.fetch("ASC_API_ISSUER_ID"),
