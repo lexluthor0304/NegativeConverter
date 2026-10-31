@@ -30,8 +30,8 @@ const PREVIEW_PHOTOMETRIC = new Set([2, 6]);
 
 // TIFF-family RAW containers this locator understands. CR3/RAF/X3F and other
 // non-TIFF containers keep their numbered tile.
-const TIFF_RAW_EXTENSIONS = new Set(['dng', 'nef', 'nrw', 'cr2', 'arw', 'srf', 'sr2', 'rw2', 'rwl',
-  'pef', 'srw', '3fr', 'mef', 'iiq', 'kdc', 'dcr', 'erf', 'mos', 'raw']);
+const TIFF_RAW_EXTENSIONS = new Set(['dng', 'nef', 'nefx', 'nrw', 'cr2', 'arw', 'srf', 'sr2', 'rw2', 'rwl',
+  'pef', 'srw', '3fr', 'fff', 'mef', 'iiq', 'kdc', 'dcr', 'erf', 'mos', 'raw']);
 
 export function isTiffContainerRawName(name) {
   const ext = String(name || '').toLowerCase().split('.').pop();

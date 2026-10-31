@@ -190,6 +190,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       loadRawImageDataPreview,
       loadStandardImage
     } from './imageFileLoaders.js';
+    import { IMAGE_IMPORT_ACCEPT } from './importFormats.js';
     import { Histogram } from '../silvercore/ui/Histogram.js';
     import { loadFilmPresets } from '../silvercore/engine/filmPresetsLoader.js';
     import { detectDust, updateDustStrength, inpaintMasked } from '../silvercore/engine/DustRemoval.js';
@@ -24497,7 +24498,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const input = document.createElement('input');
       input.type = 'file';
       input.multiple = true;
-      input.accept = '.cr2,.cr3,.crw,.nef,.nrw,.arw,.dng,.raf,.raw,.rw2,.pef,.srw,.3fr,.mef,.orf,.rwl,.iiq,.x3f,.mrw,.kdc,.dcr,.tif,.tiff,image/*';
+      input.accept = IMAGE_IMPORT_ACCEPT;
       input.onchange = (e) => {
         if (isDesktopBatchExportLocked()) return;
         if (e.target.files.length > 0) {
@@ -24548,8 +24549,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // or more here; those frames count toward one once their recipes are
     // ready (noteHotFolderRecipe).
     function addFilesToQueue(files, { importId: importIdOption = null, automaticRoll = true } = {}) {
-      // Filter for supported image files
-      const supportedExtensions = ['.cr2', '.cr3', '.crw', '.nef', '.nrw', '.arw', '.dng', '.raf', '.raw', '.rw2', '.pef', '.srw', '.3fr', '.mef', '.orf', '.rwl', '.iiq', '.x3f', '.mrw', '.kdc', '.dcr', '.tif', '.tiff', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.heic', '.heif', '.hif'];
+      // Supported image files: IMAGE_IMPORT_EXTENSIONS in importFormats.js,
+      // repeated here for the tests that run this function on its own
+      // (importFormats.test.mjs keeps the two equal).
+      const supportedExtensions = ['.3fr', '.arw', '.cr2', '.cr3', '.crw', '.dcr', '.dng', '.erf', '.fff', '.iiq', '.kdc', '.mef', '.mos', '.mrw', '.nef', '.nefx', '.nrw', '.orf', '.pef', '.raf', '.raw', '.rw2', '.rwl', '.sr2', '.srf', '.srw', '.x3f', '.tif', '.tiff', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.heic', '.heif', '.hif'];
       const validFiles = files.filter(file => {
         const ext = '.' + file.name.split('.').pop().toLowerCase();
         return supportedExtensions.includes(ext) || file.type.startsWith('image/');

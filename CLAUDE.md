@@ -182,5 +182,5 @@ The codebase includes RGB ↔ HSL and RGB ↔ CMY conversions applied per-pixel 
 ## Supported Formats
 - Standard: PNG, JPG/JPEG
 - 16-bit PNG (via UPNG.js)
-- RAW: CR2 (Canon), NEF (Nikon), ARW (Sony), DNG (Adobe), RW2 (Panasonic)
+- RAW: every camera RAW LibRaw 0.22 decodes — CR2/CR3/CRW (Canon), NEF/NEFX/NRW (Nikon), ARW/SRF/SR2 (Sony), RAF (Fujifilm), RW2/RAW (Panasonic), ORF (Olympus/OM System), PEF (Pentax), DNG (Adobe) and more. One list, `negative2positive/src/app/importFormats.js`, feeds the pickers, the queue filter, RAW routing and the panels; `index.html`, `addFilesToQueue` and the desktop watch folder (`src-tauri/src/import_folder.rs`) repeat it and `importFormats.test.mjs` keeps them equal
 - iPhone DNG (ProRaw) - Special handling via UTIF.js
