@@ -29,8 +29,12 @@ pub struct WatchResult { path: String, session: String }
 pub fn supported(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|x| x.to_str()) else { return false; };
     if name.starts_with('.') || name.starts_with('~') { return false; }
+    // The camera RAW list is CAMERA_RAW_EXTENSIONS in importFormats.js (its
+    // test reads these lines), so a watched folder takes what an import does.
     matches!(path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase().as_str(),
-        "jpg" | "jpeg" | "png" | "tif" | "tiff" | "heic" | "heif" | "hif" | "webp" | "bmp" | "dng" | "nef" | "nrw" | "cr2" | "cr3" | "arw" | "raf" | "rw2" | "raw" | "orf" | "pef")
+        "jpg" | "jpeg" | "png" | "tif" | "tiff" | "heic" | "heif" | "hif" | "webp" | "bmp"
+        | "3fr" | "arw" | "cr2" | "cr3" | "crw" | "dcr" | "dng" | "erf" | "fff" | "iiq" | "kdc" | "mef" | "mos" | "mrw"
+        | "nef" | "nefx" | "nrw" | "orf" | "pef" | "raf" | "raw" | "rw2" | "rwl" | "sr2" | "srf" | "srw" | "x3f")
 }
 fn fingerprint(path: &Path) -> Option<(u64, String)> {
     let meta = fs::symlink_metadata(path).ok()?;
@@ -133,6 +137,7 @@ fn read_scoped_chunk(directory: &Path, path: &Path, offset: u64, expected_size: 
 mod tests {
     use super::*;
     #[test] fn ignores_partial_and_hidden() { for p in [".scan.jpg", "scan.jpg.part", "scan.tmp", "~scan.png"] { assert!(!supported(Path::new(p))); } assert!(supported(Path::new("SCAN.HEIC"))); }
+    #[test] fn takes_every_camera_raw() { for p in ["Z8_0001.NEFX", "P1000123.RW2", "_A010001.ORF", "DSCF0001.RAF", "IMG_0001.CR3", "B0000001.FFF", "EPSN0001.ERF", "SCAN.SRF"] { assert!(supported(Path::new(p)), "{p}"); } }
     #[test] fn waits_for_stable_size_and_mtime() { let a = (4, "1".into()); assert!(!stable(&a, &a, Duration::from_millis(999))); assert!(stable(&a, &a, Duration::from_secs(1))); assert!(!stable(&a, &(5, "1".into()), Duration::from_secs(2))); assert!(!stable(&a, &(4, "2".into()), Duration::from_secs(2))); }
     #[test] fn stop_ends_the_active_watch() {
         let watch = ImportWatch::default(); let stop = Arc::new(AtomicBool::new(false));

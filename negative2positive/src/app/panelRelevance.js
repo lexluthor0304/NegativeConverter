@@ -1,3 +1,5 @@
+import { isCameraRawFileName } from './importFormats.js';
+
 // Visibility only. A non-default effect must remain discoverable and undoable.
 export const PANEL_RULES = {
   studioFlatField: c => ['camera-raw', 'phone'].includes(c.sourceKind),
@@ -20,6 +22,6 @@ export function inferSourceKind({ name = '', type = '', make = '', model = '' } 
   const camera = `${make} ${model}`;
   if (/EPSON|Nikon Scan|SilverFast|VueScan|Plustek|CanoScan/i.test(camera)) return 'scanner';
   if (/hei[cf]/i.test(type) || /\.(heic|heif|hif)$/i.test(name) || /iPhone|iPad|Pixel|Samsung/i.test(camera)) return 'phone';
-  if (/\.(cr2|cr3|crw|nef|nrw|arw|dng|raf|raw|rw2|pef|srw|3fr|mef|orf|rwl|iiq|x3f|mrw|kdc|dcr)$/i.test(name)) return 'camera-raw';
+  if (isCameraRawFileName(name)) return 'camera-raw';
   return 'unknown';
 }

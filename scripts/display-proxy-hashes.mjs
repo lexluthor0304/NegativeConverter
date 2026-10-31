@@ -33,7 +33,7 @@ export const DISPLAY_PROXY_ENTRY_FILES = [
 export const DISPLAY_PROXY_CODE_FILES = [
   'app/rawFileLoader.js', 'app/rawPostDecode.js', 'app/rawPostDecodeClient.js', 'workers/rawPostDecodeWorker.js',
   'app/rawResultToRgb16.js', 'silvercore/util/image16.js', 'silvercore/util/sensorDefects.js',
-  'app/tiffFileLoader.js', 'app/imageFileLoaders.js', 'workers/scanDecodeWorker.js',
+  'app/tiffFileLoader.js', 'app/imageFileLoaders.js', 'app/importFormats.js', 'workers/scanDecodeWorker.js',
   'app/imageGeometry.js', 'app/imageDataOps.js', 'app/geometryPool.js', 'workers/geometryWorker.js',
   'app/lensfunLoader.js', 'app/lensMaps.js', 'app/displayPreview.js', 'app/displayProxy.js',
   'app/librawRuntime.js', 'app/nativeRawDecoder.js', 'app/nativeRawTransfer.js', 'workers/nativeRawFetchWorker.js',

@@ -20,7 +20,7 @@ optional. See the [automation design](docs/simplicity-automation.md),
 
 ## 🌟 Features
 
-- 📷 **Supports HEIC/HEIF, PNG/JPG file uploads** (including 16-bit PNGs via UPNG.js and .cr2, .nef, .arw, .dng, .raw, .rw2 raw files via LibRaw-Wasm)
+- 📷 **Supports HEIC/HEIF, PNG/JPG file uploads** (including 16-bit PNGs via UPNG.js and camera RAW files via LibRaw-Wasm: Canon CR2/CR3/CRW, Nikon NEF/NEFX/NRW, Sony ARW/SRF/SR2, Fujifilm RAF, Panasonic RW2/RAW, Olympus/OM System ORF, Pentax PEF, Leica RWL, DNG and more)
 - 🔄 **Rotation correction** via slider or number input
 - ✂️ **Visual cropping** with drag-and-drop overlay and a film-format ratio lock (135, 120, 4×5/8×10, 5×7)
 - ⚖️ **One-click white balance** by clicking a gray area in the image
@@ -79,7 +79,7 @@ optional. See the [automation design](docs/simplicity-automation.md),
 ## ⚙️ Technical Highlights
 
 - Uses [`UPNG.js`](https://github.com/photopea/UPNG.js) to decode 16-bit PNGs  
-- Uses the [`libraw-wasm`](https://www.npmjs.com/package/libraw-wasm) npm package to support `.cr2`, `.nef`, `.arw`, `.dng`, `.raw`, `.rw2` formats
+- Uses the [`libraw-wasm`](https://www.npmjs.com/package/libraw-wasm) npm package to support camera RAW formats such as `.cr2`, `.cr3`, `.nef`, `.nefx`, `.arw`, `.raf`, `.rw2`, `.orf`, `.pef` and `.dng` (the full list is in `negative2positive/src/app/importFormats.js`)
 - Uses UTIF.js + an in-app PNG encoder path to support TIFF export and 16-bit PNG/TIFF output options  
 - Color adjustment logic is based on RGB ↔ HSL and RGB ↔ CMY conversions  
 - Film preset metadata lives in `FilmPresets.js` and is grouped dynamically by film type in the UI

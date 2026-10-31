@@ -1,15 +1,7 @@
 import { allocPlane16, sharedPlanesAvailable, markDerivedEightBit } from './crossOriginIsolation.js';
 
-export const RAW_LIKE_EXTENSIONS = [
-  '.cr2', '.cr3', '.crw', '.nef', '.nrw', '.arw', '.dng', '.raf', '.raw', '.rw2',
-  '.pef', '.srw', '.3fr', '.mef', '.orf', '.rwl', '.iiq', '.x3f', '.mrw', '.kdc',
-  '.dcr', '.tif', '.tiff'
-];
-
-export function isRawLikeFileName(fileName) {
-  const normalized = String(fileName || '').toLowerCase();
-  return RAW_LIKE_EXTENSIONS.some((ext) => normalized.endsWith(ext));
-}
+// The lists live in importFormats.js (#268, #321); kept here for importers.
+export { RAW_LIKE_EXTENSIONS, isRawLikeFileName } from './importFormats.js';
 
 const PNG_SIGNATURE = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
 

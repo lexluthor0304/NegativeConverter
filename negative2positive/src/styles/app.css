@@ -2283,7 +2283,10 @@ body.dodge-burn-active #glCanvas {
 .toast-message {
   background: rgba(30,30,30,0.92); color: #e0e0e0; padding: 8px 18px;
   border-radius: 6px; font-size: 13px; opacity: 0; transition: opacity 0.25s;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.3); white-space: nowrap;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+  /* A long message wraps inside the window instead of running off it (#313). */
+  box-sizing: border-box; max-width: min(560px, calc(100vw - 32px));
+  white-space: normal; overflow-wrap: break-word; text-align: center;
 }
 .toast-message.toast-visible { opacity: 1; }
 .toast-message.toast-with-action {
