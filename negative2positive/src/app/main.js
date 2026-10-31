@@ -36,7 +36,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     import { computeSpline, buildCurveLut, getCurvePresetPoints, insertCurvePoint, moveCurvePoint, findNearPointIndex } from './curveMath.js';
     import { deepCopySanitizedSettings } from './settingsSnapshot.js';
     import { computeZoomGeometry, clampPanValues } from './zoomGeometry.js';
-    import { showToast } from '../ui/toast.js';
+    import { showToast, readingTimeMs } from '../ui/toast.js';
     import { writeDesktopBlob } from './desktopExportWriter.js';
     import { normalizeAngleDegrees, applyRotationToImageData, mirrorImageDataHorizontal, applyGeometryChainToImageData, rotatedDimensions, sanitizeCropRect, planGeometry, renderGeometry, geometryCounters } from './imageGeometry.js';
     import { createGeometryPool, yieldToEventLoop } from './geometryPool.js';
@@ -18511,20 +18511,23 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       beginCropMode();
     });
 
-    function showCropModeHint(options = {}) {
-      if (!cropModeHint || !cropModeHintTitle || !cropModeHintBody) return;
-      const durationMs = Number.isFinite(options.durationMs) ? options.durationMs : 4200;
-
-      cropModeHintTitle.textContent = getLocalizedText('cropHintTitle', 'Crop and straighten');
-      cropModeHintBody.textContent = getLocalizedText(
+    // On screen as long as its text takes to read (#313: a fixed 4.2 s was too
+    // short for the 30-word instructions), and gone when crop mode ends.
+    function showCropModeHint({
+      title = getLocalizedText('cropHintTitle', 'Crop and straighten'),
+      body = getLocalizedText(
         'cropHintBody',
         'Drag inside the box to move it, or drag edges/corners to resize. Hold Command/Ctrl and draw a line to straighten. Lock a film ratio (135, 120, 4×5…) in the toolbar.'
-      );
+      )
+    } = {}) {
+      if (!cropModeHint || !cropModeHintTitle || !cropModeHintBody) return;
+      cropModeHintTitle.textContent = title;
+      cropModeHintBody.textContent = body;
 
       if (cropHintTimer) clearTimeout(cropHintTimer);
       cropModeHint.style.display = 'flex';
       requestAnimationFrame(() => cropModeHint.classList.add('visible'));
-      cropHintTimer = setTimeout(() => hideCropModeHint(), durationMs);
+      cropHintTimer = setTimeout(() => hideCropModeHint(), readingTimeMs(`${title} ${body}`));
     }
 
     function hideCropModeHint() {
@@ -19079,11 +19082,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // Opened on the stand-in: the display-resolution picture is built from
       // the next task on, in slices, and swapped in when it lands.
       if (state.cropDraft.view.standIn) void yieldTaskForJob().then(ensureCropViewProxy);
-      showCropModeHint();
-      if (analysisOnly) {
-        document.getElementById('cropModeHintTitle').textContent = studioWorkspace.text('confirmAnalysis');
-        document.getElementById('cropModeHintBody').textContent = studioWorkspace.text('analysisHint');
-      }
+      showCropModeHint(analysisOnly
+        ? { title: studioWorkspace.text('confirmAnalysis'), body: studioWorkspace.text('analysisHint') }
+        : {});
       updateBeforeAfterButtonState();
     }
 
@@ -28907,7 +28908,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         void runDustAiRefresh().catch((error) => {
           if (error?.name === 'AbortError') return;
           console.warn('Brush repair failed:', error);
-          showToast(error?.message || String(error), 'error');
+          showToast(error?.message || String(error), 6000);
         });
       }, 200);
     }
