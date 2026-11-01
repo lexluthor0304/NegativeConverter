@@ -100,7 +100,8 @@
   .shell-mobile .studio.studio-lighttable:not(.studio-strip-hidden) :is(.studio-filmstrip, .controls-panel) { grid-row: 1; }
 }
 
-/* On compact native windows Photos expands the filmstrip on demand. */
+/* On compact native windows Photos expands the filmstrip on demand; the
+   collapsed strip itself (Photos and the count) is studio.css's, for every shell. */
 @media (max-width: 700px), (max-height: 540px) {
   /* Keep the tools in one scrollable row so expanding Photos cannot push
      the editor off a small screen. Popovers escape this scrollport. */
@@ -113,6 +114,4 @@
     width: min(290px, calc(100vw - var(--safe-left) - var(--safe-right) - 24px));
     max-height: calc(100dvh - var(--safe-top) - var(--safe-bottom) - 100px);
   }
-  .shell-mobile .studio-strip-hidden .studio-strip-header > :not(#studioToggleStrip):not(#studioSelection) { display: none; }
-  .shell-mobile .studio-strip-hidden #studioSelection { margin-left: auto; }
 }

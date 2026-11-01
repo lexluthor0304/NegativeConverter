@@ -412,8 +412,9 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
   const writer = createDiffedWriter();
   const set = writer.set;
   body.classList.add('studio');
-  if (document.documentElement?.classList.contains('shell-mobile') &&
-      window.matchMedia('(max-width: 700px), (max-height: 540px)').matches) {
+  // A compact screen (a phone in any shell, a short window) opens with Photos
+  // collapsed so the photo gets the room; Photos expands the strip on demand.
+  if (window.matchMedia?.('(max-width: 700px), (max-height: 540px)').matches) {
     body.classList.add('studio-strip-hidden');
   }
   const header = $('studioHeader');
@@ -981,6 +982,10 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
     set(node.studioStatus, 'textContent', state.samplingMode
       ? t(state.samplingMode === 'filmBase' ? 'baseSampleHint' : 'sampleHint')
       : switching?.message || t(busy ? 'processing' : ready ? 'ready' : loaded ? 'failed' : 'empty'));
+    // Which message it is, for the compact layout (studio.css): only "ready"
+    // may give up its place beside a framing notice.
+    set(node.studioStatus, 'dataset.state', state.samplingMode ? 'sampling' : switching ? 'switching'
+      : busy ? 'busy' : ready ? 'ready' : loaded ? 'failed' : 'empty');
     set(node.studioFilename, 'textContent', switching?.item.file.name || state.loadedFile?.name || '');
     set(node.studioSampleHint, 'hidden', !state.samplingMode);
     const count = state.fileQueue.filter(item => item.selected).length;
