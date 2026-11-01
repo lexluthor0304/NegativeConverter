@@ -53,6 +53,20 @@ export function fromImageData8(imageData) {
 // bytes are written through plain views, four samples per 32-bit word where the
 // platform is little-endian (the high byte of each 16-bit sample, in order).
 export function toImageData8(image16) {
+  const { width, height } = image16;
+  return new ImageData(highBytesOf(image16), width, height);
+}
+
+// The same bytes as a plain { width, height, data } (no ImageData global
+// needed): the RAW post-decode worker's 8-bit mirror and Node tests.
+export function toRGBA8(image16) {
+  const { width, height } = image16;
+  return { width, height, data: highBytesOf(image16) };
+}
+
+// The high byte of every sample, as a fresh Uint8ClampedArray of width x
+// height x 4.
+function highBytesOf(image16) {
   const { width, height, data: src } = image16;
   const dst = new Uint8ClampedArray(width * height * 4);
   if (LITTLE_ENDIAN && wordAligned(src) && src.length === dst.length) {
@@ -64,21 +78,12 @@ export function toImageData8(image16) {
     }
   } else {
     const out = new Uint8Array(dst.buffer);
-    for (let i = 0; i < src.length; i++) {
+    const n = Math.min(src.length, out.length);
+    for (let i = 0; i < n; i++) {
       out[i] = src[i] >>> 8;
     }
   }
-  return new ImageData(dst, width, height);
-}
-
-// Plain Uint8Array variant for environments without the ImageData global (Node smoke tests).
-export function toRGBA8(image16) {
-  const { width, height, data: src } = image16;
-  const dst = new Uint8ClampedArray(width * height * 4);
-  for (let i = 0; i < src.length; i++) {
-    dst[i] = src[i] >>> 8;
-  }
-  return { width, height, data: dst };
+  return dst;
 }
 
 export function cloneImage16(image16) {
@@ -106,7 +111,22 @@ export function packRGBToImage16(width, height, rgb16, channels, alloc = null) {
   const pixelCount = width * height;
   const dst = alloc ? alloc(pixelCount * 4) : new Uint16Array(pixelCount * 4);
   if (channels === 3) {
-    for (let i = 0; i < pixelCount; i++) {
+    let i = 0;
+    if (LITTLE_ENDIAN && rgb16.byteOffset % 4 === 0 && dst.byteOffset % 4 === 0) {
+      // Two pixels per step as whole words: R0G0 B0R1 G1B1 in, R0G0 B0A R1G1 B1A out.
+      const pairs = pixelCount >>> 1;
+      const s32 = new Uint32Array(rgb16.buffer, rgb16.byteOffset, pairs * 3);
+      const d32 = new Uint32Array(dst.buffer, dst.byteOffset, pairs * 4);
+      for (let q = 0, k = 0, o = 0; q < pairs; q++, k += 3, o += 4) {
+        const w0 = s32[k], w1 = s32[k + 1], w2 = s32[k + 2];
+        d32[o] = w0;
+        d32[o + 1] = (w1 & 0xFFFF) | 0xFFFF0000;
+        d32[o + 2] = (w1 >>> 16) | (w2 << 16);
+        d32[o + 3] = (w2 >>> 16) | 0xFFFF0000;
+      }
+      i = pairs * 2;
+    }
+    for (; i < pixelCount; i++) {
       dst[i * 4]     = rgb16[i * 3];
       dst[i * 4 + 1] = rgb16[i * 3 + 1];
       dst[i * 4 + 2] = rgb16[i * 3 + 2];
