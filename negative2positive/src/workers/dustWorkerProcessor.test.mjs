@@ -219,17 +219,23 @@ assert.deepEqual(results[2].payload.mask, mask);
   }
 }
 {
-  // A strength change reuses the detection's hat histograms; a state without
-  // them (made before they were kept) gets them on first use, same masks.
+  // An integer strength keeps one level byte per pixel instead of the two
+  // responses; a strength change reads it. A non-integer strength keeps the
+  // responses (with their histograms), which answer any strength, and a state
+  // of responses without histograms gets them on first use. Same masks.
   const first = detectDust(source, { strength: 3 });
-  assert.ok(first._state.topHist instanceof Uint32Array && first._state.blackHist instanceof Uint32Array);
-  const bare = { topData: first._state.topData, blackData: first._state.blackData, width, height };
-  for (const strength of [1, 5, 10]) {
-    const reused = updateDustStrength(source, first._state, strength);
+  assert.ok(first._state.levels instanceof Uint8Array && first._state.levels.length === width * height);
+  assert.equal(first._state.topData, undefined, 'the level map replaces the responses');
+  const responses = detectDust(source, { strength: 2.5 })._state;
+  assert.ok(responses.topData instanceof Uint8Array && responses.topHist instanceof Uint32Array);
+  const bare = { topData: responses.topData, blackData: responses.blackData, width, height };
+  for (const strength of [1, 2, 5, 9, 10, 4.5]) {
     const fresh = detectDust(source, { strength });
-    assert.deepEqual(reused.mask, fresh.mask, `reused histograms give the fresh mask at strength ${strength}`);
-    assert.equal(reused.particleCount, fresh.particleCount);
-    assert.deepEqual(updateDustStrength(source, bare, strength).mask, fresh.mask);
+    for (const [label, state] of [['level map', first._state], ['responses', responses], ['bare responses', bare]]) {
+      const reused = updateDustStrength(source, state, strength);
+      assert.deepEqual(reused.mask, fresh.mask, `${label} give the fresh mask at strength ${strength}`);
+      assert.equal(reused.particleCount, fresh.particleCount);
+    }
   }
   assert.ok(bare.topHist instanceof Uint32Array, 'a bare state is given its histograms');
 }

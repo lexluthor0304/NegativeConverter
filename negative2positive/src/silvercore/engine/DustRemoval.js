@@ -262,6 +262,87 @@ function hatHistograms(topData, blackData) {
   return { topHist, blackHist };
 }
 
+// ─── Strength levels ─────────────────────────────────────────────────────────
+//
+// The UI's strengths are the integers 1-10, and a response's threshold never
+// rises with the strength (the quantile target falls, the floor falls). So a
+// pixel that is set at strength s stays set at every higher one, and the
+// smallest strength that sets it says everything every strength needs:
+// binary(s) = level <= s. One byte per pixel replaces the two responses a
+// strength change used to keep, and the responses never get a JS copy: each
+// is read once from its Mat, through a 256-entry table of first levels.
+// Other strengths (none come from the UI) keep the responses.
+
+const STRENGTH_LEVELS = 10;
+const LEVEL_NEVER = STRENGTH_LEVELS + 1;
+
+/** True for the strengths a level map answers: the integers 1-10. */
+function isStrengthLevel(strength) {
+  return Number.isInteger(strength) && strength >= 1 && strength <= STRENGTH_LEVELS;
+}
+
+// For each response value, the first strength whose threshold it exceeds
+// (LEVEL_NEVER when none does), or null when the thresholds are not
+// non-increasing in the strength (they always are; the check keeps the map
+// exact if the formula ever changes).
+function firstLevelTable(hist, total) {
+  const thresholds = new Int32Array(LEVEL_NEVER);
+  for (let strength = 1; strength <= STRENGTH_LEVELS; strength++) {
+    thresholds[strength] = hatThresholdFromHistogram(hist, total, strength);
+    if (strength > 1 && thresholds[strength] > thresholds[strength - 1]) return null;
+  }
+  const table = new Uint8Array(256);
+  for (let v = 0; v < 256; v++) {
+    let level = LEVEL_NEVER;
+    for (let strength = 1; strength <= STRENGTH_LEVELS; strength++) {
+      if (v > thresholds[strength]) { level = strength; break; }
+    }
+    table[v] = level;
+  }
+  return table;
+}
+
+/**
+ * The level map of a frame (see above), or null when a threshold sequence is
+ * not monotone (the caller then keeps the responses).
+ * @returns {{ levels: Uint8Array, topHist: Uint32Array, blackHist: Uint32Array } | null}
+ */
+function computeHatLevels(imageData) {
+  const c = cv();
+  const pixelCount = imageData.width * imageData.height;
+  const gray = grayMatFromImageData(imageData);
+  const kernel = c.getStructuringElement(c.MORPH_ELLIPSE, new c.Size(DUST_HAT_KERNEL, DUST_HAT_KERNEL));
+  let hat = new c.Mat();
+  // The level buffer holds the top-hat response until both histograms exist.
+  const levels = new Uint8Array(pixelCount);
+  try {
+    c.morphologyEx(gray, hat, c.MORPH_TOPHAT, kernel);
+    levels.set(hat.data);
+    // Freed before the black-hat runs, so its scratch can take the space.
+    hat.delete();
+    hat = new c.Mat();
+    c.morphologyEx(gray, hat, c.MORPH_BLACKHAT, kernel);
+    const black = hat.data;
+    const topHist = new Uint32Array(256);
+    const blackHist = new Uint32Array(256);
+    for (let i = 0; i < pixelCount; i++) {
+      topHist[levels[i]]++;
+      blackHist[black[i]]++;
+    }
+    const topTable = firstLevelTable(topHist, pixelCount);
+    const blackTable = firstLevelTable(blackHist, pixelCount);
+    if (!topTable || !blackTable) return null;
+    for (let i = 0; i < pixelCount; i++) {
+      const top = topTable[levels[i]];
+      const bottom = blackTable[black[i]];
+      levels[i] = top < bottom ? top : bottom;
+    }
+    return { levels, topHist, blackHist };
+  } finally {
+    deleteMats(gray, kernel, hat);
+  }
+}
+
 /** Quantile-based threshold: stronger strength admits a larger anomaly share. */
 export function hatThreshold(data, strength) {
   const hist = new Uint32Array(256);
@@ -375,16 +456,32 @@ export function countNonzeroInRects(bin, w, h, rects) {
   return counts;
 }
 
-/** Threshold the hat responses and filter contours into the final dust mask. */
-function buildDustMask(topData, blackData, w, h, strength, maxParticleSize, histograms = null) {
-  const c = cv();
-  const pixelCount = w * h;
-  const maxSize = Number.isFinite(maxParticleSize) && maxParticleSize > 0
-    ? maxParticleSize
-    : defaultMaxParticleSize(w, h);
+/** The binary response of the hat responses at `strength` into `bin`. */
+function responsesBinFiller(topData, blackData, strength, histograms = null) {
+  const pixelCount = topData.length;
   const { topHist, blackHist } = histograms || hatHistograms(topData, blackData);
   const thTop = hatThresholdFromHistogram(topHist, pixelCount, strength);
   const thBlack = hatThresholdFromHistogram(blackHist, pixelCount, strength);
+  return (bin) => {
+    for (let i = 0; i < pixelCount; i++) {
+      bin[i] = (topData[i] > thTop || blackData[i] > thBlack) ? 255 : 0;
+    }
+  };
+}
+
+/** The same binary response from a level map (integer strengths only). */
+function levelsBinFiller(levels, strength) {
+  return (bin) => {
+    for (let i = 0; i < levels.length; i++) bin[i] = levels[i] <= strength ? 255 : 0;
+  };
+}
+
+/** Filter the contours of the binary response `fillBin` writes into the final dust mask. */
+function buildDustMask(fillBin, w, h, maxParticleSize) {
+  const c = cv();
+  const maxSize = Number.isFinite(maxParticleSize) && maxParticleSize > 0
+    ? maxParticleSize
+    : defaultMaxParticleSize(w, h);
 
   // The binary response goes straight into the Mat findContours reads, which
   // leaves its input as it was (it traces a bordered copy), so the isolation
@@ -398,10 +495,7 @@ function buildDustMask(topData, blackData, w, h, strength, maxParticleSize, hist
   let one = null;
   const candidates = [];
   try {
-    const binWrite = binMat.data;
-    for (let i = 0; i < pixelCount; i++) {
-      binWrite[i] = (topData[i] > thTop || blackData[i] > thBlack) ? 255 : 0;
-    }
+    fillBin(binMat.data);
     c.findContours(binMat, contours, hierarchy, c.RETR_EXTERNAL, c.CHAIN_APPROX_SIMPLE);
 
     // Shape first: only blobs that pass it need their surroundings counted.
@@ -486,9 +580,14 @@ export function detectDust(imageData, { strength = 3, maxParticleSize } = {}) {
   ensureFeatureDetection();
 
   const { width: w, height: h } = imageData;
+  const leveled = isStrengthLevel(strength) ? computeHatLevels(imageData) : null;
+  if (leveled) {
+    const { mask, particleCount } = buildDustMask(levelsBinFiller(leveled.levels, strength), w, h, maxParticleSize);
+    return { mask, particleCount, _state: { ...leveled, width: w, height: h } };
+  }
   const { topData, blackData, topHist, blackHist } = computeHatResponses(imageData);
   const histograms = { topHist, blackHist };
-  const { mask, particleCount } = buildDustMask(topData, blackData, w, h, strength, maxParticleSize, histograms);
+  const { mask, particleCount } = buildDustMask(responsesBinFiller(topData, blackData, strength, histograms), w, h, maxParticleSize);
 
   return {
     mask,
@@ -498,8 +597,9 @@ export function detectDust(imageData, { strength = 3, maxParticleSize } = {}) {
 }
 
 /**
- * Update dust detection with a new strength value, reusing the cached top-hat
- * responses (skips the morphology — only threshold + contour filtering rerun).
+ * Update dust detection with a new strength value from the detection's state
+ * (its level map for the integer strengths, else its top-hat responses): the
+ * morphology is skipped, only the binary response and contour filtering rerun.
  *
  * @param {ImageData} imageData - Input RGBA image
  * @param {Object} existingState - _state from previous detectDust()
@@ -510,15 +610,21 @@ export function detectDust(imageData, { strength = 3, maxParticleSize } = {}) {
 export function updateDustStrength(imageData, existingState, newStrength, maxParticleSize) {
   const c = cv();
   if (!c || !c.Mat) return detectDust(imageData, { strength: newStrength, maxParticleSize });
-  if (!existingState || !existingState.topData
+  if (!existingState
     || existingState.width !== imageData.width
     || existingState.height !== imageData.height) {
     return detectDust(imageData, { strength: newStrength, maxParticleSize });
   }
-
-  const { topData, blackData, width: w, height: h } = existingState;
+  const { width: w, height: h } = existingState;
+  if (existingState.levels && isStrengthLevel(newStrength)) {
+    const { mask, particleCount } = buildDustMask(levelsBinFiller(existingState.levels, newStrength), w, h, maxParticleSize);
+    return { mask, particleCount, _state: existingState };
+  }
+  // A level map cannot answer another strength; responses can answer any.
+  if (!existingState.topData) return detectDust(imageData, { strength: newStrength, maxParticleSize });
+  const { topData, blackData } = existingState;
   if (!existingState.topHist || !existingState.blackHist) Object.assign(existingState, hatHistograms(topData, blackData));
-  const { mask, particleCount } = buildDustMask(topData, blackData, w, h, newStrength, maxParticleSize, existingState);
+  const { mask, particleCount } = buildDustMask(responsesBinFiller(topData, blackData, newStrength, existingState), w, h, maxParticleSize);
   return { mask, particleCount, _state: existingState };
 }
 

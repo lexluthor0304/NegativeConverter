@@ -23,14 +23,24 @@ pixel. Three exact changes keep it at what the morphology itself needs:
   for s responding pixels and q boxes. The summed-area table it replaces held
   4 B per pixel; the binary response now lives only in the Mat `findContours`
   reads (it traces a bordered copy and leaves its input alone).
-- The two hat histograms are kept in the detection state, so a strength
-  change only reads new thresholds from them.
+- A strength change reads a level map instead of the two hat responses. The
+  UI's strengths are the integers 1–10 and a response's threshold never rises
+  with the strength, so a pixel set at strength s stays set above it: one byte
+  per pixel, the smallest strength that sets it, gives every strength's binary
+  response as `level <= s`. It is built in two passes (both histograms, then
+  a 256-entry table of first levels per response) over the top-hat response,
+  parked in the level buffer while the black-hat runs; the responses never get
+  a JS copy. Another strength (the UI makes none) keeps the responses and
+  their histograms, which answer any strength; a level map asked for one
+  re-detects.
 
 Masks and particle counts are byte-identical to the summed-area version
-(both OpenCV builds, real 10.7 and 24.3 MP frames at strengths 1–10). Peak
-RSS of a detection plus two strength changes dropped by 9 B per pixel
-(24.3 MP: 835 → 616 MB), and the 24.3 MP frame no longer grows the OpenCV heap
-past its initial 128 MiB.
+(both OpenCV builds, real 10.7 and 24.3 MP frames at strengths 1–10 and at
+non-integer strengths). Peak RSS of a detection plus two strength changes
+dropped by 9 B per pixel (24.3 MP: 835 → 616 MB), the 24.3 MP frame no longer
+grows the OpenCV heap past its initial 128 MiB, and the state a pinned dust
+worker keeps for strength changes is 1 B per pixel instead of 2 (60 MP:
+about 58 MB instead of 116 MB).
 
 ## TELEA per cluster (`inpaintMasked`)
 
