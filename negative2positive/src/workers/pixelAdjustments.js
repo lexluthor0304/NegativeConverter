@@ -2,7 +2,7 @@
  * Pure pixel adjustment functions extracted from main.js for use in Web Workers.
  * No DOM dependencies — operates only on typed arrays and plain objects.
  */
-import { buildExpiredRescueStages, buildExpiredSpatialStage, applyExpiredSpatial, applyExpiredTone } from '../pipeline/expiredRescue.js';
+import { buildExpiredRescueStages, buildExpiredSpatialStage, applyExpiredSpatial, applyExpiredTone, OFFSET_BINS } from '../pipeline/expiredRescue.js';
 
 // Linear interpolation of a 256-entry float curve at a fractional position.
 function lerpCurve(curve, x) {
@@ -153,6 +153,13 @@ export function applyAdjustmentsToPixels(inputData, outputData, pixelCount, para
   const spatialWidth = doRescueSpatial && frameWidth > 0 ? frameWidth : 0;
   const spatialHeight = doRescueSpatial && frameHeight > 0 ? frameHeight : 1;
   const rescuePx = doRescueSpatial || doRescuePixel ? new Float32Array(3) : null;
+  // The rescue's tone stage without a spatial stage (every photo's automatic
+  // colour correction) runs inline: applyExpiredTone's arithmetic, with
+  // Math.fround where it went through the Float32Array, so the same values.
+  const toneOnly = doRescuePixel && !spatialWidth && rescueStages.offsets ? rescueStages : null;
+  const toneOffsets = toneOnly ? toneOnly.offsets : null;
+  const toneCurve = toneOnly ? toneOnly.tone : null;
+  const lastBin = OFFSET_BINS - 1;
   // A row band (#256) starts at its frame row. A rectangle of the frame
   // (#254's live dodge rectangles) starts at its own place in it and wraps at
   // its own width; a whole frame starts at 0.
@@ -164,7 +171,25 @@ export function applyAdjustmentsToPixels(inputData, outputData, pixelCount, para
     let r;
     let g;
     let b;
-    if (rescuePx) {
+    if (toneOnly) {
+      // 8-bit samples are exact in a Float32Array: no rounding on the way in.
+      const r0 = inputData[i];
+      const g0 = inputData[i + 1];
+      const b0 = inputData[i + 2];
+      let pos = (0.2126 * r0 + 0.7152 * g0 + 0.0722 * b0) / 255;
+      pos = (pos < 0 ? 0 : pos > 1 ? 1 : pos) * lastBin;
+      const i0 = pos | 0;
+      const k0 = i0 * 3;
+      const k1 = (i0 + 1 < OFFSET_BINS ? i0 + 1 : i0) * 3;
+      const f = pos - i0;
+      // (v + a) + b, as applyExpiredTone adds them: not v + (a + b).
+      r = r0 + toneOffsets[k0] * (1 - f) + toneOffsets[k1] * f;
+      g = g0 + toneOffsets[k0 + 1] * (1 - f) + toneOffsets[k1 + 1] * f;
+      b = b0 + toneOffsets[k0 + 2] * (1 - f) + toneOffsets[k1 + 2] * f;
+      r = Math.fround(lerpCurve(toneCurve, r < 0 ? 0 : r > 255 ? 255 : r)) * rMult;
+      g = Math.fround(lerpCurve(toneCurve, g < 0 ? 0 : g > 255 ? 255 : g)) * gMult;
+      b = Math.fround(lerpCurve(toneCurve, b < 0 ? 0 : b > 255 ? 255 : b)) * bMult;
+    } else if (rescuePx) {
       rescuePx[0] = inputData[i];
       rescuePx[1] = inputData[i + 1];
       rescuePx[2] = inputData[i + 2];

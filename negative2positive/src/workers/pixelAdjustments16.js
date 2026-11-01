@@ -6,8 +6,8 @@
 // than 256 distinct levels per channel. Reads and writes 16-bit RGBA planes.
 // No DOM: shared by the export worker and the main-thread fallback.
 
-import { hue2rgb } from './pixelAdjustments.js';
-import { applyExpiredSpatial, applyExpiredTone } from '../pipeline/expiredRescue.js';
+import { hue2rgb, isIdentityCurve } from './pixelAdjustments.js';
+import { applyExpiredSpatial, applyExpiredTone, OFFSET_BINS } from '../pipeline/expiredRescue.js';
 
 const SCALE_16_TO_8 = 255 / 65535;
 const SCALE_8_TO_16 = 65535 / 255;
@@ -101,9 +101,19 @@ export function applyAdjustmentsToPixels16(input16, output16, pixelCount, params
     doRescue, rescueR, rescueG, rescueB, doRescueSpatial, rescueSpatial, doRescuePixel, rescueStages, frameWidth, frameHeight, frameStartRow
   } = params;
   const lumaScale = 2 / 255;
+  const curveRIdentity = isIdentityCurve(curveR);
+  const curveGIdentity = isIdentityCurve(curveG);
+  const curveBIdentity = isIdentityCurve(curveB);
   const spatialWidth = doRescueSpatial && frameWidth > 0 ? frameWidth : 0;
   const spatialHeight = doRescueSpatial && frameHeight > 0 ? frameHeight : 1;
   const rescuePx = doRescueSpatial || doRescuePixel ? new Float32Array(3) : null;
+  // The rescue's tone stage without a spatial stage (every photo's automatic
+  // colour correction) runs inline: applyExpiredTone's arithmetic, with
+  // Math.fround where it went through the Float32Array, so the same values.
+  const toneOnly = doRescuePixel && !spatialWidth && rescueStages.offsets ? rescueStages : null;
+  const toneOffsets = toneOnly ? toneOnly.offsets : null;
+  const toneCurve = toneOnly ? toneOnly.tone : null;
+  const lastBin = OFFSET_BINS - 1;
   let px = 0;
   // A row band (#256) starts at its frame row.
   let py = frameStartRow || 0;
@@ -112,7 +122,22 @@ export function applyAdjustmentsToPixels16(input16, output16, pixelCount, params
     let r = input16[i] * SCALE_16_TO_8;
     let g = input16[i + 1] * SCALE_16_TO_8;
     let b = input16[i + 2] * SCALE_16_TO_8;
-    if (rescuePx) {
+    if (toneOnly) {
+      r = Math.fround(r); g = Math.fround(g); b = Math.fround(b);
+      let pos = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+      pos = (pos < 0 ? 0 : pos > 1 ? 1 : pos) * lastBin;
+      const i0 = pos | 0;
+      const k0 = i0 * 3;
+      const k1 = (i0 + 1 < OFFSET_BINS ? i0 + 1 : i0) * 3;
+      const f = pos - i0;
+      // (r + a) + b, as applyExpiredTone adds them: not r + (a + b).
+      r = r + toneOffsets[k0] * (1 - f) + toneOffsets[k1] * f;
+      g = g + toneOffsets[k0 + 1] * (1 - f) + toneOffsets[k1 + 1] * f;
+      b = b + toneOffsets[k0 + 2] * (1 - f) + toneOffsets[k1 + 2] * f;
+      r = Math.fround(curveAt(toneCurve, r < 0 ? 0 : r > 255 ? 255 : r));
+      g = Math.fround(curveAt(toneCurve, g < 0 ? 0 : g > 255 ? 255 : g));
+      b = Math.fround(curveAt(toneCurve, b < 0 ? 0 : b > 255 ? 255 : b));
+    } else if (rescuePx) {
       rescuePx[0] = r; rescuePx[1] = g; rescuePx[2] = b;
       if (spatialWidth) {
         applyExpiredSpatial(rescueSpatial, (px + 0.5) / spatialWidth, (py + 0.5) / spatialHeight, rescuePx);
@@ -206,9 +231,11 @@ export function applyAdjustmentsToPixels16(input16, output16, pixelCount, params
       if (b < 0) b = 0; else if (b > 255) b = 255;
     }
 
-    r = curveAt(curveR, r);
-    g = curveAt(curveG, g);
-    b = curveAt(curveB, b);
+    // On [0, 255] an identity curve returns its input exactly (i + (x - i)
+    // is x), so the default straight curves are skipped.
+    if (!curveRIdentity) r = curveAt(curveR, r);
+    if (!curveGIdentity) g = curveAt(curveG, g);
+    if (!curveBIdentity) b = curveAt(curveB, b);
 
     if (doLook) {
       if (doLookMatrix) {
