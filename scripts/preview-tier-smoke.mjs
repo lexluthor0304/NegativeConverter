@@ -54,8 +54,10 @@ function installTierProbe() {
   const heldWorkers = new Set();
   // #239's applyProgram (a GPU preview frame) reads the prepared negative.
   const applyPrograms = new WeakMap();
+  // Every event carries the tier the app was in when it happened, which is
+  // where the release divides the session from its settle (dragWindow).
   const note = (type, detail = {}) => {
-    probe.events.push({ type, time: performance.now(), ...detail });
+    probe.events.push({ type, time: performance.now(), tier: document.documentElement.dataset.previewTier || 'normal', ...detail });
     probe.lastActivity = performance.now();
   };
   const onPreview = context => context?.canvas?.id === 'glCanvas';
@@ -138,7 +140,8 @@ function installTierProbe() {
   };
   // Stamped when the event was created: the app's own capture listener,
   // registered before this one, ends the session and posts its settle tick
-  // in the same dispatch.
+  // in the same dispatch. A busy main thread dispatches the release later
+  // than that, and what runs in between still belongs to the session.
   const onPointer = event => note(event.type, { time: event.timeStamp });
   window.addEventListener('pointerdown', onPointer, true);
   window.addEventListener('pointerup', onPointer, true);
@@ -265,6 +268,10 @@ export async function runPreviewTierSmoke({ send, evaluate, waitFor, fail, insta
   // answers the press's tick: the probe holds that conversion until the
   // release has reached the page. A GPU frame (#239) converts nothing at the
   // press; the release's settle conversion is held and posted the same way.
+  // Where the press's frame is slow (CI's software GL draws it in ~360 ms),
+  // the GPU preview's settle (150 ms without input) posts the click's exact
+  // frame, reduced, before the release is handled: a tick of the session like
+  // the worker's, which the release converts once more at the normal size.
   const click = async (fraction, { tickHeld }) => {
     const track = await sliderTrack();
     const x = track.x + track.width * fraction;
@@ -306,12 +313,17 @@ export async function runPreviewTierSmoke({ send, evaluate, waitFor, fail, insta
     return false;
   };
   // What the drag and its settle drew and converted, from the probe's events.
+  // The release divides them where the app handled it, which on a busy main
+  // thread is later than the event's creation: an event stamped after the
+  // pointerup but still in the reduced tier is the session's (a tick the GPU
+  // settle or the worker lane posted in between), not the release's.
   const dragWindow = from => evaluate(`(() => {
     const events = window.__tierProbe.events.filter(event => event.time >= ${from});
     const down = events.find(event => event.type === 'pointerdown');
     const up = events.find(event => event.type === 'pointerup' && down && event.time >= down.time);
-    const during = events.filter(event => down && up && event.time > down.time && event.time <= up.time);
-    const after = up ? events.filter(event => event.time > up.time) : [];
+    const inSession = event => event.time <= up.time || event.tier === 'reduced';
+    const during = events.filter(event => down && up && event.time > down.time && inSession(event));
+    const after = up ? events.filter(event => event.time > up.time && !inSession(event)) : [];
     const px = event => event.width * event.height;
     return {
       pointer: !!(down && up),
@@ -320,6 +332,9 @@ export async function runPreviewTierSmoke({ send, evaluate, waitFor, fail, insta
       duringConverts: during.filter(event => event.type === 'convert' && event.cache).map(px),
       afterConverts: after.filter(event => event.type === 'convert').map(event => ({ cache: event.cache, pixels: px(event), at: Math.round(event.time - up.time) })),
       afterDraws: after.filter(event => event.type === 'draw').map(event => ({ pixels: px(event), texture: event.texture, at: Math.round(event.time - up.time) })),
+      // The session's conversions posted after the pointerup was created.
+      lateSessionConverts: during.filter(event => event.type === 'convert' && event.time > up.time)
+        .map(event => ({ cache: event.cache, pixels: px(event), at: Math.round((event.time - up.time) * 10) / 10 })),
       longTasksDuring: during.filter(event => event.type === 'longtask').map(event => event.duration),
       lastSession: document.documentElement.dataset.previewTierLastSession || null,
     };
