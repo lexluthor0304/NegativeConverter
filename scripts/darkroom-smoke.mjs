@@ -52,6 +52,19 @@ export async function runDarkroomSmoke({ send, evaluate, waitFor, wait, fail, in
     return sum / n;
   };
 
+  // What the last input put on screen: its frame has landed (the display token,
+  // as the pen-up step below waits for), no full-resolution render is running,
+  // and no toast lies over the photo while it is captured (the notices of the
+  // exports above stack up from the bottom and can reach the measured region).
+  const settledLuminance = async (region) => {
+    const token = await evaluate('window.__ncDisplay.state().token');
+    await waitFor('darkroom frame landed', `window.__ncDisplay.state().displayed >= ${token} && !document.body.dataset.studioBusy`, 30_000);
+    await evaluate(`document.getElementById('toastContainer').style.visibility = 'hidden'`);
+    try { return await canvasLuminance(region); } finally {
+      await evaluate(`document.getElementById('toastContainer').style.visibility = ''`);
+    }
+  };
+
   // ---- 1. Test strip ----
   await evaluate(`document.getElementById('studioTab-edit').click(); document.getElementById('studioTestStrip').open = true;`);
   await setInput('testStripAxis', 'coreExposure');
@@ -143,15 +156,15 @@ export async function runDarkroomSmoke({ send, evaluate, waitFor, wait, fail, in
   await evaluate(`document.getElementById('studioLooks').open = true;`);
   const paperOptions = await evaluate(`[...document.getElementById('corePaper').options].map((o) => o.value)`);
   if (!paperOptions.includes('endura') || paperOptions.includes('multigrade-rc')) fail('colour film must offer RA-4 papers only: ' + JSON.stringify(paperOptions));
-  const plain = await canvasLuminance({ x: 0.1, y: 0.1, w: 0.8, h: 0.8 });
+  const plain = await settledLuminance({ x: 0.1, y: 0.1, w: 0.8, h: 0.8 });
   await setInput('corePaper', 'crystal-archive-matte');
   await wait(1800);
-  const printed = await canvasLuminance({ x: 0.1, y: 0.1, w: 0.8, h: 0.8 });
+  const printed = await settledLuminance({ x: 0.1, y: 0.1, w: 0.8, h: 0.8 });
   console.log('darkroom paper:', JSON.stringify({ plain, printed }));
   if (Math.abs(printed - plain) < 1) fail(`paper emulation did not change the print: ${plain} -> ${printed}`);
   await setInput('corePaper', 'none');
   await wait(1800);
-  const restored = await canvasLuminance({ x: 0.1, y: 0.1, w: 0.8, h: 0.8 });
+  const restored = await settledLuminance({ x: 0.1, y: 0.1, w: 0.8, h: 0.8 });
   if (Math.abs(restored - plain) > 1) fail(`paper "none" did not restore the image: ${plain} -> ${restored}`);
 
   // ---- 4. Dodge and burn ----
