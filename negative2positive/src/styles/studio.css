@@ -58,7 +58,8 @@ body.studio {
 /* Reserve the measured Studio header space before the editor module mounts. */
 .studio-header.studio-header-pending { min-height: 60px; }
 @media (max-width: 1000px) { .studio-header.studio-header-pending { min-height: 110px; } }
-@media (max-width: 700px) { .studio-header.studio-header-pending { min-height: 181px; } }
+@media (max-width: 700px) { .studio-header.studio-header-pending { min-height: 162px; } }
+
 .studio-discovery a[lang] { font-family: system-ui, sans-serif; }
 .studio-brand { display: flex; flex-direction: column; align-items: flex-start; gap: 0; flex-shrink: 0; font-size: 12px; font-weight: 400; }
 .studio-brand > span:last-child { color: var(--text-secondary); }
@@ -307,12 +308,12 @@ body.studio {
   .studio-public-links .header-shop-badge { display: none !important; }
   .studio .github-star-btn-main { padding: 8px; min-height: 34px; }
   #studioMenu > summary { max-width: 65px; font-size: 12px; }
-  /* Keep the long, localized sort choice together on its own row. Letting it
-     split the compact actions into separate rows can consume the light table
-     and leave less than one complete thumbnail visible on a 320px screen. */
-  .studio-strip-header { gap: 4px 8px; }
-  .studio-photo-sort { order: 1; flex-basis: 100%; }
-  .studio #studioPhotoSort { flex: 1; }
+  /* The strip's tools stay in one row (see the compact block below): the
+     sort choice keeps its natural width instead of a row of its own. */
+  .studio-brand { flex-direction: row; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+  .studio-strip-header { gap: 0 6px; padding-bottom: 3px; }
+  #studioSelection { margin-left: 0; }
+  .studio #studioPhotoSort { max-width: 170px; }
   .studio.studio-loaded .app-main { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(180px, 1fr) max-content minmax(180px, .85fr); }
   .studio.studio-loaded.studio-panel-hidden .app-main { grid-template-rows: minmax(180px, 1fr) max-content; }
   .studio.studio-loaded.studio-strip-hidden .app-main { grid-template-rows: minmax(180px, 1fr) max-content minmax(180px, .85fr); }
@@ -344,6 +345,25 @@ body.studio {
   .studio .upload-privacy-note { max-width: 280px; font-size: 12px; }
   .studio .export-dropdown-menu { position: fixed; top: 68px; right: 10px; width: min(310px, calc(100vw - 20px)); }
 }
+
+/* Compact screens (a phone, a short window), every shell: the photo gets the
+   room. The strip's tools stay in one scrollable row so expanding Photos
+   cannot push the editor off the screen, and a collapsed strip keeps only
+   Photos and the selection count. Popovers escape the row's scrollport. */
+@media (max-width: 700px), (max-height: 540px) {
+  .studio-strip-header { flex-wrap: nowrap; overflow-x: auto; overscroll-behavior-x: contain; scroll-padding-inline-start: 80px; }
+  .studio-strip-header > * { flex-shrink: 0; }
+  #studioToggleStrip { position: sticky; left: 0; z-index: 1; background: #202020; }
+  .studio .studio-batch-content {
+    position: fixed; left: auto; right: calc(var(--safe-right) + 12px);
+    bottom: calc(var(--safe-bottom) + 12px);
+    width: min(290px, calc(100vw - var(--safe-left) - var(--safe-right) - 24px));
+    max-height: calc(100dvh - var(--safe-top) - var(--safe-bottom) - 100px);
+  }
+  .studio-strip-hidden .studio-strip-header > :not(#studioToggleStrip):not(#studioSelection) { display: none; }
+  .studio-strip-hidden #studioSelection { margin-left: auto; }
+}
+
 
 /* Live loupe: the camera feed converted through the current recipe. */
 .loupe-overlay { position: fixed; inset: 0; background: #000c; display: flex; align-items: center; justify-content: center; z-index: 1000; }
