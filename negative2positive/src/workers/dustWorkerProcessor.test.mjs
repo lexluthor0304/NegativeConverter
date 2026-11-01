@@ -3,7 +3,7 @@ import { createRequire } from 'node:module';
 import { createDustWorkerProcessor, summarizeDustMask } from './dustWorkerProcessor.js';
 import { murmurHash3x86_128 } from '../app/contentHash.js';
 import {
-  buildBinaryIntegralImage, detectDust, inpaintMasked,
+  countNonzeroInRects, detectDust, inpaintMasked, rgbaToGrayInto, updateDustStrength,
   refineMaskIntelligent, refineMaskDirect, refineMaskRemove
 } from '../silvercore/engine/DustRemoval.js';
 import { countMaskParticles } from '../silvercore/engine/DustBrush.js';
@@ -173,14 +173,65 @@ const results = await Promise.all(requests);
 assert.deepEqual(results[0].payload.mask, mask);
 assert.equal(results[1].payload.mask.some(Boolean), false);
 assert.deepEqual(results[2].payload.mask, mask);
-const bin = Uint8Array.from({ length: 53 * 41 }, (_, i) => i % 7 === 0 ? 255 : 0);
-const prefix = buildBinaryIntegralImage(bin, 53, 41);
-assert.ok(prefix instanceof Uint32Array);
-assert.equal(prefix.byteLength, 54 * 42 * 4);
-for (let y = 0; y <= 41; y++) for (let x = 0; x <= 53; x++) {
-  let expected = 0;
-  for (let yy = 0; yy < y; yy++) for (let xx = 0; xx < x; xx++) expected += bin[yy * 53 + xx] > 0;
-  assert.equal(prefix[y * 54 + x], expected, 'integer prefix counts are exact');
+{
+  // Isolation counts: every rectangle of a sparse 53 x 41 response (corners on
+  // the frame edges, empty and one-pixel rectangles included) against brute
+  // force, through a view that starts off a word boundary and one that does not.
+  const W = 53, H = 41;
+  const backing = new Uint8Array(W * H + 1);
+  for (const offset of [0, 1]) {
+    const bin = backing.subarray(offset, offset + W * H);
+    bin.fill(0);
+    for (let i = 0; i < bin.length; i++) if (i % 7 === 0 || i % 11 === 3) bin[i] = i % 2 ? 1 : 255;
+    const rects = [];
+    for (let y0 = 0; y0 <= H; y0 += 4) for (let y1 = y0; y1 <= H; y1 += 5) {
+      for (let x0 = 0; x0 <= W; x0 += 6) for (let x1 = x0; x1 <= W; x1 += 7) rects.push(x0, y0, x1, y1);
+    }
+    rects.push(0, 0, W, H, W - 1, H - 1, W, H, 5, 9, 4, 20, 3, 7, 30, 7);
+    const counts = countNonzeroInRects(bin, W, H, Int32Array.from(rects));
+    assert.equal(counts.length, rects.length / 4);
+    for (let k = 0; k < counts.length; k++) {
+      const [x0, y0, x1, y1] = rects.slice(4 * k, 4 * k + 4);
+      let expected = 0;
+      for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) expected += bin[y * W + x] !== 0;
+      assert.equal(counts[k], expected, `count of [${x0}, ${x1}) x [${y0}, ${y1}) at view offset ${offset}`);
+    }
+  }
+  assert.deepEqual(countNonzeroInRects(new Uint8Array(12), 4, 3, new Int32Array(0)), new Float64Array(0));
+}
+{
+  // The grey the dust detector feeds the morphology is cv.cvtColor's, byte for
+  // byte, for aligned and unaligned RGBA (every R, G and B value is met).
+  const n = 256 * 64;
+  const backing = new Uint8ClampedArray(n * 4 + 4);
+  for (const offset of [0, 1]) {
+    const rgba = backing.subarray(offset, offset + n * 4);
+    for (let p = 0; p < n; p++) {
+      rgba[p * 4] = p & 255; rgba[p * 4 + 1] = (p * 37 + (p >> 8)) & 255;
+      rgba[p * 4 + 2] = (p * 101 + 7 * (p >> 8)) & 255; rgba[p * 4 + 3] = (p * 13) & 255;
+    }
+    const src = cv.matFromImageData({ data: rgba, width: 256, height: 64 });
+    const expected = new cv.Mat();
+    try {
+      cv.cvtColor(src, expected, cv.COLOR_RGBA2GRAY);
+      assert.deepEqual(rgbaToGrayInto(rgba, new Uint8Array(n), n), new Uint8Array(expected.data), `grey equals cv.cvtColor at offset ${offset}`);
+    } finally { src.delete(); expected.delete(); }
+  }
+}
+{
+  // A strength change reuses the detection's hat histograms; a state without
+  // them (made before they were kept) gets them on first use, same masks.
+  const first = detectDust(source, { strength: 3 });
+  assert.ok(first._state.topHist instanceof Uint32Array && first._state.blackHist instanceof Uint32Array);
+  const bare = { topData: first._state.topData, blackData: first._state.blackData, width, height };
+  for (const strength of [1, 5, 10]) {
+    const reused = updateDustStrength(source, first._state, strength);
+    const fresh = detectDust(source, { strength });
+    assert.deepEqual(reused.mask, fresh.mask, `reused histograms give the fresh mask at strength ${strength}`);
+    assert.equal(reused.particleCount, fresh.particleCount);
+    assert.deepEqual(updateDustStrength(source, bare, strength).mask, fresh.mask);
+  }
+  assert.ok(bare.topHist instanceof Uint32Array, 'a bare state is given its histograms');
 }
 await assert.rejects(createDustWorkerProcessor()({ type: 'detect', width, height, reuseSource: true }), /Missing/);
 {

@@ -285,6 +285,26 @@ assert.ok(patch.samples <= 1300 && patch.samples >= 400, `maxSamples bounds the 
   worst = 0;
   for (let i = 0; i < out16.length; i += 4) for (let c = 0; c < 3; c++) worst = Math.max(worst, Math.abs((out16[i + c] >>> 8) - rescued.data[i + c]));
   assert.ok(worst <= 2, `16-bit path agrees with 8-bit (${worst})`);
+  // Exactly the stages: with every other control neutral, both kernels give
+  // what applyExpiredTone gives through a Float32Array (the inline tone path
+  // must not move a single sample).
+  {
+    const px = new Float32Array(3);
+    for (let i = 0; i < out.length; i += 4) {
+      px[0] = aged.data[i]; px[1] = aged.data[i + 1]; px[2] = aged.data[i + 2];
+      applyExpiredTone(params.rescueStages, px);
+      for (let c = 0; c < 3; c++) {
+        const v = px[c] < 0 ? 0 : px[c] > 255 ? 255 : px[c];
+        assert.equal(out[i + c], (v + 0.5) | 0, `8-bit sample ${i + c} is the stage's`);
+      }
+      px[0] = plane[i] * (255 / 65535); px[1] = plane[i + 1] * (255 / 65535); px[2] = plane[i + 2] * (255 / 65535);
+      applyExpiredTone(params.rescueStages, px);
+      for (let c = 0; c < 3; c++) {
+        const v = px[c] < 0 ? 0 : px[c] > 255 ? 255 : px[c];
+        assert.equal(out16[i + c], Math.round(v * (65535 / 255)), `16-bit sample ${i + c} is the stage's`);
+      }
+    }
+  }
   // A genuine 16-bit ramp keeps far more than 256 levels.
   const ramp16 = new Uint16Array(W * 4 * 4);
   for (let x = 0; x < W * 4; x++) {

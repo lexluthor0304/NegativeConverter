@@ -5,6 +5,33 @@ Dust removal detects specks and scratches with a dual top-hat (see
 with MI-GAN (`technical-depth.md`). This page covers how the TELEA repair and
 the dust brush stay proportional to the dust, not to the frame (#259).
 
+## Detection memory (`detectDust`, `updateDustStrength`)
+
+Detection runs on the full-resolution frame, so its scratch is counted per
+pixel. Three exact changes keep it at what the morphology itself needs:
+
+- The grey goes straight into a one-channel Mat (`rgbaToGrayInto`): OpenCV's
+  8-bit `COLOR_RGBA2GRAY` is `(R·9798 + G·19235 + B·3735 + 2^14) >> 15`, and
+  both shipped builds (scalar and SIMD) give exactly those bytes on all 2^24
+  RGB triples. The RGBA copy `cv.cvtColor` needed (4 B per pixel of OpenCV
+  heap, which a WebAssembly memory never returns) is gone, and the top-hat Mat
+  is freed before the black-hat runs.
+- The neighbourhood density of each blob that passes the shape test is
+  counted offline (`countNonzeroInRects`): the corners of every padded and
+  own bounding box are bucketed by row, and one pass down the binary response
+  answers them from a Fenwick tree over the columns, in O(w·h + (s + q)·log w)
+  for s responding pixels and q boxes. The summed-area table it replaces held
+  4 B per pixel; the binary response now lives only in the Mat `findContours`
+  reads (it traces a bordered copy and leaves its input alone).
+- The two hat histograms are kept in the detection state, so a strength
+  change only reads new thresholds from them.
+
+Masks and particle counts are byte-identical to the summed-area version
+(both OpenCV builds, real 10.7 and 24.3 MP frames at strengths 1–10). Peak
+RSS of a detection plus two strength changes dropped by 9 B per pixel
+(24.3 MP: 835 → 616 MB), and the 24.3 MP frame no longer grows the OpenCV heap
+past its initial 128 MiB.
+
 ## TELEA per cluster (`inpaintMasked`)
 
 TELEA is local. A masked pixel takes its value from known pixels within the
