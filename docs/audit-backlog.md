@@ -518,6 +518,11 @@ proof does not establish the unmeasured performance targets.
   The smoke passes today from the repo root (the ignored DSC_4127.NEF is present) but `path.resolve(process.cwd(), 'DSC_4127.NEF')` means running it from any other directory prints a warning and exits 0, identical to a pass from the runner's point of view. No npm script or runner picks it up, so the Z f fallback regression it documents (#81) is protected only when a developer remembers the exact com…  
   _Suggested fix:_ Read the fixture path from `process.env.NC_NEF_FIXTURE` with a repo-root default computed from `import.meta.url`; wire it into run-tests.mjs as an optional test that prints `SKIP` (and counts it separately) when the env var/file is missing; document the env var in CLAUDE.md next …
 
+- **low/perf** — 16-bit TIFF export compacts RGBA16 to RGB16 one sample at a time (2026-11-01 review)  
+  `negative2positive/src/workers/imageEncoders.js:110` (`compactRgba16ToRgbStrip`)  
+  The in-place compaction already avoids a second full-size buffer, but it moves three samples per pixel with per-sample loads and stores: roughly 0.15–0.2 s of a 60 MP 16-bit TIFF export. The import's RGB16 → RGBA16 packing, the same pattern in reverse, went from 70.7 to 35.1 ms at 24.3 MP when it moved whole words (#329).  
+  _Suggested fix:_ Two pixels per step as 32-bit words where the plane is word-aligned on a little-endian host: R0G0 B0A0 R1G1 B1A1 in, R0G0 B0R1 G1B1 out. Pair k's writes end at word 3k + 3, never past pair k + 1's reads from word 4k + 4, so it stays in place; an odd last pixel keeps the sample loop. Same bytes. It is about 1 % of the export, so ship it with another app change rather than as its own release.
+
 ## Build and release
 
 - **medium/ci** — macOS release build is Apple-Silicon-only while download.html hands the arm64 DMG to every Mac user _(verified)_  
@@ -593,6 +598,11 @@ proof does not establish the unmeasured performance targets.
   _Suggested fix:_ Point the card at a human page (e.g. guide.html#why or a small pricing.html rendered from pricing.md at build), keep pricing.md only as the llms.txt target, and remove it from sitemap.xml.
 
 ## Other
+
+- **low/perf** — Export lanes still plan 50 B/px, a figure not re-measured since #256 changed the lane (2026-11-01 review)  
+  `negative2positive/src/app/batchExportScheduler.js:46` (`LANE_BYTES_PER_PIXEL`)  
+  The constant's comment keeps the old 50 "until the #230 harness measures the new per-lane peak". At 60 MP that is 3 GB per lane, so a 16 GB machine (6 GiB budget, half of it for lanes) plans one 60 MP lane at a time. Since then #329 and #330 alone took 9 B/px off dust detection's peak and 1 B/px off its kept state, among the other planes a lane holds. An over-estimate costs batch throughput and an under-estimate risks WebKit's kill limit, so this needs a measurement, not a guess.  
+  _Suggested fix:_ Run S9 (`npm run bench:interactive -- --scenarios s9`) with the 60 MP fixtures on an otherwise idle machine (one heavy run at a time, at least 8 GB free disk for swap). Read the per-lane renderer peak with dust removal on and off, for 8- and 16-bit outputs, and set the constant to the measured peak plus a margin; `planBatchParallelism` and the hidden-window gate follow it.
 
 - **low/bug** — The native RAW plane worker gets its error handler only after the decode, so a worker that fails to load stalls every native decode until the transfer timeout  
   `negative2positive/src/app/nativeRawTransfer.js readInWorker`  
@@ -706,6 +716,11 @@ proof does not establish the unmeasured performance targets.
   _Suggested fix:_ Release 0.1.4: merge `fix/export-heap-views` into LensfunWasm's main and move the tag `v0.1.4` to the merge (it points at 4fdd92a, whose release run failed at "Publish to npmjs.org" on 2026-06-25 with the token present; npm has no 0.1.4), which publishes it once `NPM_TOKEN` can publish (the tag must include the branch's last commits, `buildVignettingMap` and `coverFrame`). Then pin it in `package.json`, `package-lock.json` and `LENSFUN_PACKAGE_VERSION` (`check-pinned-versions.mjs` checks they agree). The display-proxy decoder hash covers the package's files, so stored proxies of the old build miss once. Exports of lens-active photos change once correction applies.
 
 ## Test coverage
+
+- **low/test** — The darkroom smoke's paper step reads the canvas after fixed waits, and failed once with unchanged code  
+  `scripts/darkroom-smoke.mjs:146-155`  
+  `plain`, `printed` and `restored` are screenshots taken 1.5–1.8 s after the last input, of whatever frame is on screen then. main run 41262354634 (#329's merge) failed `paper "none" did not restore the image: 131.19 -> 133.81`, although the same tree had passed this step on the PR and passed it again in #331's run. The mechanism was not traced; the restored reading was the brighter one, so it was not simply a late frame of the darker paper.  
+  _Suggested fix:_ Before each reading, wait for the request's frame to land (`window.__ncDisplay.state().displayed >= token`, as the pen-up step at line 327 does) and, where it applies, for the full-resolution render; log the token and surface with each luminance, so a future failure says which frames were compared.
 
 - **medium/test** — S2's input→draw is set by each drag's input phase, which the press pins near the worst case, and a 60-changes/s drag can be paired with a move not dispatched yet  
   `scripts/perf/lib/session.mjs drag()`, `scripts/perf/lib/metrics.mjs dragInputs/dragMetrics`  
