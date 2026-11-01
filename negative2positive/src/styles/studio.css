@@ -362,6 +362,12 @@ body.studio {
   }
   .studio-strip-hidden .studio-strip-header > :not(#studioToggleStrip):not(#studioSelection) { display: none; }
   .studio-strip-hidden #studioSelection { margin-left: auto; }
+  /* "Ready" is plain from the photo itself: beside a framing notice it gives
+     up its place rather than wrap the row (a 44 px touch row each in the
+     app). Screen readers still hear it. */
+  .studio-image-status:has(#studioFrameNotice:not([hidden])) #studioStatus[data-state="ready"] {
+    position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+  }
 }
 
 

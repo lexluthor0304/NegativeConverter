@@ -982,6 +982,10 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
     set(node.studioStatus, 'textContent', state.samplingMode
       ? t(state.samplingMode === 'filmBase' ? 'baseSampleHint' : 'sampleHint')
       : switching?.message || t(busy ? 'processing' : ready ? 'ready' : loaded ? 'failed' : 'empty'));
+    // Which message it is, for the compact layout (studio.css): only "ready"
+    // may give up its place beside a framing notice.
+    set(node.studioStatus, 'dataset.state', state.samplingMode ? 'sampling' : switching ? 'switching'
+      : busy ? 'busy' : ready ? 'ready' : loaded ? 'failed' : 'empty');
     set(node.studioFilename, 'textContent', switching?.item.file.name || state.loadedFile?.name || '');
     set(node.studioSampleHint, 'hidden', !state.samplingMode);
     const count = state.fileQueue.filter(item => item.selected).length;

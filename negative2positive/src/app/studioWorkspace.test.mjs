@@ -427,5 +427,9 @@ assert.match(source, /if \(window\.matchMedia\?\.\('\(max-width: 700px\), \(max-
   assert.match(studioCss, /@media \(max-width: 700px\), \(max-height: 540px\) \{\s*\.studio-strip-header \{ flex-wrap: nowrap;/);
   assert.match(studioCss, /\n  \.studio-strip-hidden \.studio-strip-header > :not\(#studioToggleStrip\):not\(#studioSelection\) \{ display: none; \}/);
   assert.doesNotMatch(mobileCss, /\.studio-strip-header|#studioToggleStrip|position: fixed; left: auto/, 'one copy of the compact strip rules');
+  // Only "ready" gives up its place beside a framing notice: a sampling
+  // hint, progress or a failure stays in view.
+  assert.match(studioCss, /\.studio-image-status:has\(#studioFrameNotice:not\(\[hidden\]\)\) #studioStatus\[data-state="ready"\] \{/);
+  assert.match(source, /set\(node\.studioStatus, 'dataset\.state', state\.samplingMode \? 'sampling' : switching \? 'switching'\s*: busy \? 'busy' : ready \? 'ready'/);
 }
 console.log('studioWorkspace: compact screens collapse Photos and use the one-row strip in every shell');
