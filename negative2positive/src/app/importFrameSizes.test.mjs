@@ -77,6 +77,9 @@ const merged = await context.mergeImportFilmEdge(frame, framed, read, { applyDef
 const elapsed = performance.now() - started;
 assert.equal(merged.settings.mirrored, true);
 assert.deepEqual(plain(merged.settings.cropRegion), { left: turned.width - 1400 - 6700, top: 900, width: 6700, height: 4466 });
-assert.ok(elapsed < 5, `the mirror branch took ${elapsed.toFixed(2)} ms`);
+// The frame's planes throw on any read, so "without pixels" holds everywhere;
+// the time is a local budget only, like the smoke tests' TIMING_BUDGETS (a
+// loaded CI runner measured 6.17 ms, PR #330).
+if (!process.env.CI) assert.ok(elapsed < 5, `the mirror branch took ${elapsed.toFixed(2)} ms`);
 
 console.log(`importFrameSizes: rotate-180 and mirrored edge text map the crop from sizes only (${elapsed.toFixed(2)} ms at 60 MP)`);
