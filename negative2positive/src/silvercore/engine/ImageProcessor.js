@@ -68,17 +68,29 @@ export function accumulateAnalysisHistograms(imageData, bounds, params, histogra
   const gHist = histograms.g;
   const bHist = histograms.b;
   let totalPixels = 0;
+  // The flag is read once and each row walks one index: the per-pixel property
+  // read and index product made this pass cost twice its loads.
+  const skipTransparent = Boolean(params.excludeTransparent);
 
   for (let y = yStart; y < yEnd; y++) {
-    const row = (y - rowOffset) * width;
-    for (let x = cropX; x < cropX + cropW; x++) {
-      const i = (row + x) * 4;
-      // 解析標本の回転外側は黒い被写体ではない。
-      if (params.excludeTransparent && data[i + 3] === 0) continue;
-      rHist[data[i] >>> 8]++;
-      gHist[data[i + 1] >>> 8]++;
-      bHist[data[i + 2] >>> 8]++;
-      totalPixels++;
+    let i = ((y - rowOffset) * width + cropX) * 4;
+    const end = i + cropW * 4;
+    if (skipTransparent) {
+      for (; i < end; i += 4) {
+        // 解析標本の回転外側は黒い被写体ではない。
+        if (data[i + 3] === 0) continue;
+        rHist[data[i] >>> 8]++;
+        gHist[data[i + 1] >>> 8]++;
+        bHist[data[i + 2] >>> 8]++;
+        totalPixels++;
+      }
+    } else {
+      for (; i < end; i += 4) {
+        rHist[data[i] >>> 8]++;
+        gHist[data[i + 1] >>> 8]++;
+        bHist[data[i + 2] >>> 8]++;
+      }
+      totalPixels += Math.max(0, cropW);
     }
   }
   histograms.total += totalPixels;
@@ -118,11 +130,17 @@ export function analyzeGreyImage(grey, width, height, params, alpha = null) {
   const skipTransparent = Boolean(params.excludeTransparent && alpha);
   let totalPixels = 0;
   for (let y = cropY; y < cropY + cropH; y++) {
-    for (let x = cropX; x < cropX + cropW; x++) {
-      const p = y * width + x;
-      if (skipTransparent && alpha[p * 4 + 3] === 0) continue;
-      hist[grey[p] >>> 8]++;
-      totalPixels++;
+    let p = y * width + cropX;
+    const end = p + cropW;
+    if (skipTransparent) {
+      for (; p < end; p++) {
+        if (alpha[p * 4 + 3] === 0) continue;
+        hist[grey[p] >>> 8]++;
+        totalPixels++;
+      }
+    } else {
+      for (; p < end; p++) hist[grey[p] >>> 8]++;
+      totalPixels += Math.max(0, cropW);
     }
   }
   return greyChannelLevels(hist, totalPixels, params);
