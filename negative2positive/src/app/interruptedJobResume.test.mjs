@@ -28,7 +28,7 @@ const runtime = [
   'interruptedJobKey', 'describeInterruptedJob', 'checkInterruptedJobs', 'interruptedRollFrames', 'runResumedJob',
   'offerInterruptedJobResume', 'resumedExportJobs', 'resumeInterruptedExport', 'createBatchExportJobs',
   'exportBatchIndividuallyDesktop', 'runDesktopFolderExport', 'exportBatchIndividuallyBrowser', 'runBrowserDownloadsExport',
-  'exportBatchAsZipBrowser', 'getLocalizedText', 'getInterpolatedText'
+  'showBrowserDownloadsSummary', 'exportBatchAsZipBrowser', 'getLocalizedText', 'getInterpolatedText'
 ].map(functionSource).join('\n');
 
 function memoryStorage() {
@@ -56,7 +56,7 @@ const customEdge = { textEnabled: true, text: 'SMOKE 400', frameNumberEnabled: t
 
 // One page of the app: its storage persists across "reloads" (a new page on
 // the same storage); its live controls start at the defaults.
-function page({ storage, desktop = false, folderFiles = new Map() }) {
+function page({ storage, desktop = false, folderFiles = new Map(), mobileRecovery = null }) {
   const log = { alerts: [], confirms: [], toasts: [], batches: [], rolls: [], answers: [] };
   const state = defaults();
   const context = vm.createContext({
@@ -66,6 +66,8 @@ function page({ storage, desktop = false, folderFiles = new Map() }) {
     ...jobMarker,
     jobMarkerStorage: storage,
     interruptedJobs: [],
+    // The iOS app's on-device recovery (its originals come back with the roll).
+    mobileRecovery,
     window: desktop ? { __TAURI__: { core: { invoke: async (command, args) => {
       if (command === 'take_web_content_termination') return null;
       if (command === 'exported_files_exist') return args.paths.map(path => folderFiles.has(path));
@@ -162,7 +164,12 @@ const reAdded = () => queue().map(item => ({ ...item, automaticSettings: false }
   const second = page({ storage, desktop: true, folderFiles });
   await second.context.checkInterruptedJobs();
   assert.equal(second.log.alerts.length, 1);
-  assert.match(second.log.alerts[0], /^Export of 4 photos to .*Scans stopped after 1\. Add the original photos again/);
+  assert.match(second.log.alerts[0], /^Export of 4 photos to .*Scans stopped after 1\. Choose "Restore last roll" and pick the original photos again to continue\.$/);
+  // On the iOS app the restore brings the originals back too: nothing to pick.
+  const device = page({ storage: Object.assign(memoryStorage(), { locks: fakeLocks() }), desktop: true, folderFiles, mobileRecovery: {} });
+  device.context.jobMarkerStorage.set(jobMarker.JOB_MARKER_KEYS.export, first.context.markerAtKill);
+  await device.context.checkInterruptedJobs();
+  assert.match(device.log.alerts[0], /stopped after 1\. Tap "Restore last roll" to continue\.$/);
   // A later launch does not name it again, and it stays resumable.
   const third = page({ storage, desktop: true, folderFiles });
   await third.context.checkInterruptedJobs();

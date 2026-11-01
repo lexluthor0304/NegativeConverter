@@ -2868,6 +2868,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       savedFileFallback,
       browserSuccessKey,
       browserSuccessFallback,
+      downloadKey,
+      downloadFallback,
       toastDurationMs = 3500
     } = {}) {
       if (!result || !result.saved) {
@@ -2880,6 +2882,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         showToast(getInterpolatedText(savedFileKey, { name }, savedFileFallback), toastDurationMs);
       } else if (result.path && savedPathKey) {
         void appAlert(getInterpolatedText(savedPathKey, { path: result.path }, savedPathFallback));
+      } else if (result.name && downloadKey) {
+        showToast(getInterpolatedText(downloadKey, { name: result.name }, downloadFallback), toastDurationMs);
       } else if (browserSuccessKey) {
         showToast(getLocalizedText(browserSuccessKey, browserSuccessFallback), toastDurationMs);
       }
@@ -20419,7 +20423,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       }
 
       downloadBlobInBrowser(normalizedBlob, fileName);
-      return { saved: true, path: null };
+      // The browser takes the download from here: `name` is what it was offered as.
+      return { saved: true, path: null, name: fileName };
     }
 
     function isBrowserSavePickerCancel(err) {
@@ -21022,7 +21027,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           cancelledFallback: 'Save cancelled. No file was written.',
           // Desktop: the write has finished, so name the file it made.
           savedFileKey: 'exportSavedFile',
-          savedFileFallback: 'Saved {name}'
+          savedFileFallback: 'Saved {name}',
+          // Browser: the file went to its download manager, out of view.
+          downloadKey: 'exportDownloadStarted',
+          downloadFallback: 'Download started: {name}'
         });
       } catch (err) {
         notifyExportError(err);
@@ -23397,6 +23405,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       notifyReviewExport();
       const selectedFiles = getSelectedFiles();
       if (selectedFiles.length < 1) return;
+      // One photo needs no archive: it downloads as itself.
+      if (selectedFiles.length === 1) {
+        await exportBatchIndividuallyBrowser({ selectedFiles });
+        return;
+      }
       await exportBatchAsZipBrowser(selectedFiles, 'converted_negatives.zip');
     }
 
@@ -23554,6 +23567,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       await showBatchExportOverlay(() => cancel.abort());
 
       let result;
+      let lastName = '';
       try {
         result = await runBatchExport(jobs, {
           exportInfo,
@@ -23566,6 +23580,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
               cancel.abort();
               throw new Error('Save cancelled');
             }
+            lastName = saved.name || job.outputName;
             marker.record(job.markerIndex);
             scheduleProjectRecovery();
             // Later never-analysed frames wait for this write (#256).
@@ -23582,7 +23597,22 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (result.cancelled) {
         console.info('Batch individual export cancelled by user.');
         notifyBatchCancelled();
+      } else {
+        showBrowserDownloadsSummary({ successCount: result.successCount, failCount: result.failCount, total, name: lastName });
       }
+    }
+
+    // The files went to the browser's download manager, out of view.
+    function showBrowserDownloadsSummary({ successCount, failCount, total, name }) {
+      if (total === 1 && successCount === 1 && name) {
+        showToast(getInterpolatedText('exportDownloadStarted', { name }, `Download started: ${name}`), 3500);
+        return;
+      }
+      const key = failCount > 0 ? 'downloadsPartial' : 'downloadsStarted';
+      const fallback = failCount > 0
+        ? `Downloads started: ${successCount} / ${total} photos; ${failCount} failed.`
+        : `Downloads started: ${successCount} / ${total} photos.`;
+      showToast(getInterpolatedText(key, { success: successCount, failed: failCount, total }, fallback), failCount > 0 ? 6000 : 4500);
     }
 
     async function exportBatchIndividually() {
@@ -23649,7 +23679,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
     function notifyReviewExport(items = state.fileQueue.filter(item => item.selected)) {
       const count = items.filter(item => reviewForItem(item).needs).length;
-      if (count) showToast(getInterpolatedText('reviewExport', { count }, `${count} frames were flagged for review and will be exported as they are.`), 5000);
+      if (count) showToast(getInterpolatedText('reviewExport', { count }, `${count} frame(s) flagged for review will be exported as is.`), 5000);
     }
     // Inside the synchronous part of a photo switch the list is only marked
     // dirty; the switch then refreshes it once (switchToFile). Nothing else
@@ -24502,13 +24532,42 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       input.onchange = (e) => {
         if (isDesktopBatchExportLocked()) return;
         if (e.target.files.length > 0) {
-          addFilesToQueue(Array.from(e.target.files));
+          const hadPhoto = Boolean(state.originalImageData);
+          const files = Array.from(e.target.files);
+          const added = addFilesToQueue(files);
           if (!state.originalImageData && state.fileQueue.length > 0) {
             loadFile(state.fileQueue[state.currentFileIndex].file);
+          } else if (hadPhoto) {
+            announceAddedPhotos(added, files);
           }
         }
       };
       input.click();
+    }
+
+    // Photos added to an open roll join the filmstrip while the open photo
+    // stays: say so, and offer the first new one, wherever the sort put it.
+    function announceAddedPhotos(added, files) {
+      if (!added.length) {
+        const queued = new Set(state.fileQueue.map(item => item.id));
+        if (files.every(file => queued.has(createQueueItemId(file)))) {
+          showToast(getLocalizedText('photosAlreadyQueued', 'Those photos are already in this roll.'));
+        }
+        return;
+      }
+      const message = added.length === 1
+        ? getInterpolatedText('photoAdded', { name: added[0].file.name }, `Added ${added[0].file.name}`)
+        : getInterpolatedText('photosAdded', { count: String(added.length) }, `Added ${added.length} photos`);
+      showToast(message, 6000, {
+        action: {
+          id: 'openAddedPhoto',
+          label: getLocalizedText('photosAddedOpen', 'Open'),
+          onClick: () => {
+            const index = state.fileQueue.indexOf(added[0]);
+            if (index >= 0) void switchToFile(index);
+          }
+        }
+      });
     }
 
     // Add more files button
@@ -29532,16 +29591,19 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         if (!project.files.length) return;
         recoveredProject = project;
         recoveredNativeProject = record.native || null;
+        // The empty Studio offers it in place, for as long as it stays empty.
         state.projectRecoveryAvailable = true;
         studioWorkspace?.sync();
-        showToast(getLocalizedText(record.native ? 'mobileRecoveryAvailable' : 'projectRecoveryAvailable', 'A recovery copy of the last roll is available.'), 5000);
       } catch (error) {
         console.warn('Project recovery unavailable:', error);
         if (mobileRecovery) updateMobileRecoveryStatus('error', error);
       }
     }
 
-    async function restoreRecoveredProject() {
+    // `pickOriginals` (the empty Studio's button): on the web the recovery
+    // copy keeps the recipes, not the pixels, so the picker for the
+    // originals opens at once, inside the click that asked for it.
+    async function restoreRecoveredProject({ pickOriginals = false } = {}) {
       if (!recoveredProject) return;
       if (mobileRecovery && recoveredNativeProject) {
         if (state.fileQueue.length || state.mobileRecoveryRestoring) return;
@@ -29569,7 +29631,20 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       }
       pendingProject = recoveredProject;
       if (state.fileQueue.length) void applyPendingProject();
+      else if (pickOriginals) pickRecoveredOriginals();
       else showToast(getLocalizedText('projectNeedsFiles', 'Project read. Add the original photos to restore it.'), 4000);
+    }
+
+    // A cancelled picker leaves no pending project for a later, unrelated
+    // import to be matched against (browsers without the `cancel` event keep
+    // it, as the Batch tools' restore always has).
+    function pickRecoveredOriginals() {
+      const project = pendingProject;
+      const onCancel = () => { if (pendingProject === project) pendingProject = null; };
+      fileInput.addEventListener('cancel', onCancel, { once: true });
+      fileInput.addEventListener('change', () => fileInput.removeEventListener('cancel', onCancel), { once: true });
+      showToast(getLocalizedText('projectRecoveryPick', "Pick the last roll's original photos: their edits come back with them."));
+      fileInput.click();
     }
 
     async function openProjectFile(file) {
@@ -29793,7 +29868,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (named.some(jobNeedsSafeMode)) {
         parts.push(getLocalizedText('interruptedJobSafeMode', 'It stopped again after resuming, so the next attempt runs one photo at a time with the photo caches off.'));
       }
-      parts.push(getLocalizedText('interruptedJobNext', 'Add the original photos again, then restore the roll under Batch tools to continue.'));
+      // The empty Studio offers the recovery copy; on the device the
+      // originals come back with it.
+      parts.push(mobileRecovery
+        ? getLocalizedText('interruptedJobNextDevice', 'Tap "Restore last roll" to continue.')
+        : getLocalizedText('interruptedJobNext', 'Choose "Restore last roll" and pick the original photos again to continue.'));
       void appAlert(parts.join(' '));
     }
 
@@ -32582,7 +32661,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         onLoupe: () => { void openLoupe(); },
         onSaveProject: () => { void saveProject(); },
         onOpenProject: () => { const input = document.getElementById('projectInput'); if (input) { input.value = ''; input.click(); } },
-        onRestoreProject: () => { restoreRecoveredProject(); }
+        onRestoreProject: (options) => { restoreRecoveredProject(options); }
       });
       // The tools whose OpenCV half runs in the auto-frame worker (#245)
       // start it when they come into reach, hiding its cold boot after the
