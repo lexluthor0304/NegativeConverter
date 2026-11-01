@@ -6,9 +6,26 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 NegativeConverter is a browser-based film negative to positive converter. It processes scanned film negatives entirely client-side (no server uploads) with real-time adjustments. The application has a 1980s cyberpunk aesthetic and supports Chinese, English, and Japanese.
 
+The same web app (`negative2positive/`) ships on every platform but Android:
+
+- **Web**: https://negative-converter.tokugai.com (Vercel).
+- **Direct download**: Windows (`.exe`, `.msi`), macOS 10.15+ (`.dmg`) and
+  Linux (`.AppImage`, `.deb`, `.rpm`, plus a `legacy-glibc235` AppImage for
+  older distros), on GitHub Release + R2; they update themselves in-app
+  (`docs/desktop-updater.md`).
+- **App Store**: one record, Apple ID `6797694070`, bundle ID
+  `com.neoanaloglab.negativeconverter`, universal purchase: the Mac App Store
+  since 2026-08-12, iPhone and iPad (iOS 17+) since 2026-11-01.
+
+So the Studio runs in browsers, WebView2 (Windows), WKWebView (macOS, iOS) and
+WebKitGTK (Linux): a new web API has to work in all of them, and a feature only
+some shells have is gated on the native shell's platform query, never on the
+user agent (`docs/ios-p1-platform.md`).
+
 ## Development
 
-This project now uses **Vite** for web dev/build and Tauri for desktop packaging.
+This project now uses **Vite** for web dev/build and Tauri for the desktop and
+iPhone/iPad apps.
 
 Merging to `main` auto-releases the desktop app (GitHub Release + R2), and —
 when the App Store secrets are configured — builds, uploads, and submits the
