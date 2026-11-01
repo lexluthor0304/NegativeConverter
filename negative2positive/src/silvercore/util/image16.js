@@ -39,7 +39,21 @@ export function wrapImage16(width, height, data) {
 export function fromImageData8(imageData) {
   const { width, height, data: src } = imageData;
   const dst = new Uint16Array(width * height * 4);
-  for (let i = 0; i < src.length; i++) {
+  let i = 0;
+  if (LITTLE_ENDIAN && src.byteOffset % 4 === 0) {
+    // Four samples in, two words out: spread the bytes into 16-bit lanes and
+    // multiply once, b * 257 = b | b << 8 per lane, no carry across lanes.
+    const words = Math.min(src.length, dst.length) >>> 2;
+    const s32 = new Uint32Array(src.buffer, src.byteOffset, words);
+    const d32 = new Uint32Array(dst.buffer, 0, words * 2);
+    for (let k = 0, o = 0; k < words; k++, o += 2) {
+      const w = s32[k];
+      d32[o] = ((w & 0xFF) | ((w & 0xFF00) << 8)) * 257;
+      d32[o + 1] = (((w >>> 16) & 0xFF) | ((w >>> 8) & 0xFF0000)) * 257;
+    }
+    i = words * 4;
+  }
+  for (; i < src.length; i++) {
     dst[i] = src[i] * 257;
   }
   return { width, height, data: dst };
