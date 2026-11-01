@@ -416,20 +416,18 @@ assert.match(source, /set\(node\.studioBorderPreviewOff, 'hidden', !loaded \|\| 
 assert.match(functionBody('exportBatchAsZip'), /selectedFiles\.length === 1\) \{\s*await exportBatchIndividuallyBrowser\(\{ selectedFiles \}\);/);
 console.log('studioWorkspace: recovery offered on the empty Studio, border preview named in the viewer, one photo is no ZIP');
 
-// A compact screen opens with Photos collapsed in every shell, and the
-// compact filmstrip rules carry no shell qualifier (a phone in the browser
-// gets the iOS app's strip: one scrollable row, Photos and the count when
-// collapsed).
+// A compact screen opens with Photos collapsed in every shell (a phone in the
+// browser too), and the collapsed strip keeps only Photos and the count: one
+// copy of those rules, without a shell qualifier.
 assert.match(source, /if \(window\.matchMedia\?\.\('\(max-width: 700px\), \(max-height: 540px\)'\)\.matches\) \{\s*body\.classList\.add\('studio-strip-hidden'\);/);
 {
   const studioCss = readFileSync(new URL('../styles/studio.css', import.meta.url), 'utf8');
   const mobileCss = readFileSync(new URL('../styles/studio-mobile.css', import.meta.url), 'utf8');
-  assert.match(studioCss, /@media \(max-width: 700px\), \(max-height: 540px\) \{\s*\.studio-strip-header \{ flex-wrap: nowrap;/);
-  assert.match(studioCss, /\n  \.studio-strip-hidden \.studio-strip-header > :not\(#studioToggleStrip\):not\(#studioSelection\) \{ display: none; \}/);
-  assert.doesNotMatch(mobileCss, /\.studio-strip-header|#studioToggleStrip|position: fixed; left: auto/, 'one copy of the compact strip rules');
+  assert.match(studioCss, /@media \(max-width: 700px\), \(max-height: 540px\) \{\s*\.studio-strip-hidden \.studio-strip-header > :not\(#studioToggleStrip\):not\(#studioSelection\) \{ display: none; \}/);
+  assert.doesNotMatch(mobileCss, /\.studio-strip-hidden (\.studio-strip-header|#studioSelection)/, 'one copy of the collapsed strip rules');
   // Only "ready" gives up its place beside a framing notice: a sampling
   // hint, progress or a failure stays in view.
   assert.match(studioCss, /\.studio-image-status:has\(#studioFrameNotice:not\(\[hidden\]\)\) #studioStatus\[data-state="ready"\] \{/);
   assert.match(source, /set\(node\.studioStatus, 'dataset\.state', state\.samplingMode \? 'sampling' : switching \? 'switching'\s*: busy \? 'busy' : ready \? 'ready'/);
 }
-console.log('studioWorkspace: compact screens collapse Photos and use the one-row strip in every shell');
+console.log('studioWorkspace: compact screens open with Photos collapsed in every shell; the status line keeps one row');
