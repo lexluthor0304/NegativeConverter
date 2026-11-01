@@ -8,6 +8,8 @@
  *           highpass filter → contour analysis → dilate → inpaint
  */
 
+import { LITTLE_ENDIAN } from '../util/image16.js';
+
 // ─── OpenCV.js feature detection ─────────────────────────────────────────────
 
 let _hasScharr = null;
@@ -84,6 +86,44 @@ function normalizeToUint8(src, len) {
 function imageDataToMat(imageData) {
   const c = cv();
   return c.matFromImageData(imageData);
+}
+
+// OpenCV's COLOR_RGBA2GRAY on 8-bit samples is (R·9798 + G·19235 + B·3735 +
+// 2^14) >> 15, its 15-bit weights; alpha takes no part. Both shipped builds,
+// the package's scalar module and the SIMD one (#292), give exactly these
+// bytes on all 2^24 RGB triples. Writing them straight into a one-channel Mat
+// skips the RGBA copy of the frame cv.cvtColor would need: 4 bytes per pixel
+// of OpenCV heap, which a WebAssembly memory never gives back.
+const GRAY_R = 9798;
+const GRAY_G = 19235;
+const GRAY_B = 3735;
+const GRAY_HALF = 1 << 14;
+const GRAY_SHIFT = 15;
+
+/** cv.cvtColor(COLOR_RGBA2GRAY) of `pixelCount` RGBA pixels into `gray`. */
+export function rgbaToGrayInto(rgba, gray, pixelCount) {
+  if (LITTLE_ENDIAN && rgba.byteOffset % 4 === 0) {
+    // One load per pixel: R is the low byte of the little-endian word.
+    const words = new Uint32Array(rgba.buffer, rgba.byteOffset, pixelCount);
+    for (let p = 0; p < pixelCount; p++) {
+      const v = words[p];
+      gray[p] = ((v & 255) * GRAY_R + ((v >>> 8) & 255) * GRAY_G + ((v >>> 16) & 255) * GRAY_B + GRAY_HALF) >> GRAY_SHIFT;
+    }
+    return gray;
+  }
+  for (let p = 0, i = 0; p < pixelCount; p++, i += 4) {
+    gray[p] = (rgba[i] * GRAY_R + rgba[i + 1] * GRAY_G + rgba[i + 2] * GRAY_B + GRAY_HALF) >> GRAY_SHIFT;
+  }
+  return gray;
+}
+
+/** A CV_8UC1 Mat holding the grey of an RGBA ImageData (as cv.cvtColor makes it). */
+function grayMatFromImageData(imageData) {
+  const c = cv();
+  const { width, height, data } = imageData;
+  const gray = new c.Mat(height, width, c.CV_8UC1);
+  rgbaToGrayInto(data, gray.data, width * height);
+  return gray;
 }
 
 /** Convert single-channel Uint8Array (h*w) to OpenCV Mat */
@@ -186,33 +226,55 @@ export function classifyDustBlob(rect, area, maxSize, imageWidth, imageHeight) {
 }
 
 /**
- * Compute white/black top-hat responses for the image.
- * @returns {{ topData: Uint8Array, blackData: Uint8Array }}
+ * Compute white/black top-hat responses for the image, with their histograms
+ * (a strength change only moves the thresholds read from them).
+ * @returns {{ topData: Uint8Array, blackData: Uint8Array, topHist: Uint32Array, blackHist: Uint32Array }}
  */
 function computeHatResponses(imageData) {
   const c = cv();
-  const src = imageDataToMat(imageData);
-  const gray = new c.Mat();
-  c.cvtColor(src, gray, c.COLOR_RGBA2GRAY);
+  const gray = grayMatFromImageData(imageData);
   const kernel = c.getStructuringElement(c.MORPH_ELLIPSE, new c.Size(DUST_HAT_KERNEL, DUST_HAT_KERNEL));
   const tophat = new c.Mat();
   const blackhat = new c.Mat();
-  c.morphologyEx(gray, tophat, c.MORPH_TOPHAT, kernel);
-  c.morphologyEx(gray, blackhat, c.MORPH_BLACKHAT, kernel);
-  const topData = new Uint8Array(tophat.data);
-  const blackData = new Uint8Array(blackhat.data);
-  deleteMats(src, gray, kernel, tophat, blackhat);
-  return { topData, blackData };
+  let topData;
+  let blackData;
+  try {
+    c.morphologyEx(gray, tophat, c.MORPH_TOPHAT, kernel);
+    topData = new Uint8Array(tophat.data);
+    // Freed before the black-hat runs, so its scratch can take the space.
+    tophat.delete();
+    c.morphologyEx(gray, blackhat, c.MORPH_BLACKHAT, kernel);
+    blackData = new Uint8Array(blackhat.data);
+  } finally {
+    deleteMats(gray, kernel, tophat, blackhat);
+  }
+  return { topData, blackData, ...hatHistograms(topData, blackData) };
+}
+
+/** The 256-bin histograms of both hat responses, in one pass. */
+function hatHistograms(topData, blackData) {
+  const topHist = new Uint32Array(256);
+  const blackHist = new Uint32Array(256);
+  for (let i = 0; i < topData.length; i++) {
+    topHist[topData[i]]++;
+    blackHist[blackData[i]]++;
+  }
+  return { topHist, blackHist };
 }
 
 /** Quantile-based threshold: stronger strength admits a larger anomaly share. */
 export function hatThreshold(data, strength) {
   const hist = new Uint32Array(256);
   for (let i = 0; i < data.length; i++) hist[data[i]]++;
+  return hatThresholdFromHistogram(hist, data.length, strength);
+}
+
+/** hatThreshold() from the response's histogram over `total` pixels. */
+export function hatThresholdFromHistogram(hist, total, strength) {
   // Level 1 admits almost nothing (~0.03% of pixels); the old mapping of
   // 0.001 + strength*0.0011 made even the minimum setting claim ~0.2% of the
   // frame, which on clean film lands on real highlight detail (#113).
-  const target = data.length * (1 - (0.0003 + (strength - 1) * 0.0013));
+  const target = total * (1 - (0.0003 + (strength - 1) * 0.0013));
   let cum = 0;
   let quantile = 255;
   for (let v = 0; v < 256; v++) {
@@ -224,97 +286,186 @@ export function hatThreshold(data, strength) {
 }
 
 /**
- * Exact summed-area counts of nonzero mask pixels, using four bytes per pixel.
+ * Exact counts of the nonzero pixels of `bin` (w × h, row-major) inside each
+ * half-open rectangle [x0, x1) × [y0, y1), four entries of `rects` per
+ * rectangle, already clamped to the frame (an empty one counts 0).
+ *
+ * Offline orthogonal range counting: a rectangle's count is four corner
+ * prefix counts C(X, Y) = #{nonzero (x, y) : x < X, y < Y}; the corners are
+ * bucketed by Y (counting sort) and one pass down the rows answers each
+ * bucket from a Fenwick tree over the columns before adding the next row.
+ * O(w·h + (s + q)·log w) time for s nonzero pixels and q rectangles, and
+ * O(w + h + q) memory, where the summed-area table it replaces held 4 bytes
+ * per pixel. Integer arithmetic, so the counts are the table's exactly.
+ *
+ * @param {ArrayLike<number>} bin
+ * @param {number} w
+ * @param {number} h
+ * @param {Int32Array} rects
+ * @returns {Float64Array} one count per rectangle
  */
-export function buildBinaryIntegralImage(bin, w, h) {
-  // Each pixel contributes either zero or one. Integer counts remain exact;
-  // only frames exceeding uint32's count range need the wider representation.
-  const Counts = w * h <= 0xffffffff ? Uint32Array : Float64Array;
-  const integ = new Counts((w + 1) * (h + 1));
-  for (let y = 0; y < h; y++) {
-    let rowSum = 0;
-    for (let x = 0; x < w; x++) {
-      rowSum += bin[y * w + x] > 0 ? 1 : 0;
-      integ[(y + 1) * (w + 1) + x + 1] = integ[y * (w + 1) + x + 1] + rowSum;
+export function countNonzeroInRects(bin, w, h, rects) {
+  const q = rects.length >> 2;
+  const counts = new Float64Array(q);
+  // Corners per row bound Y. A corner at X = 0 or Y = 0 counts nothing.
+  const bucket = new Int32Array(h + 2);
+  for (let k = 0; k < q; k++) {
+    const x0 = rects[4 * k], y0 = rects[4 * k + 1], x1 = rects[4 * k + 2], y1 = rects[4 * k + 3];
+    if (x1 <= x0 || y1 <= y0) continue;
+    const perRow = x0 > 0 ? 2 : 1;
+    if (y0 > 0) bucket[y0 + 1] += perRow;
+    bucket[y1 + 1] += perRow;
+  }
+  let lastY = -1;
+  for (let y = 0; y <= h; y++) {
+    if (bucket[y + 1]) lastY = y;
+    bucket[y + 1] += bucket[y];
+  }
+  if (lastY < 0) return counts;
+  const cornerCount = bucket[h + 1];
+  const cornerX = new Int32Array(cornerCount);
+  const cornerRect = new Int32Array(cornerCount);
+  const cornerSign = new Int8Array(cornerCount);
+  const fill = bucket.slice(0, h + 1);
+  const add = (y, x, k, sign) => {
+    const j = fill[y]++;
+    cornerX[j] = x; cornerRect[j] = k; cornerSign[j] = sign;
+  };
+  for (let k = 0; k < q; k++) {
+    const x0 = rects[4 * k], y0 = rects[4 * k + 1], x1 = rects[4 * k + 2], y1 = rects[4 * k + 3];
+    if (x1 <= x0 || y1 <= y0) continue;
+    add(y1, x1, k, 1);
+    if (x0 > 0) add(y1, x0, k, -1);
+    if (y0 > 0) {
+      add(y0, x1, k, -1);
+      if (x0 > 0) add(y0, x0, k, 1);
     }
   }
-  return integ;
+  // tree[i] covers columns (i - lowbit(i), i] of the rows added so far.
+  const tree = w * h <= 0xffffffff ? new Uint32Array(w + 1) : new Float64Array(w + 1);
+  // The response is sparse: whole zero words are skipped four pixels at a time.
+  const words = bin instanceof Uint8Array && bin.byteOffset % 4 === 0
+    ? new Uint32Array(bin.buffer, bin.byteOffset, bin.length >>> 2)
+    : null;
+  for (let y = 0; y <= lastY; y++) {
+    for (let j = bucket[y]; j < bucket[y + 1]; j++) {
+      let sum = 0;
+      for (let i = cornerX[j]; i > 0; i -= i & -i) sum += tree[i];
+      counts[cornerRect[j]] += cornerSign[j] * sum;
+    }
+    if (y === lastY) break;
+    const row = y * w;
+    const end = row + w;
+    let p = row;
+    if (words) {
+      for (; p < end && (p & 3); p++) {
+        if (bin[p] !== 0) for (let i = p - row + 1; i <= w; i += i & -i) tree[i]++;
+      }
+      for (; p + 4 <= end; p += 4) {
+        if (words[p >>> 2] === 0) continue;
+        for (let b = p; b < p + 4; b++) {
+          if (bin[b] !== 0) for (let i = b - row + 1; i <= w; i += i & -i) tree[i]++;
+        }
+      }
+    }
+    for (; p < end; p++) {
+      if (bin[p] !== 0) for (let i = p - row + 1; i <= w; i += i & -i) tree[i]++;
+    }
+  }
+  return counts;
 }
 
 /** Threshold the hat responses and filter contours into the final dust mask. */
-function buildDustMask(topData, blackData, w, h, strength, maxParticleSize) {
+function buildDustMask(topData, blackData, w, h, strength, maxParticleSize, histograms = null) {
   const c = cv();
   const pixelCount = w * h;
   const maxSize = Number.isFinite(maxParticleSize) && maxParticleSize > 0
     ? maxParticleSize
     : defaultMaxParticleSize(w, h);
-  const thTop = hatThreshold(topData, strength);
-  const thBlack = hatThreshold(blackData, strength);
+  const { topHist, blackHist } = histograms || hatHistograms(topData, blackData);
+  const thTop = hatThresholdFromHistogram(topHist, pixelCount, strength);
+  const thBlack = hatThresholdFromHistogram(blackHist, pixelCount, strength);
 
-  const bin = new Uint8Array(pixelCount);
-  for (let i = 0; i < pixelCount; i++) {
-    bin[i] = (topData[i] > thTop || blackData[i] > thBlack) ? 255 : 0;
-  }
-
-  // Integral image over the binary response for isolation checks
-  const integ = buildBinaryIntegralImage(bin, w, h);
-  const regionSum = (x0, y0, x1, y1) => {
-    x0 = Math.max(0, x0); y0 = Math.max(0, y0);
-    x1 = Math.min(w, x1); y1 = Math.min(h, y1);
-    if (x1 <= x0 || y1 <= y0) return 0;
-    return integ[y1 * (w + 1) + x1] - integ[y0 * (w + 1) + x1] - integ[y1 * (w + 1) + x0] + integ[y0 * (w + 1) + x0];
-  };
-
-  const binMat = uint8ArrayToMat(bin, h, w);
+  // The binary response goes straight into the Mat findContours reads, which
+  // leaves its input as it was (it traces a bordered copy), so the isolation
+  // counts below read the same bytes afterwards.
+  const binMat = new c.Mat(h, w, c.CV_8UC1);
   const contours = new c.MatVector();
   const hierarchy = new c.Mat();
-  c.findContours(binMat, contours, hierarchy, c.RETR_EXTERNAL, c.CHAIN_APPROX_SIMPLE);
+  let outMat = null;
+  let dilateKernel = null;
+  let dilated = null;
+  let one = null;
+  const candidates = [];
+  try {
+    const binWrite = binMat.data;
+    for (let i = 0; i < pixelCount; i++) {
+      binWrite[i] = (topData[i] > thTop || blackData[i] > thBlack) ? 255 : 0;
+    }
+    c.findContours(binMat, contours, hierarchy, c.RETR_EXTERNAL, c.CHAIN_APPROX_SIMPLE);
 
-  const outMat = c.Mat.zeros(h, w, c.CV_8UC1);
-  let particleCount = 0;
-
-  for (let i = 0; i < contours.size(); i++) {
-    const cnt = contours.get(i);
-    const area = Math.abs(c.contourArea(cnt)) || 1;
-    const rect = c.boundingRect(cnt);
-    const shape = classifyDustBlob(rect, area, maxSize, w, h);
-    const isScratch = shape.isScratch;
-    let keep = shape.keep;
-
-    if (keep) {
+    // Shape first: only blobs that pass it need their surroundings counted.
+    // Their contour handles stay open for the drawing pass below.
+    const contourCount = contours.size();
+    const rects = [];
+    const nbAreas = [];
+    for (let i = 0; i < contourCount; i++) {
+      const cnt = contours.get(i);
+      const area = Math.abs(c.contourArea(cnt)) || 1;
+      const rect = c.boundingRect(cnt);
+      const shape = classifyDustBlob(rect, area, maxSize, w, h);
+      if (!shape.keep) {
+        cnt.delete();
+        continue;
+      }
       // Scratches too must sit in quiet surroundings — dense responses around
       // a thin candidate mean film-grain or texture, not a defect. They get a
       // tight band (their bbox is already mostly background), spots a wide pad.
-      const pad = isScratch ? 16 : Math.max(8, Math.max(rect.width, rect.height) * 2);
-      const nbSum = regionSum(rect.x - pad, rect.y - pad, rect.x + rect.width + pad, rect.y + rect.height + pad);
-      const selfSum = regionSum(rect.x, rect.y, rect.x + rect.width, rect.y + rect.height);
-      const nbArea = (Math.min(w, rect.x + rect.width + pad) - Math.max(0, rect.x - pad))
+      const pad = shape.isScratch ? 16 : Math.max(8, Math.max(rect.width, rect.height) * 2);
+      rects.push(
+        Math.max(0, rect.x - pad), Math.max(0, rect.y - pad),
+        Math.min(w, rect.x + rect.width + pad), Math.min(h, rect.y + rect.height + pad),
+        Math.max(0, rect.x), Math.max(0, rect.y),
+        Math.min(w, rect.x + rect.width), Math.min(h, rect.y + rect.height)
+      );
+      nbAreas.push((Math.min(w, rect.x + rect.width + pad) - Math.max(0, rect.x - pad))
         * (Math.min(h, rect.y + rect.height + pad) - Math.max(0, rect.y - pad))
-        - rect.width * rect.height;
-      const density = (nbSum - selfSum) / Math.max(1, nbArea);
-      if (density > DUST_NEIGHBOR_DENSITY_LIMIT) keep = false;
+        - rect.width * rect.height);
+      candidates.push(cnt);
+    }
+    const sums = countNonzeroInRects(binMat.data, w, h, Int32Array.from(rects));
+
+    outMat = c.Mat.zeros(h, w, c.CV_8UC1);
+    let particleCount = 0;
+    // One single-contour vector and one colour for every blob drawn.
+    const white = new c.Scalar(255);
+    one = new c.MatVector();
+    for (let k = 0; k < candidates.length; k++) {
+      const cnt = candidates[k];
+      const density = (sums[2 * k] - sums[2 * k + 1]) / Math.max(1, nbAreas[k]);
+      if (density <= DUST_NEIGHBOR_DENSITY_LIMIT) {
+        if (one.size() === 0) one.push_back(cnt);
+        else one.set(0, cnt);
+        c.drawContours(outMat, one, 0, white, c.FILLED);
+        particleCount++;
+      }
+      cnt.delete();
+      candidates[k] = null;
     }
 
-    if (keep) {
-      const vec = new c.MatVector();
-      vec.push_back(cnt);
-      c.drawContours(outMat, vec, 0, new c.Scalar(255), c.FILLED);
-      vec.delete();
-      particleCount++;
-    }
-    cnt.delete();
+    const kernelSize = Math.max(3, Math.round(h * 0.0015)) | 1;
+    dilateKernel = c.getStructuringElement(c.MORPH_ELLIPSE, new c.Size(kernelSize, kernelSize));
+    dilated = new c.Mat();
+    c.dilate(outMat, dilated, dilateKernel);
+    const mask = new Uint8Array(dilated.data);
+    return { mask, particleCount };
+  } finally {
+    deleteMats(binMat, hierarchy, outMat, dilateKernel, dilated);
+    if (one) one.delete();
+    // Handles still open when something threw (tens of thousands on a grainy frame: no spread).
+    for (const cnt of candidates) if (cnt && !cnt.isDeleted()) cnt.delete();
+    contours.delete();
   }
-
-  const kernelSize = Math.max(3, Math.round(h * 0.0015)) | 1;
-  const dilateKernel = c.getStructuringElement(c.MORPH_ELLIPSE, new c.Size(kernelSize, kernelSize));
-  const dilated = new c.Mat();
-  c.dilate(outMat, dilated, dilateKernel);
-  const mask = new Uint8Array(dilated.data);
-
-  deleteMats(binMat, hierarchy, outMat, dilateKernel, dilated);
-  contours.delete();
-
-  return { mask, particleCount };
 }
 
 /**
@@ -335,13 +486,14 @@ export function detectDust(imageData, { strength = 3, maxParticleSize } = {}) {
   ensureFeatureDetection();
 
   const { width: w, height: h } = imageData;
-  const { topData, blackData } = computeHatResponses(imageData);
-  const { mask, particleCount } = buildDustMask(topData, blackData, w, h, strength, maxParticleSize);
+  const { topData, blackData, topHist, blackHist } = computeHatResponses(imageData);
+  const histograms = { topHist, blackHist };
+  const { mask, particleCount } = buildDustMask(topData, blackData, w, h, strength, maxParticleSize, histograms);
 
   return {
     mask,
     particleCount,
-    _state: { topData, blackData, width: w, height: h }
+    _state: { topData, blackData, width: w, height: h, topHist, blackHist }
   };
 }
 
@@ -365,7 +517,8 @@ export function updateDustStrength(imageData, existingState, newStrength, maxPar
   }
 
   const { topData, blackData, width: w, height: h } = existingState;
-  const { mask, particleCount } = buildDustMask(topData, blackData, w, h, newStrength, maxParticleSize);
+  if (!existingState.topHist || !existingState.blackHist) Object.assign(existingState, hatHistograms(topData, blackData));
+  const { mask, particleCount } = buildDustMask(topData, blackData, w, h, newStrength, maxParticleSize, existingState);
   return { mask, particleCount, _state: existingState };
 }
 
