@@ -69,6 +69,15 @@ body.studio .studio-import-actions .upload-btn {
   box-shadow: var(--pixel-shadow); cursor: pointer;
 }
 body.studio .studio-import-actions .upload-btn:hover { background: var(--accent-hover); color: #211d17; }
+body.studio .studio-welcome-restore {
+  display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 8px 12px;
+  margin: 0; font-size: 12px; line-height: 1.8; color: var(--text-secondary); text-shadow: none;
+}
+body.studio .studio-welcome-restore button {
+  border: 2px solid var(--accent); background: transparent; color: var(--accent);
+  padding: 8px 14px; font-size: 12px; cursor: pointer; box-shadow: var(--pixel-shadow);
+}
+body.studio .studio-welcome-restore button:hover:not(:disabled) { background: var(--accent); color: #211d17; }
 body.studio .upload-placeholder .studio-import-hint { font-size: 12px; line-height: 1.8; color: var(--text-secondary); margin: 0; text-shadow: none; }
 body.studio .upload-placeholder .studio-formats { margin: 0; line-height: 1.8; text-shadow: none; }
 body.studio .upload-placeholder .studio-auto-crop {

@@ -31,7 +31,7 @@ export const studioText = {
     composition: '构图', border: '边框', curves: '曲线', fine: 'RGB / CMY 精调', looks: '全部风格与预设',
     lens: '镜头校正', autoFrame: '自动取景设置', compositionHint: '导入时自动识别成像区域。支持 135、半格、宽幅及 120 多种画幅；识别不可靠时保留完整画面，供你确认。',
     borderHint: '添加模拟胶片齿孔与边码；不是恢复原片上被裁掉的信息。预览与导出可分别设置。',
-    borderPreview: '预览胶片边框', borderExport: '导出时包含边框与边码', borderExportAction: '导出带边框照片',
+    borderPreview: '预览胶片边框', borderPreviewOff: '胶片边框预览中 · 关闭', borderExport: '导出时包含边框与边码', borderExportAction: '导出带边框照片',
     batch: '批量工具', batchHint: '同步调色只复制色彩。处理设置还包括片基、白平衡校正和镜头等；两者都保留各照片的构图。',
     allSettings: '同步片基与处理设置…', saveSettings: '保存当前照片设置', clearQueue: '清空照片列表…', newSession: '关闭照片，重新开始…',
     mergeHint: '把同一格底片的 2–5 次拍摄合成一个 16 位文件：平均叠加降噪，HDR 合并不同曝光。', mergeAverage: '合成已选：平均叠加', mergeHdr: '合成已选：HDR 包围曝光',
@@ -39,7 +39,7 @@ export const studioText = {
     newConfirm: '关闭当前照片和列表？未导出的结果将丢失，原始文件不会被删除。',
     hidePanel: '收起调整', showPanel: '展开调整', hideStrip: '收起照片条', showStrip: '展开照片条', tabs: '照片工具',
     recipe: '配方', recipeHint: '把这张照片的转换设置压缩成一段短代码或二维码分享；粘贴朋友的代码或上传二维码图片，查看后即可套用。不含裁切与文件信息。',
-    projectHint: '工程文件记录整卷：照片列表、每张的设置、片基参考和元数据。之后把它和原片一起拖进来即可恢复。', saveProject: '保存工程文件…', openProject: '打开工程文件…', restoreProject: '恢复上次的胶卷',
+    projectHint: '工程文件记录整卷：照片列表、每张的设置、片基参考和元数据。之后把它和原片一起拖进来即可恢复。', saveProject: '保存工程文件…', openProject: '打开工程文件…', restoreProject: '恢复上次的胶卷', restoreNotice: '上次胶卷的编辑还在。',
     metadata: '胶卷与画格', metadataHint: '胶片、ISO、相机、镜头、冲洗、冲印店、日期和画格号会写进导出文件的 EXIF 与 XMP。',
     lightTable: '光桌', stripView: '照片条', lightTableHint: '以网格查看整卷，颜色是否统一一眼可见。',
     photoSort: '排序', sortModifiedDesc: '修改日期：新到旧', sortModifiedAsc: '修改日期：旧到新', sortNameAsc: '名称：A–Z', sortNameDesc: '名称：Z–A',
@@ -80,14 +80,14 @@ export const studioText = {
     composition: 'Crop', border: 'Border', curves: 'Curves', fine: 'RGB / CMY fine tuning', looks: 'All styles & presets',
     lens: 'Lens correction', autoFrame: 'Auto frame settings', compositionHint: 'Detect the image area on import: 135, half frame, panoramic and 120 formats. Uncertain detections keep the full image for review.',
     borderHint: 'Add simulated sprockets and edge markings, not recovered film data. Preview and export are separate choices.',
-    borderPreview: 'Preview film border', borderExport: 'Include border & markings in export', borderExportAction: 'Export with film border',
-    batch: 'Batch tools', batchHint: 'Sync color copies color only. Processing settings also copy film base, WB gains and lens settings. Both preserve each photo’s geometry.',
+    borderPreview: 'Preview film border', borderPreviewOff: 'Film border preview on · Turn off', borderExport: 'Include border & markings in export', borderExportAction: 'Export with film border',
+    batch: 'Batch tools', batchHint: 'Sync color copies color only. Processing settings also copy film base, WB gains and lens settings. Both preserve each photo\'s geometry.',
     allSettings: 'Sync base & processing settings…', saveSettings: 'Save current photo settings', clearQueue: 'Clear photo list…', newSession: 'Close photos & start again…',
     mergeHint: 'Merge 2–5 shots of the same frame into one 16-bit file: average stacks for less noise, HDR combines exposure brackets.', mergeAverage: 'Merge selected: average', mergeHdr: 'Merge selected: HDR brackets',
     clearConfirm: 'Clear the photo list? Export any results you want to keep first.', newConfirm: 'Close this photo and the list? Unexported results will be lost. Original files will not be deleted.',
     hidePanel: 'Hide controls', showPanel: 'Show controls', hideStrip: 'Hide photos', showStrip: 'Show photos', tabs: 'Photo tools',
-    recipe: 'Recipe', recipeHint: 'Share this photo’s conversion as a short code or QR; paste a friend’s code or upload their QR image to review and apply it. No crop or file data travels.',
-    projectHint: 'A project file records the roll: the photo list, every frame’s settings, the roll reference and the metadata. Drop it back in with the originals to restore everything.', saveProject: 'Save project…', openProject: 'Open project…', restoreProject: 'Restore last roll',
+    recipe: 'Recipe', recipeHint: 'Share this photo\'s conversion as a short code or QR; paste a friend\'s code or upload their QR image to review and apply it. No crop or file data travels.',
+    projectHint: 'A project file records the roll: the photo list, every frame\'s settings, the roll reference and the metadata. Drop it back in with the originals to restore everything.', saveProject: 'Save project…', openProject: 'Open project…', restoreProject: 'Restore last roll', restoreNotice: 'Your last roll\'s edits are still here.',
     metadata: 'Roll & frame', metadataHint: 'Film, ISO, camera, lens, process, lab, date and frame number go into the EXIF and XMP of every export.',
     lightTable: 'Light table', stripView: 'Film strip', lightTableHint: 'Show the whole roll as a grid so colour consistency is visible at a glance.',
     photoSort: 'Sort', sortModifiedDesc: 'Modified: newest first', sortModifiedAsc: 'Modified: oldest first', sortNameAsc: 'Name: A–Z', sortNameDesc: 'Name: Z–A',
@@ -128,14 +128,14 @@ export const studioText = {
     composition: '構図', border: '枠', curves: 'カーブ', fine: 'RGB / CMY 微調整', looks: '全スタイルとプリセット',
     lens: 'レンズ補正', autoFrame: '自動フレーム設定', compositionHint: '読み込み時に画像領域を検出。135・ハーフ・パノラマ・120 各画幅に対応。不確かな場合は全体を保持して確認を促します。',
     borderHint: 'パーフォレーションと端文字の再現です。失われた情報の復元ではありません。表示と書き出しは別々に設定できます。',
-    borderPreview: 'フィルム枠を表示', borderExport: '枠と端文字を書き出しに含める', borderExportAction: '枠付きで書き出す',
+    borderPreview: 'フィルム枠を表示', borderPreviewOff: 'フィルム枠を表示中 · 解除', borderExport: '枠と端文字を書き出しに含める', borderExportAction: '枠付きで書き出す',
     batch: '一括操作', batchHint: '色同期は色だけをコピーします。処理設定はベース・WB補正・レンズなども同期します。どちらも各写真の構図を保ちます。',
     allSettings: 'ベースと処理設定を同期…', saveSettings: '現在の写真の設定を保存', clearQueue: '写真一覧を空にする…', newSession: '写真を閉じてやり直す…',
     mergeHint: '同じコマの 2〜5 枚の撮影を 1 つの 16 bit ファイルに合成します。平均でノイズを減らし、HDR で露出ブラケットを統合します。', mergeAverage: '選択を合成：平均', mergeHdr: '選択を合成：HDR ブラケット',
     clearConfirm: '写真一覧を空にしますか？必要な結果を先に書き出してください。', newConfirm: '現在の写真と一覧を閉じますか？未保存の結果は失われますが、元ファイルは削除しません。',
     hidePanel: '調整を隠す', showPanel: '調整を表示', hideStrip: '写真一覧を隠す', showStrip: '写真一覧を表示', tabs: '写真ツール',
     recipe: 'レシピ', recipeHint: 'この写真の変換設定を短いコードや QR で共有し、友達のコードを貼り付けるか QR 画像を読み込み、確認して適用できます。切り抜きやファイル情報は含みません。',
-    projectHint: 'プロジェクトには写真一覧・各コマの設定・ロール基準・メタデータが入ります。原板と一緒に戻せば復元できます。', saveProject: 'プロジェクトを保存…', openProject: 'プロジェクトを開く…', restoreProject: '前回のロールを復元',
+    projectHint: 'プロジェクトには写真一覧・各コマの設定・ロール基準・メタデータが入ります。原板と一緒に戻せば復元できます。', saveProject: 'プロジェクトを保存…', openProject: 'プロジェクトを開く…', restoreProject: '前回のロールを復元', restoreNotice: '前回のロールの編集が残っています。',
     metadata: 'ロールとコマ', metadataHint: 'フィルム・ISO・カメラ・レンズ・現像・ラボ・日付・コマ番号を書き出しファイルの EXIF と XMP に書き込みます。',
     lightTable: 'ライトテーブル', stripView: 'フィルムストリップ', lightTableHint: 'ロール全体をサムネイルの一覧で表示し、色の統一を一目で確認します。',
     photoSort: '並び順', sortModifiedDesc: '更新日時：新しい順', sortModifiedAsc: '更新日時：古い順', sortNameAsc: '名前：A–Z', sortNameDesc: '名前：Z–A',
@@ -245,10 +245,10 @@ const STUDIO_SYNC_IDS = [
   'studioExport', 'studioStatus', 'studioFilename', 'studioSelection', 'studioSync', 'exportZipBtn', 'exportSingleBtn',
   'exportAllBtn', 'studioUndo', 'studioRedo', 'undoBtn', 'redoBtn', 'studioRetry', 'studioApplyLens', 'studioResetAll',
   'studioRestart', 'exportSprocketBtn', 'studioExportBorder', 'studioClearQueue', 'studioSaveProject',
-  'studioOpenProject', 'studioRestoreProject', 'studioMergeAverage', 'studioMergeHdr', 'studioNewSession', 'studioAdd',
+  'studioOpenProject', 'studioRestoreProject', 'studioWelcomeRestore', 'studioWelcomeRestoreBtn', 'studioMergeAverage', 'studioMergeHdr', 'studioNewSession', 'studioAdd',
   'studioLoupe', 'saveSettingsBtn', 'applyToSelectedBtn', 'exportBtn', 'filmSettingsSection',
   'studioPhotoSwitchFeedback', 'studioPhotoSwitchMessage', 'studioPhotoSwitchHint', 'canvasContainer',
-  'previewToolbar', 'canvasTransformWrapper',
+  'previewToolbar', 'canvasTransformWrapper', 'studioBorderPreviewOff', 'sprocketPreviewBtn',
 ];
 // Shown once a photo is converted, hidden before.
 const STUDIO_STEP3_SECTIONS = ['toneSection', 'colorSection', 'cmySection', 'additionalSection', 'consoleSection',
@@ -526,6 +526,16 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
   importActions.className = 'studio-import-actions';
   welcome.after(importActions);
   ['uploadBtn', 'uploadFolderBtn', 'uploadExpiredBtn'].forEach(id => move(id, importActions));
+  // The recovery copy's way back from the empty Studio, where a restarted
+  // page (a crash, an iOS memory kill) lands: the Batch tools that also offer
+  // it sit in the filmstrip, which only shows once photos are in.
+  const welcomeRestore = document.createElement('p');
+  welcomeRestore.id = 'studioWelcomeRestore';
+  welcomeRestore.className = 'studio-welcome-restore';
+  welcomeRestore.hidden = true;
+  welcomeRestore.innerHTML = '<span data-studio="restoreNotice"></span><button id="studioWelcomeRestoreBtn" type="button" data-studio="restoreProject"></button>';
+  welcomeRestore.querySelector('button').addEventListener('click', () => onRestoreProject?.({ pickOriginals: true }));
+  importActions.before(welcomeRestore);
   const batchHint = document.createElement('p');
   batchHint.className = 'studio-import-hint';
   batchHint.dataset.studio = 'importBatch';
@@ -743,7 +753,10 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
 
   const status = document.createElement('div');
   status.className = 'studio-image-status';
-  status.innerHTML = `<span id="studioStatus" role="status"></span><span id="studioFilename"></span><button id="studioFrameNotice" type="button" hidden></button><button id="studioTogglePanel" type="button" aria-controls="controlsPanel" aria-expanded="true"></button>`;
+  status.innerHTML = `<span id="studioStatus" role="status"></span><span id="studioFilename"></span><button id="studioFrameNotice" type="button" hidden></button><button id="studioBorderPreviewOff" type="button" data-studio="borderPreviewOff" hidden></button><button id="studioTogglePanel" type="button" aria-controls="controlsPanel" aria-expanded="true"></button>`;
+  // The film border preview holds for every photo until it is turned off,
+  // from a tab that may no longer be open: the viewer names it while it is on.
+  status.querySelector('#studioBorderPreviewOff').addEventListener('click', () => $('sprocketPreviewBtn').click());
   status.querySelector('#studioFrameNotice').addEventListener('click', () => {
     body.classList.remove('studio-panel-hidden');
     panel.hidden = false;
@@ -940,6 +953,8 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
     set(node.studioFrameNotice, 'textContent', t(preparing ? 'preparingOriginal' : frameDetecting ? 'detectingFrame' : areaReview ? 'analysisReview' : frameMeta?.appliedMode === 'crop' ? 'frameApplied' : frameMeta?.frameIncomplete ? 'frameIncomplete' : frameMeta?.imageArea ? 'frameAnalysis' : 'frameReview'));
     set(node.studioFrameNotice, 'dataset.status', preparing ? 'preparing' : frameDetecting ? 'detecting' : frameMeta?.appliedMode || '');
     set(node.studioFrameNotice, 'disabled', Boolean(state.cropping || busy));
+    set(node.studioBorderPreviewOff, 'hidden', !loaded || !state.sprocketPreviewEnabled || Boolean(state.cropping));
+    set(node.studioBorderPreviewOff, 'disabled', Boolean(busy || node.sprocketPreviewBtn?.disabled));
     set(panel, 'inert', busy);
     // The toolbar (rotate, mirror, crop) and the brushes and samplers on the
     // photo edit it too, outside the panel: a photo's detection tail shows
@@ -990,6 +1005,8 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
     set(node.studioSaveProject, 'disabled', Boolean(locked || !state.fileQueue.length));
     set(node.studioOpenProject, 'disabled', Boolean(locked));
     set(node.studioRestoreProject, 'hidden', !state.projectRecoveryAvailable);
+    set(node.studioWelcomeRestore, 'hidden', !state.projectRecoveryAvailable || state.fileQueue.length > 0);
+    set(node.studioWelcomeRestoreBtn, 'disabled', Boolean(locked || state.mobileRecoveryRestoring));
     const mergeable = !locked && count >= 2 && count <= 5;
     set(node.studioMergeAverage, 'disabled', !mergeable);
     set(node.studioMergeHdr, 'disabled', !mergeable);

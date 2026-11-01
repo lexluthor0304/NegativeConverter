@@ -152,6 +152,9 @@ body.studio {
 .studio #aiBrushSection .control-group { margin: 0; }
 .studio #aiBrushSection details { margin-top: 12px; }
 .studio .section-title { font-family: var(--font-body); font-size: 12px; letter-spacing: 0; text-transform: none; }
+/* The old step guide's "start here" arrow read as a disclosure control next
+   to the real one (.section-toggle) in the Studio's tabbed panes. */
+.studio .control-section.task-primary > .section-header .section-title::before { content: none; }
 .studio #studioExportSettings { border-top: 1px solid var(--border); padding-top: 8px; margin-top: 8px; }
 .studio #studioExportSettings > summary { cursor: pointer; font-size: 12px; color: var(--text-secondary); padding: 10px; }
 #studioMobileHistory { display: none; }
@@ -232,7 +235,8 @@ body.studio {
 .studio-pane-hint { font-size: 12px; color: var(--text-secondary); line-height: 1.7; margin: 16px 18px; }
 .studio-auto-crop { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 12px 18px; font-size: 12px; color: var(--text-secondary); }
 .studio-auto-crop input { accent-color: var(--accent); }
-#studioFrameNotice { border: 0; color: var(--accent); background: transparent; padding: 5px; font-size: 12px; cursor: pointer; }
+#studioFrameNotice, #studioBorderPreviewOff { border: 0; color: var(--accent); background: transparent; padding: 5px; font-size: 12px; cursor: pointer; }
+#studioBorderPreviewOff { margin-left: auto; white-space: nowrap; }
 .studio .histogram-container { margin: 12px 18px 0; border: 0; background: #202020; padding: 8px; border-radius: 4px; box-shadow: none; }
 .studio #histogramCanvas { height: 68px; }
 .studio .histogram-header { margin-bottom: 4px; }

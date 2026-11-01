@@ -401,3 +401,17 @@ assert.doesNotMatch(functionBody('updateExportUI'), /getElementById\('export(Btn
 assert.doesNotMatch(functionBody('updateExportButtons'), /(exportBtn|exportSprocketBtn)\.disabled =|getElementById\('export(Btn|SprocketBtn)'\)/, 'sync owns their disabled state');
 assert.match(functionBody('updateExportButtons'), /exportSingleBtn\.disabled = exportLocked/, 'sync does not own exportSingleBtn.disabled');
 console.log('studioWorkspace: no synthetic resize, and single writers for the export labels and batch buttons');
+
+// The recovery copy stays reachable from the empty Studio, where a restarted
+// page lands and the filmstrip (with its Batch tools) is hidden; on the web
+// the originals' picker opens inside the click that asked for it.
+assert.match(source, /importActions\.before\(welcomeRestore\)/);
+assert.match(source, /set\(node\.studioWelcomeRestore, 'hidden', !state\.projectRecoveryAvailable \|\| state\.fileQueue\.length > 0\)/);
+assert.match(functionBody('restoreRecoveredProject'), /else if \(pickOriginals\) pickRecoveredOriginals\(\);/);
+assert.match(functionBody('pickRecoveredOriginals'), /addEventListener\('cancel'[\s\S]*fileInput\.click\(\);/);
+// The film border preview holds for every photo: the viewer names it while
+// it is on, with the way to turn it off.
+assert.match(source, /set\(node\.studioBorderPreviewOff, 'hidden', !loaded \|\| !state\.sprocketPreviewEnabled/);
+// One selected photo downloads as itself rather than as a one-file ZIP.
+assert.match(functionBody('exportBatchAsZip'), /selectedFiles\.length === 1\) \{\s*await exportBatchIndividuallyBrowser\(\{ selectedFiles \}\);/);
+console.log('studioWorkspace: recovery offered on the empty Studio, border preview named in the viewer, one photo is no ZIP');
