@@ -101,9 +101,15 @@ both). The provisioning profile is the same file as the local, gitignored
   across **all** uploads, and the attempt digit lets a re-run re-upload the
   same version after a failed submission. Three digits for patch keep
   `1.0.100` below `1.1.0`; the script fails loudly if minor/patch exceed 999.
-- "What's New" is generated from `git log` between the previous tag and HEAD
-  (capped at 3500 chars, fallback "Bug fixes and improvements."), applied to
-  all locales.
+- "What's New" lists the app changes since the version Mac App Store
+  customers have: the newest version already submitted on App Store Connect
+  (`store_version` from `asc_mas_state.mjs`, tag `v<version>`; the previous
+  `v*` tag when there is none), so a release that waited for Apple's review
+  still names the releases it replaces. `.github/scripts/store_changes.mjs`
+  writes it with the iOS lane's rules (`docs/ios-release.md`, "What's New"):
+  never docs, CI or test changes, a commit's own `Whats-New:` lines first, at
+  most 3500 characters, "Bug fixes and improvements." when nothing is news;
+  en-US only, the store's one locale.
 
 ## ストア画像
 

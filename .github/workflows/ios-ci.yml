@@ -26,6 +26,7 @@ jobs:
       - name: Validate iOS release tooling without credentials
         run: |
           node .github/scripts/prepare_ios_release.test.mjs
+          node .github/scripts/store_changes.test.mjs
           python3 scripts/test-ios-package.py
           ruby -c fastlane/Fastfile
       - run: npm run test:smoke -- --studio-shell-only

@@ -208,21 +208,31 @@ jobs:
             echo "BUILD_NUMBER=$BUILD_NUMBER"
           } >> "$GITHUB_ENV"
 
+      # What's New, read by Mac App Store customers: the app changes since the
+      # version they have (store_version from the state step; the previous v*
+      # tag when App Store Connect has none), never docs, CI or tests
+      # (.github/scripts/store_changes.mjs). Mac 1.0.49 shipped raw commit
+      # subjects, "docs: CLAUDE.md names every platform the app ships on (#328)"
+      # among them. Empty notes make the Fastfile say "Bug fixes and improvements."
       - name: Generate release notes
         if: steps.state.outputs.decision == 'publish'
         env:
           TAG: ${{ inputs.tag }}
+          STORE_VERSION: ${{ steps.state.outputs.store_version }}
         run: |
           set -euo pipefail
           NOTES_PATH="$RUNNER_TEMP/release_notes.txt"
-          prev="$(git tag --list 'v*' --sort=-v:refname | grep -Fxv "$TAG" | head -n 1 || true)"
-          if [ -n "$prev" ] && git rev-parse -q --verify "$prev^{commit}" >/dev/null; then
-            git log --no-merges --pretty='format:- %s' "$prev..HEAD" | head -c 3500 > "$NOTES_PATH" || true
+          since=""
+          if [ -n "$STORE_VERSION" ] && git rev-parse -q --verify "refs/tags/v$STORE_VERSION^{commit}" >/dev/null; then
+            since="v$STORE_VERSION"
           else
+            prev="$(git tag --list 'v*' --sort=-v:refname | grep -Fxv "$TAG" | head -n 1 || true)"
+            if [ -n "$prev" ] && git rev-parse -q --verify "$prev^{commit}" >/dev/null; then since="$prev"; fi
+          fi
+          if ! node .github/scripts/store_changes.mjs --since "$since" --out "$NOTES_PATH"; then
+            echo "::warning::What's New could not be generated; the Fastfile's fallback sentence goes out instead."
             : > "$NOTES_PATH"
           fi
-          echo "Release notes ($(wc -c < "$NOTES_PATH") bytes):"
-          cat "$NOTES_PATH" || true
           echo "RELEASE_NOTES_PATH=$NOTES_PATH" >> "$GITHUB_ENV"
 
       - name: Upload and submit to App Store

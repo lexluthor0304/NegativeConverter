@@ -23,6 +23,7 @@ on:
       - '.github/workflows/ios-ci.yml'
       - '.github/workflows/ios-release.yml'
       - '.github/scripts/prepare_ios_release*.mjs'
+      - '.github/scripts/store_changes*.mjs'
       - 'fastlane/ios/**'
       - 'docs/ios-*.md'
       - 'scripts/ios-*'

@@ -18,6 +18,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ascClientFromEnv } from '../../scripts/asc-api.mjs';
 import { decideStorePublish, fetchStoreVersions, printStoreVersions, storeVersionsTable } from './asc_mas_state.mjs';
+import { printVerdicts, readCommits, relevantChanges, whatsNew } from './store_changes.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const versionPattern = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
@@ -62,44 +63,6 @@ export function releasePlan(config, tags, runNumber, runAttempt, channel) {
     config: { version, bundle: { iOS: { bundleVersion: build } } } };
 }
 
-// Changes that leave the iPhone/iPad app as it is: tests, fixtures,
-// benchmarks, documentation, CI and the desktop/Mac App Store lanes. A push
-// that only touches these submits nothing (the iOS counterpart of
-// desktop-release.yml's paths-ignore). Anything else, including the store
-// copy and screenshots under fastlane/ios, is a new version.
-export const IGNORED_PATHS = [
-  '.github/**', '.gitattributes', '.gitignore', 'CLAUDE.md', 'LICENSE', 'README.md', 'img/**',
-  'docs/**', 'vercel.json', 'negative2positive/vercel.json',
-  'negative2positive/**/*.test.mjs', 'negative2positive/test-fixtures/**',
-  'scripts/**/*.test.mjs', 'scripts/perf/**', 'scripts/run-tests.mjs', 'scripts/smoke-test.mjs',
-  'scripts/*-smoke.mjs', 'scripts/bench*.mjs', 'scripts/benchmark-*.mjs', 'scripts/eval-*.mjs',
-  'scripts/check-*.mjs', 'scripts/test-*.py', 'scripts/verify-*.py', 'scripts/ios-*',
-  'scripts/asc-api.mjs', 'scripts/appstore-screenshots.mjs', 'scripts/build-mas.sh',
-  'fastlane/Fastfile', 'fastlane/metadata/**', 'fastlane/screenshots/**', 'fastlane/ios/release.json',
-];
-
-// `**` spans directories, `*` stays within one path segment.
-export function globToRegExp(glob) {
-  let source = '';
-  for (let index = 0; index < glob.length; index += 1) {
-    const char = glob[index];
-    if (char === '*' && glob[index + 1] === '*') {
-      if (glob[index + 2] === '/') { source += '(?:.*/)?'; index += 2; } else { source += '.*'; index += 1; }
-    } else if (char === '*') {
-      source += '[^/]*';
-    } else {
-      source += /[.+?^${}()|[\]\\]/.test(char) ? `\\${char}` : char;
-    }
-  }
-  return new RegExp(`^${source}$`);
-}
-
-const ignored = IGNORED_PATHS.map(globToRegExp);
-
-export function relevantChanges(files) {
-  return files.filter((file) => file && !ignored.some((pattern) => pattern.test(file)));
-}
-
 // previousTag: the last submitted ios/v* tag or null (first version);
 // changedFiles: `git diff --name-only previousTag HEAD`;
 // storeVersions: App Store Connect's IOS versions, or null when not asked.
@@ -117,33 +80,6 @@ export function decideIosRelease({ channel, ready, previousTag, changedFiles, st
     result.reason += `; tag that submission's commit as ios/v${version} so the sequence moves on`;
   }
   return result;
-}
-
-// "What's New" from the commit subjects since the previous submission:
-// conventional-commit noise (ci, docs, test, chore, …) is dropped, feat/fix/perf
-// prefixes become words, PR numbers go, and the text stays under Apple's limit.
-const DROPPED_SUBJECTS = /^(ci|docs?|tests?|chore|build|refactor|style|release|revert|bench)(\([^)]*\))?!?:/i;
-const KEPT_PREFIX = /^(feat|fix|perf)(\([^)]*\))?!?:\s*/i;
-const PREFIX_WORDS = { feat: '', fix: 'Fixed: ', perf: 'Performance: ' };
-
-export function whatsNew(subjects, limit = 3500) {
-  const lines = [];
-  for (const raw of subjects) {
-    let subject = raw.trim();
-    if (!subject || DROPPED_SUBJECTS.test(subject)) continue;
-    const prefix = subject.match(KEPT_PREFIX);
-    if (prefix) subject = PREFIX_WORDS[prefix[1].toLowerCase()] + subject.slice(prefix[0].length);
-    subject = subject.replace(/\s*\(#\d+\)$/, '').trim();
-    if (!subject) continue;
-    const line = `- ${subject[0].toUpperCase()}${subject.slice(1)}`;
-    if (!lines.includes(line)) lines.push(line);
-  }
-  let text = '';
-  for (const line of lines) {
-    if ([...text].length + [...line].length + 1 > limit) break;
-    text += `${line}\n`;
-  }
-  return text.trimEnd();
 }
 
 async function main() {
@@ -169,7 +105,11 @@ async function main() {
 
   let notes = '';
   if (channel === 'app-store' && plan.previousTag) {
-    notes = whatsNew(git('log', '--no-merges', '--pretty=format:%s', `${plan.previousTag}..HEAD`).split('\n'));
+    // What iPhone and iPad customers read: the app changes since the last
+    // submission (store_changes.mjs; never docs, CI or tests).
+    const commits = readCommits(plan.previousTag, 'HEAD', root);
+    printVerdicts(commits);
+    notes = whatsNew(commits);
     if (notes) writeFileSync(resolve(root, RELEASE_NOTES_PATH), `${notes}\n`);
   }
 

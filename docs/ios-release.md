@@ -20,7 +20,7 @@ decides; only on `publish` does the macOS `publish` job build and submit.
 | decision | when | run |
 | --- | --- | --- |
 | `publish` | something app-relevant changed since the last submitted `ios/v*` tag and no iOS version is in flight at App Store Connect | build, verify, upload, submit for review, tag `ios/vX.Y.Z` |
-| `skip` | the diff since the last `ios/v*` tag only touches tests, fixtures, benchmarks, docs, CI or the desktop/Mac lanes (`IGNORED_PATHS` in the script, the counterpart of `desktop-release.yml`'s `paths-ignore`) | notice, nothing built |
+| `skip` | the diff since the last `ios/v*` tag only touches tests, fixtures, benchmarks, docs, CI or the desktop/Mac lanes (`IGNORED_PATHS` in `.github/scripts/store_changes.mjs`, the counterpart of `desktop-release.yml`'s `paths-ignore`) | notice, nothing built |
 | `blocked` | the previous iOS version is `WAITING_FOR_REVIEW`, `IN_REVIEW`, `PENDING_*`, `PROCESSING_*` … (App Store Connect allows one version per platform in flight; deliver would die on "You cannot create a new version of the App in the current state") | a push gets a "deferred" warning; the next scheduled run that finds Apple done submits `main` |
 | `paused` | `fastlane/ios/release.json` has `appStoreSubmissionReady: false` | notice; the committed switch to stop App Store submissions |
 | `done` | the planned version already exists at App Store Connect and is not editable, i.e. a submission succeeded but its tag was never pushed | notice; tag that commit as `ios/v<version>` by hand so the sequence moves on |
@@ -108,13 +108,25 @@ development project's `debugging` export setting is overridden explicitly.
 
 For every version after the first, the planner writes
 `fastlane/ios/metadata/en-US/release_notes.txt` in the runner's checkout from
-the commit subjects since the previous `ios/v*` tag (`whatsNew`): `ci`,
-`docs`, `test`, `chore`, `build`, `refactor`, `style`, `release` and `revert`
-subjects are dropped, `feat:` prefixes go, `fix:` becomes "Fixed:", `perf:`
-becomes "Performance:", PR numbers are removed and the text stays under
-Apple's 4000 characters. When nothing user-facing remains, the committed
-sentence in that file is uploaded instead. Nothing is committed back; the
-file in git is the fallback and the first version has no What's New.
+the commits since the previous `ios/v*` tag. Both store lanes build it with
+`.github/scripts/store_changes.mjs` (`whatsNew`), and the check job's log
+lists every commit with its verdict. Photographers read it in the store, so it
+names what they can notice and nothing about how the app is made (Mac 1.0.49
+went out with "docs: CLAUDE.md names every platform the app ships on (#328)"):
+
+- A commit that changes no app file (only `IGNORED_PATHS`, or the store
+  listing under `fastlane/`) is never news, whatever its subject says.
+- A commit's `Whats-New:` lines (also spelt `What's New:`) are its entries,
+  written for customers; `Whats-New: none` leaves it out.
+- Otherwise a `feat`, `fix` or `perf` subject speaks: the prefix becomes
+  nothing, "Fixed:" or "Performance:", issue and PR numbers go, and so does
+  any `;`-separated clause about tests, smokes, CI, benchmarks, fixtures or
+  docs. The other conventional types (`ci`, `docs`, `test`, `chore`, `build`,
+  `refactor`, `style`, `release`, `revert`, `bench`) are dropped.
+
+The text stays under Apple's 4000 characters. When nothing is news, the
+committed sentence in that file is uploaded instead. Nothing is committed
+back; the file in git is the fallback and the first version has no What's New.
 
 ## Verification and artifacts
 

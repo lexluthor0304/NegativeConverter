@@ -37,6 +37,15 @@ review when it changed the app and Apple is not still reviewing the previous
 iOS version; otherwise the two-hourly schedule submits it later
 (`docs/ios-release.md`).
 
+Both store submissions carry a "What's New" built from the commits since the
+store's previous version (`.github/scripts/store_changes.mjs`). Customers read
+it, so a commit that changes the app ends its message with `Whats-New:` lines
+in plain words about what they can now see or do (`Whats-New: none` when
+nothing), and documentation, CI and test changes go in their own `docs:`,
+`ci:` and `test:` commits, which never appear there. A squash merge keeps the
+commit messages; don't replace them with `--body`, or the lines never reach
+`main`.
+
 Run locally:
 ```bash
 npm ci
