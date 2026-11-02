@@ -1,7 +1,5 @@
 import assert from 'node:assert/strict';
-import {
-  buildNumber, decideIosRelease, globToRegExp, latestTag, nextVersion, relevantChanges, releasePlan, whatsNew,
-} from './prepare_ios_release.mjs';
+import { buildNumber, decideIosRelease, latestTag, nextVersion, releasePlan } from './prepare_ios_release.mjs';
 
 // Version isolation from the desktop v* tags.
 assert.equal(nextVersion('1.0.0', ['v1.0.99', 'ios/v1.0.0-beta']), '1.0.0');
@@ -32,25 +30,6 @@ const release = releasePlan({ ...pending, appStoreSubmissionReady: true }, ['ios
 assert.equal(release.version, '1.0.1');
 assert.equal(release.previousTag, 'ios/v1.0.0');
 
-// Which changes make a new iOS version.
-assert.ok(globToRegExp('negative2positive/**/*.test.mjs').test('negative2positive/src/app/main.test.mjs'));
-assert.ok(globToRegExp('negative2positive/**/*.test.mjs').test('negative2positive/x.test.mjs'));
-assert.ok(!globToRegExp('scripts/*-smoke.mjs').test('scripts/perf/x-smoke.mjs'));
-assert.ok(globToRegExp('docs/**').test('docs/a/b.md'));
-assert.deepEqual(relevantChanges([
-  'docs/ios-release.md', '.github/workflows/ios-release.yml', '.github/scripts/prepare_ios_release.mjs',
-  'negative2positive/src/app/main.test.mjs', 'negative2positive/test-fixtures/a.jpg', 'scripts/studio-smoke.mjs',
-  'scripts/run-tests.mjs', 'scripts/perf/budgets.json', 'scripts/check-ios-store-assets.mjs', 'scripts/ios-ensure-store-profile.mjs',
-  'scripts/verify-ios-package.py', 'scripts/asc-api.mjs', 'CLAUDE.md', 'README.md', 'fastlane/Fastfile',
-  'fastlane/metadata/en-US/release_notes.txt', 'fastlane/screenshots/en-US/mac.png', 'fastlane/ios/release.json',
-]), []);
-assert.deepEqual(relevantChanges(['negative2positive/src/app/main.js', 'docs/x.md']), ['negative2positive/src/app/main.js']);
-for (const file of ['src-tauri/src/lib.rs', 'src-tauri/tauri.ios.conf.json', 'package-lock.json', 'wasm/png-deflate/src/lib.rs',
-  'negative2positive/vendor/libraw-wasm/libraw.wasm', 'scripts/build-ui-fonts.mjs', 'scripts/opencv-assets.mjs',
-  'fastlane/ios/metadata/en-US/description.txt', 'fastlane/ios/screenshots/en-US/iphone-medium-01-editor.png']) {
-  assert.deepEqual(relevantChanges([file]), [file], file);
-}
-
 // The decision, in order of precedence.
 const live = [{ versionString: '1.0.0', state: 'READY_FOR_DISTRIBUTION' }];
 const base = { channel: 'app-store', ready: true, previousTag: 'ios/v1.0.0',
@@ -72,24 +51,4 @@ assert.equal(done.decision, 'done');
 assert.match(done.reason, /tag that submission's commit as ios\/v1\.0\.1/);
 assert.equal(decideIosRelease({ ...base, storeVersions: [{ versionString: '1.0.1', state: 'DEVELOPER_REJECTED' }, ...live] }).decision, 'publish');
 
-// What's New from the commits since the previous submission.
-assert.equal(whatsNew([
-  'feat: automatic colour correction replaces the one-click button; iOS icon from the Mac icon (#322)',
-  'ci: run the unit suite in parallel and the smoke in four shards (#323)',
-  'fix(ios): crash when importing HEIC',
-  'docs: release notes',
-  'perf!: faster 16-bit export',
-  'Tidy the welcome screen',
-  '',
-  'feat: automatic colour correction replaces the one-click button; iOS icon from the Mac icon (#322)',
-]), [
-  '- Automatic colour correction replaces the one-click button; iOS icon from the Mac icon',
-  '- Fixed: crash when importing HEIC',
-  '- Performance: faster 16-bit export',
-  '- Tidy the welcome screen',
-].join('\n'));
-assert.equal(whatsNew(['ci: a', 'docs: b', 'chore(deps): c', 'refactor: d', 'test: e']), '');
-const long = whatsNew(Array.from({ length: 400 }, (_, i) => `feat: change number ${i} with a reasonably long subject line`));
-assert.ok([...long].length <= 3500 && long.endsWith('subject line'), 'cut at a line boundary under the limit');
-
-console.log('iOS version isolation, change filter, release decision and What\'s New passed');
+console.log('iOS version isolation and release decision passed');

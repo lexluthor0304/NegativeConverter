@@ -16,6 +16,7 @@
 // Outputs (GITHUB_OUTPUT when set, always printed):
 //   decision=publish|blocked|done   reason=<one line>
 //   min_build=<CFBundleVersion above every build already uploaded for the version, or empty>
+//   store_version=<the newest version already submitted, other than --version, or empty>
 import { appendFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -52,6 +53,15 @@ export function decideStorePublish(versions, version, platformLabel = 'macOS') {
   }
   if (same) return { decision: 'publish', reason: `${version} is ${same.state}; deliver re-submits it` };
   return { decision: 'publish', reason: `no ${platformLabel} version is in flight; deliver creates ${version}` };
+}
+
+// The version store customers have, or get next: the newest one other than
+// `version` that was submitted (an editable one was not; deliver renames or
+// re-submits it). The Mac App Store's What's New for `version` lists the app
+// changes since it, so a release that waited for Apple still names the
+// releases it replaces. versions: newest first, as fetchStoreVersions gives them.
+export function previousStoreVersion(versions, version) {
+  return versions.find((item) => item.versionString !== version && !EDITABLE_STATES.has(item.state))?.versionString ?? null;
 }
 
 // CFBundleVersion strings of the builds already uploaded for the version →
@@ -128,15 +138,18 @@ async function main() {
   const label = platform === 'IOS' ? 'iOS' : 'macOS';
   const result = decideStorePublish(versions, version, label);
   const minBuild = nextBuildNumber(builds);
+  const storeVersion = previousStoreVersion(versions, version);
 
   printStoreVersions(platform, bundleId, versions);
   console.log(`builds already uploaded for ${version}: ${builds.length ? builds.join(', ') : 'none'}`);
   console.log(`decision=${result.decision}`);
   console.log(`reason=${result.reason}`);
   console.log(`min_build=${minBuild ?? ''}`);
+  console.log(`store_version=${storeVersion ?? ''}`);
 
   if (process.env.GITHUB_OUTPUT) {
-    appendFileSync(process.env.GITHUB_OUTPUT, `decision=${result.decision}\nreason=${result.reason}\nmin_build=${minBuild ?? ''}\n`);
+    appendFileSync(process.env.GITHUB_OUTPUT,
+      `decision=${result.decision}\nreason=${result.reason}\nmin_build=${minBuild ?? ''}\nstore_version=${storeVersion ?? ''}\n`);
   }
   if (process.env.GITHUB_STEP_SUMMARY) {
     appendFileSync(process.env.GITHUB_STEP_SUMMARY,

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { decideStorePublish, nextBuildNumber, storeVersionsTable } from './asc_mas_state.mjs';
+import { decideStorePublish, nextBuildNumber, previousStoreVersion, storeVersionsTable } from './asc_mas_state.mjs';
 
 const live43 = { versionString: '1.0.43', state: 'REPLACED_WITH_NEW_VERSION' };
 const live44 = { versionString: '1.0.44', state: 'READY_FOR_DISTRIBUTION' };
@@ -38,5 +38,16 @@ assert.equal(nextBuildNumber(['100004500', 'n/a']), 100004501);
 
 assert.equal(storeVersionsTable([{ ...live44, created: '2026-10-25T00:00:00Z' }]),
   '| Version | State | Created |\n| --- | --- | --- |\n| 1.0.44 | READY_FOR_DISTRIBUTION | 2026-10-25T00:00:00Z |\n');
+
+// The version Mac App Store customers have: What's New lists the changes since
+// it. 1.0.53 waited behind 1.0.49's review, so its notes start at 1.0.49, not
+// at the 1.0.52 tag (2026-11-02: they named #335 only).
+const live49 = { versionString: '1.0.49', state: 'READY_FOR_DISTRIBUTION' };
+assert.equal(previousStoreVersion([live49, { versionString: '1.0.48', state: 'READY_FOR_DISTRIBUTION' }], '1.0.53'), '1.0.49');
+assert.equal(previousStoreVersion([{ versionString: '1.0.53', state: 'WAITING_FOR_REVIEW' }, live49], '1.0.54'), '1.0.53');
+assert.equal(previousStoreVersion([{ versionString: '1.0.53', state: 'DEVELOPER_REJECTED' }, live49], '1.0.54'), '1.0.49');
+assert.equal(previousStoreVersion([{ versionString: '1.0.54', state: 'PREPARE_FOR_SUBMISSION' }, live49], '1.0.54'), '1.0.49');
+assert.equal(previousStoreVersion([{ versionString: '1.0.54', state: 'REJECTED' }, { versionString: '1.0.53', state: 'METADATA_REJECTED' }, live49], '1.0.54'), '1.0.49');
+assert.equal(previousStoreVersion([], '1.0.54'), null);
 
 console.log('asc_mas_state: ok');
