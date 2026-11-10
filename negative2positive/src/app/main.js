@@ -10647,7 +10647,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         console.warn('Dust worker unavailable; using OpenCV fallback:', error);
         if (!(await ensureOpenCvReady())) throw new Error('OpenCV is not available');
         assertRepairCurrent(isCurrent);
-        return previous ? updateDustStrength(source, previous, options.strength, options.maxParticleSize)
+        return previous ? updateDustStrength(source, previous, options.strength, options.maxParticleSize, options.polarity)
           : detectDust(source, options);
       }
     }
@@ -10740,6 +10740,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         const detected = !dustEnabled
           ? { mask: new Uint8Array(source.width * source.height), particleCount: 0, _state: null }
           : await detectDustOffMainThread(source, { strength: state.dustRemoval.strength, maxParticleSize, maskTag,
+            // What blocks light on a negative comes out bright on the frame;
+            // on a positive (a slide) it stays dark.
+            polarity: state.filmType === 'positive' ? 'dark' : 'bright',
             // The worker pools the display tint while the mask is shown (#254 B).
             tint: state.dustRemoval.showMask ? displayOverlaySize() : null }, prevState, isCurrent);
         const { mask, particleCount, _state } = detected;
@@ -21946,7 +21949,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // Dust removal on a converted frame. `scaleFrom`, the short side of the
     // full-resolution working frame, scales the particle size to a
     // preview-size frame (never below three pixels).
-    async function removeFrameDust(processed, { dustRemoval, scaleFrom = 0, isCurrent = () => true, dustWorker = null, own = plane => plane, trace = null, requireAi = false }) {
+    async function removeFrameDust(processed, { dustRemoval, settings = state, scaleFrom = 0, isCurrent = () => true, dustWorker = null, own = plane => plane, trace = null, requireAi = false }) {
       const strength = Number.isFinite(dustRemoval.strength) ? dustRemoval.strength : state.dustRemoval.strength;
       let maxParticleSize = Number.isFinite(dustRemoval.maxParticleSize)
         ? dustRemoval.maxParticleSize
@@ -21957,7 +21960,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       }
       // A batch job's snapshot carries its AI flag (#241); others read the live one.
       const ai = typeof dustRemoval.ai === 'boolean' ? dustRemoval.ai : state.dustRemoval.ai;
-      const { mask, particleCount } = await detectDustOffMainThread(processed, { strength, maxParticleSize }, null, isCurrent, dustWorker);
+      // Dust is bright on a negative's frame and dark on a positive's.
+      const polarity = settings?.filmType === 'positive' ? 'dark' : 'bright';
+      const { mask, particleCount } = await detectDustOffMainThread(processed, { strength, maxParticleSize, polarity }, null, isCurrent, dustWorker);
       let result = processed;
       // Batch lanes and thumbnails reuse the open photo's tiles but never
       // evict them (lookups only).
@@ -22059,7 +22064,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         pixels: getImageDataPixelCount(processed)
       });
       if (dustRemoval && dustRemoval.enabled && processed) {
-        processed = await removeFrameDust(processed, { dustRemoval, scaleFrom: fullWorkingShortSide, isCurrent, dustWorker, own, trace });
+        processed = await removeFrameDust(processed, { dustRemoval, settings, scaleFrom: fullWorkingShortSide, isCurrent, dustWorker, own, trace });
       }
       if (settings.repairStrokes?.length) {
         const brushSource = processed;
@@ -22429,7 +22434,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // sheet leaves it out (a flagged proof-sheet approximation, #247).
       const dustRemoval = options.dustRemoval || state.dustRemoval;
       if (!tileMax && dustRemoval && dustRemoval.enabled && processed) {
-        processed = await removeFrameDust(processed, { dustRemoval, isCurrent, dustWorker: options.dustWorker, own, trace, requireAi: true });
+        processed = await removeFrameDust(processed, { dustRemoval, settings, isCurrent, dustWorker: options.dustWorker, own, trace, requireAi: true });
       }
 
       if (settings.repairStrokes?.length) {
