@@ -413,12 +413,16 @@ export async function runDarkroomSmoke({ send, evaluate, waitFor, wait, fail, in
   await removeStroke('long pen stroke by delta');
 
   // #254's third brush session: dodge with dust removal on. The frame on
-  // screen is the repaired full-resolution frame's display. This fixture has
-  // no dust, so nothing was repaired and its display is the exact one: the
-  // stroke gets exact rectangles, the dust pass after it finds nothing, and
-  // the frame stays put inside and outside the stroke. (Where dust is found,
-  // the pass after the stroke may change repairs outside it: its threshold is a
-  // quantile of the whole frame; docs/darkroom.md, Limits.)
+  // screen is the repaired full-resolution frame's display. With nothing to
+  // repair its display is the exact one: the stroke gets exact rectangles,
+  // the dust pass after it finds nothing, and the frame stays put inside and
+  // outside the stroke. The strip is not cropped, and the last mark of each
+  // edge-print group stands alone on the calm rebate like a speck (about
+  // 15 px here), so the size cap goes to its minimum for this pass: dust
+  // removal runs and repairs nothing. (Where dust is found, the pass after
+  // the stroke may change repairs under and around it; docs/darkroom.md,
+  // Limits.)
+  await setInput('dustMaxSizeValue', 6);
   await evaluate(`(() => {
     window.__darkroomDustUpdates = 0;
     window.__darkroomDustObserver = new MutationObserver(() => window.__darkroomDustUpdates++);
@@ -461,6 +465,7 @@ export async function runDarkroomSmoke({ send, evaluate, waitFor, wait, fail, in
   await removeStroke('repaired-frame stroke');
   await evaluate(`window.__darkroomDustObserver.disconnect(); document.getElementById('dustRemovalEnabled').click()`);
   await wait(3000);
+  await setInput('dustMaxSizeValue', 40);
 
   await evaluate(`(() => { const el = document.getElementById('dodgeBurnEnabled'); el.checked = false; el.dispatchEvent(new Event('change', { bubbles: true })); })()`);
   await waitFor('dodge burn inactive', `!document.body.classList.contains('dodge-burn-active')`, 5_000);
