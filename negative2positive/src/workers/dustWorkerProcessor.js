@@ -111,9 +111,10 @@ export function createDustWorkerProcessor({ loadCv = async () => {} } = {}) {
     }
     if (message.image16) source.__image16 = { width, height, data: message.image16 };
     if (message.type === 'detect') {
+      // `polarity`: 'bright' on a negative's frame, 'dark' on a positive's.
       const result = detectionState
-        ? updateDustStrength(source, detectionState, message.strength ?? 3, message.maxParticleSize)
-        : detectDust(source, { strength: message.strength, maxParticleSize: message.maxParticleSize });
+        ? updateDustStrength(source, detectionState, message.strength ?? 3, message.maxParticleSize, message.polarity)
+        : detectDust(source, { strength: message.strength, maxParticleSize: message.maxParticleSize, polarity: message.polarity });
       detectionState = result._state;
       // A tagged request keeps its mask here for the brush (the reply's copy
       // is transferred to the page).

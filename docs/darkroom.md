@@ -266,15 +266,14 @@ NC_DARKROOM_CPU=1 node scripts/smoke-test.mjs --darkroom-only
   772 px display of `_DSC3111.NEF` a Node probe of the composite against the
   exact frame finds 47.8 % (up to 46/255). Exact rectangles there would need
   the region's repair as well.
-- The dust pass after a stroke detects on the new frame, and its thresholds
-  are quantiles of the whole frame (`hatThreshold`), so a burn can change which
-  specks are repaired outside the stroke. Probe: a 1.5-stop burn on a 900 x 600
-  negative with 220 graded specks, at the default strength 3: the white
-  top-hat threshold moves 132 -> 129 and 5 specks outside the stroke become
-  repaired, while the conversion outside the stroke's box is bit-identical. The
-  exact frame and the export show that repair set; the live effect cannot. The
-  change that would stop it (detect before local exposure, or keep the
-  thresholds of the frame without strokes) changes exports, so it is queued in
+- The dust pass after a stroke detects on the new frame. Detection reads every
+  candidate against its own surroundings (`docs/dust-removal.md`), so a burn
+  changes which specks are repaired under and around the stroke, where the
+  tones changed, and leaves the rest of the frame as it was
+  (`DustDetection.test.mjs`: a two-stop burn over a 200 px box changes no mask
+  pixel 300 px from it). The exact frame and the export show the repair set
+  under the stroke; the live effect cannot. Detecting before local exposure
+  would remove that too, changes exports, and is queued in
   `docs/audit-backlog.md` (Dust removal) for the owner.
 - Exact rectangles need the preview worker to hold the frame's source as its
   level (the client numbers the sources it posts, and the worker refuses a

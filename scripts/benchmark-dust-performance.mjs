@@ -59,7 +59,5 @@ try {
   const summarize = ({ elapsedMs, maxHeartbeatGapMs }) => ({ elapsedMs, maxHeartbeatGapMs });
   console.log(JSON.stringify({ width, height, direct: summarize(direct), worker: summarize(offThread),
     particles: direct.result.particleCount,
-    identicalMaskSha256: createHash('sha256').update(direct.result.mask).digest('hex'),
-    integralBytesBefore: (width + 1) * (height + 1) * 8,
-    integralBytesAfter: (width + 1) * (height + 1) * 4 }, null, 2));
+    identicalMaskSha256: createHash('sha256').update(direct.result.mask).digest('hex') }, null, 2));
 } finally { await worker.terminate(); }

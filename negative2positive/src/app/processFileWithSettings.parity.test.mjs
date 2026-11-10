@@ -49,6 +49,7 @@ const exportSteps = {
     return rect ? cropImageDataRegion(image, rect) : image;
   }
 };
+const seenPolarities = [];
 const digest = image => image ? createHash('sha256').update(Buffer.from(image.data.buffer, image.data.byteOffset, image.data.byteLength))
   .update(image.__image16 ? Buffer.from(image.__image16.data.buffer) : Buffer.alloc(0)).digest('hex').slice(0, 16) : null;
 const describe = image => image ? `${image.width}x${image.height}:${digest(image)}` : null;
@@ -106,6 +107,11 @@ function stages(log, { automatic }) {
     buildRouterSettings: (settings, base) => ({ coreExposure: settings.coreExposure, filmType: settings.filmType, base: [base.width, base.height] }),
     getColorAnalysisSample: (settings, base) => ({ ref: describe(base), area: settings.autoFrameMeta?.imageArea || null }),
     detectDustOffMainThread: async (image, options, _unused, _isCurrent, worker) => {
+      // The polarity (which side of the frame's tones dust is on) came after
+      // the reference was frozen: it is kept apart from the compared log.
+      const { polarity, ...rest } = options;
+      if (polarity !== undefined) seenPolarities.push(polarity);
+      options = rest;
       record('dust', { image: describe(image), options, worker: worker ?? null });
       return { mask: new Uint8Array(image.width * image.height), particleCount: 2 };
     },
@@ -242,6 +248,17 @@ for (const [label, saved] of [...Object.entries(recipes), ['no recipe', null]]) 
   }
 }
 console.log(`processFileWithSettings parity: ${cases} export-branch cases match HEAD (calls, pixels, settings)`);
+
+// Dust blocks light on the film: bright on a negative's frame, dark on a
+// positive's. Every case above was a negative.
+assert.ok(seenPolarities.length > 0 && seenPolarities.every(polarity => polarity === 'bright'), 'negatives look for bright dust');
+for (const [filmType, expected] of [['color', 'bright'], ['bw', 'bright'], ['positive', 'dark']]) {
+  seenPolarities.length = 0;
+  const saved = { ...structuredClone(recipes.plain), filmType };
+  const now = run(current, { base: makeBase(64, 40, 4242), saved, options: { bitDepth: 8 }, dust: true, automatic: false });
+  await now.context.processFileWithSettings(now.file, structuredClone(saved), { bitDepth: 8 });
+  assert.deepEqual(seenPolarities, [expected], `${filmType}: dust polarity`);
+}
 
 // #256: a batch export's options change no stage call, no pixel and no
 // setting: `releaseEarly` (the base and the working plane are released once

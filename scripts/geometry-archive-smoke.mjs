@@ -6,6 +6,9 @@ export async function runGeometryArchiveSmoke({ evaluate, waitFor, wait, fail })
   const idle = `document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy
     && document.body.dataset.photoSwitching !== 'true' && !document.querySelector('.loading-overlay.visible')`;
   const detected = `/^Detected [0-9]+ dust particles$/.test(document.getElementById('dustStatus').textContent)`;
+  // The frame is a block texture without dust: the pass may find none. The
+  // brush stroke below paints a repair, after which the count shows.
+  const passSettled = `/^(Detected [0-9]+ dust particles|No dust detected)$/.test(document.getElementById('dustStatus').textContent)`;
   await evaluate(`document.getElementById('mirrorBtn').click()`);
   await waitFor('archive geometry mirror', idle, 120_000);
   const geometry = await evaluate(`window.__ncGeometry.inspect({ chain: true })`);
@@ -29,7 +32,7 @@ export async function runGeometryArchiveSmoke({ evaluate, waitFor, wait, fail })
     if (document.getElementById('dustAiEnabled').checked) document.getElementById('dustAiEnabled').click();
     if (!document.getElementById('dustRemovalEnabled').checked) document.getElementById('dustRemovalEnabled').click();
   })()`);
-  await waitFor('archive geometry dust settled', `${idle} && ${detected}`, 120_000);
+  await waitFor('archive geometry dust settled', `${idle} && ${passSettled}`, 120_000);
   const exportBoth = async label => {
     const hashes = {};
     for (const format of ['png', 'tiff']) {

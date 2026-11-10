@@ -117,7 +117,10 @@ async function walkHistory(actions, { cold = 0 } = {}) {
   assert.deepEqual(f.fingerprint(), before, 'a second undo');
   assert.equal(f.calls.detect, detections, 'the round trip detected nothing');
   // The rebuilt state is a working state: a new stroke patches it and undoes.
-  refine(f, 120, 90);
+  // (Next to the first stroke: a stroke repairs every cluster it reaches, and
+  // across the middle of this small frame the specks chain into one, whose
+  // entry would outweigh the scaled-down budget and be dropped.)
+  refine(f, 30, 12);
   const stroked = f.fingerprint();
   await f.undo();
   assert.deepEqual(f.fingerprint(), before);
