@@ -3,7 +3,7 @@ import { createRequire } from 'node:module';
 import { createDustWorkerProcessor, summarizeDustMask } from './dustWorkerProcessor.js';
 import { murmurHash3x86_128 } from '../app/contentHash.js';
 import {
-  countNonzeroInRects, detectDust, inpaintMasked, rgbaToGrayInto, updateDustStrength,
+  detectDust, inpaintMasked, rgbaToGrayInto, updateDustStrength,
   refineMaskIntelligent, refineMaskDirect, refineMaskRemove
 } from '../silvercore/engine/DustRemoval.js';
 import { countMaskParticles } from '../silvercore/engine/DustBrush.js';
@@ -174,32 +174,6 @@ assert.deepEqual(results[0].payload.mask, mask);
 assert.equal(results[1].payload.mask.some(Boolean), false);
 assert.deepEqual(results[2].payload.mask, mask);
 {
-  // Isolation counts: every rectangle of a sparse 53 x 41 response (corners on
-  // the frame edges, empty and one-pixel rectangles included) against brute
-  // force, through a view that starts off a word boundary and one that does not.
-  const W = 53, H = 41;
-  const backing = new Uint8Array(W * H + 1);
-  for (const offset of [0, 1]) {
-    const bin = backing.subarray(offset, offset + W * H);
-    bin.fill(0);
-    for (let i = 0; i < bin.length; i++) if (i % 7 === 0 || i % 11 === 3) bin[i] = i % 2 ? 1 : 255;
-    const rects = [];
-    for (let y0 = 0; y0 <= H; y0 += 4) for (let y1 = y0; y1 <= H; y1 += 5) {
-      for (let x0 = 0; x0 <= W; x0 += 6) for (let x1 = x0; x1 <= W; x1 += 7) rects.push(x0, y0, x1, y1);
-    }
-    rects.push(0, 0, W, H, W - 1, H - 1, W, H, 5, 9, 4, 20, 3, 7, 30, 7);
-    const counts = countNonzeroInRects(bin, W, H, Int32Array.from(rects));
-    assert.equal(counts.length, rects.length / 4);
-    for (let k = 0; k < counts.length; k++) {
-      const [x0, y0, x1, y1] = rects.slice(4 * k, 4 * k + 4);
-      let expected = 0;
-      for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) expected += bin[y * W + x] !== 0;
-      assert.equal(counts[k], expected, `count of [${x0}, ${x1}) x [${y0}, ${y1}) at view offset ${offset}`);
-    }
-  }
-  assert.deepEqual(countNonzeroInRects(new Uint8Array(12), 4, 3, new Int32Array(0)), new Float64Array(0));
-}
-{
   // The grey the dust detector feeds the morphology is cv.cvtColor's, byte for
   // byte, for aligned and unaligned RGBA (every R, G and B value is met).
   const n = 256 * 64;
@@ -219,25 +193,35 @@ assert.deepEqual(results[2].payload.mask, mask);
   }
 }
 {
-  // An integer strength keeps one level byte per pixel instead of the two
-  // responses; a strength change reads it. A non-integer strength keeps the
-  // responses (with their histograms), which answer any strength, and a state
-  // of responses without histograms gets them on first use. Same masks.
-  const first = detectDust(source, { strength: 3 });
-  assert.ok(first._state.levels instanceof Uint8Array && first._state.levels.length === width * height);
-  assert.equal(first._state.topData, undefined, 'the level map replaces the responses');
-  const responses = detectDust(source, { strength: 2.5 })._state;
-  assert.ok(responses.topData instanceof Uint8Array && responses.topHist instanceof Uint32Array);
-  const bare = { topData: responses.topData, blackData: responses.blackData, width, height };
-  for (const strength of [1, 2, 5, 9, 10, 4.5]) {
+  // A detection keeps its candidates: a lower sensitivity only selects among
+  // them and gives the mask a fresh detection gives; a higher one, or another
+  // polarity, detects again. The worker does the same with the state it holds.
+  const first = detectDust(source, { strength: 8 });
+  assert.ok(first._state.records instanceof Float64Array && first._state.strength === 8);
+  for (const strength of [1, 2, 4.5, 5, 8]) {
     const fresh = detectDust(source, { strength });
-    for (const [label, state] of [['level map', first._state], ['responses', responses], ['bare responses', bare]]) {
-      const reused = updateDustStrength(source, state, strength);
-      assert.deepEqual(reused.mask, fresh.mask, `${label} give the fresh mask at strength ${strength}`);
-      assert.equal(reused.particleCount, fresh.particleCount);
-    }
+    const reused = updateDustStrength(source, first._state, strength);
+    assert.equal(reused._state, first._state, `strength ${strength} is answered from the state`);
+    assert.deepEqual(reused.mask, fresh.mask, `the state gives the fresh mask at strength ${strength}`);
+    assert.equal(reused.particleCount, fresh.particleCount);
   }
-  assert.ok(bare.topHist instanceof Uint32Array, 'a bare state is given its histograms');
+  const higher = updateDustStrength(source, first._state, 10);
+  assert.notEqual(higher._state, first._state, 'a higher sensitivity detects again');
+  assert.deepEqual(higher.mask, detectDust(source, { strength: 10 }).mask);
+
+  const stateful = createDustWorkerProcessor();
+  const request = (strength, polarity, reuseSource) => stateful({ type: 'detect', id: ++id, width, height, reuseSource,
+    ...(reuseSource ? {} : { rgba: source.data.slice() }), strength, ...(polarity ? { polarity } : {}) });
+  let reuse = false;
+  for (const [strength, polarity] of [[5, undefined], [3, undefined], [9, undefined], [9, 'dark'], [4, 'dark'], [4, 'bright']]) {
+    const { payload } = await request(strength, polarity, reuse);
+    reuse = true;
+    const direct = detectDust(source, { strength, polarity });
+    assert.deepEqual(payload.mask, direct.mask, `worker mask at strength ${strength}, ${polarity || 'default'} polarity`);
+    assert.equal(payload.particleCount, direct.particleCount);
+  }
+  // The specks of this frame are bright: a positive's detection leaves them.
+  assert.equal(detectDust(source, { strength: 5, polarity: 'dark' }).mask.some(Boolean), false);
 }
 await assert.rejects(createDustWorkerProcessor()({ type: 'detect', width, height, reuseSource: true }), /Missing/);
 {
