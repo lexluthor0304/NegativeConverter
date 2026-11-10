@@ -1,46 +1,113 @@
-# Dust removal: TELEA per cluster and regional brush strokes
+# Dust removal: detection, TELEA per cluster and regional brush strokes
 
-Dust removal detects specks and scratches with a dual top-hat (see
-`DustRemoval.js`), repairs them with OpenCV's TELEA or, when AI repair is on,
-with MI-GAN (`technical-depth.md`). This page covers how the TELEA repair and
-the dust brush stay proportional to the dust, not to the frame (#259).
+Dust removal finds dust, hairs and scratches on the converted frame
+(`DustDetection.js`, re-exported by `DustRemoval.js`), repairs them with
+OpenCV's TELEA or, when AI repair is on, with MI-GAN (`technical-depth.md`),
+and lets the brush add and remove repairs. This page covers what detection
+takes for dust, and how the TELEA repair and the dust brush stay proportional
+to the dust, not to the frame (#259).
 
-## Detection memory (`detectDust`, `updateDustStrength`)
+## Detection (`detectDust`, `updateDustStrength`)
 
-Detection runs on the full-resolution frame, so its scratch is counted per
-pixel. Three exact changes keep it at what the morphology itself needs:
+Dust lies on the film, so on the converted frame it is a small blob or a thin
+line standing alone on a locally calm background, as sharp as the film. The
+detector looks for exactly that, at several scales, and reads every candidate
+against its own surroundings. (The dual top-hat it replaced took its
+thresholds as quantiles of the whole frame, so texture anywhere set the bar
+everywhere: it marked foliage, gravel and grain by the thousand and missed
+faint specks on a clear sky.)
 
-- The grey goes straight into a one-channel Mat (`rgbaToGrayInto`): OpenCV's
-  8-bit `COLOR_RGBA2GRAY` is `(R·9798 + G·19235 + B·3735 + 2^14) >> 15`, and
-  both shipped builds (scalar and SIMD) give exactly those bytes on all 2^24
-  RGB triples. The RGBA copy `cv.cvtColor` needed (4 B per pixel of OpenCV
-  heap, which a WebAssembly memory never returns) is gone, and the top-hat Mat
-  is freed before the black-hat runs.
-- The neighbourhood density of each blob that passes the shape test is
-  counted offline (`countNonzeroInRects`): the corners of every padded and
-  own bounding box are bucketed by row, and one pass down the binary response
-  answers them from a Fenwick tree over the columns, in O(w·h + (s + q)·log w)
-  for s responding pixels and q boxes. The summed-area table it replaces held
-  4 B per pixel; the binary response now lives only in the Mat `findContours`
-  reads (it traces a bordered copy and leaves its input alone).
-- A strength change reads a level map instead of the two hat responses. The
-  UI's strengths are the integers 1–10 and a response's threshold never rises
-  with the strength, so a pixel set at strength s stays set above it: one byte
-  per pixel, the smallest strength that sets it, gives every strength's binary
-  response as `level <= s`. It is built in two passes (both histograms, then
-  a 256-entry table of first levels per response) over the top-hat response,
-  parked in the level buffer while the black-hat runs; the responses never get
-  a JS copy. Another strength (the UI makes none) keeps the responses and
-  their histograms, which answer any strength; a level map asked for one
-  re-detects.
+1. **Pyramid and hat.** The grey frame (`rgbaToGrayInto`: OpenCV's 8-bit
+   `COLOR_RGBA2GRAY`, `(R·9798 + G·19235 + B·3735 + 2^14) >> 15`, exact on
+   both builds, with no RGBA copy in the OpenCV heap) and its levels of 2×2
+   sums, as many as the size cap needs (`dustPyramidLevels`, at most five),
+   each through a 9 px elliptical top-hat (bright dust) or black-hat (dark).
+   A soft speck a dozen pixels across responds below the grain at full size
+   and well above it two levels down. Every plane is an integer (level l
+   holds sums of 4^l grey values), so the scalar and SIMD builds give
+   byte-identical masks.
+2. **Local grain, texture.** Per 32 px block of a level, the median response
+   is the grain (never below 0.35 grey levels). Seeds stand `seed` grains
+   above it and grow, 8-connected, down to 3.2 grains. A block whose 5×5
+   surroundings have more than 14 % of their samples above 3.2 grains is
+   texture: no seeds there and no growing into it.
+3. **Flat background.** A candidate's peak must stand `ringZ` spreads above
+   the response of a ring around it (a box ring for compact blobs, a band
+   traced along long ones), and at most 12 % of the ring's grey values may
+   differ from its median by 0.6 of the blob's contrast, in either direction.
+4. **Footprint and shape.** The footprint is taken at full size from a 5×5
+   binomial blur, down to 0.3 of the blob's contrast and within a few pixels
+   of what its level found. Its half-maximum core is what the size rule
+   reads. A core up to the size cap (`maxParticleSize`) long is a speck. Past
+   the cap only a hair passes (`looksLikeHair`): thin (core at most 0.4 % of
+   the short side thick, about 100 µm on 35 mm film) and at least ten times
+   as long as thick; past twice the cap also bent (sagitta at least 3.5 % of
+   the chord) and no longer than 60 % of the short side. A hair, and every
+   thin speck at least three times as long as thick (a short line: at most
+   0.3 % of the short side thick, so a thick or out-of-focus clump stays a
+   speck), must also be as sharp as the film and end where it ends
+   (`inFocusAndEnds`): its footprint at most max(3 px, 0.1 % of the short
+   side) thicker than its core, and no ridge of 40 % of its contrast going
+   on past either end (`continuation`: along each end's own direction, a
+   strip as wide as the line against the flanks beside it). A seam, a
+   crease, a wire or an edge of the picture fails one of those: it is thick,
+   straight and long, has soft shoulders, or goes on past what was found of
+   it. A straight line inside
+   the 2 % band along the frame's edge is the frame's border; a bent one
+   there is a hair running off the frame. Pieces of one line found
+   separately join into one blob, and a blob much longer than its longest
+   piece is read again as one shape.
+5. **Crowds.** Dust lands anywhere; highlights in foliage and sparkle on water
+   come in crowds. A blob whose 3×3 neighbourhood of cells (a twelfth of the
+   short side each) holds more blobs than the sensitivity allows per 1 % of
+   the frame is texture. The mask is the remaining footprints, dilated by
+   about 0.15 % of the frame's height.
 
-Masks and particle counts are byte-identical to the summed-area version
-(both OpenCV builds, real 10.7 and 24.3 MP frames at strengths 1–10 and at
-non-integer strengths). Peak RSS of a detection plus two strength changes
-dropped by 9 B per pixel (24.3 MP: 835 → 616 MB), the 24.3 MP frame no longer
-grows the OpenCV heap past its initial 128 MiB, and the state a pinned dust
-worker keeps for strength changes is 1 B per pixel instead of 2 (60 MP:
-about 58 MB instead of 116 MB).
+**Polarity.** What blocks light on a negative comes out bright on the
+converted frame; on a positive (a slide) it stays dark. The app asks for
+`polarity: 'dark'` when `filmType` is `'positive'` and `'bright'` otherwise,
+in the live pass (`runDustDetectionPass`) and in exports and batch
+(`removeFrameDust`, from each job's settings). `'both'` exists for tests.
+
+**Sensitivity and state.** The UI's 1–10 moves three thresholds together
+(`dustThresholds`): the seed (7.5 grains at 1, 5.6 at 3, 3.8 at 10), the ring
+significance (10, 6.5, 3.8 spreads) and the crowd density (5, 9, 60 blobs per
+1 % of the frame; none at 10). Each relaxes as the sensitivity rises, and a
+component is the same whichever of its seeds starts it, so a detection holds
+every candidate of every lower sensitivity. The state keeps the candidates (a
+record each, with its footprint as row runs: 34 KB to 1.2 MB on 7–19 MP frames,
+where the old level map took 1 B per pixel), and a lower sensitivity, or a
+smaller cap that needs no more pyramid levels, only selects among them: the
+same mask as a fresh detection (`DustDetection.test.mjs`) in 0–4 ms. A higher
+one, more levels or the other polarity detect again.
+
+**Measured** 2026-11-10 on four of the owner's colour negatives converted at
+full size (`_DSC3111`, `_DSC7811`, `_DSC5290`, `_DSC0914`: 7.4, 13.1, 13.1
+and 19.3 MP; a Mac, Node 26.5.1, SIMD build unless noted), the old detector
+against the new at the default sensitivity 3 and cap 40. Dust was injected into each negative's linear transmission (about 290
+per frame: hard and soft specks and bent fibres; for a positive, the same
+darkening the converted frame) and each defect grouped by the spread of the
+clean frame's grey around it: calm below 6 levels (sky, walls: where dust
+shows), moderate 6–20, busy above (foliage: where it hides).
+
+- Negatives, calm: 17 → 112 of 150 found; moderate 21–47 % → 45–74 %; busy
+  18–33 % → 7–42 %. Marks away from any injected defect 957–8315 → 21–209
+  blobs per frame.
+- Positives (dark dust), calm: 23–54 % → 47–86 % found; other marks
+  1187–9463 → 41–172 blobs.
+- The owner's own defects: four real hairs are masked (one running off the
+  frame's edge) and two soft blobs on a clear sky; a 43 × 13 px fibre clump
+  past the 40 px cap is not (raise the cap), nor a blob on busy paving.
+- Detection, minimum of 8 runs: SIMD 48–136 → 64–159 ms, scalar 394–1085 →
+  282–738 ms; a sensitivity change 9–102 → 0–4 ms. Repair follows the mask:
+  TELEA 42–262 → 16–57 ms, and the 512 px tiles AI repair infers (about a
+  quarter second each) 54–137 → 19–112 per frame, so a frame with AI repair
+  is ready 6–20 s sooner. Process RSS is about the same (225–386 MB against
+  246–395 MB).
+
+`scripts/eval-dust.mjs` is the in-repo stand-in: synthetic specks and bent
+hairs on a small rough positive of `_DSC3111.NEF`, scored by where each one
+landed (calm, moderate, busy).
 
 ## TELEA per cluster (`inpaintMasked`)
 
@@ -324,28 +391,26 @@ one process on the same planes, load average 35–180 from other agents, so
 the times carry noise; harness in `notes/292-harness/`, rows in
 `notes/results/measure-292.md`):
 
-- **Parity.** `detectDust` masks and particle counts, `inpaintMasked` in
-  8-bit and in the 16-bit plane (radius 3 and 5) and `refineMaskIntelligent`
-  (40 strokes each) are byte-identical on the synthetic frames at 640×480,
-  1500×1000 and 3000×2000 (60–400 specks) and `detectDust` at 24 MP
-  (6000×4000, 12 164 particles); `detectDust` masks on the 20 M11 frames
-  downsampled to 24 MP and on L1000617 at 60 MP are identical as well.
+- **Parity.** `inpaintMasked` in 8-bit and in the 16-bit plane (radius 3
+  and 5) and `refineMaskIntelligent` (40 strokes each) are byte-identical on
+  the synthetic frames at 640×480, 1500×1000 and 3000×2000 (60–400 specks).
   `DustRemoval.partition.test.mjs` (17 frames bit-identical to one
   full-frame TELEA), `DustBrush.test.mjs` (200+ strokes against the
   full-frame path), `DustRemoval.regional/inpaint`, `DustBrush.enclosure`,
   `dustWorkerProcessor`, `dustWorkerMemoryResize`, `dustStrokeHistory` and
   `dustWorkerClient.shared` pass on the SIMD build
   (`NC_OPENCV_VARIANT=simd node -r ./scripts/opencv-variant-preload.cjs`).
-  So dust exports do not change with the build.
-- **Speed, scalar → SIMD (medians).** Detection at 24 MP: the dual top-hat
-  (Scharr, morphology, blur, threshold, contours) is where SIMD pays:
-  2324 → 433 ms on the synthetic 6000×4000 frame (harness, 3 runs);
-  `scripts/benchmark-dust-performance.mjs 6000 4000`: direct 2375 → 423 ms
-  (second pass 2438 → 431), in its worker thread 2315 → 453 ms; on the 12
-  frames of the M11 B&W roll (L1000617–628) downsampled to 24 MP, median
-  of the per-frame medians (3 runs) 1392 → 325 ms (−77 %; 1324–1437 →
-  252–511 ms); on the full 60 MP L1000617 14 464 → 2 909 ms. Detection at 3000×2000
-  513 → 100 ms, at 1500×1000 141 → 28 ms. TELEA itself is not vectorised:
+  `detectDust` (2026-11-10) gives byte-identical masks and particle counts
+  on four real frames of 7.4–19.3 MP, each at sensitivities 3 and 8, the
+  dark polarity and a cap of 80 (16 combinations), and
+  `DustDetection.test.mjs` passes on both builds. So dust exports do not
+  change with the build.
+- **Speed, scalar → SIMD.** Detection (2026-11-10, minimum of 8 runs on the
+  four real frames): 282 → 64, 509 → 121, 456 → 73 and 738 → 159 ms; the
+  morphology at each pyramid level is where SIMD pays, the JS stages
+  (block statistics, seeds, rings, footprints) cost the same on both
+  builds. (The dual top-hat it replaced took 2324 → 433 ms at 24 MP.)
+  The rest was measured 2026-10-09. TELEA itself is not vectorised:
   `inpaintMasked` at 3000×2000 34 → 32 ms (radius 3) and 43 → 42 ms
   (radius 5); `scripts/bench-dust-inpaint-60mp.mjs` (9504×6320, 400 specks)
   199 → 193 ms in an idle pass and 596 → 278 ms in a pass at load average
@@ -356,6 +421,25 @@ the times carry noise; harness in `notes/292-harness/`, rows in
 
 ## Known limits
 
+- Detection leaves dust in dense texture (foliage, gravel, fabric) to the
+  brush: there it cannot be told from the texture, and the old detector's
+  attempt marked the texture itself.
+- A speck lying on a line of the picture (a tile seam, a wire) joins the line
+  and is left with it.
+- A thick clump past the size cap is left until the cap is raised: the cap
+  means what it says, and only thin, long shapes pass it as hairs.
+- A long straight scratch (more than twice the cap) reads as a line of the
+  picture and is left; so does a hair crossing busy detail, whose calm
+  stretches go on past what was found of them.
+- A short thin line alone on a calm background, on dust's side of the tones,
+  still reads as a fibre (`audit-backlog.md`).
+- On a positive, small dark specks of the picture's own (pores in concrete,
+  stains) look like dust and are repaired; mostly harmlessly, since the
+  repair fills them with the surface around them.
+- The sharpness test sees shoulders only as far as the finest level's
+  footprint reaches (a few pixels past what it found), and each level's
+  reading counts on its own: a coarse level reads even a sharp fibre a
+  little soft, so one sharp reading keeps a shape.
 - Batch export still re-detects dust per file and ignores brush edits
   (`audit-backlog.md`).
 - A stroke entry still holds the planes it patched, so once they are off
