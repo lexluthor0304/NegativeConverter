@@ -436,6 +436,11 @@ the times carry noise; harness in `notes/292-harness/`, rows in
 - On a positive, small dark specks of the picture's own (pores in concrete,
   stains) look like dust and are repaired; mostly harmlessly, since the
   repair fills them with the surface around them.
+- On a scan that keeps the film's rebate, a small edge-print mark standing
+  alone on it reads as a speck when it fits under the size cap, which
+  happens on low-resolution scans of whole strips (the darkroom smoke's
+  strip, about 15 px; on a full-size frame scan edge print is far larger
+  than the cap).
 - The sharpness test sees shoulders only as far as the finest level's
   footprint reaches (a few pixels past what it found), and each level's
   reading counts on its own: a coarse level reads even a sharp fibre a
