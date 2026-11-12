@@ -221,11 +221,51 @@ export function createSparseBlendWeights(width, { blockSize = 64 } = {}) {
 // small clusters do not get a tile each: a window is cut around every one and
 // the windows are laid side by side in one 512 px input, sixteen of 128 px or
 // four of 256 px (or a mix: a quadrant holds one 256 px window or four 128 px
-// ones). Only clusters too large for a 256 px window keep the tiles.
+// ones). A cluster too large for a 256 px window that is thin all along (a
+// hair, a scratch) goes in piece by piece: each grid cell's part of it in a
+// 128 px window of its own, the rest of the line masked beside it. Only what
+// is large and thick (a brushed area) keeps the tiles.
 // docs/technical-depth.md has the measurements against known pixels.
 
 /** Pixels of real picture a cluster keeps on every side inside its window, for a 512 px input. */
 export const MOSAIC_CONTEXT = 32;
+/** A long cluster goes in by pieces while the mask fills at most this share of every piece's window. */
+export const MOSAIC_PIECE_SHARE = 0.12;
+
+// A long cluster cell by cell: the centre of each cell's own mask pixels, or
+// null when a 128 px window around one holds more mask than a thin line leaves.
+function clusterPieces(mask, width, height, grid, id, size, share) {
+  const { cell, cols, clusterOf, clusters } = grid;
+  const { minC, maxC, minR, maxR } = clusters[id];
+  const limit = share * size * size;
+  const pieces = [];
+  for (let r = minR; r <= maxR; r++) {
+    for (let c = minC; c <= maxC; c++) {
+      if (clusterOf[r * cols + c] !== id) continue;
+      let x0 = width, y0 = height, x1 = 0, y1 = 0;
+      const cellX1 = Math.min(width, (c + 1) * cell), cellY1 = Math.min(height, (r + 1) * cell);
+      for (let y = r * cell; y < cellY1; y++) {
+        const row = y * width;
+        for (let x = c * cell; x < cellX1; x++) {
+          if (!mask[row + x]) continue;
+          if (x < x0) x0 = x; if (x >= x1) x1 = x + 1;
+          if (y < y0) y0 = y; if (y >= y1) y1 = y + 1;
+        }
+      }
+      const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+      const left = Math.min(width - size, Math.max(0, Math.round(cx - size / 2)));
+      const top = Math.min(height - size, Math.max(0, Math.round(cy - size / 2)));
+      let masked = 0;
+      for (let y = top; y < top + size; y++) {
+        const row = y * width;
+        for (let x = left; x < left + size; x++) if (mask[row + x]) masked++;
+      }
+      if (masked > limit) return null;
+      pieces.push({ cluster: id, cell: r * cols + c, cx, cy });
+    }
+  }
+  return pieces;
+}
 
 // The mask pixels of a cluster: their bounds, x1 and y1 exclusive.
 function clusterPixelBounds(mask, width, height, grid, id) {
@@ -252,14 +292,18 @@ function clusterPixelBounds(mask, width, height, grid, id) {
 /**
  * The inferences a pass over the mask needs. Returns the cluster grid, the
  * mosaics (`canvases`: each a list of windows { x, y, size, at: { x, y },
- * cluster, blend } laid out in one tile-sized input; windows with `blend:
- * false` only fill room that would otherwise be empty), the tiles of the
- * clusters too large for a window, and `tiled[cluster]`, 1 for those.
+ * cluster, cell, blend } laid out in one tile-sized input; a window writes
+ * back its cluster's pixels, or those in grid cell `cell` alone when it is a
+ * piece of a long cluster (-1 otherwise); windows with `blend: false` only
+ * fill room that would otherwise be empty), the tiles of the clusters left
+ * to tiles, and `tiled[cluster]`, 1 for those.
  * The layout depends on the mask alone, so the same mask is always repaired
  * by the same inputs. A frame smaller than a tile, or `mosaic: false`, keeps
  * every cluster on tiles.
  */
-export function planInpaint(mask, width, height, { tile = TILE, overlap = OVERLAP, bounds = null, mosaic = true } = {}) {
+export function planInpaint(mask, width, height, {
+  tile = TILE, overlap = OVERLAP, bounds = null, mosaic = true, pieceShare = MOSAIC_PIECE_SHARE
+} = {}) {
   const grid = maskClusters(mask, width, height, { bounds });
   const { cell, clusters } = grid;
   const tiled = new Uint8Array(clusters.length);
@@ -268,21 +312,25 @@ export function planInpaint(mask, width, height, { tile = TILE, overlap = OVERLA
   const usable = mosaic && tile % 4 === 0 && width >= tile && height >= tile;
   for (let id = 0; id < clusters.length; id++) {
     const { minC, maxC, minR, maxR } = clusters[id];
+    if (!usable) { tiled[id] = 1; continue; }
     // A cluster spanning n cells is more than (n - 2) cells long.
     const span = Math.max(maxC - minC, maxR - minR) + 1;
-    if (!usable || (span - 2) * cell + 2 * context >= medium) { tiled[id] = 1; continue; }
-    const { x0, y0, x1, y1 } = clusterPixelBounds(mask, width, height, grid, id);
-    const long = Math.max(x1 - x0, y1 - y0);
-    const unit = { cluster: id, cx: (x0 + x1) / 2, cy: (y0 + y1) / 2 };
-    if (long + 2 * context <= small) smalls.push(unit);
-    else if (long + 2 * context <= medium) mediums.push(unit);
+    if ((span - 2) * cell + 2 * context < medium) {
+      const { x0, y0, x1, y1 } = clusterPixelBounds(mask, width, height, grid, id);
+      const long = Math.max(x1 - x0, y1 - y0);
+      const unit = { cluster: id, cell: -1, cx: (x0 + x1) / 2, cy: (y0 + y1) / 2 };
+      if (long + 2 * context <= small) { smalls.push(unit); continue; }
+      if (long + 2 * context <= medium) { mediums.push(unit); continue; }
+    }
+    const pieces = pieceShare > 0 ? clusterPieces(mask, width, height, grid, id, small, pieceShare) : null;
+    if (pieces) smalls.push(...pieces);
     else tiled[id] = 1;
   }
   // A window of `size` px centred on a unit, kept inside the frame.
   const windowOf = (unit, size, atX, atY, blend = true) => ({
     x: Math.min(width - size, Math.max(0, Math.round(unit.cx - size / 2))),
     y: Math.min(height - size, Math.max(0, Math.round(unit.cy - size / 2))),
-    size, at: { x: atX, y: atY }, cluster: unit.cluster, blend
+    size, at: { x: atX, y: atY }, cluster: unit.cluster, cell: unit.cell, blend
   });
   // Quadrants: one 256 px window, or up to four 128 px ones.
   const quadrants = mediums.map((unit) => [unit]);
@@ -409,17 +457,17 @@ export function blendTile(result, source, tile, output, weights, applied = null,
  * input.
  * `maskBounds` is the cluster scan's hint. `memoInsert: false` asks a
  * memoising session to look inputs up without storing new ones (batch lanes).
- * `mosaic: false` keeps every cluster on tiles (measurements).
+ * `mosaic: false` keeps every cluster on tiles, `pieceShare: 0` the long ones (measurements).
  * The plan and the first input come before the copy of the frame: that input
  * infers while the copy proceeds in chunks.
  */
 export async function inpaintWithModel(imageData, mask, run, {
   tile = TILE, onProgress = null, feather = FEATHER, signal = null, shouldContinue = null,
-  maskBounds = null, memoInsert = true, cloneChunkBytes = CLONE_CHUNK_BYTES, mosaic = true
+  maskBounds = null, memoInsert = true, cloneChunkBytes = CLONE_CHUNK_BYTES, mosaic = true, pieceShare = undefined
 } = {}) {
   checkInpaintCurrent(signal, shouldContinue);
   const { width, height, data } = imageData;
-  const { grid, canvases, tiles, tiled } = planInpaint(mask, width, height, { tile, bounds: maskBounds, mosaic });
+  const { grid, canvases, tiles, tiled } = planInpaint(mask, width, height, { tile, bounds: maskBounds, mosaic, pieceShare });
   const { cell, cols, clusterOf } = grid;
   const jobs = [...canvases.map((windows) => ({ windows })), ...tiles.map((t) => ({ tile: t }))];
   const runOptions = { transferInputs: true, signal, shouldContinue };
@@ -467,7 +515,9 @@ export async function inpaintWithModel(imageData, mask, run, {
           image[2 * plane + dst] = data[src + 2] / 255;
           if (!mask[pixel]) continue;
           maskOut[dst] = 1;
-          if (own && clusterOf[gridRow + (((win.x + wx) / cell) | 0)] === win.cluster) own[wy * win.size + wx] = 1;
+          if (!own) continue;
+          const gridCell = gridRow + (((win.x + wx) / cell) | 0);
+          if (win.cell >= 0 ? gridCell === win.cell : clusterOf[gridCell] === win.cluster) own[wy * win.size + wx] = 1;
         }
       }
       if (own) writes.push({ win, weights: featherWeights(own, win.size, feather) });

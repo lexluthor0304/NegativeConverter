@@ -150,15 +150,36 @@ const disc = (mask, width, cx, cy, r) => { for (let y = cy - r; y <= cy + r; y++
   plan = planInpaint(maskOf(specks.slice(0, 3)), W, H);
   assert.deepEqual(plan.canvases[0].map((win) => [win.size, win.blend]), [[256, true], [256, true], [256, true], [256, false]]);
   assert.deepEqual(planInpaint(maskOf(specks.slice(0, 3)), W, H).canvases, plan.canvases);
-  // A blob up to 192 px takes a 256 px window; a longer line keeps its tiles.
-  const mixed = maskOf(specks.slice(0, 2));
+  // A blob up to 192 px takes a 256 px window; a long bar keeps its tiles.
+  const bar = (mask) => { for (let y = 1700; y < 1770; y++) mask.fill(255, y * W + 300, y * W + 1000); return mask; };
+  const mixed = bar(maskOf(specks.slice(0, 2)));
   for (let x = 1000; x < 1150; x++) disc(mixed, W, x, 1000, 2);
-  for (let x = 1500; x < 2300; x++) disc(mixed, W, x, 1500 + Math.round((x - 1500) / 8), 2);
   plan = planInpaint(mixed, W, H);
   assert.equal(plan.canvases.length, 1);
   assert.deepEqual(plan.canvases[0].filter((win) => win.blend).map((win) => win.size), [256, 256, 256]);
-  assert.equal(plan.tiled.reduce((sum, flag) => sum + flag, 0), 1, 'the long line alone is tiled');
+  assert.equal(plan.tiled.reduce((sum, flag) => sum + flag, 0), 1, 'the bar alone is tiled');
   assert.ok(plan.tiles.length >= 2);
+  // A long thin line goes in piece by piece: a 128 px window per grid cell it
+  // crosses, centred on that cell's part of it, which alone it writes back.
+  const line = new Uint8Array(W * H);
+  for (let x = 1500; x < 2300; x++) disc(line, W, x, 1500 + Math.round((x - 1500) / 8), 2);
+  plan = planInpaint(line, W, H);
+  assert.deepEqual([plan.grid.clusters.length, plan.tiles.length, plan.tiled[0]], [1, 0, 0]);
+  const pieces = plan.canvases.flat().filter((win) => win.blend);
+  const lineCells = new Set();
+  for (let p = 0; p < W * H; p++) if (line[p]) lineCells.add((((p / W) | 0) >> 6) * plan.grid.cols + ((p % W) >> 6));
+  assert.deepEqual(pieces.map((win) => win.cell).sort((a, b) => a - b), [...lineCells].sort((a, b) => a - b), 'a window per cell of the line');
+  assert.ok(pieces.every((win) => win.size === 128 && win.cluster === 0));
+  assert.equal(plan.canvases.length, Math.ceil(lineCells.size / 16));
+  for (const win of pieces) {
+    const cellX = (win.cell % plan.grid.cols) * 64, cellY = ((win.cell / plan.grid.cols) | 0) * 64;
+    for (let y = cellY; y < cellY + 64; y++) for (let x = cellX; x < cellX + 64; x++) {
+      if (!line[y * W + x]) continue;
+      assert.ok(x - win.x >= MOSAIC_CONTEXT && win.x + win.size - x > MOSAIC_CONTEXT && y - win.y >= MOSAIC_CONTEXT && win.y + win.size - y > MOSAIC_CONTEXT,
+        'a piece keeps the window around its pixels');
+    }
+  }
+  assert.equal(planInpaint(line, W, H, { pieceShare: 0 }).canvases.length, 0, 'pieceShare: 0 leaves it to tiles');
   // A frame smaller than the input, or mosaic: false, is all tiles.
   assert.equal(planInpaint(maskOf(specks.slice(0, 3)), W, H, { mosaic: false }).canvases.length, 0);
   const tiny = new Uint8Array(400 * 300); disc(tiny, 400, 100, 100, 5);
@@ -170,7 +191,7 @@ const disc = (mask, width, cx, cy, r) => { for (let y = cy - r; y <= cy + r; y++
   // holding another cluster's pixels masks them for the model without writing them.
   const img = image(W, H, (x, y) => [(x * 3) % 256, (y * 2) % 256, 90]);
   const near = [...specks.slice(0, 5), { x: 150 + 140, y: 200, r: 4 }]; // an empty grid cell from the first speck: a cluster of its own
-  const nearMask = maskOf(near);
+  const nearMask = bar(maskOf(near));
   for (let x = 1500; x < 2300; x++) disc(nearMask, W, x, 1500 + Math.round((x - 1500) / 8), 2);
   let inputs = 0, maskedInInput = 0;
   const run = async (input, maskTile, size) => {
@@ -181,10 +202,11 @@ const disc = (mask, width, cx, cy, r) => { for (let y = cy - r; y <= cy + r; y++
     return out;
   };
   const expected = planInpaint(nearMask, W, H);
-  assert.equal(expected.grid.clusters.length, 7);
+  assert.equal(expected.grid.clusters.length, 8);
+  assert.ok(expected.canvases.length >= 2 && expected.tiles.length >= 2, 'mosaics, pieces and tiles in one pass');
   const { imageData: result, tiles } = await inpaintWithModel(img, nearMask, run);
   assert.equal(tiles, expected.canvases.length + expected.tiles.length);
-  assert.ok(inputs <= tiles && inputs < 7, `fewer inputs than clusters (${inputs})`);
+  assert.ok(inputs <= tiles, `no more inferences than inputs (${inputs})`);
   let wrong = 0;
   for (let p = 0; p < W * H; p++) {
     const x = p % W, y = (p - x) / W, o = p * 4;
