@@ -81,9 +81,12 @@ const disc = (mask, cx, cy, r) => {
     if (x >= 0 && y >= 0 && x < W && y < H && Math.hypot(x - cx, y - cy) <= r) mask[y * W + x] = 255;
   }
 };
+// Frames are compared as bytes: assert.deepEqual would build a diff of 24 M values when they differ.
+const sameBytes = (a, b) => a.length === b.length
+  && Buffer.compare(Buffer.from(a.buffer, a.byteOffset, a.byteLength), Buffer.from(b.buffer, b.byteOffset, b.byteLength)) === 0;
 const same = (a, b, label) => {
-  assert.deepEqual(a.data, b.data, `${label}: 8-bit`);
-  assert.deepEqual(a.__image16.data, b.__image16.data, `${label}: 16-bit`);
+  assert.ok(sameBytes(a.data, b.data), `${label}: 8-bit`);
+  assert.ok(sameBytes(a.__image16.data, b.__image16.data), `${label}: 16-bit`);
 };
 // Slots 600 px apart: a 512 px window around one never reaches another.
 const slots = [];
@@ -175,8 +178,10 @@ const dab = ({ x, y }) => ({ size: 0.02, points: [{ x: (x + 17) / W, y: (y + 11)
 }
 
 // Strokes 1..11 on top of dust. The memoised session equals an unmemoised
-// runner at every step, 8 and 16 bits; earlier strokes' and all dust tiles are
-// reused, so the 11th far-apart dab infers exactly one tile.
+// runner at every step, 8 and 16 bits. The three specks share one mosaic and
+// so do the dabs: the dust input is reused, and each new dab infers the one
+// input that holds the dabs. On tiles alone (`mosaic: false`) a pass still
+// equals the 1703835 setup.
 {
   const session = await createInpaintSession(new Uint8Array(1), { prefer: 'wasm', warmUp: true },
     { loadRuntime: async () => ort, backends: () => ({ webgpu: false, wasm: true }) });
@@ -196,28 +201,37 @@ const dab = ({ x, y }) => ({ size: 0.02, points: [{ x: (x + 17) / W, y: (y + 11)
     const dustInferences = inferences - before;
     const memoResult = await inpaintWithModel(memoDust.imageData, selection.mask, session.run, { maskBounds: selection.bounds });
     const strokeInferences = inferences - before - dustInferences;
-    // Same passes without memo, and with the 1703835 setup.
-    const plainDust = await headInpaintWithModel(source, dustMask, plain);
-    const plainResult = await headInpaintWithModel(plainDust.imageData, selection.mask, plain);
+    // Same passes without memo.
+    const plainDust = await inpaintWithModel(source, dustMask, plain);
+    const plainResult = await inpaintWithModel(plainDust.imageData, selection.mask, plain);
+    if (n === 1 || n === 11) {
+      const headDust = await headInpaintWithModel(source, dustMask, plain);
+      const tiledDust = await inpaintWithModel(source, dustMask, plain, { mosaic: false });
+      same(tiledDust.imageData, headDust.imageData, `tiles alone, dust pass, stroke ${n}`);
+      assert.equal(tiledDust.tiles, dustSlots.length, 'a tile per far-apart speck');
+      same((await inpaintWithModel(headDust.imageData, selection.mask, plain, { mosaic: false, maskBounds: selection.bounds })).imageData,
+        (await headInpaintWithModel(headDust.imageData, selection.mask, plain)).imageData, `tiles alone, stroke pass, stroke ${n}`);
+    }
     same(memoDust.imageData, plainDust.imageData, `dust pass, stroke ${n}`);
     same(memoResult.imageData, plainResult.imageData, `stroke pass, stroke ${n}`);
     const verifiedResult = await inpaintWithModel(memoDust.imageData, selection.mask, verified, { maskBounds: selection.bounds });
     same(verifiedResult.imageData, plainResult.imageData, `verified memo, stroke ${n}`);
-    assert.equal(memoResult.tiles, n, 'one 512 px tile per default-size dab');
+    assert.equal(memoResult.tiles, 1, 'up to sixteen default-size dabs share one input');
     if (n === 1) {
-      assert.equal(dustInferences, dustSlots.length, 'the first commit infers every dust tile');
+      assert.equal(dustInferences, 1, 'the first commit infers the three specks in one input');
+      assert.equal(memoDust.tiles, 1);
       dustImages = memoDust;
     } else {
-      assert.equal(dustInferences, 0, `stroke ${n}: dust tiles are reused`);
+      assert.equal(dustInferences, 0, `stroke ${n}: the dust input is reused`);
     }
-    assert.equal(strokeInferences, 1, `stroke ${n}: only the new dab's tile is inferred`);
+    assert.equal(strokeInferences, 1, `stroke ${n}: one input holds the dabs`);
   }
   // A fresh detection with the same content: no dust tile is inferred.
   const before = inferences;
   const again = await inpaintWithModel(source, new Uint8Array(dustMask), session.run);
   assert.equal(inferences - before, 0);
   same(again.imageData, dustImages.imageData, 'unchanged dust content');
-  // An edit that stays inside one box's occupied 64 px cells re-infers that box only.
+  // An edit to one speck re-infers the input that holds it.
   const edited = new Uint8Array(dustMask);
   const { x, y } = dustSlots[1];
   disc(edited, x + 30, y, 3); // cell (14, 4) already holds the speck at (905, 297)
@@ -225,8 +239,8 @@ const dab = ({ x, y }) => ({ size: 0.02, points: [{ x: (x + 17) / W, y: (y + 11)
   assert.deepEqual(maskBoundingBoxes(edited, W, H), maskBoundingBoxes(dustMask, W, H), 'the boxes do not move');
   const beforeEdit = inferences;
   const editedResult = await inpaintWithModel(source, edited, session.run);
-  assert.equal(inferences - beforeEdit, 1, 'only the edited box infers');
-  same(editedResult.imageData, (await headInpaintWithModel(source, edited, plain)).imageData, 'edited dust mask');
+  assert.equal(inferences - beforeEdit, 1, 'one input infers');
+  same(editedResult.imageData, (await inpaintWithModel(source, edited, plain)).imageData, 'edited dust mask');
   // Blocks the pass wrote: pixels outside them equal the source.
   const written = new Set(editedResult.blocks.keys);
   const { size, columns } = editedResult.blocks;
@@ -242,7 +256,7 @@ const dab = ({ x, y }) => ({ size: 0.02, points: [{ x: (x + 17) / W, y: (y + 11)
   const lane = buildRepairMask(sanitizeRepairStrokes([dab({ x: slots[1].x + 150, y: slots[1].y }), dab({ x: slots[2].x - 150, y: slots[2].y })]), geometry);
   const laneBefore = inferences;
   await inpaintWithModel(source, lane.mask, session.run, { maskBounds: lane.bounds, memoInsert: false });
-  assert.equal(inferences - laneBefore, 2, 'the lane infers its tiles');
+  assert.equal(inferences - laneBefore, 1, 'the lane infers its input');
   assert.equal(session.memoStats().entries, stats.entries, 'and stores none of them');
   await session.release();
   assert.equal(session.memoStats().entries, 0, 'release empties the memo');

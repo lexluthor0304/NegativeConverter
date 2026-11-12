@@ -2,7 +2,7 @@
 // node negative2positive/src/app/aiInpaint.test.mjs
 
 import assert from 'node:assert/strict';
-import { maskBoundingBoxes, tilesForBox, uniqueTiles, extractTile, featherWeights, inpaintWithModel, maskBounds } from './aiInpaint.js';
+import { maskBoundingBoxes, tilesForBox, uniqueTiles, extractTile, featherWeights, inpaintWithModel, maskBounds, planInpaint, MOSAIC_CONTEXT } from './aiInpaint.js';
 
 if (typeof globalThis.ImageData === 'undefined') {
   globalThis.ImageData = class ImageData {
@@ -89,7 +89,9 @@ const disc = (mask, width, cx, cy, r) => { for (let y = cy - r; y <= cy + r; y++
   };
   const { imageData: result, tiles } = await inpaintWithModel(img, mask, run);
   assert.equal(tiles, calls.length);
-  assert.ok(tiles >= 2 && tiles <= 4, `two specks need a couple of tiles (${tiles})`);
+  assert.equal(tiles, 1, 'two small specks share one input');
+  const tiled = await inpaintWithModel(img, mask, run, { mosaic: false });
+  assert.ok(tiled.tiles >= 2 && tiled.tiles <= 4, `on tiles alone they need a couple (${tiled.tiles})`);
   const at = (x, y) => { const o = (y * W + x) * 4; return [result.data[o], result.data[o + 1], result.data[o + 2]]; };
   assert.deepEqual(at(120, 120), [153, 153, 153], 'mask centre takes the model fill');
   assert.deepEqual(at(800, 600), [153, 153, 153]);
@@ -107,6 +109,102 @@ const disc = (mask, width, cx, cy, r) => { for (let y = cy - r; y <= cy + r; y++
   const progress = [];
   await inpaintWithModel(img, mask, run, { onProgress: (done, total) => progress.push([done, total]) });
   assert.equal(progress.at(-1)[0], progress.at(-1)[1]);
+}
+
+// Mosaics: small clusters share one input, each in a window of its own with
+// picture around it; only a cluster too large for a window keeps its tiles.
+{
+  const W = 3000; const H = 2000;
+  const specks = [];
+  for (let i = 0; i < 21; i++) specks.push({ x: 150 + (i % 7) * 400, y: 200 + ((i / 7) | 0) * 700, r: 3 + (i % 5) * 4 });
+  const maskOf = (list) => { const mask = new Uint8Array(W * H); for (const { x, y, r } of list) disc(mask, W, x, y, r); return mask; };
+  const covers = (windows) => {
+    const seen = new Uint8Array(512 * 512);
+    for (const win of windows) {
+      assert.ok(win.x >= 0 && win.y >= 0 && win.x + win.size <= W && win.y + win.size <= H, 'a window lies inside the frame');
+      for (let y = 0; y < win.size; y++) for (let x = 0; x < win.size; x++) seen[(win.at.y + y) * 512 + win.at.x + x]++;
+    }
+    return seen.every((count) => count === 1);
+  };
+  // Sixteen small specks: one input of sixteen 128 px windows.
+  let plan = planInpaint(maskOf(specks.slice(0, 16)), W, H);
+  assert.deepEqual([plan.canvases.length, plan.tiles.length], [1, 0]);
+  assert.equal(plan.canvases[0].length, 16);
+  assert.ok(plan.canvases[0].every((win) => win.size === 128 && win.blend) && covers(plan.canvases[0]), 'the windows fill the input');
+  assert.deepEqual(plan.canvases[0].map((win) => win.cluster).sort((a, b) => a - b), [...Array(16).keys()], 'one window per cluster');
+  specks.slice(0, 16).forEach(({ x, y, r }) => {
+    const win = plan.canvases[0].find((w) => x >= w.x && x < w.x + w.size && y >= w.y && y < w.y + w.size);
+    assert.ok(win && x - r - win.x >= MOSAIC_CONTEXT && win.x + win.size - (x + r + 1) >= MOSAIC_CONTEXT
+      && y - r - win.y >= MOSAIC_CONTEXT && win.y + win.size - (y + r + 1) >= MOSAIC_CONTEXT, 'picture on every side of a speck');
+  });
+  // A seventeenth has an input to itself and takes all of it; twenty-one fill a second input with five.
+  plan = planInpaint(maskOf(specks.slice(0, 17)), W, H);
+  assert.deepEqual(plan.canvases.map((windows) => windows.map((win) => win.size)), [Array(16).fill(128), [512]]);
+  plan = planInpaint(maskOf(specks), W, H);
+  assert.equal(plan.canvases.length, 2);
+  assert.ok(covers(plan.canvases[1]));
+  assert.deepEqual(plan.canvases[1].filter((win) => win.blend).map((win) => win.size), [128, 128, 128, 128, 256],
+    'four share a quadrant, the fifth takes one');
+  assert.ok(plan.canvases[1].filter((win) => !win.blend).length > 0, 'spare room shows windows again, without writing them');
+  // Up to four take a quadrant each; the same mask gives the same plan.
+  plan = planInpaint(maskOf(specks.slice(0, 3)), W, H);
+  assert.deepEqual(plan.canvases[0].map((win) => [win.size, win.blend]), [[256, true], [256, true], [256, true], [256, false]]);
+  assert.deepEqual(planInpaint(maskOf(specks.slice(0, 3)), W, H).canvases, plan.canvases);
+  // A blob up to 192 px takes a 256 px window; a longer line keeps its tiles.
+  const mixed = maskOf(specks.slice(0, 2));
+  for (let x = 1000; x < 1150; x++) disc(mixed, W, x, 1000, 2);
+  for (let x = 1500; x < 2300; x++) disc(mixed, W, x, 1500 + Math.round((x - 1500) / 8), 2);
+  plan = planInpaint(mixed, W, H);
+  assert.equal(plan.canvases.length, 1);
+  assert.deepEqual(plan.canvases[0].filter((win) => win.blend).map((win) => win.size), [256, 256, 256]);
+  assert.equal(plan.tiled.reduce((sum, flag) => sum + flag, 0), 1, 'the long line alone is tiled');
+  assert.ok(plan.tiles.length >= 2);
+  // A frame smaller than the input, or mosaic: false, is all tiles.
+  assert.equal(planInpaint(maskOf(specks.slice(0, 3)), W, H, { mosaic: false }).canvases.length, 0);
+  const tiny = new Uint8Array(400 * 300); disc(tiny, 400, 100, 100, 5);
+  plan = planInpaint(tiny, 400, 300);
+  assert.deepEqual([plan.canvases.length, plan.tiles.length], [0, 1]);
+
+  // The repair: a model that paints grey and passes the rest through. Every
+  // masked pixel takes the fill exactly once, nothing else moves, and a window
+  // holding another cluster's pixels masks them for the model without writing them.
+  const img = image(W, H, (x, y) => [(x * 3) % 256, (y * 2) % 256, 90]);
+  const near = [...specks.slice(0, 5), { x: 150 + 140, y: 200, r: 4 }]; // an empty grid cell from the first speck: a cluster of its own
+  const nearMask = maskOf(near);
+  for (let x = 1500; x < 2300; x++) disc(nearMask, W, x, 1500 + Math.round((x - 1500) / 8), 2);
+  let inputs = 0, maskedInInput = 0;
+  const run = async (input, maskTile, size) => {
+    inputs++;
+    const out = new Float32Array(input);
+    const plane = size * size;
+    for (let i = 0; i < plane; i++) if (maskTile[i]) { maskedInInput++; out[i] = out[plane + i] = out[2 * plane + i] = 0.6; }
+    return out;
+  };
+  const expected = planInpaint(nearMask, W, H);
+  assert.equal(expected.grid.clusters.length, 7);
+  const { imageData: result, tiles } = await inpaintWithModel(img, nearMask, run);
+  assert.equal(tiles, expected.canvases.length + expected.tiles.length);
+  assert.ok(inputs <= tiles && inputs < 7, `fewer inputs than clusters (${inputs})`);
+  let wrong = 0;
+  for (let p = 0; p < W * H; p++) {
+    const x = p % W, y = (p - x) / W, o = p * 4;
+    const original = [(x * 3) % 256, (y * 2) % 256, 90];
+    for (let c = 0; c < 3; c++) if (result.data[o + c] !== (nearMask[p] ? 153 : original[c])) wrong++;
+  }
+  // The model passes unmasked pixels through, so the feather blends a pixel with itself.
+  assert.equal(wrong, 0, 'masked pixels take the fill, every other pixel keeps its value');
+  assert.equal(result.__image16.data[(200 * W + 150) * 4], Math.round(0.6 * 65535));
+  // Two clusters inside each other's 256 px windows: each window masks both
+  // for the model (four windows, two of them spare) and writes its own.
+  const pair = maskOf([{ x: 180, y: 400, r: 3 }, { x: 262, y: 400, r: 3 }]);
+  const pairPlan = planInpaint(pair, W, H);
+  assert.equal(pairPlan.grid.clusters.length, 2);
+  assert.deepEqual(pairPlan.canvases.map((windows) => windows.map((win) => win.size)), [[256, 256, 256, 256]]);
+  inputs = maskedInInput = 0;
+  const pairResult = await inpaintWithModel(img, pair, run);
+  assert.equal(inputs, 1);
+  assert.equal(maskedInInput, 4 * pair.reduce((sum, value) => sum + (value ? 1 : 0), 0), 'every window masks both specks');
+  for (const x of [180, 262]) assert.equal(pairResult.imageData.data[(400 * W + x) * 4], 153);
 }
 
 console.log('aiInpaint.test.mjs passed');
