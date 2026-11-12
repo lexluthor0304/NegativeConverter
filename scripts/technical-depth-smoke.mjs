@@ -143,6 +143,8 @@ async function runAiRepairScenario({ send, evaluate, waitFor, wait, fail, instal
   await evaluate(`document.getElementById('studioTab-repair').click()`);
   await waitFor('model loads when the Repair tab opens', `/Model ready/.test(document.getElementById('dustAiStatus').textContent)`, 180_000);
   await wait(600);
+  // The sample has no dust on it: at the highest sensitivity its smallest highlights stand in.
+  await evaluate(`(() => { const strength = document.getElementById('dustStrengthValue'); strength.value = '10'; strength.dispatchEvent(new Event('change')); })()`);
   await evaluate(`document.getElementById('dustRemovalEnabled').click();`);
   await waitFor('dust detected with TELEA', `/Detected \\d+ dust/.test(document.getElementById('dustStatus').textContent)`, 60_000);
   const idle = await evaluate(`document.getElementById('dustAiStatus').textContent`);
@@ -490,6 +492,8 @@ async function runManualBrushSmoke({ send, evaluate, waitFor, wait, fail, instal
   const dustInput = await send('DOM.querySelector', { nodeId: dustDoc.result.root.nodeId, selector: '#fileInput' });
   await send('DOM.setFileInputFiles', { files: [join(root, 'negative2positive/test-fixtures/negative-sample.jpg')], nodeId: dustInput.result.nodeId });
   await waitFor('default AI dust photo', `${ready} && document.getElementById('studioFilename').textContent === 'negative-sample.jpg'`, 150_000);
+  // No dust on the sample: the highest sensitivity again (a new page starts at the default).
+  await evaluate(`(() => { const strength = document.getElementById('dustStrengthValue'); strength.value = '10'; strength.dispatchEvent(new Event('change')); })()`);
   await evaluate(`document.getElementById('studioTab-repair').click(); document.getElementById('dustRemovalEnabled').click()`);
   await waitFor('default AI dust automatically loads and repairs', `/Model ready.*last run [1-9]/.test(document.getElementById('dustAiStatus').textContent)`, 180_000);
   console.log('ok: enabling dust alone automatically loads MI-GAN and repairs with AI');
