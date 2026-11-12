@@ -114,7 +114,7 @@ function negative(width, height, seed = 17) {
   vm.runInContext(['renderFrameAnalysisThumbnail', 'releaseFrameThumbnailWorkers', 'renderSampleTile', 'publishSampleTile',
     'renderRollSampleTiles', 'renderPreviewFromWorkingImage', 'removeFrameDust', 'frameWantsAutoWhiteBalance',
     'applyFrameAutoWhiteBalance', 'applyFrameExpiredAnalysis', 'analysisRegionSample', 'sanitizeCropRegionForImage',
-    'photoSettingsKey'].map(functionSource).join('\n'), context);
+    'photoSettingsKey', 'dustRemovalOfItem', 'sanitizeDustRemoval'].map(functionSource).join('\n'), context);
 
   // The sink: the frame's recipe and sample are in, its tile renders.
   context.renderFrameAnalysisThumbnail(item, { sample, settings: item.settings }, () => item.settings === recipe);

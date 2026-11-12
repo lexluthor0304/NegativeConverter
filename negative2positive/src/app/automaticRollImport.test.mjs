@@ -965,7 +965,7 @@ function workerRoll(f, { analysisFor = () => ({}), dng = true, holdAnalysis = nu
 // on a pixel-less frame), analyzeStudioImportFrame and mergeImportFilmEdge
 // from main.js, with the modules they read, in place of the fixture's stubs.
 const MERGE_FUNCTIONS = ['getImageDataPixelCount', 'clampBetween', 'sanitizeNumeric', 'makeLinearCurveLut',
-  'createDefaultLensCorrectionSettings', 'autoDetectFilmBase', 'defaultSettingsInputs', 'createDefaultSettings',
+  'createDefaultLensCorrectionSettings', 'autoDetectFilmBase', 'defaultSettingsInputs', 'createDefaultSettings', 'sanitizeDustRemoval',
   'shotMetadataFor', 'applyShotMetadata',
   'autoFrameEffectiveAngle', 'rotate180CropRegion', 'mirrorCropForRotatedFrame', 'analyzeStudioImportFrame', 'mergeImportFilmEdge'];
 function useRealMerge(f) {

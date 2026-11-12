@@ -120,10 +120,10 @@ proof does not establish the unmeasured performance targets.
   processNegative awaits maybeApplyFrontierGuideDefaults(), which on the first conversion of a colour negative whose model/preset are still 'standard'/'none' switches coreColorModel to 'frontier' and applies the 'frontier-lab' preset (writing coreEnhancedProfile, coreSaturation, coreGlow, coreFade, coreShadows, coreHighlights, coreBlacks, coreWhites from the preset). createDefaultSettings returns `c…  
   _Suggested fix:_ Factor the guide default into a pure `applyFrontierGuideDefaults(settings)` that returns the modified settings (model + preset values from loadFilmPresets) and call it both from maybeApplyFrontierGuideDefaults (on state) and from processFileWithSettings when no snapshot exists (o…
 
-- **medium/bug** — Dust removal is global session state, not per-file settings: batch applies the current toggle to every file and re-detects from scratch, discarding manual brush edits that single export keeps  
-  `negative2positive/src/app/main.js:9576`  
-  extractCurrentSettings/deepCopySanitizedSettings carry no dust keys. processFileWithSettings reads `options.dustRemoval || state.dustRemoval` (enabled, strength, maxParticleSize) and always runs a fresh `detectDust` + `inpaintMasked`. Interactively the mask is refined by brush strokes (refineMaskDirect / refineMaskRemove on state.dustRemoval.mask) and the inpainted result is what displayImageData/…  
-  _Suggested fix:_ Add `dustRemoval: { enabled, strength, maxParticleSize }` to sanitizeSettings/deepCopySanitizedSettings/restoreSettings and read it from `settings` in processFileWithSettings (fall back to state only for files without a snapshot). For the current file, reuse `state.dustRemoval.ma…
+- **medium/bug** — Batch export detects dust from scratch for every file, discarding the manual brush edits a single export keeps (2026-11-12: the switch and its sensitivity are per photo now, `docs/dust-removal.md`; this half remains)  
+  `negative2positive/src/app/main.js` (`processFileWithSettings`, `removeFrameDust`)  
+  A photo's recipe carries `dustRemoval: { enabled, strength, maxParticleSize }` and the export reads it per file, but always runs a fresh `detectDust` and repair. Interactively the mask is refined by brush strokes (`state.dustRemoval.mask`) and a single export of the open photo keeps them; the same photo in a batch does not.  
+  _Suggested fix:_ For the open photo, reuse `state.dustRemoval.mask` and its repaired image in the batch when the recipe and the dust revision still match; for other photos, keep the brush refinements with the recipe (as runs, like the cold dust record) and apply them after detection.
 
 - **medium/bug** — Clear list + Add files leaves currentFileIndex pointing at a file that is not the one displayed, so edits/settings persist into the wrong queue item  
   `negative2positive/src/app/main.js:10569`  

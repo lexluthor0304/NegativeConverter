@@ -24,6 +24,7 @@ export const studioText = {
     photoSwitchHint: '正在本机加载与处理，你可以继续选择其他照片。', photoSwitchTile: '打开中…',
     empty: '添加照片后开始调色', photos: '照片', sync: '同步调色', selected: '已选 {count} 张',
     syncHint: '只同步色彩，不改变其他照片的裁切、片基和修复。', synced: '已同步到 {count} 张照片',
+    syncCrop: '同步裁剪', syncCropHint: '把当前照片的裁剪框、旋转和镜像复制到其他所选照片，色彩不变。', cropSynced: '裁剪已同步到 {count} 张照片',
     export: '导出', sampleHint: '在照片上点击应为中性灰的区域；按 Esc 取消。',
     retry: '重新转换', advancedHint: '只在需要时展开。这里保留原来的精细控制。',
     exportSettings: '文件格式与质量', exportSelected: '导出所选 {count} 张', exportCurrent: '导出当前照片', exportCurrentDng: '导出当前照片（线性 DNG）', undo: '撤销', redo: '重做',
@@ -73,6 +74,7 @@ export const studioText = {
     photoSwitchHint: 'Loading and processing on your device. You can choose another photo.', photoSwitchTile: 'Opening…',
     empty: 'Add a photo to start editing', photos: 'Photos', sync: 'Sync color', selected: '{count} selected',
     syncHint: 'Only color is synced. Each photo keeps its crop, film base and retouching.', synced: 'Color synced to {count} photos',
+    syncCrop: 'Sync crop', syncCropHint: 'Copies this photo\'s crop, rotation and mirroring to the other selected photos. Their color stays.', cropSynced: 'Crop synced to {count} photos',
     export: 'Export', sampleHint: 'Click an area that should be neutral gray. Press Esc to cancel.',
     retry: 'Convert again', advancedHint: 'Optional controls for a more precise finish.',
     exportSettings: 'File format & quality', exportSelected: 'Export {count} selected', exportCurrent: 'Export current photo', exportCurrentDng: 'Export current photo (linear DNG)', undo: 'Undo', redo: 'Redo',
@@ -121,6 +123,7 @@ export const studioText = {
     photoSwitchHint: 'この端末で読み込み・処理中です。他の写真も選択できます。', photoSwitchTile: '読み込み中…',
     empty: '写真を追加すると色調整できます', photos: '写真', sync: '色調整を同期', selected: '{count} 枚選択中',
     syncHint: '色だけを同期します。切り抜き・フィルムベース・修復は各写真の設定を保ちます。', synced: '{count} 枚に色調整を同期しました',
+    syncCrop: '切り抜きを同期', syncCropHint: 'この写真の切り抜き・回転・反転を他の選択写真にコピーします。色は変わりません。', cropSynced: '{count} 枚に切り抜きを同期しました',
     export: '書き出し', sampleHint: '写真の中の無彩色の部分をクリック。Esc で終了します。',
     retry: '再変換', advancedHint: '必要なときだけ使える、細かな仕上げのための設定。',
     exportSettings: '形式と画質', exportSelected: '選択した {count} 枚を書き出す', exportCurrent: '現在の写真を書き出す', exportCurrentDng: '現在の写真を書き出す（リニア DNG）', undo: '取り消す', redo: 'やり直す',
@@ -242,7 +245,7 @@ const STUDIO_SYNC_IDS = [
   'studioBatchActions', 'uploadPlaceholder', 'studioSampleHint', 'studioTab-expired', 'studioExpiredMode',
   'studioImportAutoCrop', 'studioAutoCrop', 'studioRestoreFrame',
   'studioConfirmAnalysis', 'studioAnalysisStatus', 'studioFrameNotice', 'studioColorControls', 'studioHistory',
-  'studioExport', 'studioStatus', 'studioFilename', 'studioSelection', 'studioSync', 'exportZipBtn', 'exportSingleBtn',
+  'studioExport', 'studioStatus', 'studioFilename', 'studioSelection', 'studioSync', 'studioSyncCrop', 'dustQuickBtn', 'exportZipBtn', 'exportSingleBtn',
   'exportAllBtn', 'studioUndo', 'studioRedo', 'undoBtn', 'redoBtn', 'studioRetry', 'studioApplyLens', 'studioResetAll',
   'studioRestart', 'exportSprocketBtn', 'studioExportBorder', 'studioClearQueue', 'studioSaveProject',
   'studioOpenProject', 'studioRestoreProject', 'studioWelcomeRestore', 'studioWelcomeRestoreBtn', 'studioMergeAverage', 'studioMergeHdr', 'studioNewSession', 'studioAdd',
@@ -402,7 +405,7 @@ export function createPhotoSortControl({ select, onSortFiles }) {
   };
 }
 
-export function mountStudioWorkspace({ getState, getLanguage, getText, isExportLocked, isCropAreaDetecting = () => false, onTabSelect = () => {}, onStyle, onReset, onResetAll, onRestart, onNewSession, onSync, onSortFiles, onRetry, onConfirm, onExportBorder, onAutoCrop, onRestoreFrame, onConfirmAnalysis, onMergeShots, onLoupe, onSaveProject, onOpenProject, onRestoreProject, onExpiredMode }) {
+export function mountStudioWorkspace({ getState, getLanguage, getText, isExportLocked, isCropAreaDetecting = () => false, onTabSelect = () => {}, onStyle, onReset, onResetAll, onRestart, onNewSession, onSync, onSyncCrop = () => {}, onSortFiles, onRetry, onConfirm, onExportBorder, onAutoCrop, onRestoreFrame, onConfirmAnalysis, onMergeShots, onLoupe, onSaveProject, onOpenProject, onRestoreProject, onExpiredMode }) {
   const $ = id => document.getElementById(id);
   const t = key => (studioText[getLanguage()] || studioText.en)[key];
   const move = (id, target) => target.append($(id));
@@ -788,11 +791,12 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
   const strip = document.createElement('section');
   strip.className = 'studio-filmstrip';
   strip.id = 'studioFilmstrip';
-  strip.innerHTML = `<div class="studio-strip-header"><button id="studioToggleStrip" type="button" aria-controls="fileListSection" aria-expanded="true" data-studio="photos"></button><button id="studioToggleLightTable" type="button" aria-pressed="false" data-studio="lightTable"></button><label class="studio-photo-sort" for="studioPhotoSort"><span data-studio="photoSort"></span><select id="studioPhotoSort"><option value="modified-desc" data-studio="sortModifiedDesc"></option><option value="modified-asc" data-studio="sortModifiedAsc"></option><option value="name-asc" data-studio="sortNameAsc"></option><option value="name-desc" data-studio="sortNameDesc"></option></select></label><button id="studioReviewFilter" type="button" aria-pressed="false" hidden></button><span id="studioSelection"></span><button id="studioSync" type="button" data-studio="sync"></button><details id="studioBatchMenu"><summary data-studio="batch"></summary><div class="studio-batch-content"><p data-studio="batchHint"></p><div id="studioBatchActions"></div><p data-studio="mergeHint"></p><button id="studioMergeAverage" type="button" data-studio="mergeAverage"></button><button id="studioMergeHdr" type="button" data-studio="mergeHdr"></button><p data-studio="projectHint"></p><button id="studioSaveProject" type="button" data-studio="saveProject"></button><button id="studioOpenProject" type="button" data-studio="openProject"></button><button id="studioRestoreProject" type="button" data-studio="restoreProject" hidden></button><button id="studioClearQueue" type="button" data-studio="clearQueue"></button></div></details></div>`;
+  strip.innerHTML = `<div class="studio-strip-header"><button id="studioToggleStrip" type="button" aria-controls="fileListSection" aria-expanded="true" data-studio="photos"></button><button id="studioToggleLightTable" type="button" aria-pressed="false" data-studio="lightTable"></button><label class="studio-photo-sort" for="studioPhotoSort"><span data-studio="photoSort"></span><select id="studioPhotoSort"><option value="modified-desc" data-studio="sortModifiedDesc"></option><option value="modified-asc" data-studio="sortModifiedAsc"></option><option value="name-asc" data-studio="sortNameAsc"></option><option value="name-desc" data-studio="sortNameDesc"></option></select></label><button id="studioReviewFilter" type="button" aria-pressed="false" hidden></button><span id="studioSelection"></span><button id="studioSync" type="button" data-studio="sync"></button><button id="studioSyncCrop" type="button" data-studio="syncCrop"></button><details id="studioBatchMenu"><summary data-studio="batch"></summary><div class="studio-batch-content"><p data-studio="batchHint"></p><div id="studioBatchActions"></div><p data-studio="mergeHint"></p><button id="studioMergeAverage" type="button" data-studio="mergeAverage"></button><button id="studioMergeHdr" type="button" data-studio="mergeHdr"></button><p data-studio="projectHint"></p><button id="studioSaveProject" type="button" data-studio="saveProject"></button><button id="studioOpenProject" type="button" data-studio="openProject"></button><button id="studioRestoreProject" type="button" data-studio="restoreProject" hidden></button><button id="studioClearQueue" type="button" data-studio="clearQueue"></button></div></details></div>`;
   document.querySelector('.app-main').append(strip);
   move('fileListSection', strip);
   const photoSort = createPhotoSortControl({ select: $('studioPhotoSort'), onSortFiles });
   $('studioSync').title = t('syncHint');
+  $('studioSyncCrop').title = t('syncCropHint');
   move('saveSettingsBtn', $('studioBatchActions'));
   move('applyToSelectedBtn', $('studioBatchActions'));
   $('saveSettingsBtn').dataset.studio = 'saveSettings';
@@ -847,6 +851,7 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
   $('studioLoupe').addEventListener('click', () => onLoupe?.());
   $('studioReset').addEventListener('click', onReset);
   $('studioSync').addEventListener('click', onSync);
+  $('studioSyncCrop').addEventListener('click', onSyncCrop);
   $('studioRetry').addEventListener('click', onRetry);
   basic.querySelectorAll('[data-model]').forEach(button => button.addEventListener('click', () => onStyle(button.dataset.model)));
   document.addEventListener('keydown', event => {
@@ -993,6 +998,10 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
     set(node.studioSelection, 'textContent', t('selected').replace('{count}', count));
     set(node.studioSync, 'disabled', Boolean(!ready || busy || state.cropping || isExportLocked() || !otherSelected));
     set(node.studioSync, 'title', t('syncHint'));
+    set(node.studioSyncCrop, 'disabled', Boolean(!ready || busy || state.cropping || isExportLocked() || !otherSelected));
+    // One press cleans the open photo and the other selected ones (main.js: toggleDustForSelection).
+    if (node.dustQuickBtn) set(node.dustQuickBtn, 'disabled', Boolean(!ready || busy || state.cropping || isExportLocked()));
+    set(node.studioSyncCrop, 'title', t('syncCropHint'));
     set(node.exportZipBtn, 'textContent', t('exportSelected').replace('{count}', count));
     set(node.exportSingleBtn, 'textContent', t(state.exportFormat === 'dng' ? 'exportCurrentDng' : 'exportCurrent'));
     set(node.exportAllBtn, 'textContent', t('exportIndividualSelected').replace('{count}', count));

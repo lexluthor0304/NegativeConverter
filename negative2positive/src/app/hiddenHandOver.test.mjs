@@ -36,7 +36,7 @@ const SNAPSHOT_REF_KEYS = /const SNAPSHOT_REF_KEYS = (\[[^\]]+\]);/.exec(source)
 
 // The hidden-job section of main.js, its parking and the memory ledger.
 const HIDDEN_FUNCTIONS = [
-  'hiddenJobRunning', 'shedHiddenJobMemory', 'hiddenJobUsesAiRepair', 'onHiddenJobAdmitted', 'onHiddenJobsIdle',
+  'hiddenJobRunning', 'shedHiddenJobMemory', 'hiddenJobUsesAiRepair', 'dustRemovalOfItem', 'sanitizeDustRemoval', 'onHiddenJobAdmitted', 'onHiddenJobsIdle',
   'hiddenJobVisibilityChanged', 'hiddenResidentBytes', 'onHiddenJobPaused', 'hiddenParkEnabled',
   'parkOpenPhotoForHiddenJob', 'memoryLedgerConsumers', 'openPhotoMemoryRoots', 'liveHistoryRoots',
   'sampleStoreBytes', 'workerResidentBytes', 'releaseGlBorder'

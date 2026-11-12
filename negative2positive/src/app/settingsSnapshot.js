@@ -15,6 +15,7 @@ export function deepCopySanitizedSettings(safe, { autoFrameMeta = safe.autoFrame
     semanticMap: safe.semanticMap ? structuredClone(safe.semanticMap) : null,
     learnedDefaults: safe.learnedDefaults ? { ...safe.learnedDefaults } : null,
     reviewed: Boolean(safe.reviewed),
+    dustRemoval: { enabled: Boolean(safe.dustRemoval?.enabled), strength: safe.dustRemoval?.strength ?? 3, maxParticleSize: safe.dustRemoval?.maxParticleSize ?? 40 },
     wbUserOverride: Boolean(safe.wbUserOverride),
     wbSemanticApplied: Boolean(safe.wbSemanticApplied),
     filmType: safe.filmType,

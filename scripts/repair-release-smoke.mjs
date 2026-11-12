@@ -86,7 +86,9 @@ export async function runRepairReleaseSmoke({ send, evaluate, waitFor, wait, fai
       };
       document.getElementById('studioTab-repair').click();
       if (!document.getElementById('dustAiEnabled').checked) document.getElementById('dustAiEnabled').click();
-      document.getElementById('dustRemovalEnabled').click();
+      // The sample has no dust on it: at the highest sensitivity its smallest highlights stand in.
+    { const strength = document.getElementById('dustStrengthValue'); strength.value = '10'; strength.dispatchEvent(new Event('change')); }
+    document.getElementById('dustRemovalEnabled').click();
     })()`);
     await waitFor(`${label}: MI-GAN dust commit`, `${ready} && /^Detected [0-9]+ dust particles$/.test(document.getElementById('dustStatus').textContent)
       && /last run [1-9][0-9]* tile/.test(document.getElementById('dustAiStatus').textContent)`, 300_000);
@@ -250,6 +252,8 @@ export async function runRepairReleaseSmoke({ send, evaluate, waitFor, wait, fai
   await evaluate(`window.__ncAiRepair.load('wasm')`);
   await evaluate(`document.getElementById('studioTab-repair').click();
     if (!document.getElementById('dustAiEnabled').checked) document.getElementById('dustAiEnabled').click();
+    // The sample has no dust on it: at the highest sensitivity its smallest highlights stand in.
+    { const strength = document.getElementById('dustStrengthValue'); strength.value = '10'; strength.dispatchEvent(new Event('change')); }
     document.getElementById('dustRemovalEnabled').click()`);
   await waitFor('AI failure committed nonempty dust', `${ready} && /^Detected [1-9][0-9]* dust particles$/.test(document.getElementById('dustStatus').textContent)
     && window.__ncAiRepair.state().provider === 'wasm' && window.__ncAiRepair.state().strokes === 0`, 120_000);

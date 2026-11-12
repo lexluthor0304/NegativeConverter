@@ -54,6 +54,8 @@ export async function runDustUndoSmoke({ send, evaluate, waitFor, wait, fail, in
     };
     document.getElementById('studioTab-repair').click();
     if (document.getElementById('dustAiEnabled').checked) document.getElementById('dustAiEnabled').click();
+    // The sample has no dust on it: at the highest sensitivity its smallest highlights stand in.
+    { const strength = document.getElementById('dustStrengthValue'); strength.value = '10'; strength.dispatchEvent(new Event('change')); }
     document.getElementById('dustRemovalEnabled').click();
   })()`);
   await waitFor('dust undo: first detection', `${ready} && ${detected} && window.__undoProbe.detect > 0`, 120_000);

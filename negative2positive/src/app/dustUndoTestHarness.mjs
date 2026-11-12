@@ -142,7 +142,9 @@ function fakeClock() {
 
 // `budget`: history's memory budget (HISTORY_MEMORY_BUDGET_BYTES); a small
 // one makes entries cold at this size the way 768 MiB does from about 30 MP.
-export function fixture({ width = 160, height = 120, specks = 24, ai = false, budget = 768 * 1024 * 1024,
+// A few specks per frame: a frame this small with a speck in every block of
+// the detector's grain statistics is a crowd, where no speck stands clear.
+export function fixture({ width = 160, height = 120, specks = 8, ai = false, budget = 768 * 1024 * 1024,
   coldDustMaxBytes = null } = {}) {
   const base = makeSource(width, height, specks);
   const calls = { convert: 0, detect: 0, inpaint: 0 };

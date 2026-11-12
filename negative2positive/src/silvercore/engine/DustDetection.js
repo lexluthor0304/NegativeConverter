@@ -79,6 +79,7 @@ const BLOCK = 1 << BLOCK_SHIFT; // the grain is measured per block of the level
 const GROW = 3.2;              // a blob is grown down to this many grains
 const CLUTTER_BLOCKS = 2;      // the surroundings of a block: 5 x 5 blocks without the block itself
 const CLUTTER_MAX = 0.14;      // share of the surroundings above GROW that marks dense texture
+const STAND_LEVELS = 2;         // grain clumps are a few px across: only the two finest levels read a blob against them
 const GRAIN_FLOOR = 0.35;      // grey levels: a flat or clipped area must not divide by nothing
 const MIN_CONTRAST = 2.5;      // grey levels a blob must stand above its ring
 const RING_NEAR = 2;           // px around the blob that belong to neither blob nor ring
@@ -117,6 +118,9 @@ const SPECK_LINE_THICKNESS_SHARE = 0.003; // ...and at most this share of the sh
 const JOINED_LENGTHS = 1.3;    // a blob this many times longer than its longest piece is pieces of one line
 const EDGE_BAND = 0.02;        // a long line inside this share of the short side from the frame edge is the frame's border
 const CROWD_CELLS = 12;        // the short side in crowd cells
+const STAND_CLEAR = 1.5;       // a blob this many times the least stand is clear of the grain; a lesser one is weak
+const WEAK_CROWD = 0.125;      // the share of the crowd cap at which a weak blob's company is a crowd
+const PEER_SHARE = 0.7;        // what is not clear of the grain is a clear blob's company from this share of its peak
 const DILATE_SHARE = 0.0015;   // the final dilation, as a share of the frame height
 
 const DUST_DEFAULT_MAX_SIZE_RATIO = 0.016; // default particle cap as a share of the short edge
@@ -133,6 +137,7 @@ const STRENGTH_KNOTS = [1, 3, 5, 8, 10];
 const SEED_AT = [7.5, 5.6, 4.9, 4.3, 3.8];       // grains a seed stands above the local grain
 const RING_Z_AT = [10.0, 6.5, 5.5, 4.5, 3.8];    // spreads of the ring's response a blob's peak stands above it
 const CROWD_AT = [5.0, 9.0, 14.0, 24.0, 60.0];   // blobs per 1 % of the frame a neighbourhood may hold
+const STAND_AT = [3.2, 2.1, 1.7, 1.4, 0.0];      // how many times as far as the surroundings' own strongest grains a blob's peak stands above the grain
 
 function interpolate(s, values) {
   for (let k = 1; k < STRENGTH_KNOTS.length; k++) {
@@ -144,13 +149,14 @@ function interpolate(s, values) {
   return values[values.length - 1];
 }
 
-/** { seed, ringZ, crowd } for a sensitivity; the highest one keeps crowds too. */
+/** { seed, ringZ, crowd, stand } for a sensitivity; the highest one keeps crowds and grain clumps too. */
 export function dustThresholds(strength) {
   const s = Math.min(10, Math.max(1, Number.isFinite(strength) ? strength : 3));
   return {
     seed: interpolate(s, SEED_AT),
     ringZ: interpolate(s, RING_Z_AT),
     crowd: s >= 10 ? Infinity : interpolate(s, CROWD_AT),
+    stand: interpolate(s, STAND_AT),
   };
 }
 
@@ -252,13 +258,15 @@ function histogramShift(unit) {
 /**
  * Per block, from one histogram of the response read on every second row and
  * column: the grain (the median, never below the floor), how many of those
- * samples stand above the grow level, and how many samples there were.
+ * samples stand above the grow level, how many samples there were, and the
+ * strongest of them.
  */
 function blockStatistics(resp, w, h, unit, shift) {
   const wb = Math.ceil(w / BLOCK), hb = Math.ceil(h / BLOCK);
   const grain = new Float32Array(wb * hb);
   const above = new Uint32Array(wb * hb);
   const sampled = new Uint32Array(wb * hb);
+  const strongest = new Float32Array(wb * hb);
   const hist = new Uint32Array(HISTOGRAM_BINS);
   const floor = GRAIN_FLOOR * unit;
   for (let by = 0; by < hb; by++) {
@@ -292,9 +300,10 @@ function blockStatistics(resp, w, h, unit, shift) {
       grain[b] = g;
       above[b] = over;
       sampled[b] = count;
+      strongest[b] = top << shift;
     }
   }
-  return { grain, above, sampled, wb, hb };
+  return { grain, above, sampled, strongest, wb, hb };
 }
 
 /**
@@ -304,7 +313,7 @@ function blockStatistics(resp, w, h, unit, shift) {
 function scanLevel(level, lum, resp, w, h, sign, thresholds, scratch, accept) {
   const unit = 4 ** level;
   const shift = histogramShift(unit);
-  const { grain, above, sampled, wb, hb } = blockStatistics(resp, w, h, unit, shift);
+  const { grain, above, sampled, strongest, wb, hb } = blockStatistics(resp, w, h, unit, shift);
   const blocks = wb * hb;
   const invBlock = 1 / BLOCK;
   const minContrast = MIN_CONTRAST * unit;
@@ -335,6 +344,23 @@ function scanLevel(level, lum, resp, w, h, sign, thresholds, scratch, accept) {
       }
     }
     quiet[by * wb + bx] = samples === 0 || sum < CLUTTER_MAX * samples ? 1 : 0;
+  }
+
+  // Coarse grain has a long tail: among the thousands of grains around a
+  // blob a few clumps stand many grains above the median, as dust does. What
+  // a clump does not do is stand far above the other clumps. The strongest
+  // sample of a block is one of its grain's extremes (the 99.7th percentile
+  // of 256 samples, on average), and the median of those over the block's
+  // surroundings is unmoved by a few specks or one edge: how high the
+  // grain there reaches on its own. A blob is read against that reach.
+  const reach = new Float32Array(blocks);
+  const around = new Float32Array((2 * CLUTTER_BLOCKS + 1) ** 2);
+  for (let by = 0; by < hb; by++) for (let bx = 0; bx < wb; bx++) {
+    let n = 0;
+    for (let ny = Math.max(0, by - CLUTTER_BLOCKS); ny <= Math.min(hb - 1, by + CLUTTER_BLOCKS); ny++) {
+      for (let nx = Math.max(0, bx - CLUTTER_BLOCKS); nx <= Math.min(wb - 1, bx + CLUTTER_BLOCKS); nx++) around[n++] = strongest[ny * wb + nx];
+    }
+    reach[by * wb + bx] = selectKth(around, n, (n - 1) >> 1);
   }
 
   // The grain is bilinear between block centres, so over a quadrant of a
@@ -464,7 +490,11 @@ function scanLevel(level, lum, resp, w, h, sign, thresholds, scratch, accept) {
     if (oversize) continue;
 
     const verdict = verifyBlob(lum, resp, w, h, unit, shift, sign, comp, minX, minY, maxX, maxY, peak, thresholds.ringZ, scratch);
-    if (verdict) accept(level, comp, minX, minY, maxX, maxY, verdict.median, verdict.contrast, verdict.z, maxRatio);
+    if (!verdict) continue;
+    // How far its peak stands above the grain, in the surroundings' own reach.
+    const block = (((minY + maxY) >> 1) >> BLOCK_SHIFT) * wb + (((minX + maxX) >> 1) >> BLOCK_SHIFT);
+    const stand = level >= STAND_LEVELS ? Infinity : (peak - grain[block]) / Math.max(reach[block] - grain[block], GRAIN_FLOOR * unit);
+    accept(level, comp, minX, minY, maxX, maxY, verdict.median, verdict.contrast, verdict.z, maxRatio, stand, peak / unit);
   }
 }
 
@@ -724,8 +754,8 @@ export function updateDustStrength(imageData, existingState, newStrength, maxPar
 // Fields of a candidate record (a row of Float64 values).
 const R_LEVEL = 0, R_RATIO = 1, R_Z = 2, R_CORE_LONG = 3, R_LENGTH = 4, R_THICKNESS = 5, R_BOW = 6;
 const R_SKIRT = 7, R_CONTINUES = 8;
-const R_CORE_X0 = 9, R_CORE_Y0 = 10, R_CORE_X1 = 11, R_CORE_Y1 = 12, R_RUN_START = 13, R_RUN_END = 14;
-const RECORD = 15;
+const R_CORE_X0 = 9, R_CORE_Y0 = 10, R_CORE_X1 = 11, R_CORE_Y1 = 12, R_RUN_START = 13, R_RUN_END = 14, R_STAND = 15, R_PEAK = 16;
+const RECORD = 17;
 
 /** Stages 1-4 at `strength`: every candidate that stands on a flat background, with its footprint. */
 function analyseDust(imageData, strength, maxSize, polarity) {
@@ -744,7 +774,7 @@ function analyseDust(imageData, strength, maxSize, polarity) {
   // contrast, within reach of the component its level found: a faint blob's
   // threshold lies inside the background's own variation, and without the
   // bound its footprint runs off into the background it sits on.
-  const accept = (level, comp, minX, minY, maxX, maxY, median, contrast, z, ratio, sign) => {
+  const accept = (level, comp, minX, minY, maxX, maxY, median, contrast, z, ratio, stand, peak, sign) => {
     const scale = 1 << level, unit = 4 ** level;
     const reach = scale + FOOTPRINT_REACH;
     const x0 = Math.max(0, minX * scale - reach), y0 = Math.max(0, minY * scale - reach);
@@ -857,7 +887,7 @@ function analyseDust(imageData, strength, maxSize, polarity) {
       }
     }
     records.push(level, ratio, z, Math.max(cx1 - cx0, cy1 - cy0) + 1, length, thickness, bow,
-      skirt, continues, x0 + cx0, y0 + cy0, x0 + cx1, y0 + cy1, runStart, runs.length);
+      skirt, continues, x0 + cx0, y0 + cy0, x0 + cx1, y0 + cy1, runStart, runs.length, stand, peak);
   };
 
   for (const sign of signs) {
@@ -869,8 +899,8 @@ function analyseDust(imageData, strength, maxSize, polarity) {
         // No OpenCV call runs while this view of the heap is read.
         const resp = level ? hat.data16U : hat.data;
         scanLevel(level, lum, resp, lw, lh, sign, thresholds, scratch,
-          (lvl, comp, minX, minY, maxX, maxY, median, contrast, z, ratio) =>
-            accept(lvl, comp, minX, minY, maxX, maxY, median, contrast, z, ratio, sign));
+          (lvl, comp, minX, minY, maxX, maxY, median, contrast, z, ratio, stand, peak) =>
+            accept(lvl, comp, minX, minY, maxX, maxY, median, contrast, z, ratio, stand, peak, sign));
       } finally {
         hat.delete();
       }
@@ -1003,7 +1033,7 @@ function looksLikeHair(length, thickness, bow, skirt, continues, maxSize, shortS
 function selectDust(state, strength, maxSize) {
   const { width: w, height: h, records, runs } = state;
   const mask = new Uint8Array(w * h);
-  const { seed, ringZ, crowd } = dustThresholds(strength);
+  const { seed, ringZ, crowd, stand } = dustThresholds(strength);
   const levels = dustPyramidLevels(maxSize, w, h);
   const shortSide = Math.min(w, h);
   const band = Math.max(8, Math.round(shortSide * EDGE_BAND));
@@ -1015,8 +1045,13 @@ function selectDust(state, strength, maxSize) {
   // Each level's record of an object is read on its own, and one that passes
   // is enough: a coarse level reads even a sharp fibre a little soft.
   const kept = [];
+  // Blobs that do not stand clear of the grain's own reach are not dust, but
+  // they are company: grain clumps, or the highlights of a crowd, which
+  // raise each other's reach.
+  const company = [];
   for (let r = 0; r < records.length; r += RECORD) {
     if (records[r + R_LEVEL] >= levels || records[r + R_RATIO] <= seed || records[r + R_Z] < ringZ) continue;
+    if (records[r + R_STAND] < stand) { company.push(r); continue; }
     if (records[r + R_CORE_LONG] > maxSize) {
       if (!looksLikeHair(records[r + R_LENGTH], records[r + R_THICKNESS], records[r + R_BOW], records[r + R_SKIRT],
         records[r + R_CONTINUES], maxSize, shortSide)
@@ -1037,12 +1072,14 @@ function selectDust(state, strength, maxSize) {
   if (!kept.length) return { mask, particleCount: 0 };
   // The first pixel of every kept footprint (3), with the longest core that
   // starts there: a blob learns from them how long its longest piece is.
-  const longestAt = new Map();
+  const longestAt = new Map(), standAt = new Map(), peakAt = new Map();
   for (const r of kept) {
     const k = records[r + R_RUN_START];
     const first = runs[k] * w + runs[k + 1];
     mask[first] = 3;
     longestAt.set(first, Math.max(longestAt.get(first) || 0, records[r + R_CORE_LONG]));
+    standAt.set(first, Math.max(standAt.get(first) || 0, records[r + R_STAND]));
+    peakAt.set(first, Math.max(peakAt.get(first) || 0, records[r + R_PEAK]));
   }
 
   // Footprints of one speck found at several levels overlap, and the pieces
@@ -1051,7 +1088,7 @@ function selectDust(state, strength, maxSize) {
   // again, as one shape.
   const blobPixels = new GrowableInt32(4096);
   const blobStart = [0];
-  const blobX = [], blobY = [], structure = [];
+  const blobX = [], blobY = [], structure = [], blobStand = [], blobPeak = [];
   const stack = new GrowableInt32(1024);
   for (const r of kept) {
     const k = records[r + R_RUN_START];
@@ -1061,7 +1098,7 @@ function selectDust(state, strength, maxSize) {
     stack.length = 0;
     stack.push(first);
     let sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0, bx0 = w, by0 = h, bx1 = -1, by1 = -1;
-    let longestPiece = longestAt.get(first);
+    let longestPiece = longestAt.get(first), strongest = standAt.get(first), highest = peakAt.get(first);
     const begin = blobPixels.length;
     while (stack.length) {
       const p = stack.data[--stack.length];
@@ -1073,7 +1110,12 @@ function selectDust(state, strength, maxSize) {
         for (let nx = px > 0 ? px - 1 : 0, nxEnd = px < w - 1 ? px + 1 : w - 1; nx <= nxEnd; nx++) {
           const q = ny * w + nx, state = mask[q];
           if (state !== 1 && state !== 3) continue;
-          if (state === 3) { const piece = longestAt.get(q); if (piece > longestPiece) longestPiece = piece; }
+          if (state === 3) {
+            const piece = longestAt.get(q);
+            if (piece > longestPiece) longestPiece = piece;
+            if (standAt.get(q) > strongest) strongest = standAt.get(q);
+            if (peakAt.get(q) > highest) highest = peakAt.get(q);
+          }
           mask[q] = 2;
           stack.push(q);
         }
@@ -1093,6 +1135,8 @@ function selectDust(state, strength, maxSize) {
         || (shape.bow < HAIR_BOW && atEdge(bx0, by0, bx1, by1));
     }
     structure.push(isStructure);
+    blobStand.push(strongest);
+    blobPeak.push(highest);
   }
   const blobCount = blobX.length;
 
@@ -1100,11 +1144,32 @@ function selectDust(state, strength, maxSize) {
   // density per share of the frame, so it means the same film area at any size.
   const cell = Math.max(16, Math.floor(shortSide / CROWD_CELLS));
   const gw = Math.ceil(w / cell), gh = Math.ceil(h / cell);
-  const grid = new Uint32Array(gw * gh);
+  // Grain clumps and faint dust read alike one by one (a peak two or three
+  // times the surroundings' reach); what tells them apart is company. A blob
+  // clear of the grain's reach is crowded by its like: the other clear blobs,
+  // and what failed that test with a peak like its own (highlights in
+  // foliage raise each other's reach). The grain clumps around a speck far
+  // above the grain are not its company. A weak blob counts everything that
+  // passed the other tests, and is a crowd with far less of it: grain clumps
+  // come by the dozen, a faint speck on a clear sky is alone.
+  const clear = stand * STAND_CLEAR;
+  const grid = new Uint32Array(gw * gh), clearGrid = new Uint32Array(gw * gh);
+  const others = Array.from({ length: gw * gh }, () => []);   // the peaks of what is not clear, per cell
   const cellOf = new Int32Array(blobCount);
   for (let b = 0; b < blobCount; b++) {
     cellOf[b] = Math.min(gh - 1, Math.floor(blobY[b] / cell)) * gw + Math.min(gw - 1, Math.floor(blobX[b] / cell));
-    if (!structure[b]) grid[cellOf[b]]++;
+    if (structure[b]) continue;
+    grid[cellOf[b]]++;
+    if (blobStand[b] >= clear) clearGrid[cellOf[b]]++;
+    else others[cellOf[b]].push(blobPeak[b]);
+  }
+  // Company outside every kept footprint (the same speck read weaker at another level is not its own company).
+  for (const r of company) {
+    const cx = (records[r + R_CORE_X0] + records[r + R_CORE_X1]) >> 1, cy = (records[r + R_CORE_Y0] + records[r + R_CORE_Y1]) >> 1;
+    if (mask[cy * w + cx] !== 0) continue;
+    const at = Math.min(gh - 1, Math.floor(cy / cell)) * gw + Math.min(gw - 1, Math.floor(cx / cell));
+    grid[at]++;
+    others[at].push(records[r + R_PEAK]);
   }
   const limit = crowd * (9 * cell * cell) / (w * h) * 100;
   const pixels = blobPixels.data;
@@ -1114,11 +1179,18 @@ function selectDust(state, strength, maxSize) {
   const crowded = new Uint8Array(blobCount);
   for (let b = 0; b < blobCount; b++) {
     const gx = cellOf[b] % gw, gy = (cellOf[b] - gx) / gw;
+    const isClear = blobStand[b] >= clear, peer = blobPeak[b] * PEER_SHARE;
     let around = 0;
     for (let ny = Math.max(0, gy - 1); ny <= Math.min(gh - 1, gy + 1); ny++) {
-      for (let nx = Math.max(0, gx - 1); nx <= Math.min(gw - 1, gx + 1); nx++) around += grid[ny * gw + nx];
+      for (let nx = Math.max(0, gx - 1); nx <= Math.min(gw - 1, gx + 1); nx++) {
+        const at = ny * gw + nx;
+        if (!isClear) { around += grid[at]; continue; }
+        around += clearGrid[at];
+        const peaks = others[at];
+        for (let k = 0; k < peaks.length; k++) if (peaks[k] >= peer) around++;
+      }
     }
-    crowded[b] = structure[b] || around >= limit ? 1 : 0;
+    crowded[b] = structure[b] || around >= (isClear ? limit : Math.max(2, limit * WEAK_CROWD)) ? 1 : 0;
     if (!crowded[b]) particleCount++;
   }
   // Crowds and structures go first, so a kept blob's dilation is never erased with them.
