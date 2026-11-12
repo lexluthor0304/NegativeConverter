@@ -94,7 +94,7 @@ const FUNCTIONS = [
   // Cold entries' dust states (#281).
   'coldRefsFor', 'heldDustObjects', 'compactColdDust', 'startColdDustJob', 'endColdDustJob', 'coldDustWanted', 'finishColdDustJobs',
   'pushHistoryEntry', 'pruneHistoryForMemory', 'trimHistorySnapshot', 'commitUndoSnapshot', 'pushUndo', 'performUndo', 'performRedo',
-  'rememberPhotoSession', 'rememberUnsettledDisplaySession', 'releaseOutgoingPhotoPlanes', 'photoSettingsKey', 'switchToFile',
+  'rememberPhotoSession', 'rememberUnsettledDisplaySession', 'releaseOutgoingPhotoPlanes', 'photoSettingsKey', 'dustRemovalOfItem', 'sanitizeDustRemoval', 'switchToFile',
   'reactivateReleasedPhoto', 'resumeDeferredPhotoReactivation', 'reopenLivePhoto', 'invalidatePhotoActivation', 'getCropDraftTotalAngle', 'scaleCropRect',
   'interactiveGeometryBands',
   // Apply Crop's pending crop-area detection (#245).

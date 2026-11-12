@@ -14,7 +14,7 @@ function functionSource(name) {
   assert.ok(match, `${name} exists`);
   return source.slice(match.index, source.indexOf('\n    }', match.index) + '\n    }'.length);
 }
-const runtime = ['buildCurrentProject', 'frameThumbnailContext', 'savedProjectThumbnail', 'applyPendingProject', 'sanitizeProjectSettings']
+const runtime = ['buildCurrentProject', 'frameThumbnailContext', 'dustRemovalOfItem', 'sanitizeDustRemoval', 'savedProjectThumbnail', 'applyPendingProject', 'sanitizeProjectSettings']
   .map(functionSource).join('\n');
 const tile = n => 'data:image/jpeg;base64,' + Buffer.alloc(3000 + n, n).toString('base64');
 const noop = () => {};
@@ -22,7 +22,9 @@ const noop = () => {};
 function session({ dust = false, automatic = false } = {}) {
   const files = Array.from({ length: 5 }, (_, i) => ({ name: `f${i}.dng`, size: 100 + i, lastModified: i }));
   const items = files.map((file, i) => ({ id: i, file, hash: `h${i}`, selected: true, automaticSettings: automatic,
-    settings: { id: i, filmType: i === 4 ? 'bw' : 'color', ...(i === 3 ? { repairStrokes: [{ size: 1, points: [] }] } : {}) } }));
+    // Dust removal is each photo's own switch.
+    settings: { id: i, filmType: i === 4 ? 'bw' : 'color', ...(i === 3 ? { repairStrokes: [{ size: 1, points: [] }] } : {}),
+      ...(dust ? { dustRemoval: { enabled: true, strength: 3, maxParticleSize: 40 } } : {}) } }));
   const state = {
     fileQueue: items, currentFileIndex: 0, originalImageData: {}, rollMetadata: {}, rollReference: {}, rollAnalysis: {},
     lensCorrection: {}, flatFields: {}, dustRemoval: { enabled: dust, strength: 3, maxParticleSize: 40, ai: false }

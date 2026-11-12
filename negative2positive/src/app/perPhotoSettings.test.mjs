@@ -54,7 +54,9 @@ const context = vm.createContext({
     exposure: 0.5,
     wbR: 1.1,
     wbG: 1,
-    wbB: 0.9
+    wbB: 0.9,
+    // The open photo has dust removal on, at its own sensitivity.
+    dustRemoval: { enabled: true, strength: 7, maxParticleSize: 22, mask: new Uint8Array(4) }
   }
 });
 vm.runInContext(['clampBetween', 'sanitizeNumeric', 'sanitizeSettings', 'perPhotoSettingsFallback', 'cloneSettings', 'sanitizeProjectSettings']
@@ -107,6 +109,24 @@ for (const clone of [cloneSettings, sanitizeProjectSettings]) {
   assert.equal(copy.exposure, 0.5);
   assert.deepEqual([copy.wbR, copy.wbG, copy.wbB], [1.1, 1, 0.9]);
   assert.deepEqual(copy.filmBase, state.filmBase);
+}
+
+// Dust removal is each photo's own switch: another photo's recipe never
+// takes the open photo's, a recipe keeps its own (within the sliders' ranges),
+// and the editor's recipe and a partial patch restored into it carry the live one.
+{
+  for (const clone of [cloneSettings, sanitizeProjectSettings]) {
+    assert.deepEqual({ ...clone({ exposure: 0 }).dustRemoval }, { enabled: false, strength: 3, maxParticleSize: 40 });
+  }
+  const own = cloneSettings({ dustRemoval: { enabled: true, strength: 99, maxParticleSize: 2, mask: 'x' } });
+  assert.deepEqual({ ...own.dustRemoval }, { enabled: true, strength: 10, maxParticleSize: 6 });
+  assert.deepEqual({ ...cloneSettings({ dustRemoval: { enabled: false, strength: 5, maxParticleSize: 30 } }).dustRemoval },
+    { enabled: false, strength: 5, maxParticleSize: 30 });
+  const live = { enabled: true, strength: 7, maxParticleSize: 22 };
+  assert.deepEqual({ ...context.sanitizeSettings(state, { fallbackSettings: state }).dustRemoval }, live);
+  assert.deepEqual({ ...context.sanitizeSettings({ exposure: 1 }, { fallbackSettings: state }).dustRemoval }, live);
+  assert.deepEqual({ ...context.sanitizeSettings({ dustRemoval: { enabled: false } }, { fallbackSettings: state }).dustRemoval },
+    { enabled: false, strength: 3, maxParticleSize: 40 });
 }
 
 assert.equal(cloneSettings(null), null);

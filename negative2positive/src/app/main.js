@@ -4902,6 +4902,19 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       return next;
     }
 
+    // A photo's dust removal: whether it is on, and what counts as dust.
+    function sanitizeDustRemoval(dust) {
+      const number = (value, low, high, fallback) => (value !== null && value !== undefined && Number.isFinite(Number(value))
+        ? Math.min(high, Math.max(low, Math.round(Number(value)))) : fallback);
+      return { enabled: Boolean(dust?.enabled), strength: number(dust?.strength, 1, 10, 3), maxParticleSize: number(dust?.maxParticleSize, 6, 80, 40) };
+    }
+    // The dust removal of a photo in the queue: the editor's for the open
+    // photo, else its recipe's, or what is waiting for a photo without one.
+    function dustRemovalOfItem(item) {
+      if (item && item.file === state.loadedFile && state.originalImageData) return sanitizeDustRemoval(state.dustRemoval);
+      return sanitizeDustRemoval(item?.settings ? item.settings.dustRemoval : item?.pendingEdits?.dustRemoval);
+    }
+
     function sanitizeSettings(rawSettings, options = {}) {
       const fallbackSettings = (options.fallbackSettings && typeof options.fallbackSettings === 'object')
         ? options.fallbackSettings
@@ -4968,6 +4981,15 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         // Per-file like the crop: strokes are never inherited from the fallback frame.
         localExposure: sanitizeLocalExposureForSettings(source === state ? state.localExposure : source.localExposure),
         repairStrokes: sanitizeRepairStrokes(source.repairStrokes),
+        // Dust removal is the photo's own switch. A recipe that does not name
+        // it (a partial patch, a project saved before the switch was per
+        // photo) takes the fallback's: the editor's when that is the live
+        // state, off for another photo (perPhotoSettingsFallback).
+        dustRemoval: (({ enabled, strength, maxParticleSize } = {}) => ({
+          enabled: Boolean(enabled),
+          strength: Number.isFinite(Number(strength)) && strength !== null ? Math.min(10, Math.max(1, Math.round(Number(strength)))) : 3,
+          maxParticleSize: Number.isFinite(Number(maxParticleSize)) && maxParticleSize !== null ? Math.min(80, Math.max(6, Math.round(Number(maxParticleSize)))) : 40
+        }))((source === state || !Object.hasOwn(source, 'dustRemoval') ? (source === state ? state : fallbackSettings).dustRemoval : source.dustRemoval) || undefined),
         // A colour setting like the curves: copied with the look, inherited from the fallback frame.
         look: sanitizeLookForSettings(source === state ? state.look : (Object.hasOwn(source, 'look') ? source.look : fallbackSettings.look)),
         // Expired-film rescue: the strengths are colour settings and inherit like
@@ -10627,7 +10649,49 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (controls) controls.style.display = state.dustRemoval.enabled ? 'block' : 'none';
       const brushControls = document.getElementById('dustBrushControls');
       if (brushControls) brushControls.style.display = state.dustRemoval.showMask ? 'block' : 'none';
+      // The switch and its sliders show the open photo's own values.
+      const enabled = document.getElementById('dustRemovalEnabled');
+      if (enabled) enabled.checked = Boolean(state.dustRemoval.enabled);
+      for (const [id, value] of [['dustStrength', state.dustRemoval.strength], ['dustStrengthValue', state.dustRemoval.strength],
+        ['dustMaxSize', state.dustRemoval.maxParticleSize], ['dustMaxSizeValue', state.dustRemoval.maxParticleSize]]) {
+        const input = document.getElementById(id);
+        if (input && Number.isFinite(value) && document.activeElement !== input) input.value = String(value);
+      }
+      // The toolbar's one-press dust removal is pressed while the open photo
+      // has it on (the Studio's sync enables it: studioWorkspace.js).
+      const quick = document.getElementById('dustQuickBtn');
+      if (quick?.setAttribute) {
+        quick.setAttribute('aria-pressed', state.dustRemoval.enabled ? 'true' : 'false');
+        quick.classList?.toggle('active', Boolean(state.dustRemoval.enabled));
+      }
     }
+
+    // One press: dust removal on (or off again) for the open photo and every
+    // other selected photo, at the open photo's sensitivity. The open photo is
+    // detected and repaired now, off the page's thread; the others when they
+    // are opened or exported, each from its own recipe.
+    function toggleDustForSelection() {
+      const button = document.getElementById('dustQuickBtn');
+      if (!button || button.disabled || state.currentStep < 3 || !state.processedImageData || state.cropping || isDesktopBatchExportLocked()) return;
+      const enable = !state.dustRemoval.enabled;
+      const dustRemoval = { ...sanitizeDustRemoval(state.dustRemoval), enabled: enable };
+      const others = state.fileQueue.filter(item => item.selected && item.file !== state.loadedFile);
+      for (const item of others) {
+        if (item.settings) item.settings = { ...cloneSettings(item.settings), dustRemoval: { ...dustRemoval } };
+        else item.pendingEdits = { ...(item.pendingEdits || {}), dustRemoval: { ...dustRemoval } };
+        item.status = 'pending';
+      }
+      const box = document.getElementById('dustRemovalEnabled');
+      box.checked = enable;
+      box.dispatchEvent(new Event('change'));
+      updateFileListUI();
+      if (state.mobileRecoveryEnabled) scheduleProjectRecovery();
+      if (others.length) {
+        showToast(getInterpolatedText(enable ? 'dustQuickOn' : 'dustQuickOff', { count: String(others.length + 1) },
+          enable ? `Dust removal is on for ${others.length + 1} photos` : `Dust removal is off for ${others.length + 1} photos`));
+      }
+    }
+    document.getElementById('dustQuickBtn')?.addEventListener('click', toggleDustForSelection);
 
     function hasFrameRepairs() {
       return Boolean(state.dustRemoval.enabled || state.repairStrokes?.length);
@@ -11186,6 +11250,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     document.getElementById('dustRemovalEnabled')?.addEventListener('change', function () {
       pushUndo('dustToggle');
       state.dustRemoval.enabled = this.checked;
+      // The switch is part of the photo's recipe.
+      markCurrentFileDirty();
       updateDustControlsVisibility();
       // The detection below waits for the model; start loading it now.
       if (state.dustRemoval.enabled && state.dustRemoval.ai) ensureAiRepairPreload();
@@ -11228,6 +11294,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         dustStrengthPreSnapshot = null;
         updateUndoRedoButtons();
       }
+      // The sensitivity is part of the photo's recipe.
+      markCurrentFileDirty();
     });
 
     let dustMaxSizePreSnapshot = null;
@@ -11250,10 +11318,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         dustMaxSizePreSnapshot = null;
         updateUndoRedoButtons();
       }
+      // The sensitivity is part of the photo's recipe.
+      markCurrentFileDirty();
     });
 
     document.getElementById('dustMaxSizeValue')?.addEventListener('change', function () {
       pushUndo('dustMaxSize');
+      markCurrentFileDirty();
       const val = Math.max(6, Math.min(80, parseInt(this.value, 10) || 40));
       this.value = String(val);
       state.dustRemoval.maxParticleSize = val;
@@ -11266,6 +11337,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
     document.getElementById('dustStrengthValue')?.addEventListener('change', function () {
       pushUndo('dustStrength');
+      markCurrentFileDirty();
       const val = Math.max(1, Math.min(10, parseInt(this.value, 10) || 3));
       this.value = String(val);
       state.dustRemoval.strength = val;
@@ -12115,10 +12187,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // (settingsKey.js), with the curve LUTs of settings and studioColors
     // appended as bytes instead of index-keyed JSON objects.
     function photoSettingsKey(item) {
+      const dust = dustRemovalOfItem(item);
       return exactSettingsKey([item.settings, item.studioColors, item.filmTypeOverride,
-        state.dustRemoval.enabled, state.dustRemoval.strength, state.dustRemoval.maxParticleSize,
+        dust.enabled, dust.strength, dust.maxParticleSize,
         state.dustRemoval.ai,
-        state.dustRemoval.enabled || item.settings?.repairStrokes?.length ? aiRepair.revision : null,
+        dust.enabled || item.settings?.repairStrokes?.length ? aiRepair.revision : null,
         state.flatFields[item.settings?.flatFieldId]?.id || null,
         // A photo left inside a two-stage window keeps its edits apart (#255).
         ...(!item.settings && item.pendingEdits ? [item.pendingEdits] : []),
@@ -12203,7 +12276,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
     function hiddenJobUsesAiRepair() {
       if (!hiddenJobRunning()) return false;
-      return Boolean(state.dustRemoval.ai && state.dustRemoval.enabled)
+      return Boolean(state.dustRemoval.ai && state.fileQueue.some(item => dustRemovalOfItem(item).enabled))
         || state.fileQueue.some(item => item.settings?.repairStrokes?.length);
     }
 
@@ -21158,7 +21231,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // photo's crop onto every never-cropped frame a batch export, thumbnail or
     // roll pass cloned.
     function perPhotoSettingsFallback() {
-      return { ...state, cropRegion: null, autoFrameMeta: null, rotationAngle: 0, mirrored: false };
+      return { ...state, cropRegion: null, autoFrameMeta: null, rotationAngle: 0, mirrored: false, dustRemoval: null };
     }
 
     function cloneSettings(settings) {
@@ -21288,6 +21361,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         }) : null;
         const next = cloneSettings(copied);
         next.repairStrokes = structuredClone(item.settings?.repairStrokes || []);
+        // Dust removal is switched per photo (the toolbar's button does it for the selection).
+        next.dustRemoval = sanitizeDustRemoval(item.settings?.dustRemoval);
         // These describe the receiving photograph, not the copied colour recipe.
         next.reviewed = Boolean(item.settings?.reviewed);
         // Its focal length and aperture too, unless the copied ones were typed (#278).
@@ -21905,6 +21980,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         rotationAngle: 0,
         mirrored: false,
         autoFrameMeta: null,
+        // Off until it is switched on for the photo; the sensitivity carries over.
+        dustRemoval: { ...sanitizeDustRemoval(state.dustRemoval), enabled: false },
         ...importSettings,
         filmBase: filmBase,
         filmEdge: null,
@@ -22260,6 +22337,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       assertRepairCurrent(isCurrent);
       const settings = sanitizeSettings(initialSettings, { fallbackSettings: perPhotoSettingsFallback() });
       if (options.stage === 'settings') { trace.end({ settingsOnly: true }); return { settings }; }
+      // Dust removal by the file's own recipe (its switch and sensitivity);
+      // the job, or the editor, gives the AI switch. A recipe from before the
+      // switch was per photo does not name it: the job's or the editor's
+      // dust removal applies to it whole, as it did then.
+      const jobDustRemoval = options.dustRemoval || state.dustRemoval;
+      const fileDustRemoval = initialSettings && Object.hasOwn(initialSettings, 'dustRemoval') && initialSettings.dustRemoval
+        ? { ai: jobDustRemoval?.ai, ...settings.dustRemoval } : jobDustRemoval;
 
       // Geometry chain (base -> rotation -> mirror -> crop). One pass that
       // only resamples the cropped window: rotating a whole 24 MP scan to keep
@@ -22380,7 +22464,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           convert,
           sourceRole,
           isCurrent,
-          dustRemoval: options.dustRemoval || state.dustRemoval,
+          dustRemoval: fileDustRemoval,
           dustWorker: options.dustWorker,
           automaticWhiteBalance: !savedSettings || Boolean(pendingFrame) || Boolean(state.fileQueue.find(item => item.file === file)?.automaticSettings),
           viewedWhiteBalance: Boolean(pendingFrame),
@@ -22412,7 +22496,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // measurement, an auto white balance from the analysis preview or
       // none) may keep its converted bands in the band pool; the caller then
       // runs Step 3 there. Any convert may ignore it.
-      const dustEnabled = !tileMax && Boolean((options.dustRemoval || state.dustRemoval)?.enabled);
+      const dustEnabled = !tileMax && Boolean(fileDustRemoval?.enabled);
       const automaticWb = Boolean(!savedSettings || pendingFrame || state.fileQueue.find(item => item.file === file)?.automaticSettings)
         && frameWantsAutoWhiteBalance(settings);
       const resident = Boolean(options.bandResident) && !dustEnabled && !settings.repairStrokes?.length
@@ -22474,7 +22558,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
       // Apply dust removal if enabled (full resolution for export). A contact
       // sheet leaves it out (a flagged proof-sheet approximation, #247).
-      const dustRemoval = options.dustRemoval || state.dustRemoval;
+      const dustRemoval = fileDustRemoval;
       if (!tileMax && dustRemoval && dustRemoval.enabled && processed) {
         processed = await removeFrameDust(processed, { dustRemoval, settings, isCurrent, dustWorker: options.dustWorker, own, trace, requireAi: true });
       }
@@ -24281,6 +24365,22 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       state.corePaperToningStrength = safe.corePaperToningStrength ?? 100;
       state.localExposure = safe.localExposure ? structuredClone(safe.localExposure) : null;
       state.repairStrokes = sanitizeRepairStrokes(safe.repairStrokes).slice();
+      // The photo's own dust removal. Switched off here, what the editor
+      // still holds of it goes; the conversion that follows every restore
+      // detects again for a photo that has it on.
+      const photoDust = safe.dustRemoval || state.dustRemoval;
+      if (state.dustRemoval.enabled && !photoDust.enabled) {
+        state.dustRemoval.showMask = false;
+        const showMask = document.getElementById('dustShowMask');
+        if (showMask) showMask.checked = false;
+        cancelDustBrush();
+        clearDustState();
+      }
+      if (!photoDust.enabled) updateDustStatusUI(getLocalizedText('dustStatusIdle', 'Ready'));
+      state.dustRemoval.enabled = Boolean(photoDust.enabled);
+      state.dustRemoval.strength = photoDust.strength;
+      state.dustRemoval.maxParticleSize = photoDust.maxParticleSize;
+      updateDustControlsVisibility();
       state.flatFieldId = safe.flatFieldId && state.flatFields[safe.flatFieldId] ? safe.flatFieldId : null;
       updateFlatFieldUI();
       state.look = safe.look ? structuredClone(safe.look) : null;
@@ -29571,8 +29671,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // again rather than restored.
     function frameThumbnailContext(item) {
       const settings = item.settings ? sanitizeSettings(item.settings, { fallbackSettings: perPhotoSettingsFallback() }) : null;
+      const dust = dustRemovalOfItem(item);
       return projectThumbnailContext({
-        dust: [state.dustRemoval.enabled, state.dustRemoval.strength, state.dustRemoval.maxParticleSize, state.dustRemoval.ai],
+        dust: [dust.enabled, dust.strength, dust.maxParticleSize, state.dustRemoval.ai],
         flatFieldId: state.flatFields[item.settings?.flatFieldId]?.id || null,
         autoWhiteBalance: Boolean(item.automaticSettings && settings && frameWantsAutoWhiteBalance(settings))
       });
@@ -29585,7 +29686,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // settings are not the ones its key covers.
     function savedProjectThumbnail(item, { skip = false } = {}) {
       if (skip || !item.settings || !item.thumbnail || item.thumbnailKind !== 'processed') return {};
-      if (state.dustRemoval.enabled || item.settings.repairStrokes?.length) return {};
+      if (dustRemovalOfItem(item).enabled || item.settings.repairStrokes?.length) return {};
       if (item.thumbnailKey !== photoSettingsKey(item)) return {};
       return { thumbnail: item.thumbnail, thumbnailContext: frameThumbnailContext(item) };
     }
@@ -29831,6 +29932,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         jpegQuality: state.jpegQuality,
         sprocket: Boolean(state.exportSprocketHolesEnabled),
         sprocketEdge: createSprocketEdgeSettings(state.sprocketEdge),
+        // Each file is cleaned by its own recipe's switch and sensitivity
+        // (processFileWithSettings). The job fixes the AI switch; its own
+        // switch and sensitivity are for recipes that do not name dust removal.
         dustRemoval: {
           enabled: Boolean(state.dustRemoval.enabled),
           strength: state.dustRemoval.strength,

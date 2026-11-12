@@ -33,7 +33,8 @@ function image() {
 
 function fixture() {
   const base = image(), converted = image(), mask = new Uint8Array(16);
-  const item = { file: new Blob(['original container']), settings: { repairStrokes: [] } };
+  // The photo's recipe carries its own dust removal, as the editor shows it.
+  const item = { file: new Blob(['original container']), settings: { repairStrokes: [], dustRemoval: { enabled: true, strength: 3, maxParticleSize: 40 } } };
   const state = {
     loadedFile: item.file, loadedBaseImageData: base, originalImageData: base,
     conversionSourceImageData: base, processedImageData: converted,
@@ -130,7 +131,7 @@ function fixture() {
     // #249: no photo here takes a display form.
     ...displaySessionStubs(),
   });
-  vm.runInContext([...DISPLAY_SESSION_HELPERS, 'photoSettingsKey', 'rememberPhotoSession', 'invalidatePhotoActivation',
+  vm.runInContext([...DISPLAY_SESSION_HELPERS, 'photoSettingsKey', 'dustRemovalOfItem', 'sanitizeDustRemoval', 'rememberPhotoSession', 'invalidatePhotoActivation',
     'cancelStudioThumbnailUpdate', 'isCurrentLoad', 'deferFileListRefresh', 'updateFileListUI',
     'refreshThumbnailStates', 'nextDustMaskTag', 'needsDustPrivateBuffer', 'installDustPrivateBuffer',
     'ensureDustPrivateBuffer', 'prepareDustPrivateBuffer', 'strokeDustOffMainThread',

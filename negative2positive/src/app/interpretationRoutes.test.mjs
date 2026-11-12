@@ -52,10 +52,10 @@ const functions = ['recipePatch', 'applyRecipeToCurrent', 'applyRecipeToSelected
   'resolveLensCorrection', 'lensCorrectionActive', 'perPhotoSettingsFallback', 'withPendingEdits',
   'sanitizeSettings', 'sanitizeNumeric', 'clampBetween', 'sanitizeCurveLut', 'sanitizeCurvePointChannel', 'buildCurveLutFromPoints',
   'makeLinearCurvePoints', 'makeLinearCurveLut', 'extractCurrentSettings', 'cloneSettings',
-  'applySettingsToItems', 'applyCurrentSettingsToSelected', 'applyRollReferenceToSelected', 'addFilesToQueue',
+  'applySettingsToItems', 'sanitizeDustRemoval', 'applyCurrentSettingsToSelected', 'applyRollReferenceToSelected', 'addFilesToQueue',
   'createQueueItemId', 'persistCurrentFileSettings', 'buildCurrentProject', 'sanitizeProjectSettings',
   'getEffectiveFilmType', 'usesSilverCoreConversion', 'buildCoreConversionSettings', 'buildRouterSettings', 'localExposureGeometryFor',
-  'getCurrentQueueItem', 'markCurrentFileDirty', 'retypeImportItem', 'applyFilmTypeToRoll', 'applyImportPositives', 'withPendingEditsOf', 'photoSettingsKey',
+  'getCurrentQueueItem', 'markCurrentFileDirty', 'retypeImportItem', 'applyFilmTypeToRoll', 'applyImportPositives', 'withPendingEditsOf', 'photoSettingsKey', 'dustRemovalOfItem', 'sanitizeDustRemoval',
   'resolvePendingFrameEdits', 'frameMetaWithWindowIntent', 'windowFrameIntent'];
 const positiveMarker = "    document.getElementById('convertPositiveBtn').addEventListener('click', () => {";
 const positiveStart = source.indexOf(positiveMarker), positiveEnd = source.indexOf('\n    });', positiveStart);

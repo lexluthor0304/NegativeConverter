@@ -109,7 +109,7 @@ function settleFixture({ loadFails = false } = {}) {
     adjustPhotoPreviewSample: sample => sample, geometryDiagnostics: { coldSessions: false },
     ...displaySessionStubs(),
   });
-  vm.runInContext([...DISPLAY_SESSION_HELPERS, 'photoSettingsKey', 'rememberPhotoSession', 'commitDustStroke',
+  vm.runInContext([...DISPLAY_SESSION_HELPERS, 'photoSettingsKey', 'dustRemovalOfItem', 'sanitizeDustRemoval', 'rememberPhotoSession', 'commitDustStroke',
     'queueDustAiRefresh', 'mergeDustRefreshRects', 'dustAiWindow', 'cropDustImage', 'cropDustMask', 'repairStrokeMaskFor',
     'runDustAiRefresh', 'noteBrushRepairSettled', 'aiRepairReady', 'dustPassUsesAi', 'settleAiRepairModel',
     'aiRepairLoadArgs', 'assertRepairCurrent', 'countAiRepairRun', 'noteAiRepairUsed', 'releaseIdleAiRepair',

@@ -245,7 +245,7 @@ const STUDIO_SYNC_IDS = [
   'studioBatchActions', 'uploadPlaceholder', 'studioSampleHint', 'studioTab-expired', 'studioExpiredMode',
   'studioImportAutoCrop', 'studioAutoCrop', 'studioRestoreFrame',
   'studioConfirmAnalysis', 'studioAnalysisStatus', 'studioFrameNotice', 'studioColorControls', 'studioHistory',
-  'studioExport', 'studioStatus', 'studioFilename', 'studioSelection', 'studioSync', 'studioSyncCrop', 'exportZipBtn', 'exportSingleBtn',
+  'studioExport', 'studioStatus', 'studioFilename', 'studioSelection', 'studioSync', 'studioSyncCrop', 'dustQuickBtn', 'exportZipBtn', 'exportSingleBtn',
   'exportAllBtn', 'studioUndo', 'studioRedo', 'undoBtn', 'redoBtn', 'studioRetry', 'studioApplyLens', 'studioResetAll',
   'studioRestart', 'exportSprocketBtn', 'studioExportBorder', 'studioClearQueue', 'studioSaveProject',
   'studioOpenProject', 'studioRestoreProject', 'studioWelcomeRestore', 'studioWelcomeRestoreBtn', 'studioMergeAverage', 'studioMergeHdr', 'studioNewSession', 'studioAdd',
@@ -998,7 +998,9 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
     set(node.studioSelection, 'textContent', t('selected').replace('{count}', count));
     set(node.studioSync, 'disabled', Boolean(!ready || busy || state.cropping || isExportLocked() || !otherSelected));
     set(node.studioSync, 'title', t('syncHint'));
-    set(node.studioSyncCrop, 'disabled', node.studioSync.disabled);
+    set(node.studioSyncCrop, 'disabled', Boolean(!ready || busy || state.cropping || isExportLocked() || !otherSelected));
+    // One press cleans the open photo and the other selected ones (main.js: toggleDustForSelection).
+    if (node.dustQuickBtn) set(node.dustQuickBtn, 'disabled', Boolean(!ready || busy || state.cropping || isExportLocked()));
     set(node.studioSyncCrop, 'title', t('syncCropHint'));
     set(node.exportZipBtn, 'textContent', t('exportSelected').replace('{count}', count));
     set(node.exportSingleBtn, 'textContent', t(state.exportFormat === 'dng' ? 'exportCurrentDng' : 'exportCurrent'));

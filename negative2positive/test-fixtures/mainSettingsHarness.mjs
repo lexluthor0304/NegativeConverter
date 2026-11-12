@@ -63,7 +63,7 @@ export function mainFunctions(names, extraDeps = {}) {
       'createDefaultLensCorrectionSettings', 'sanitizeLensSelection', 'sanitizeLensShotSource', 'sanitizeLensCorrection', 'makeLinearCurveLut',
       'makeLinearCurvePoints', 'sanitizeNumeric', 'sanitizeFilmBase', 'sanitizeCurvePointChannel',
       'buildCurveLutFromPoints', 'sanitizeCurveLut', 'sanitizeSettings', 'defaultFilmBaseBuffer', 'getImageDataPixelCount',
-      'defaultSettingsInputs', 'shotMetadataFor', 'applyShotMetadata', 'createDefaultSettings', 'photoSettingsKey',
+      'defaultSettingsInputs', 'shotMetadataFor', 'applyShotMetadata', 'createDefaultSettings', 'photoSettingsKey', 'dustRemovalOfItem', 'sanitizeDustRemoval',
       ...names].map(functionSource)
   ].join('\n');
   const exported = ['sanitizeSettings', 'createDefaultSettings', 'photoSettingsKey', 'sanitizeNumeric', ...names];

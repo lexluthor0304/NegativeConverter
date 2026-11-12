@@ -260,6 +260,27 @@ for (const [filmType, expected] of [['color', 'bright'], ['bw', 'bright'], ['pos
   assert.deepEqual(seenPolarities, [expected], `${filmType}: dust polarity`);
 }
 
+// Dust removal is each file's own switch and sensitivity: a recipe that names
+// it decides, whatever the editor shows or the job says; a recipe from before
+// the switch was per photo (every case above) follows the job, then the editor.
+for (const [own, editor, jobDust, expected] of [
+  [{ enabled: false, strength: 6, maxParticleSize: 25 }, true, { enabled: true, strength: 9 }, null],
+  [{ enabled: true, strength: 6, maxParticleSize: 25 }, false, null, { strength: 6, maxParticleSize: 25 }],
+  [{ enabled: true, strength: 6, maxParticleSize: 25 }, false, { enabled: false, strength: 9, maxParticleSize: 12 }, { strength: 6, maxParticleSize: 25 }],
+  [undefined, false, { enabled: true, strength: 9, maxParticleSize: 12 }, { strength: 9, maxParticleSize: 12 }],
+]) {
+  const saved = { ...structuredClone(recipes.plain), ...(own ? { dustRemoval: own } : {}) };
+  const now = run(current, { base: makeBase(64, 40, 4343), saved, options: { bitDepth: 8 }, dust: editor, automatic: false });
+  await now.context.processFileWithSettings(now.file, structuredClone(saved), { bitDepth: 8, ...(jobDust ? { dustRemoval: jobDust } : {}) });
+  const calls = now.log.filter(entry => typeof entry === 'string' && entry.startsWith('dust:'));
+  const label = `own ${JSON.stringify(own)} editor ${editor} job ${JSON.stringify(jobDust)}`;
+  assert.equal(calls.length, expected ? 1 : 0, `${label}: dust passes`);
+  if (expected) {
+    const { options } = JSON.parse(calls[0].slice('dust:'.length));
+    assert.deepEqual([options.strength, options.maxParticleSize], [expected.strength, expected.maxParticleSize], `${label}: sensitivity`);
+  }
+}
+
 // #256: a batch export's options change no stage call, no pixel and no
 // setting: `releaseEarly` (the base and the working plane are released once
 // the conversion resolves), a base decoded ahead (`sourceOwned`: no load of

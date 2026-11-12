@@ -100,7 +100,7 @@ const context = vm.createContext({
 });
 vm.runInContext(['getImageDataPixelCount', 'clampBetween', 'sanitizeNumeric', 'makeLinearCurveLut',
   'createDefaultLensCorrectionSettings', 'sanitizeLensSelection', 'sanitizeLensShotSource', 'sanitizeLensCorrection', 'autoDetectFilmBase',
-  'defaultFilmBaseBuffer', 'defaultSettingsInputs', 'createDefaultSettings', 'shotMetadataFor', 'applyShotMetadata',
+  'defaultFilmBaseBuffer', 'defaultSettingsInputs', 'createDefaultSettings', 'sanitizeDustRemoval', 'shotMetadataFor', 'applyShotMetadata',
   'settleImportFilmType', 'autoFrameAnalyzerOptions', 'runImportDetections', 'autoFrameEffectiveAngle', 'rotate180CropRegion',
   'analyzeStudioImportFrame', 'autoFrameDetectionFilmType', 'applyAutoFrameToSelected'].map(functionSource).join('\n'), context);
 const createDefaults = context.createDefaultSettings;

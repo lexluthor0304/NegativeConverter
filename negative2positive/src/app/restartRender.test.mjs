@@ -339,7 +339,9 @@ const drain = async () => {
 };
 
 function listenerSource(id, name) {
-  const anchor = source.indexOf(`getElementById('${id}')`);
+  // The element is also read elsewhere (the dust switch follows the open photo): anchor on its listener.
+  const listener = source.indexOf(`getElementById('${id}')?.addEventListener`);
+  const anchor = listener >= 0 ? listener : source.indexOf(`getElementById('${id}')`);
   assert.ok(anchor >= 0, `listener exists: ${id}`);
   const head = /addEventListener\('\w+', (?:function \(\)|\(\) =>) \{/g;
   head.lastIndex = anchor;
