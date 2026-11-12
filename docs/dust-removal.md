@@ -64,6 +64,17 @@ faint specks on a clear sky.)
    above it and grow, 8-connected, down to 3.2 grains. A block whose 5×5
    surroundings have more than 14 % of their samples above 3.2 grains is
    texture: no seeds there and no growing into it.
+   **The grain's reach.** Coarse grain has a long tail: on a fast
+   black-and-white film scanned at 60 MP, some of the thousands of grain
+   clumps around a blob stand as many grains above the median as dust does.
+   So a blob found at one of the two finest levels is also read against how
+   high the grain reaches on its own: the strongest sample of each block (the
+   99.7th percentile of its 256 samples, on average), and the median of those
+   over the 5×5 blocks around (unmoved by a few specks or one edge). The
+   blob's `stand` is its peak above the grain over that reach above the
+   grain; below `stand` (3.2 at sensitivity 1, 2.1 at 3, 1.4 at 8, none at
+   10) it is a clump. Blobs found at coarser levels are larger than grain and
+   are not read this way.
 3. **Flat background.** A candidate's peak must stand `ringZ` spreads above
    the response of a ring around it (a box ring for compact blobs, a band
    traced along long ones), and at most 12 % of the ring's grey values may
@@ -92,9 +103,18 @@ faint specks on a clear sky.)
    piece is read again as one shape.
 5. **Crowds.** Dust lands anywhere; highlights in foliage and sparkle on water
    come in crowds. A blob whose 3×3 neighbourhood of cells (a twelfth of the
-   short side each) holds more blobs than the sensitivity allows per 1 % of
-   the frame is texture. The mask is the remaining footprints, dilated by
-   about 0.15 % of the frame's height.
+   short side each) holds more company than the sensitivity allows per 1 % of
+   the frame is texture. Company depends on the blob. One clear of the
+   grain's reach (a `stand` 1.5 times the least) counts the other clear
+   blobs, and of everything else that passed stages 1–4, clumps below the
+   least `stand` included, what peaks at 70 % of its own peak or more: the
+   grain clumps around a speck far above the grain do not take it along,
+   highlights of its own kind do. A weak blob (between the least `stand` and
+   1.5 times it) counts everything, and is a crowd at an eighth of the cap
+   (never fewer than two): grain clumps and faint dust read alike one by one,
+   but clumps come by the dozen and a faint speck on a clear sky is alone.
+   The mask is the remaining footprints, dilated by about 0.15 % of the
+   frame's height.
 
 **Polarity.** What blocks light on a negative comes out bright on the
 converted frame; on a positive (a slide) it stays dark. The app asks for
@@ -102,10 +122,11 @@ converted frame; on a positive (a slide) it stays dark. The app asks for
 in the live pass (`runDustDetectionPass`) and in exports and batch
 (`removeFrameDust`, from each job's settings). `'both'` exists for tests.
 
-**Sensitivity and state.** The UI's 1–10 moves three thresholds together
+**Sensitivity and state.** The UI's 1–10 moves four thresholds together
 (`dustThresholds`): the seed (7.5 grains at 1, 5.6 at 3, 3.8 at 10), the ring
-significance (10, 6.5, 3.8 spreads) and the crowd density (5, 9, 60 blobs per
-1 % of the frame; none at 10). Each relaxes as the sensitivity rises, and a
+significance (10, 6.5, 3.8 spreads), the stand above the grain's reach (3.2,
+2.1, none) and the crowd density (5, 9, 60 blobs per 1 % of the frame; none
+at 10). Each relaxes as the sensitivity rises, and a
 component is the same whichever of its seeds starts it, so a detection holds
 every candidate of every lower sensitivity. The state keeps the candidates (a
 record each, with its footprint as row runs: 34 KB to 1.2 MB on 7–19 MP frames,
@@ -143,6 +164,24 @@ With AI repair on, the wait after detection is MI-GAN's inferences; since
 the 66 specks of `_DSC3111` take 5 inferences instead of 29, 3.7 s instead of
 21.5 s on the one WASM thread the macOS and iOS apps have, and two 60 MP
 frames with 236 and 219 specks take 19 and 24 instead of 124 and 162.
+
+**Coarse grain (2026-11-12).** Two of the owner's 60 MP black-and-white
+frames (Leica DNG, 9536 × 6336, a night scene and a busy one) showed what
+reading a blob against the median grain alone does on such film: 236 and 258
+marks at the default sensitivity, nearly all the brightest grain clumps of
+the dark areas (62 along the unexposed rebate of one frame), and so many
+that the crowd rule dropped real dust with them. Of 240 defects injected
+into each frame (hard discs, soft and faint blobs), 51 and 75 were found;
+of the 56 hard discs on calm ground in the first frame, 12. With the
+grain's reach and the two kinds of company: 51 and 5 marks on the frames as
+they are; 149 and 80 of the injected defects found, 54 of those 56 hard
+discs; faint blobs at four times the local grain's spread are mostly left
+(15 of 49 on calm ground), as they cannot be told from clumps. On the 9 MP
+colour frame `_DSC3111` the marks go from 66 to 21: what went was mostly
+highlights in foliage, and the faint specks and the short fibre on its clear
+sky stay. Detection time is unchanged (the reach is one median per block).
+What is left on the night scene besides dust is small soft glows of lamps
+and reflections, which read as soft dust on a dark ground.
 
 `scripts/eval-dust.mjs` is the in-repo stand-in: synthetic specks and bent
 hairs on a small rough positive of `_DSC3111.NEF`, scored by where each one
@@ -472,6 +511,10 @@ the times carry noise; harness in `notes/292-harness/`, rows in
   stretches go on past what was found of them.
 - A short thin line alone on a calm background, on dust's side of the tones,
   still reads as a fibre (`audit-backlog.md`).
+- A small, soft, isolated glow on a dark ground (a distant lamp, a glint in
+  a night scene) reads as an out-of-focus speck and is repaired.
+- On coarse grain, dust no stronger than the grain's own strongest clumps
+  (about twice its reach) is left: one by one the two read alike.
 - On a positive, small dark specks of the picture's own (pores in concrete,
   stains) look like dust and are repaired; mostly harmlessly, since the
   repair fills them with the surface around them.
