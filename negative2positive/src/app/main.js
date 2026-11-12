@@ -21349,6 +21349,48 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       void appAlert(template.replace('{count}', String(selectedItems.length)));
     }
 
+    // The open photo's framing (crop, rotation, mirroring and the image area
+    // they confirm) on the other selected photos, whose colour stays. Frames of
+    // one roll share a size, so the crop is copied as it is; a photo of another
+    // size clamps it when it loads. A photo that has no recipe yet takes it as
+    // its geometry before the import's detections (`pendingEdits`), so no
+    // automatic frame replaces it.
+    async function syncCropToSelected() {
+      await settlePendingCropDetection();
+      if (!await ensureFullDecodeWithNotice('sync')) return;
+      if (state.currentStep < 3 || state.cropping || isDesktopBatchExportLocked()) return;
+      const current = extractCurrentSettings();
+      const geometry = {
+        cropRegion: current.cropRegion ? { ...current.cropRegion } : null,
+        rotationAngle: Number.isFinite(current.rotationAngle) ? current.rotationAngle : 0,
+        mirrored: Boolean(current.mirrored),
+        autoFrameMeta: current.autoFrameMeta ? structuredClone(current.autoFrameMeta) : null
+      };
+      const targets = state.fileQueue.filter(item => item.selected && item.file !== state.loadedFile);
+      for (const item of targets) {
+        if (item.settings) {
+          const previous = item.settings;
+          const next = { ...cloneSettings(previous), ...structuredClone(geometry) };
+          const sameGeometry = ['cropRegion', 'rotationAngle', 'mirrored'].every(key =>
+            JSON.stringify(previous[key] ?? null) === JSON.stringify(next[key] ?? null))
+            && JSON.stringify(previous.autoFrameMeta?.imageArea || null) === JSON.stringify(next.autoFrameMeta?.imageArea || null);
+          // Measurements belong to the frame they were taken from.
+          if (!sameGeometry) next.semanticMap = next.expiredAnalysis = null;
+          if (item.pendingFrameEdit) item.pendingFrameEdit.baseline = cloneSettings(next);
+          item.settings = next;
+        } else {
+          item.pendingEdits = { ...(item.pendingEdits || {}), ...structuredClone(geometry) };
+          delete item.pendingFrameEdit;
+        }
+        item.isDirty = false;
+        item.status = 'pending';
+      }
+      persistCurrentFileSettings({ silent: true, force: true });
+      updateFileListUI();
+      if (state.mobileRecoveryEnabled) scheduleProjectRecovery();
+      showToast(studioWorkspace.text('cropSynced').replace('{count}', targets.length));
+    }
+
     async function setRollReferenceFromCurrent() {
       if (state.currentStep < 3 || !state.processedImageData) {
         void appAlert(i18n[currentLang].finishProcessing || 'Please complete the workflow (step 3) before saving settings.');
@@ -32632,6 +32674,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           updateFileListUI();
           showToast(studioWorkspace.text('synced').replace('{count}', targets.length));
         },
+        onSyncCrop: () => syncCropToSelected(),
         onRetry: () => {
           if (!state.originalImageData) return;
           document.getElementById('applyConvertBtn').click();
