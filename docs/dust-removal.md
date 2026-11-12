@@ -105,6 +105,11 @@ shows), moderate 6–20, busy above (foliage: where it hides).
   is ready 6–20 s sooner. Process RSS is about the same (225–386 MB against
   246–395 MB).
 
+With AI repair on, the wait after detection is MI-GAN's inferences; since
+2026-11-12 small specks share inputs (`technical-depth.md`, "モザイク入力"):
+the 66 specks of `_DSC3111` take 5 inferences instead of 29, 3.7 s instead of
+21.5 s on the one WASM thread the macOS and iOS apps have.
+
 `scripts/eval-dust.mjs` is the in-repo stand-in: synthetic specks and bent
 hairs on a small rough positive of `_DSC3111.NEF`, scored by where each one
 landed (calm, moderate, busy).
