@@ -35,6 +35,25 @@ the unmirrored base and `cropRegion` on the rotated (and mirrored) frame.
   of the base turned by canvas transforms (#245,
   `docs/crop-apply-and-analysis-worker.md`).
 
+## Sync crop (`syncCropToSelected`)
+
+**Sync crop**, beside Sync color in the photo strip, copies the open photo's
+framing to the other selected photos: `cropRegion`, `rotationAngle`,
+`mirrored` and the `autoFrameMeta` that names the image area they confirm.
+Colour is left alone (Sync color and the processing settings do the reverse:
+both keep each photo's geometry, and the roll reference copies a crop only
+together with every other setting).
+
+- A photo with a recipe gets the four fields in it; its semantic map and
+  expired-film measurement go when the frame changed, as after any crop.
+- A photo without a recipe yet takes them as `pendingEdits`: its first decode
+  (switch, batch export, roll analysis) treats them as the user's geometry,
+  so no automatic frame is detected over them.
+- The crop is copied in pixels of the frame. The frames of one roll share a
+  size; a photo of another size clamps the rectangle when it loads
+  (`sanitizeCropRect`). A queue item does not know its base size before it is
+  decoded, so there is no proportional mapping.
+
 ## Pool and ordering
 
 `geometryPool.js` splits the output window into 4–6 row bands (pool size

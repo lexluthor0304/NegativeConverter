@@ -7,6 +7,39 @@ and lets the brush add and remove repairs. This page covers what detection
 takes for dust, and how the TELEA repair and the dust brush stay proportional
 to the dust, not to the frame (#259).
 
+## The switch: per photo, one press for the selection
+
+Dust removal is each photo's own setting. Its recipe carries `dustRemoval:
+{ enabled, strength, maxParticleSize }` (`sanitizeSettings`,
+`deepCopySanitizedSettings`), never inherited from the photo on screen
+(`perPhotoSettingsFallback`, like the crop); a new photo starts with it off,
+at the editor's sensitivity. `restoreSettings` puts a photo's values into
+`state.dustRemoval`, the switch, the sliders and the toolbar button follow
+(`updateDustControlsVisibility`), and the conversion that follows detects for
+a photo that has it on. Until 2026-11-12 it was one switch for the session:
+it followed whichever photo was open, and a batch export cleaned every file
+or none.
+
+- **Remove dust** (`#dustQuickBtn`, in the toolbar under the photo;
+  `toggleDustForSelection`): one press turns dust removal on, or off again,
+  for the open photo and every other selected photo, at the open photo's
+  sensitivity. The open photo goes through the Cleanup panel's own switch
+  (one undo step, detection and repair in the dust worker at once); another
+  photo's recipe is patched, or, when it has no recipe yet, the patch waits
+  in its `pendingEdits` and lands on the recipe its first decode computes.
+  Those photos are detected and repaired when they are opened or exported:
+  nothing is repaired ahead, since a repaired 60 MP frame is 0.7 GB.
+- **Exports** (`processFileWithSettings`): each file is cleaned by its own
+  recipe's switch and sensitivity; the job (`captureExportJobOptions`) fixes
+  the AI switch. A recipe saved before the switch was per photo does not name
+  dust removal: it follows the job's switch, then the editor's, as it did.
+- Copying processing settings or a roll reference (`applySettingsToItems`)
+  keeps the receiving photo's switch; Sync color never carried it.
+- Tile and session keys (`photoSettingsKey`, `frameThumbnailContext`) read
+  the photo's own dust removal (`dustRemovalOfItem`: the editor's for the
+  open photo), so opening a photo with another switch does not make the
+  other photos' tiles stale.
+
 ## Detection (`detectDust`, `updateDustStrength`)
 
 Dust lies on the film, so on the converted frame it is a small blob or a thin
@@ -453,6 +486,8 @@ the times carry noise; harness in `notes/292-harness/`, rows in
   little soft, so one sharp reading keeps a shape.
 - Batch export still re-detects dust per file and ignores brush edits
   (`audit-backlog.md`).
+- Undo after **Remove dust** takes back the open photo's switch only; the
+  other selected photos keep theirs until the button is pressed again.
 - A stroke entry still holds the planes it patched, so once they are off
   screen history's budget drops it with every older step (#259): at 60 MP
   with dust removal on, strokes made before a conversion are dropped at the
