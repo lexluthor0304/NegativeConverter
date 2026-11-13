@@ -215,10 +215,24 @@ export async function runStudioSyncSmoke({ send, evaluate, waitFor, wait, fail, 
     'a cold switch did not announce its target in one flush: ' + JSON.stringify(cold));
   await waitFor('second photo open', `${ready} && document.getElementById('studioFilename').textContent === 'sync-negative-textured.png'`, 150_000);
   await settle('second photo idle');
+  // The CMYD keys are off during a switch and come back with the photo.
+  const keysAfterSwitch = await evaluate(`[...document.querySelectorAll('.console-key, #consoleResetBtn')].filter(key => key.disabled).length`);
+  expect(keysAfterSwitch === 0, `the correction console stayed off after a photo switch (${keysAfterSwitch} keys disabled)`);
   const warm = await burst(`document.querySelector('.file-list-name[data-index="0"]').click();`);
   expect(warm.flushes === 1 && warm.rowWalks === 1 && warm.renders === 1 && warm.filename === 'sync-negative-plain.png',
     'a photo switch is not one flush, one file-list render and one row reconcile: ' + JSON.stringify(warm));
   console.log('ok: one flush per burst ' + JSON.stringify({ idleFlush, curveRelease, sliderRelease, undo, cold, warm, warmSwitch: warm.switching === null }));
   await waitFor('first photo back', `${ready} && document.getElementById('studioFilename').textContent === 'sync-negative-plain.png'`, 150_000);
   await expectLoadingOverlayIdle({ evaluate, waitFor, fail }, 'photo switches');
+  // The batch menu wraps its own text inside its box, in the longest language.
+  const menu = await evaluate(`(() => {
+    const details = document.getElementById('studioBatchMenu'); details.open = true;
+    const box = details.querySelector('.studio-batch-content'), frame = box.getBoundingClientRect();
+    const outside = [...box.querySelectorAll('p, button')].filter(node => !node.hidden && node.getClientRects().length)
+      .filter(node => { const r = node.getBoundingClientRect(); return r.left < frame.left - 1 || r.right > frame.right + 1; }).map(node => node.id || node.textContent.slice(0, 24));
+    const out = { outside, wide: box.scrollWidth > box.clientWidth + 1, top: Math.round(frame.top) };
+    details.open = false; return out;
+  })()`);
+  expect(menu.outside.length === 0 && !menu.wide && menu.top >= 0, 'the batch menu spills out of its box: ' + JSON.stringify(menu));
+  console.log('ok: the correction console follows photo switches; the batch menu keeps its text inside');
 }
