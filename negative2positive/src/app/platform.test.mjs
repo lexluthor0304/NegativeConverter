@@ -20,6 +20,12 @@ assert.equal(normalizePlatform({ ...ios, capabilities: desktop.capabilities }).c
 assert.equal(normalizePlatform({ ...ios, capabilities: { sourceRecovery: true } }).capabilities.sourceRecovery, true);
 assert.equal(normalizePlatform({ ...desktop, capabilities: { sourceRecovery: true } }).capabilities.sourceRecovery, false);
 assert.ok(!simulatedPlatform('?shell=mobile').capabilities.sourceRecovery, 'layout preview has no native source store');
+// The system's version is the shell's answer, as digits and dots, or nothing.
+const mac = { shell: 'tauri', os: 'macos', mobile: false, capabilities: {} };
+assert.equal(normalizePlatform({ ...mac, osVersion: '27.2' }).osVersion, '27.2');
+assert.equal(normalizePlatform({ ...mac, osVersion: '27.2.1' }).osVersion, '27.2.1');
+for (const osVersion of [undefined, null, 27.2, '', '27.2 (beta)', '27.2.1.4', 'macOS 27']) assert.equal(normalizePlatform({ ...mac, osVersion }).osVersion, null);
+assert.equal(simulatedPlatform('?shell=desktop').osVersion, undefined, 'a layout preview claims no system version');
 assert.equal(normalizePlatform({ ...desktop, capabilities: { ...desktop.capabilities, updater: false } }).capabilities.updater, false, 'store build has no updater');
 for (const answer of [null, {}, [], { shell: 'web' }, { shell: 'tauri', os: 'ios invalid' }]) {
   const resolved = await resolvePlatform({ invoke: async () => answer, search: '' });

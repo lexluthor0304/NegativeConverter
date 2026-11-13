@@ -9,7 +9,7 @@ import { exactSettingsKey } from './settingsKey.js';
 import { sanitizeSemanticMap } from './semanticAnchors.js';
 import { analyzeSemanticPreview } from './semanticModel.js';
 import { isLargeImage } from './imageMemoryBudget.js';
-import { defaultInferencePreference } from './inferenceBackend.js';
+import { defaultInferencePreference, allowWebKitGpuInference, webKitGpuInferenceSafe, webKitGpuInferenceAllowed } from './inferenceBackend.js';
 import { readDesktopImportFile } from './desktopImportReader.js';
 import { learnedDefaultsKey, learnedDelta, recordLearnedObservation, applyLearnedDefaults, withoutLearnedDefaults, snapLearnedDefaults, LEARNED_NUMERIC_KEYS, LEARNED_CATEGORY_KEYS } from './learnedDefaults.js';
 import { readLearnedDefaults, writeLearnedDefaults, resetLearnedDefaults } from './learnedDefaultsStore.js';
@@ -237,6 +237,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // the stylesheet shows; `isTauriMobile()` below decides what runs.
     const platformInfo = await resolvePlatform();
     applyPlatformClasses(platformInfo);
+    // AI repair on the GPU in the macOS app, where the system's WebKit allows it.
+    allowWebKitGpuInference(webKitGpuInferenceSafe(platformInfo));
     const mobileRecovery = platformInfo.capabilities.sourceRecovery && !platformInfo.simulated
       ? createMobileRecovery({ invoke: window.__TAURI__.core.invoke, onStatus: updateMobileRecoveryStatus }) : null;
     const WEBGL_DEBUG_ERRORS = new URLSearchParams(window.location.search).has('debugGL');
@@ -12778,7 +12780,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // reply. Before its first reply, and for a main-thread session, estimate:
     // on WebKit's non-JSEP WASM an estimated 0.6-0.8 GB (#236), less on
     // WebGPU, whose weights live in the GPU process.
-    const AI_REPAIR_RESIDENT_ESTIMATE_BYTES = { wasm: 0.7e9, other: 0.25e9 };
+    // `webkitGpu`: the macOS app's GPU session, measured at 0.4-0.5 GB once settled (docs/macos-export-cancel.md).
+    const AI_REPAIR_RESIDENT_ESTIMATE_BYTES = { wasm: 0.7e9, other: 0.25e9, webkitGpu: 0.5e9 };
     workerResidents.set('export', {
       residentBytes: () => exportWorkerResidentBytes(),
       // #250's default bridge releases itself 4 s after a large request.
@@ -12806,7 +12809,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         if (aiRepair.status !== 'ready') return 0;
         const reported = Number(aiRepair.resident?.()) || 0;
         if (reported > 0) return reported;
-        return aiRepair.provider === 'webgpu' ? AI_REPAIR_RESIDENT_ESTIMATE_BYTES.other : AI_REPAIR_RESIDENT_ESTIMATE_BYTES.wasm;
+        if (aiRepair.provider !== 'webgpu') return AI_REPAIR_RESIDENT_ESTIMATE_BYTES.wasm;
+        return webKitGpuInferenceAllowed() ? AI_REPAIR_RESIDENT_ESTIMATE_BYTES.webkitGpu : AI_REPAIR_RESIDENT_ESTIMATE_BYTES.other;
       },
       // Only under #236's idle-release rule: no run for about 5 minutes, no
       // pending brush repair, no batch.
@@ -29116,7 +29120,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           // The bundled model's URL carries Vite's content hash; show its plain name.
           label = String(source).split('/').pop().replace(/-[\w-]{8}(\.onnx)$/, '$1');
         }
-        const session = await createInpaintSessionInWorker(bytes, { prefer });
+        const session = await createInpaintSessionInWorker(bytes, { prefer, webKitGpu: prefer === 'webgpu' && webKitGpuInferenceAllowed() });
         aiRepair.run = session.run;
         aiRepair.release = session.release;
         // Shrinks the session's tile memo (#258); resolves to its size.

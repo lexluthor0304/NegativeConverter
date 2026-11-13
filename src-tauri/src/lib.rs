@@ -362,9 +362,41 @@ fn current_installer_name() -> Option<&'static str> {
 struct PlatformInfo {
     shell: &'static str,
     os: &'static str,
+    /// The system's version ("27.2"), where the page decides by it: WebKit
+    /// comes with the system on Apple platforms, and the page cannot read
+    /// either version from its frozen user agent. None elsewhere.
+    os_version: Option<String>,
     arch: &'static str,
     mobile: bool,
     capabilities: PlatformCapabilities,
+}
+
+/// `kern.osproductversion` (macOS, iOS): the version System Settings shows.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn os_product_version() -> Option<String> {
+    let name = std::ffi::CString::new("kern.osproductversion").ok()?;
+    let mut size: libc::size_t = 0;
+    // SAFETY: a size query (null buffer), then a read into a buffer of that size.
+    unsafe {
+        if libc::sysctlbyname(name.as_ptr(), std::ptr::null_mut(), &mut size, std::ptr::null_mut(), 0) != 0 || size == 0 {
+            return None;
+        }
+        let mut buffer = vec![0u8; size];
+        if libc::sysctlbyname(name.as_ptr(), buffer.as_mut_ptr().cast(), &mut size, std::ptr::null_mut(), 0) != 0 {
+            return None;
+        }
+        buffer.truncate(size);
+        while buffer.last() == Some(&0) {
+            buffer.pop();
+        }
+        let version = String::from_utf8(buffer).ok()?;
+        (!version.is_empty() && version.len() <= 32 && version.chars().all(|c| c.is_ascii_digit() || c == '.')).then_some(version)
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+fn os_product_version() -> Option<String> {
+    None
 }
 
 #[derive(Serialize)]
@@ -389,6 +421,7 @@ fn platform_info() -> PlatformInfo {
     PlatformInfo {
         shell: "tauri",
         os: std::env::consts::OS,
+        os_version: os_product_version(),
         arch: std::env::consts::ARCH,
         mobile,
         capabilities: PlatformCapabilities {
@@ -1547,6 +1580,13 @@ mod tests {
         let json = serde_json::to_value(info).expect("serializes");
         assert_eq!(json["shell"], "tauri");
         assert!(json["capabilities"]["watchFolder"].is_boolean());
+        // Apple systems report their version; the others report none.
+        if cfg!(any(target_os = "macos", target_os = "ios")) {
+            let version = json["osVersion"].as_str().expect("an Apple system has a version");
+            assert!(version.split('.').next().and_then(|major| major.parse::<u32>().ok()).is_some_and(|major| major >= 10));
+        } else {
+            assert!(json["osVersion"].is_null());
+        }
     }
 
     #[test]

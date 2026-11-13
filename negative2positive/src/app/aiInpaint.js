@@ -1,6 +1,6 @@
 import { yieldTaskForJob } from './yieldToPaint.js';
 import { loadInferenceRuntime } from './inferenceRuntime.js';
-import { defaultInferencePreference } from './inferenceBackend.js';
+import { defaultInferencePreference, allowWebKitGpuInference } from './inferenceBackend.js';
 import { murmurHash3x86_128 } from './contentHash.js';
 import { fetchModelBytes as fetchCachedModelBytes } from './modelCache.js';
 export { readCachedModel, writeCachedModel } from './modelCache.js';
@@ -699,8 +699,11 @@ const inWorkerRealm = () => typeof globalThis.WorkerGlobalScope === 'function'
  * it only takes effect on the realm's first load).
  */
 export async function createInpaintSession(modelBytes, {
-  prefer = defaultInferencePreference(), warmUp = true, memoBytes = null, numThreads = null
+  prefer = defaultInferencePreference(), warmUp = true, memoBytes = null, numThreads = null, webKitGpu = false
 } = {}, { loadRuntime = loadOrt, backends = inpaintBackends } = {}) {
+  // The page's answer for this shell, carried into the worker's realm before
+  // its runtime is chosen (inferenceBackend.js).
+  if (webKitGpu === true) allowWebKitGpuInference(true);
   const ort = await loadRuntime(Number.isInteger(numThreads) ? { numThreads } : {});
   const available = backends();
   const attempts = defaultInferencePreference() !== 'wasm' && prefer === 'webgpu' && available.webgpu ? [['webgpu', 'wasm'], ['wasm']] : [['wasm']];
