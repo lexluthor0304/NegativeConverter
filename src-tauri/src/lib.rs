@@ -22,10 +22,14 @@ mod import_folder;
 mod memory_info;
 mod mobile_recovery;
 mod native_raw;
+// Tethered capture: a camera on USB (docs/tethered-capture.md).
+mod tether;
 #[cfg(any(target_os = "ios", test))]
 mod webview_recovery;
 use memory_info::get_memory_info;
 use import_folder::{ImportWatch, watch_import_folder, stop_watch_import_folder, read_import_file};
+#[cfg(desktop)]
+use import_folder::{remembered_import_folder, watch_remembered_import_folder};
 use export_stream::ExportStreams;
 use native_raw::{NativeRawDecodes, native_raw_info, native_raw_begin, native_raw_append, native_raw_open, native_raw_process, native_raw_release};
 
@@ -406,6 +410,8 @@ struct PlatformCapabilities {
     native_dialogs: bool,
     /// The desktop watch folder (import_folder.rs).
     watch_folder: bool,
+    /// A camera on USB: live view, shutter and transfer (tether/mod.rs).
+    tether: bool,
     /// In-app updates (the `updater` feature on desktop builds).
     updater: bool,
     /// `open_external_url` (desktop) or the opener plugin (mobile).
@@ -427,6 +433,7 @@ fn platform_info() -> PlatformInfo {
         capabilities: PlatformCapabilities {
             native_dialogs: !mobile,
             watch_folder: !mobile,
+            tether: cfg!(target_os = "macos"),
             updater: cfg!(all(feature = "updater", desktop)),
             external_links: true,
             documents_export: mobile,
@@ -1406,6 +1413,7 @@ pub fn run() {
         .manage(ExportGrants::default())
         .manage(ExportStreams::default())
         .manage(ImportWatch::default())
+        .manage(tether::Tether::default())
         .manage(WebContentTerminations::default())
         .manage(NativeRawDecodes::default())
         .manage(mobile_recovery::MobileRecovery::default())
@@ -1421,6 +1429,9 @@ pub fn run() {
         .on_page_load(|webview, payload| {
             if matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
                 reset_page_owned_state(webview);
+                // The page that connected a camera is gone: leave the camera as it was found.
+                let app = tauri::Manager::app_handle(webview).clone();
+                tauri::async_runtime::spawn(async move { tether::release(&app).await });
             }
         });
     #[cfg(target_os = "ios")]
@@ -1475,6 +1486,9 @@ pub fn run() {
         // Display proxies (#249): the cache directory is prepared once, and an
         // earlier run's spill removed.
         .setup(|app| {
+            // Debug builds: `NC_TETHER_SELFTEST=<dir>` drives a connected camera once and logs what it answers.
+            #[cfg(all(debug_assertions, target_os = "macos"))]
+            tether::self_test(app.handle());
             if let Ok(root) = display_proxy_store::root_for(app.handle()) {
                 if let Err(err) = display_proxy_store::prepare_root(&root) {
                     eprintln!("[display-proxies] cache directory unavailable: {err}");
@@ -1525,6 +1539,19 @@ pub fn run() {
             display_proxy_store::display_proxy_space,
             watch_import_folder,
             stop_watch_import_folder,
+            #[cfg(desktop)]
+            remembered_import_folder,
+            #[cfg(desktop)]
+            watch_remembered_import_folder,
+            tether::tether_cameras,
+            tether::tether_connect,
+            tether::tether_disconnect,
+            tether::tether_live_view,
+            tether::tether_frame,
+            tether::tether_capture,
+            tether::tether_settings,
+            tether::tether_trash,
+            tether::tether_set,
             read_import_file,
             begin_export_write,
             append_export_chunk,
@@ -1575,6 +1602,7 @@ mod tests {
         assert_eq!(info.mobile, cfg!(mobile));
         assert_eq!(info.capabilities.native_dialogs, cfg!(desktop));
         assert_eq!(info.capabilities.watch_folder, cfg!(desktop));
+        assert_eq!(info.capabilities.tether, cfg!(target_os = "macos"));
         assert_eq!(info.capabilities.updater, cfg!(all(feature = "updater", desktop)));
         assert_eq!(info.capabilities.documents_export, cfg!(mobile));
         let json = serde_json::to_value(info).expect("serializes");

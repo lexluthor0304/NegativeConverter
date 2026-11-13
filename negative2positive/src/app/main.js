@@ -11,6 +11,7 @@ import { analyzeSemanticPreview } from './semanticModel.js';
 import { isLargeImage } from './imageMemoryBudget.js';
 import { defaultInferencePreference, allowWebKitGpuInference, webKitGpuInferenceSafe, webKitGpuInferenceAllowed } from './inferenceBackend.js';
 import { readDesktopImportFile } from './desktopImportReader.js';
+import { TETHER_PREFIX, isTetherDevice, tetherErrorKey, createTetherFeed, exposureVerdict, SHUTTER_AUTO, shutterLabel, shutterChoices, compensationLabel } from './tetherCamera.js';
 import { learnedDefaultsKey, learnedDelta, recordLearnedObservation, applyLearnedDefaults, withoutLearnedDefaults, snapLearnedDefaults, LEARNED_NUMERIC_KEYS, LEARNED_CATEGORY_KEYS } from './learnedDefaults.js';
 import { readLearnedDefaults, writeLearnedDefaults, resetLearnedDefaults } from './learnedDefaultsStore.js';
 import { exportNameStem } from './exportFileName.js';
@@ -30752,7 +30753,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // by display frames at the camera's rate instead.
     const LOUPE_FRAME_CALLBACK_WAIT_MS = 200;
     const LOUPE_CONVERSION_OPTIONS = { preview: true, scratch: true, includeAnalysisPreview: false };
-    const liveLoupe = { stream: null, track: null, running: false, capturing: false, frames: 0, view: 'converted', surface: null, generation: 0, recipe: null, convert: null, wake: null };
+    const liveLoupe = { stream: null, track: null, running: false, capturing: false, frames: 0, view: 'converted', surface: null, generation: 0, recipe: null, convert: null, wake: null,
+      // A camera on USB (tetherCamera.js): its feed, and the release of the previous one.
+      tether: null, tetherReleased: Promise.resolve(),
+      // Camera scan (openScan): the loupe as a copy-stand screen, and the photos of this sitting.
+      scan: false, scanItems: [], scanTimer: null, scanExposure: '', scanTicks: 0,
+      // Shots released whose photo has not arrived yet (when each was taken).
+      scanPending: [] };
     // Read by the camera smoke (?debugCounters=1).
     const loupeDebugCounters = { grabs: 0, conversions: 0, workerConversions: 0, mainConversions: 0, recipes: 0, defaultSettings: 0, repeatedFrames: 0, pacing: '' };
     // An infrastructure failure of the loupe worker moves the loupe to the
@@ -30765,7 +30772,96 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     function loupeSupported() {
-      return Boolean(navigator.mediaDevices && typeof navigator.mediaDevices.getUserMedia === 'function');
+      return Boolean(navigator.mediaDevices && typeof navigator.mediaDevices.getUserMedia === 'function') || hasPlatformCapability('tether');
+    }
+
+    // Cameras on USB that this app can drive (the native shell says which).
+    async function tetheredCameras() {
+      if (!hasPlatformCapability('tether')) return [];
+      try {
+        return (await window.__TAURI__.core.invoke('tether_cameras')).filter((camera) => camera.supported);
+      } catch (error) {
+        console.warn('Tethered camera list failed:', error);
+        return [];
+      }
+    }
+
+    // Stops the feed, then leaves the camera as it was found. The next
+    // connection waits for this, so a late release never ends a new session.
+    function releaseTether() {
+      const tether = liveLoupe.tether;
+      if (!tether) return;
+      liveLoupe.tether = null;
+      liveLoupe.tetherReleased = liveLoupe.tetherReleased
+        .then(() => tether.feed.stop())
+        .then(() => window.__TAURI__.core.invoke('tether_disconnect'))
+        .catch((error) => console.warn('Tethered camera release failed:', error));
+    }
+
+    // The live view of a camera on USB as a video stream. Its photos land in
+    // the watch folder, so one is chosen first when none is watched.
+    async function openTetherStream(id, isCurrent) {
+      const invoke = window.__TAURI__.core.invoke;
+      await liveLoupe.tetherReleased;
+      if (!isCurrent()) return null;
+      if (!hotFolder) {
+        setScanPhase('failed', getLocalizedText('loupeTetherFolder', 'Choose the folder the photos are saved to.'));
+        await startHotFolder();
+        if (!isCurrent()) return null;
+        if (!hotFolder) return null;
+      }
+      setScanPhase('connecting', getLocalizedText('loupeTetherStarting', 'Connecting to the camera…'));
+      let camera;
+      try {
+        camera = await invoke('tether_connect', { id });
+        if (camera.liveView) await invoke('tether_live_view', { on: true });
+      } catch (error) {
+        console.warn('Tethered camera failed:', error);
+        void invoke('tether_disconnect').catch(() => {});
+        if (isCurrent()) setScanPhase('failed', getLocalizedText(tetherErrorKey(error), 'The camera could not be connected.'));
+        return null;
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = 1536;
+      canvas.height = 1024;
+      const generation = liveLoupe.generation;
+      const feed = createTetherFeed({
+        invoke, canvas,
+        onError: (error) => {
+          console.warn('Tethered live view ended:', error);
+          if (liveLoupe.generation !== generation) return;
+          stopLoupeStream();
+          setScanPhase('failed', getLocalizedText('loupeTetherLost', 'The camera stopped answering. Check the cable and open the loupe again.'));
+          // Plugged in again, the scan goes on by itself.
+          if (liveLoupe.scan) void waitForTetheredCamera(liveLoupe.generation);
+        }
+      });
+      liveLoupe.tether = { id, camera, feed };
+      if (!isCurrent()) { releaseTether(); return null; }
+      if (liveLoupe.scan) void loadScanSettings();
+      return canvas.captureStream();
+    }
+
+    // Where the camera scan stands: 'waiting' for a camera, 'connecting',
+    // 'live', or 'failed' with the reason. The stage shows what to do while
+    // there is no picture; the loupe's status line carries the same words.
+    function setScanPhase(phase, text = '') {
+      if (text) setLoupeStatus(text);
+      const overlay = loupeElement('loupeOverlay');
+      if (!overlay) return;
+      overlay.dataset.phase = phase;
+      const empty = loupeElement('scanEmpty');
+      if (!empty) return;
+      empty.hidden = !liveLoupe.scan || phase === 'live';
+      empty.dataset.phase = phase;
+      const title = loupeElement('scanEmptyTitle');
+      if (title) title.textContent = phase === 'waiting' ? getLocalizedText('scanEmptyTitle', 'Connect your Leica M11') : text;
+      const camera = loupeElement('scanCamera');
+      if (camera) {
+        const connected = liveLoupe.scan && phase === 'live' && liveLoupe.tether?.camera;
+        camera.hidden = !connected;
+        if (connected) camera.textContent = getInterpolatedText('scanCameraChip', { model: connected.model, firmware: connected.firmware }, `${connected.model} · USB`);
+      }
     }
 
     function setLoupeStatus(text) {
@@ -30781,6 +30877,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (liveLoupe.stream) for (const track of liveLoupe.stream.getTracks()) track.stop();
       liveLoupe.stream = null;
       liveLoupe.track = null;
+      releaseTether();
       // No loupe worker outlives the loupe.
       liveLoupe.convert?.dispose();
       liveLoupe.convert = null;
@@ -30840,7 +30937,223 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const ctx = surface.getContext('2d', { willReadFrequently: true });
       ctx.drawImage(video, 0, 0, width, height);
       loupeDebugCounters.grabs++;
-      return ctx.getImageData(0, 0, width, height);
+      const frame = ctx.getImageData(0, 0, width, height);
+      // The camera's own picture, before conversion: how the film is exposed.
+      if (liveLoupe.scan && loupeDebugCounters.grabs % 6 === 0) showScanExposure(exposureVerdict(frame.data));
+      return frame;
+    }
+
+    // ── Camera scan ───────────────────────────────────────────────────────
+    // The loupe as a copy-stand screen (docs/tethered-capture.md): the
+    // tethered camera's live view converted live, one key to shoot, and each
+    // photo imported, converted and cropped as it arrives.
+    function showScanExposure(verdict) {
+      if (verdict === liveLoupe.scanExposure) return;
+      liveLoupe.scanExposure = verdict;
+      const label = loupeElement('scanExposure');
+      if (!label) return;
+      label.dataset.state = verdict;
+      label.textContent = getLocalizedText({ over: 'scanExposureOver', under: 'scanExposureUnder', ok: 'scanExposureOk' }[verdict], verdict);
+      label.hidden = !verdict;
+    }
+
+    function applyScanMode() {
+      const overlay = loupeElement('loupeOverlay');
+      if (!overlay) return;
+      const scan = liveLoupe.scan;
+      overlay.dataset.mode = scan ? 'scan' : 'loupe';
+      for (const [id, loupeKey, scanKey] of [['loupeTitle', 'loupeTitle', 'scanTitle'], ['loupeCloseBtn', 'loupeClose', 'scanFinish'], ['loupeCaptureLabel', 'loupeCapture', 'scanShoot']]) {
+        const element = loupeElement(id);
+        if (!element) continue;
+        element.dataset.i18n = scan ? scanKey : loupeKey;
+        element.textContent = getLocalizedText(element.dataset.i18n, element.textContent);
+      }
+      loupeElement('scanStrip').hidden = !scan;
+      loupeElement('scanSettings').hidden = !scan;
+      loupeElement('scanKey').hidden = !scan;
+      if (!scan) {
+        loupeElement('scanExposure').hidden = true;
+        loupeElement('scanEmpty').hidden = true;
+        loupeElement('scanCamera').hidden = true;
+        delete overlay.dataset.phase;
+        liveLoupe.scanExposure = '';
+        liveLoupe.scanPending = [];
+      }
+      clearInterval(liveLoupe.scanTimer);
+      liveLoupe.scanTimer = scan ? setInterval(refreshScanStrip, 500) : null;
+      if (scan) refreshScanStrip();
+    }
+
+    // ISO, shutter speed and exposure compensation, read from the camera and
+    // set on it: the camera stays the one place they live, so its dials and
+    // these menus never disagree for longer than a refresh.
+    async function loadScanSettings() {
+      const tether = liveLoupe.tether;
+      if (!liveLoupe.scan || !tether) return;
+      let settings;
+      try {
+        settings = await window.__TAURI__.core.invoke('tether_settings');
+      } catch (error) {
+        console.warn('Camera settings failed:', error);
+        return;
+      }
+      if (liveLoupe.tether !== tether) return;
+      const automatic = getLocalizedText('scanAuto', 'Auto');
+      const fill = (id, setting, choices, label) => {
+        const select = loupeElement(id);
+        // An open menu is the user's: do not rebuild it under the pointer.
+        if (!select || document.activeElement === select) return;
+        select.disabled = !setting?.settable;
+        if (!setting) { select.replaceChildren(); return; }
+        const values = choices.includes(setting.value) ? choices : [setting.value, ...choices];
+        const key = values.join(',');
+        if (select.dataset.values !== key) {
+          select.replaceChildren(...values.map((value) => {
+            const option = document.createElement('option');
+            option.value = String(value);
+            option.textContent = label(value) ?? automatic;
+            return option;
+          }));
+          select.dataset.values = key;
+        }
+        select.value = String(setting.value);
+      };
+      fill('scanShutter', settings.shutter, [SHUTTER_AUTO, ...shutterChoices()], shutterLabel);
+      fill('scanIso', settings.iso, settings.iso?.options ?? [], (value) => (value ? String(value) : null));
+      fill('scanCompensation', settings.compensation, settings.compensation?.options ?? [], compensationLabel);
+    }
+
+    async function changeScanSetting(select) {
+      if (!liveLoupe.tether) return;
+      try {
+        await window.__TAURI__.core.invoke('tether_set', { name: select.dataset.setting, value: Number(select.value) });
+      } catch (error) {
+        console.warn('Camera setting refused:', error);
+        showToast(getLocalizedText('scanSettingRefused', 'The camera did not take this setting.'));
+      }
+      select.blur();
+      await loadScanSettings();
+    }
+
+    // This sitting's photos, the newest first, with the thumbnails their
+    // conversion publishes; a shot still on its way from the camera is a
+    // placeholder ahead of them.
+    const SCAN_PENDING_MS = 90000;
+    function refreshScanStrip() {
+      // Every three seconds the camera's own settings are read again (its dials may have moved).
+      if (++liveLoupe.scanTicks % 6 === 0) void loadScanSettings();
+      const items = liveLoupe.scanItems.filter((item) => state.fileQueue.includes(item)).reverse();
+      const now = Date.now();
+      liveLoupe.scanPending = liveLoupe.scanPending.filter((taken) => now - taken < SCAN_PENDING_MS);
+      const pending = liveLoupe.scanPending.length;
+      loupeElement('scanCount').textContent = getInterpolatedText('scanCount', { count: String(items.length) }, `${items.length} taken`);
+      loupeElement('scanRailNote').hidden = items.length + pending > 0;
+      const folder = loupeElement('scanFolder');
+      const folderName = hotFolder ? hotFolder.path.split(/[\\/]/).filter(Boolean).pop() || hotFolder.path : '';
+      folder.parentElement.hidden = !folderName;
+      folder.textContent = getInterpolatedText('scanFolder', { folder: folderName }, `Saved to “${folderName}”`);
+      folder.title = hotFolder?.path ?? '';
+      const frames = loupeElement('scanFrames');
+      const removeLabel = getLocalizedText('scanRemove', 'Discard this shot (moves the file to the Trash)');
+      const openLabel = getLocalizedText('scanOpenLast', 'Open this photo in the editor');
+      const waiting = getLocalizedText('scanArriving', 'On its way…');
+      const total = pending + items.length;
+      while (frames.children.length > total) frames.lastChild.remove();
+      while (frames.children.length < total) {
+        const frame = document.createElement('div');
+        frame.className = 'scan-frame';
+        frame.innerHTML = '<button type="button" class="scan-open"><img alt=""><span></span></button><button type="button" class="scan-remove">×</button>';
+        frame.firstChild.addEventListener('click', () => {
+          const item = frame.scanItem;
+          if (!item || !state.fileQueue.includes(item)) return;
+          closeLoupe();
+          void switchToFile(state.fileQueue.indexOf(item));
+        });
+        frame.lastChild.addEventListener('click', () => { void discardScanItem(frame.scanItem); });
+        frames.append(frame);
+      }
+      for (let index = 0; index < total; index++) {
+        const frame = frames.children[index];
+        const item = index < pending ? null : items[index - pending];
+        frame.scanItem = item;
+        const [open, remove] = frame.children;
+        const [image, name] = open.children;
+        frame.dataset.state = !item ? 'pending' : item.thumbnail ? 'ready' : 'converting';
+        open.disabled = !item;
+        remove.hidden = !item;
+        name.textContent = item ? item.file.name : waiting;
+        open.title = item ? openLabel : '';
+        image.alt = item ? item.file.name : '';
+        remove.title = removeLabel;
+        remove.setAttribute('aria-label', item ? `${removeLabel}: ${item.file.name}` : removeLabel);
+        if (item?.thumbnail) { if (image.getAttribute('src') !== item.thumbnail) image.src = item.thumbnail; }
+        else if (image.hasAttribute('src')) image.removeAttribute('src');
+      }
+    }
+
+    // A shot the user discards: its file goes to the Trash (it can be put
+    // back from there) and the photo leaves the list.
+    let scanDiscarding = false;
+    async function discardScanItem(item) {
+      if (scanDiscarding || !item || !state.fileQueue.includes(item)) return;
+      scanDiscarding = true;
+      try {
+        const path = hotFolderPaths.get(item.file);
+        if (path) await window.__TAURI__.core.invoke('tether_trash', { path });
+        if (!await removeQueueItem(item)) throw new Error('the photo could not be removed from the list');
+        liveLoupe.scanItems = liveLoupe.scanItems.filter((entry) => entry !== item);
+        showToast(getInterpolatedText('scanRemoved', { name: item.file.name }, `${item.file.name} moved to the Trash`));
+      } catch (error) {
+        console.warn('Discarding a shot failed:', error);
+        showToast(getLocalizedText('scanRemoveFailed', 'This shot could not be discarded.'));
+      } finally {
+        scanDiscarding = false;
+        refreshScanStrip();
+      }
+    }
+
+    // Takes one photo out of the list. When it is the one on screen, a
+    // neighbour is opened first; the last photo of a list stays on screen
+    // until the next one arrives (queueHotFolderBatch), as after Clear.
+    async function removeQueueItem(item) {
+      if (isDesktopBatchExportLocked()) return false;
+      let index = state.fileQueue.indexOf(item);
+      if (index < 0) return false;
+      if (item.file === state.loadedFile) {
+        const other = state.fileQueue[index + 1] ?? state.fileQueue[index - 1];
+        if (other) {
+          await switchToFile(state.fileQueue.indexOf(other));
+          if (item.file === state.loadedFile) return false;
+        }
+      }
+      index = state.fileQueue.indexOf(item);
+      if (index < 0) return false;
+      state.fileQueue.splice(index, 1);
+      state.currentFileIndex = state.fileQueue.findIndex((entry) => entry.file === state.loadedFile);
+      updateFileListUI();
+      syncBatchUIState({ reason: 'removeQueueItem' });
+      updateExportButtons();
+      return true;
+    }
+
+    async function openScan() {
+      if (!hasPlatformCapability('tether')) return;
+      liveLoupe.scan = true;
+      // Coming back from the editor continues the sitting: its photos stay on the strip.
+      liveLoupe.scanItems = liveLoupe.scanItems.filter((item) => state.fileQueue.includes(item));
+      applyScanMode();
+      await openLoupe(null);
+    }
+
+    // No camera yet: the scan waits on this screen and starts when one is plugged in.
+    async function waitForTetheredCamera(generation) {
+      const overlay = loupeElement('loupeOverlay');
+      const current = () => liveLoupe.generation === generation && liveLoupe.scan && !overlay.hidden;
+      const unlisten = await window.__TAURI__.event.listen('tether-cameras', ({ payload }) => {
+        if (!current()) { unlisten(); return; }
+        if (payload.some((camera) => camera.supported)) { unlisten(); void openLoupe(null); }
+      });
+      if (!current()) unlisten();
     }
 
     // Converts in the loupe's own worker (not the editor's preview worker,
@@ -30997,22 +31310,27 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
     async function populateLoupeCameras() {
       const select = loupeElement('loupeCameraSelect');
-      if (!select || !navigator.mediaDevices?.enumerateDevices) return;
+      if (!select) return;
       let devices = [];
       try {
-        devices = (await navigator.mediaDevices.enumerateDevices()).filter((device) => device.kind === 'videoinput');
+        devices = navigator.mediaDevices?.enumerateDevices ? (await navigator.mediaDevices.enumerateDevices()).filter((device) => device.kind === 'videoinput') : [];
       } catch (error) {
         console.warn('Loupe camera list failed:', error);
       }
-      const current = liveLoupe.track?.getSettings?.().deviceId || '';
-      select.replaceChildren(...devices.map((device, index) => {
+      const tethered = await tetheredCameras();
+      const current = liveLoupe.tether ? TETHER_PREFIX + liveLoupe.tether.id : liveLoupe.track?.getSettings?.().deviceId || '';
+      const options = [
+        ...tethered.map((camera) => ({ value: TETHER_PREFIX + camera.id, label: getInterpolatedText('loupeTetherLabel', { name: camera.name }, `${camera.name} · USB`) })),
+        ...devices.map((device, index) => ({ value: device.deviceId, label: device.label || getInterpolatedText('loupeCameraLabel', { index: String(index + 1) }, `Camera ${index + 1}`) }))
+      ];
+      select.replaceChildren(...options.map(({ value, label }) => {
         const option = document.createElement('option');
-        option.value = device.deviceId;
-        option.textContent = device.label || getInterpolatedText('loupeCameraLabel', { index: String(index + 1) }, `Camera ${index + 1}`);
-        option.selected = device.deviceId === current;
+        option.value = value;
+        option.textContent = label;
+        option.selected = value === current;
         return option;
       }));
-      select.disabled = devices.length < 2;
+      select.disabled = options.length < 2;
     }
 
     function configureLoupeTrackControls() {
@@ -31064,13 +31382,35 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       overlay.dataset.frames = '0';
       liveLoupe.frames = 0;
       setLoupeStatus(getLocalizedText('loupeStarting', 'Starting camera…'));
+      // A camera on USB that the app can drive comes first: it was plugged in for this.
+      if (deviceId === null) {
+        const [tethered] = await tetheredCameras();
+        if (!isCurrent()) return;
+        if (tethered) deviceId = TETHER_PREFIX + tethered.id;
+        else if (liveLoupe.scan) {
+          setScanPhase('waiting', getLocalizedText('scanWaiting', 'Waiting for the camera…'));
+          void waitForTetheredCamera(generation);
+          return;
+        }
+      }
       const video = deviceId
         ? { deviceId: { exact: deviceId } }
         : { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } };
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video, audio: false });
+        let stream;
+        if (isTetherDevice(deviceId)) {
+          stream = await openTetherStream(deviceId.slice(TETHER_PREFIX.length), isCurrent);
+          if (!stream) {
+            if (isCurrent()) await populateLoupeCameras();
+            return;
+          }
+        } else {
+          if (!navigator.mediaDevices?.getUserMedia) throw new DOMException('No camera', 'NotFoundError');
+          stream = await navigator.mediaDevices.getUserMedia({ video, audio: false });
+        }
         if (!isCurrent()) {
           for (const track of stream.getTracks()) track.stop();
+          releaseTether();
           return;
         }
         liveLoupe.stream = stream;
@@ -31099,6 +31439,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (!loupeWorkerFailed) liveLoupe.convert = createConversionWorkerClient();
       loupeElement('loupeCaptureBtn').disabled = false;
       loupeElement('loupeCloseBtn')?.focus();
+      if (liveLoupe.scan) setScanPhase('live');
       startLoupeFrames();
     }
 
@@ -31107,6 +31448,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (!overlay || overlay.hidden) return;
       stopLoupeStream();
       overlay.hidden = true;
+      if (liveLoupe.scan) {
+        liveLoupe.scan = false;
+        applyScanMode();
+      }
       document.getElementById('studioLoupe')?.focus();
       // Captures made before any photo was open behave like added files.
       if (!state.originalImageData && state.fileQueue.length > 0) {
@@ -31121,6 +31466,21 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       liveLoupe.capturing = true;
       const button = loupeElement('loupeCaptureBtn');
       button.disabled = true;
+      // A camera on USB takes the picture itself: its RAW arrives through the watch folder.
+      if (liveLoupe.tether) {
+        try {
+          await window.__TAURI__.core.invoke('tether_capture');
+          if (liveLoupe.scan) { liveLoupe.scanPending.push(Date.now()); refreshScanStrip(); }
+          else showToast(getLocalizedText('loupeTetherShot', 'Shot taken. The photo is on its way…'));
+        } catch (error) {
+          console.warn('Tethered capture failed:', error);
+          showToast(getLocalizedText(tetherErrorKey(error), 'The camera could not take the picture.'));
+        } finally {
+          liveLoupe.capturing = false;
+          button.disabled = !liveLoupe.running;
+        }
+        return;
+      }
       try {
         let blob = null;
         // ImageCapture returns the sensor's still resolution where supported;
@@ -31155,6 +31515,54 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     loupeElement('loupeCloseBtn')?.addEventListener('click', closeLoupe);
+    // Camera scan: Space shoots, so the hands stay on the film holder.
+    document.addEventListener('keydown', (event) => {
+      if (!liveLoupe.scan || loupeElement('loupeOverlay')?.hidden || event.code !== 'Space' || event.repeat) return;
+      if (event.target instanceof Element && event.target.closest('input, select, textarea, [contenteditable]')) return;
+      event.preventDefault();
+      void captureLoupeFrame();
+    });
+    for (const id of ['scanShutter', 'scanIso', 'scanCompensation']) {
+      loupeElement(id)?.addEventListener('change', (event) => { void changeScanSetting(event.target); });
+    }
+    // Another folder for the photos: the camera is connected again with it.
+    loupeElement('scanFolderChange')?.addEventListener('click', async () => {
+      if (!liveLoupe.scan) return;
+      const previous = hotFolder?.path;
+      stopLoupeStream();
+      await stopHotFolder();
+      await startHotFolder({ pick: true });
+      if (!hotFolder && previous) await startHotFolder();
+      if (liveLoupe.scan && !loupeElement('loupeOverlay').hidden) void openLoupe(null);
+    });
+    loupeElement('scanRetry')?.addEventListener('click', () => { if (liveLoupe.scan) void openLoupe(null); });
+    // Camera scan's entries (docs/tethered-capture.md): the welcome screen and
+    // the menu always offer it where the shell can drive a camera, and say
+    // which cameras; the header shows it while such a camera is plugged in.
+    queueMicrotask(() => {
+      if (!hasPlatformCapability('tether')) return;
+      const { invoke } = window.__TAURI__.core;
+      for (const id of ['uploadScanBtn', 'studioMenuScan']) {
+        const entry = document.getElementById(id);
+        if (!entry) continue;
+        entry.hidden = false;
+        entry.addEventListener('click', () => {
+          const menu = document.getElementById('studioMenu');
+          if (menu) menu.open = false;
+          void openScan();
+        });
+      }
+      const header = document.getElementById('studioScan');
+      const plugged = (cameras) => { if (header) header.hidden = !cameras.some((camera) => camera.supported); };
+      void window.__TAURI__.event.listen('tether-cameras', ({ payload }) => plugged(payload));
+      void invoke('tether_cameras').then(plugged).catch((error) => console.warn('Tethered camera list failed:', error));
+      // A photo the camera took but could not hand over.
+      void window.__TAURI__.event.listen('tether-error', ({ payload }) => {
+        console.warn('Tethered transfer failed:', payload);
+        liveLoupe.scanPending.shift();
+        showToast(getLocalizedText('scanTransferFailed', 'The photo could not be transferred. It is still on the camera’s card.'), 6000);
+      });
+    });
     loupeElement('loupeCaptureBtn')?.addEventListener('click', () => { void captureLoupeFrame(); });
     loupeElement('loupeCameraSelect')?.addEventListener('change', (event) => { void openLoupe(event.target.value || null); });
     loupeElement('loupeZoom')?.addEventListener('input', (event) => { void applyLoupeConstraint({ zoom: Number(event.target.value) }); });
@@ -31405,10 +31813,14 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     queueMicrotask(() => { void displayProxyStore?.load(); });
     queueMicrotask(mountHotFolderUI);
     let hotFolder = null, hotFolderUnlisten = null, hotFolderEpoch = 0, hotFolderFiles = [], hotFolderQuiet;
+    // The folder of the last watch, which the shell remembers across launches: watched again without the picker.
+    let hotFolderRemembered = null;
     let hotFolderImports = Promise.resolve();
     // Arrivals read but not yet queued, and the timer that queues them as one
     // batch (#247): the sampler emits a whole folder scan within milliseconds.
     let hotFolderBatch = [], hotFolderBatchTimer = null;
+    // Where each arrival lives in the watched folder (a discarded scan is moved to the Trash from there).
+    const hotFolderPaths = new WeakMap();
     const HOT_FOLDER_BATCH_MS = 1000;
     async function stopHotFolder() {
       hotFolderEpoch++; hotFolder = null; hotFolderFiles = []; clearTimeout(hotFolderQuiet);
@@ -31423,7 +31835,15 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (!button) return;
       const existing = document.getElementById('studioWatchExisting');
       if (existing) existing.disabled = Boolean(hotFolder);
-      button.textContent = hotFolder ? getInterpolatedText('watchFolderActive', { folder: hotFolder.path.split(/[\\/]/).pop() }, `Watching ${hotFolder.path} · Stop`) : getLocalizedText('watchFolder', 'Watch a folder…');
+      const folderName = (path) => path.split(/[\\/]/).filter(Boolean).pop() || path;
+      button.textContent = hotFolder ? getInterpolatedText('watchFolderActive', { folder: folderName(hotFolder.path) }, `Watching ${hotFolder.path} · Stop`)
+        : hotFolderRemembered ? getInterpolatedText('watchFolderResume', { folder: folderName(hotFolderRemembered) }, `Watch “${folderName(hotFolderRemembered)}”`)
+        : getLocalizedText('watchFolder', 'Watch a folder…');
+      const change = document.getElementById('studioWatchChange');
+      if (change) {
+        change.hidden = Boolean(hotFolder) || !hotFolderRemembered;
+        change.textContent = getLocalizedText('watchFolderChange', 'Another folder…');
+      }
     }
     // One stable file of the watched folder: read it (unless its name and
     // size are already queued or read for this batch) and hold it for the
@@ -31434,9 +31854,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         if (hotFolderHas(payload.name, payload.size)) return;
         const file = await readDesktopImportFile(payload, window.__TAURI__.core.invoke, () => epoch === hotFolderEpoch);
         if (epoch !== hotFolderEpoch || hotFolderHas(file.name, file.size)) return;
+        hotFolderPaths.set(file, payload.path);
         hotFolderBatch.push({ file, session: payload.session });
         clearTimeout(hotFolderBatchTimer);
-        hotFolderBatchTimer = setTimeout(() => queueHotFolderBatch(epoch), HOT_FOLDER_BATCH_MS);
+        // A tethered camera's photo comes alone and whole: no batch to wait for.
+        hotFolderBatchTimer = setTimeout(() => queueHotFolderBatch(epoch), payload.tethered ? 0 : HOT_FOLDER_BATCH_MS);
       }).catch(error => { console.warn('Hot folder import failed:', error); showToast(getLocalizedText('watchFolderFailed', 'Could not import the new file.')); });
     }
 
@@ -31462,10 +31884,16 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           .filter(file => !state.fileQueue.some(item => item.file.name === file.name && item.file.size === file.size));
         const imported = files.length ? addFilesToQueue(files, { importId: `watch:${batch[0].session}`, automaticRoll: false }) : [];
         if (!imported.length) return;
+        if (liveLoupe.scan) {
+          liveLoupe.scanItems.push(...imported);
+          liveLoupe.scanPending.splice(0, imported.length);
+          refreshScanStrip();
+        }
         showToast(imported.length === 1
           ? getInterpolatedText('watchFolderArrival', { name: imported[0].file.name }, `Imported ${imported[0].file.name}`)
           : getInterpolatedText('watchFolderArrivals', { count: String(imported.length) }, `Imported ${imported.length} files`));
-        if (!state.originalImageData) {
+        // Nothing open, or what is open was taken off the list (a discarded scan): open the arrival.
+        if (!state.originalImageData || (state.loadedFile && !state.fileQueue.some((item) => item.file === state.loadedFile))) {
           await switchToFile(state.fileQueue.indexOf(imported[0]));
           noteHotFolderRecipe(imported[0]);
         }
@@ -31502,21 +31930,36 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const existing = document.createElement('label'); existing.className = 'studio-watch-existing';
       existing.innerHTML = '<input type="checkbox" id="studioWatchExisting"><span data-i18n="watchFolderExisting"></span>';
       existing.querySelector('span').textContent = getLocalizedText('watchFolderExisting', 'Import existing files too');
-      const controls = document.createElement('div'); controls.id = 'studioWatchControls'; controls.append(button, existing);
+      const change = document.createElement('button'); change.type = 'button'; change.id = 'studioWatchChange'; change.hidden = true;
+      change.addEventListener('click', () => { void startHotFolder({ pick: true }); });
+      const controls = document.createElement('div'); controls.id = 'studioWatchControls'; controls.append(button, change, existing);
+      void window.__TAURI__.core.invoke('remembered_import_folder').then((path) => { hotFolderRemembered = path || null; updateHotFolderUI(); }).catch(() => {});
       document.getElementById(state.originalImageData ? 'studioBatchActions' : 'uploadPlaceholder')?.append(controls); updateHotFolderUI();
       button.addEventListener('click', async () => {
         if (hotFolder) { await stopHotFolder(); return; }
-        button.disabled = true;
-        warmImportPipeline();
-        try {
-          const epoch = ++hotFolderEpoch;
-          hotFolderUnlisten = await window.__TAURI__.event.listen('import-folder-file', ({ payload }) => receiveHotFolderArrival(payload, epoch));
-          hotFolder = await window.__TAURI__.core.invoke('watch_import_folder', { importExisting: document.getElementById('studioWatchExisting').checked });
-          if (!hotFolder && hotFolderUnlisten) { hotFolderUnlisten(); hotFolderUnlisten = null; }
-          updateHotFolderUI();
-        } catch (error) { await stopHotFolder(); console.warn('Folder watch failed:', error); showToast(getLocalizedText('watchFolderFailed', 'Could not watch this folder.')); }
-        finally { button.disabled = false; }
+        await startHotFolder();
       });
+    }
+    // Asks for a folder and watches it; `hotFolder` stays null when the picker
+    // is cancelled. Also the way a tethered camera gets the folder its photos
+    // are written to (openTetherStream).
+    async function startHotFolder({ pick = false } = {}) {
+      if (hotFolder) return;
+      const button = document.getElementById('studioWatchFolder');
+      if (button) button.disabled = true;
+      warmImportPipeline();
+      try {
+        const epoch = ++hotFolderEpoch;
+        hotFolderUnlisten = await window.__TAURI__.event.listen('import-folder-file', ({ payload }) => receiveHotFolderArrival(payload, epoch));
+        const importExisting = Boolean(document.getElementById('studioWatchExisting')?.checked);
+        // The remembered folder first; the picker when there is none, it is gone, or another one is wanted.
+        if (!pick) hotFolder = await window.__TAURI__.core.invoke('watch_remembered_import_folder', { importExisting });
+        if (!hotFolder) hotFolder = await window.__TAURI__.core.invoke('watch_import_folder', { importExisting });
+        if (hotFolder) hotFolderRemembered = hotFolder.path;
+        if (!hotFolder && hotFolderUnlisten) { hotFolderUnlisten(); hotFolderUnlisten = null; }
+        updateHotFolderUI();
+      } catch (error) { await stopHotFolder(); console.warn('Folder watch failed:', error); showToast(getLocalizedText('watchFolderFailed', 'Could not watch this folder.')); }
+      finally { if (button) button.disabled = false; }
     }
     const learnedRecords = new Map();
     let learningEpoch = 0;
@@ -32920,6 +33363,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           });
         },
         onLoupe: () => { void openLoupe(); },
+        onScan: () => { void openScan(); },
         onSaveProject: () => { void saveProject(); },
         onOpenProject: () => { const input = document.getElementById('projectInput'); if (input) { input.value = ''; input.click(); } },
         onRestoreProject: (options) => { restoreRecoveredProject(options); }

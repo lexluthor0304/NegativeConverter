@@ -304,7 +304,7 @@ function watchFixture({ open = true } = {}) {
   Object.assign(f.context, {
     mobileRecovery: null,
     hotFolder: { session: 'S', path: '/watched' }, hotFolderEpoch: 1, hotFolderImports: Promise.resolve(), hotFolderFiles: [],
-    hotFolderQuiet: null, hotFolderBatch: [], hotFolderBatchTimer: null, HOT_FOLDER_BATCH_MS: 1000,
+    hotFolderQuiet: null, hotFolderBatch: [], hotFolderBatchTimer: null, hotFolderPaths: new Map(), liveLoupe: { scan: false, scanItems: [], scanPending: [] }, refreshScanStrip() {}, HOT_FOLDER_BATCH_MS: 1000,
     // The desktop side: the watched folder's files, read in checked chunks.
     window: { __TAURI__: { core: { invoke: async (command, args) => {
       assert.equal(command, 'read_import_file');

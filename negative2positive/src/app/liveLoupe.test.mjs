@@ -74,7 +74,7 @@ function harness() {
     WORKER_UNAVAILABLE: 'WORKER_UNAVAILABLE', WORKER_CRASHED: 'WORKER_CRASHED', WORKER_TIMEOUT: 'WORKER_TIMEOUT',
   });
   vm.runInContext(declarations + '\n'
-    + ['loupeElement', 'setLoupeStatus', 'stopLoupeStream', 'loupeRecipe', 'grabLoupeFrame', 'convertLoupeFrame', 'startLoupeFrames'].map(functionSource).join('\n')
+    + ['loupeElement', 'setLoupeStatus', 'releaseTether', 'stopLoupeStream', 'loupeRecipe', 'grabLoupeFrame', 'convertLoupeFrame', 'startLoupeFrames'].map(functionSource).join('\n')
     + '\nglobalThis.peek = () => ({ liveLoupe, loupeDebugCounters, loupeWorkerFailed });', context);
   // A worker client whose replies the test releases one by one.
   const requests = [];

@@ -65,6 +65,16 @@ libc = "0.2"
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_System_SystemInformation"] }
 
+# Tethered capture (docs/tethered-capture.md): ImageCaptureCore carries the
+# PTP transactions to a camera on USB. objc2, objc2-foundation and block2 are
+# already in Cargo.lock at these versions (tauri's own dependencies);
+# objc2-image-capture-core is the same generated family at the same version.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+block2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSData", "NSError", "NSString", "NSArray", "NSObject", "NSThread", "NSFileManager", "NSURL"] }
+objc2-image-capture-core = { version = "0.3", features = ["ICDeviceBrowser", "ICDevice", "ICCameraDevice", "ICCameraItem", "ICCameraFile", "ImageCaptureConstants", "block2"] }
+
 # WebKitGTK's memory-pressure settings before the first webview (#282): run()
 # sets wry's process-wide default through the wry instance Tauri builds the
 # WebContext with. tauri-runtime-wry re-exports it and always unifies with

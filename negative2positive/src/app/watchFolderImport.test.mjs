@@ -26,7 +26,7 @@ function fixture({ open = true } = {}) {
   const context = vm.createContext({
     state, console,
     hotFolder: { session: 'S' }, hotFolderEpoch: 1, hotFolderImports: Promise.resolve(), hotFolderFiles: [], hotFolderQuiet: null,
-    hotFolderBatch: [], hotFolderBatchTimer: null, HOT_FOLDER_BATCH_MS: 1000,
+    hotFolderBatch: [], hotFolderBatchTimer: null, hotFolderPaths: new Map(), liveLoupe: { scan: false, scanItems: [], scanPending: [] }, refreshScanStrip() {}, HOT_FOLDER_BATCH_MS: 1000,
     automaticRollPendingItems: new Set(),
     window: { __TAURI__: { core: { invoke: () => { throw new Error('reads go through readDesktopImportFile'); } } } },
     readDesktopImportFile: async payload => { reads.push(payload.name); return { name: payload.name, size: payload.size }; },

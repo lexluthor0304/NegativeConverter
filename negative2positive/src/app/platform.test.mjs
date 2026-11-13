@@ -17,6 +17,11 @@ for (const search of ['', '?shell=desktop', '?shell=web']) {
 assert.equal((await resolvePlatform({ invoke: async () => desktop, navigator: { maxTouchPoints: 10 }, search: '' })).mobile, false);
 assert.equal(normalizePlatform({ ...ios, mobile: false, capabilities: desktop.capabilities }).capabilities.updater, false);
 assert.equal(normalizePlatform({ ...ios, capabilities: desktop.capabilities }).capabilities.watchFolder, false);
+// A tethered camera is the shell's to offer, and it needs the watch folder its photos land in.
+assert.equal(normalizePlatform(desktop).capabilities.tether, false);
+assert.equal(normalizePlatform({ ...desktop, capabilities: { ...desktop.capabilities, tether: true } }).capabilities.tether, true);
+assert.equal(normalizePlatform({ ...desktop, capabilities: { tether: true } }).capabilities.tether, false);
+assert.equal(normalizePlatform({ ...ios, capabilities: { ...desktop.capabilities, tether: true } }).capabilities.tether, false);
 assert.equal(normalizePlatform({ ...ios, capabilities: { sourceRecovery: true } }).capabilities.sourceRecovery, true);
 assert.equal(normalizePlatform({ ...desktop, capabilities: { sourceRecovery: true } }).capabilities.sourceRecovery, false);
 assert.ok(!simulatedPlatform('?shell=mobile').capabilities.sourceRecovery, 'layout preview has no native source store');
