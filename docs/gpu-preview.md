@@ -9,7 +9,9 @@ tick. With a WebGL2 context the Studio now draws such a tick with one fragment s
 on the display-size negative, and converts only the frame that settles it.
 
 The CPU engine stays the reference and the only producer of settled and exported
-pixels. A GPU frame is display-only.
+pixels. A GPU frame is display-only. (One exception since 2026-11-13: focus recovery,
+a stage after the conversion, runs on the GPU for exports too and has no CPU
+path; `focus-recovery.md` says what keeps it reproducible.)
 
 ## Pieces
 
