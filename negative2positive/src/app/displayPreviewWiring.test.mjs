@@ -10,6 +10,7 @@ import { previewTierMaxPixels } from './previewTier.js';
 import { viewportRefreshBranch } from './fullResolutionRouting.js';
 import { isLargeImage } from './imageMemoryBudget.js';
 import { displaySessionStubs, DISPLAY_SESSION_HELPERS } from './displaySessionHarness.mjs';
+import { INERT_FOCUS_STAGE } from './focusStage.js';
 
 // #248 parts 2-4 in main.js (extracted with vm): the display target and its
 // hysteresis, no resample in the input path, full-resolution results with their
@@ -54,7 +55,7 @@ function fixture({ sourceSize = { width: 1200, height: 800 }, container = { widt
     fullResolutionPromise: null, repairStrokes: [],
     dustRemoval: { enabled: false, processing: false, revision: 1 },
   };
-  const context = vm.createContext({
+  const context = vm.createContext({ focusStage: INERT_FOCUS_STAGE,
     // #249: no photo here takes a display form.
     ...displaySessionStubs(),
     state, window: { devicePixelRatio: dpr }, console,

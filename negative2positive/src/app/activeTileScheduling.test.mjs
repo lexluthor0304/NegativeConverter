@@ -9,6 +9,7 @@ import { updateDisplayPreviewRect } from './displayPreview.js';
 import { createRepairStamps } from './repairReuse.js';
 import { TILE as AI_TILE, CONTEXT as AI_CONTEXT } from './aiInpaint.js';
 import { createHarness, makeBase, settle } from './geometryTestHarness.mjs';
+import { INERT_FOCUS_STAGE } from './focusStage.js';
 
 v8.setFlagsFromString('--expose-gc');
 const gc = vm.runInNewContext('gc');
@@ -59,7 +60,7 @@ function fixture() {
   let nextHandle = 1;
   const counts = { adjusted: 0, sampled: 0, encodes: 0, canvases: 0, rows: 0, keys: 0 };
   const puts = [];
-  const context = vm.createContext({
+  const context = vm.createContext({ focusStage: INERT_FOCUS_STAGE,
     state, loadGeneration: 1, exactSettingsKey, ImageData: TestImageData, Uint8ClampedArray, Uint8Array,
     studioThumbnailInputs: new WeakMap(), rasterIdentities: new WeakMap(), nextRasterIdentity: 1, convertedPixelsRevision: 0,
     STUDIO_THUMBNAIL_SETTLE_MS: 250,
@@ -290,7 +291,7 @@ function dustFixture() {
     const thumb = createStudioThumbnail(image, 144);
     return new TestImageData(thumb.data.map(value => value + state.cyan), thumb.width, thumb.height);
   };
-  const context = vm.createContext({
+  const context = vm.createContext({ focusStage: INERT_FOCUS_STAGE,
     state, loadGeneration: 1, exactSettingsKey, ImageData: TestImageData, Uint8ClampedArray, Uint8Array, Uint16Array,
     studioThumbnailInputs: new WeakMap(), rasterIdentities: new WeakMap(), nextRasterIdentity: 1, convertedPixelsRevision: 0,
     STUDIO_THUMBNAIL_SETTLE_MS: 250, studioThumbnailUpdateTimer: 0, studioThumbnailUpdateFrame: 0, thumbnailCanvas: null,

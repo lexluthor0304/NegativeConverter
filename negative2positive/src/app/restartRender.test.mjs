@@ -10,6 +10,7 @@ import { applyLearnedDefaults, learnedDefaultsKey, snapLearnedDefaults } from '.
 import { decideRollFilmType, mergeRollDecision, ownFilmTypeVerdict, rollDecisionFrame, rollFilmTypeTarget, ROLL_MONOCHROME } from './rollFilmType.js';
 import { applyAutomaticFilmType, filmInterpretationChanged, sanitizeFilmTypeOverride } from './filmTypeOverride.js';
 import { releaseOwnedPlanes } from './planeRelease.js';
+import { INERT_FOCUS_STAGE } from './focusStage.js';
 
 // Exercise the actual browser lifecycle functions without loading a DOM,
 // OpenCV, or ONNX. Only their UI and expensive conversion dependencies are
@@ -40,7 +41,7 @@ function fixture({ repairs = true, locked = false, large = false } = {}) {
   const applied = [];
   const clearedTimers = [];
   const noop = () => {};
-  const context = vm.createContext({
+  const context = vm.createContext({ focusStage: INERT_FOCUS_STAGE,
     // #249: no photo here takes a display form.
     ...displaySessionStubs(),
     // #254 stand-ins: the live dodge frame note, the dust tint, the overlays.
@@ -627,7 +628,7 @@ function prepareFixture({ itemSettings = null, detectFrame = true, learned = 0 }
   const overlay = { hides: 0, shows: 0, show: async () => { overlay.shows++; }, updateProgress() {}, hide() { overlay.hides++; } };
   const compareButton = { detecting: null };
   const noop = () => {};
-  const context = vm.createContext({
+  const context = vm.createContext({ focusStage: INERT_FOCUS_STAGE,
     // #249: no photo here takes a display form.
     ...displaySessionStubs(),
     // #254 stand-ins: the live dodge frame note, the dust tint, the overlays.

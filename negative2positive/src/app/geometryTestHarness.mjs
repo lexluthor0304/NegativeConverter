@@ -6,6 +6,7 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { DISABLED_GPU_PREVIEW_SCHEDULER } from './gpuPreviewScheduler.js';
 import { step3FrameReference } from './displayCanvas.js';
+import { INERT_FOCUS_STAGE } from './focusStage.js';
 
 if (!globalThis.ImageData) {
   globalThis.ImageData = class ImageData {
@@ -147,6 +148,7 @@ export function createHarness(base, { historyBudget = 768 * 1024 * 1024, session
   };
   const pool = createGeometryPool(workers ? { workerFactory: workers, workersSupported: true, size: 2 } : { workersSupported: false, size: 2 });
   const target = {
+    focusStage: INERT_FOCUS_STAGE,   // focus recovery is off in this harness
     state, geometryPool: pool, yieldToEventLoop,
     normalizeAngleDegrees: geometry.normalizeAngleDegrees,
     rotatedDimensions: geometry.rotatedDimensions,

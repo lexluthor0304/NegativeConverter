@@ -13,6 +13,7 @@ import { step3FrameReference } from './displayCanvas.js';
 import { getSprocketFrameLayout } from './sprocketFrame.js';
 import { displayTargetFor, isDisplayTarget, displaySizeServes, displayLevelGeometry, noteDisplayFilter, displayLevelFactor } from './displayPreview.js';
 import { displaySessionStubs, DISPLAY_SESSION_HELPERS } from './displaySessionHarness.mjs';
+import { INERT_FOCUS_STAGE } from './focusStage.js';
 
 // #237 in the app itself: the real routing, restore, viewport, Step-3 and
 // export-barrier functions of main.js (extracted with vm, as
@@ -105,7 +106,7 @@ function fixture({ large = true, repairs = false, strokes = 0, aiBrush = false, 
   const previewRepairs = [];
   // Each test tick is a new frame.
   const timeline = { currentTime: 0 };
-  const context = vm.createContext({
+  const context = vm.createContext({ focusStage: INERT_FOCUS_STAGE,
     // #249: no photo here takes a display form.
     ...displaySessionStubs(),
     // #254 stand-ins: the live dodge frame note, the dust tint, the overlays.

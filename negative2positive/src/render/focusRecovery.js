@@ -322,7 +322,9 @@ export function createFocusRecoverer({ canvas = null } = {}) {
     }
     return { program, uniforms };
   };
-  const programs = { luminance: compile(LUMINANCE), blur: compile(BLUR), ratio: compile(RATIO), multiply: compile(MULTIPLY), apply: compile(APPLY) };
+  // Compiled at the first recovery: asking whether the device can do it costs a context, not five shaders.
+  let programs = null;
+  const ready = () => (programs ||= { luminance: compile(LUMINANCE), blur: compile(BLUR), ratio: compile(RATIO), multiply: compile(MULTIPLY), apply: compile(APPLY) });
   const quad = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, quad);
   gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
@@ -411,6 +413,7 @@ export function createFocusRecoverer({ canvas = null } = {}) {
     const source = sixteen ? frame.__image16.data : new Uint8Array(frame.data.buffer, frame.data.byteOffset, frame.data.byteLength);
     const target = sixteen ? out.__image16.data : new Uint8Array(out.data.buffer, out.data.byteOffset, out.data.byteLength);
     const tiles = focusTiles(width, height);
+    ready();
     for (let i = 0; i < tiles.length; i++) {
       if (i && yieldBetweenTiles) await yieldBetweenTiles();
       if (isCurrent && !isCurrent()) throw new DOMException('Focus recovery superseded', 'AbortError');
@@ -428,7 +431,7 @@ export function createFocusRecoverer({ canvas = null } = {}) {
   function dispose() {
     if (disposed) return;
     disposed = true;
-    for (const { program } of Object.values(programs)) gl.deleteProgram(program);
+    for (const { program } of Object.values(programs || {})) gl.deleteProgram(program);
     gl.deleteBuffer(quad);
     gl.deleteFramebuffer(framebuffer);
     gl.getExtension('WEBGL_lose_context')?.loseContext();
