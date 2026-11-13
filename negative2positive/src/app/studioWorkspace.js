@@ -897,6 +897,7 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
   // Filmstrip rows are reconciled only when the switch target, the current
   // photo, the rendered rows (markRowsChanged) or the language changed.
   let rowsVersion = 0;
+  let dustHinted = false;
   let rowsKey = [];
   let rowWalks = 0;
   let lastFlushWrites = 0;
@@ -1001,6 +1002,13 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
     set(node.studioSyncCrop, 'disabled', Boolean(!ready || busy || state.cropping || isExportLocked() || !otherSelected));
     // One press cleans the open photo and the other selected ones (main.js: toggleDustForSelection).
     if (node.dustQuickBtn) set(node.dustQuickBtn, 'disabled', Boolean(!ready || busy || state.cropping || isExportLocked()));
+    // Once per session, when the first photo is ready, the button blinks (studio-pixel.css).
+    if (node.dustQuickBtn && !dustHinted && !node.dustQuickBtn.disabled) {
+      dustHinted = true;
+      const button = node.dustQuickBtn;
+      button.classList.add('is-hinting');
+      button.addEventListener('animationend', () => button.classList.remove('is-hinting'), { once: true });
+    }
     set(node.studioSyncCrop, 'title', t('syncCropHint'));
     set(node.exportZipBtn, 'textContent', t('exportSelected').replace('{count}', count));
     set(node.exportSingleBtn, 'textContent', t(state.exportFormat === 'dng' ? 'exportCurrentDng' : 'exportCurrent'));

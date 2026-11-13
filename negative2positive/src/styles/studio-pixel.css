@@ -104,6 +104,9 @@ body.studio .loading-film-fill {
 body.studio .loading-overlay.indeterminate .loading-film-fill { animation-timing-function: steps(8, end); }
 body.studio .toast-message { box-shadow: var(--pixel-shadow); transition-timing-function: steps(3, end); }
 @keyframes studio-pixel-enter { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+/* The session's first photo points at one-press dust removal, three blinks. */
+@keyframes studio-dust-hint { 0%, 49% { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-dim); } 50%, 100% { box-shadow: none; } }
+body.studio .dust-quick.is-hinting:not(:disabled):not(.active) { animation: studio-dust-hint 0.8s steps(2, jump-none) 3; }
 @keyframes studio-film-frame { 0%, 32% { background-color: #b69b6d; } 33%, 100% { background-color: #6c5541; } }
 @media (max-width: 600px) {
   body.studio .upload-placeholder { padding: 24px 16px; gap: 12px; }

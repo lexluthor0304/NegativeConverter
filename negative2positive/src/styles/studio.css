@@ -163,6 +163,12 @@ body.studio {
 .studio .preview-toolbar { padding: 10px 0 0; background: transparent; border: 0; box-shadow: none; border-radius: 0; justify-content: center; gap: 7px; flex-wrap: wrap; }
 .studio .toolbar-btn { border: 0; background: transparent; color: var(--text-secondary); font-size: 12px; padding: 7px 9px; box-shadow: none; }
 .studio .toolbar-btn.active { color: var(--accent); background: var(--bg-hover); }
+/* One-press dust removal: the toolbar's one outlined action, filled while it is on. */
+.studio .toolbar-btn.dust-quick { display: inline-flex; align-items: center; gap: 6px; color: var(--accent); border: 1px solid var(--accent-dim); padding: 6px 10px; }
+.studio .toolbar-btn.dust-quick svg { width: 14px; height: 14px; flex-shrink: 0; }
+.studio .toolbar-btn.dust-quick:hover:not(:disabled) { border-color: var(--accent); background: var(--bg-hover); }
+.studio .toolbar-btn.dust-quick.active { background: var(--accent); border-color: var(--accent); color: #211d17; font-weight: 600; }
+.studio .toolbar-btn.dust-quick:disabled { color: var(--text-secondary); border-color: var(--border-light); opacity: 0.5; }
 /* No taller than the buttons (a 16 px icon, 7 px padding): at its own 32 px,
    crop mode's ratio control made the toolbar taller, so the picture shrank
    and moved when crop mode opened (#245). Narrow layouts keep app.css's

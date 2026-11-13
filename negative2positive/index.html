@@ -314,7 +314,12 @@
         </button>
         <button class="toolbar-btn" id="autoFrameBtn" data-i18n="autoFrame">Auto Frame</button>
         <button class="toolbar-btn" id="autoFrameSelectedBtn" data-i18n="autoFrameSelected">Auto Frame Selected</button>
-        <button class="toolbar-btn" id="dustQuickBtn" type="button" data-i18n="dustQuick" data-i18n-title="dustQuickTitle" title="Remove dust from this photo and the other selected photos" aria-pressed="false" disabled>Remove dust</button>
+        <div class="toolbar-separator"></div>
+        <button class="toolbar-btn dust-quick" id="dustQuickBtn" type="button" data-i18n-title="dustQuickTitle" title="Remove dust from this photo and the other selected photos" aria-pressed="false" disabled>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M10 3v5M7.5 5.5h5M17 9v6M14 12h6M8 14v5M5.5 16.5h5"></path></svg>
+          <span data-i18n="dustQuick">Remove dust</span>
+        </button>
+        <div class="toolbar-separator"></div>
         <button class="toolbar-btn" id="beforeAfterBtn" data-i18n="beforeAfter" disabled>Before/After</button>
         <button class="toolbar-btn" id="sprocketPreviewBtn" disabled>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
