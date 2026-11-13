@@ -27,6 +27,7 @@ import { MEMORY_FUNCTIONS, memoryGlobals } from './memoryHarness.mjs';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
+import { INERT_FOCUS_STAGE } from './focusStage.js';
 
 class TestImageData {
   constructor(data, width, height) {
@@ -187,7 +188,7 @@ function createContext({ gainMap = 'on' } = {}) {
       return array;
     }
   });
-  const context = vm.createContext({
+  const context = vm.createContext({ focusStage: INERT_FOCUS_STAGE,
     state, console, Blob, Uint8ClampedArray: CountingUint8ClampedArray, Uint16Array, Promise, Error, Object, Array, Number, Boolean, Math, JSON,
     ImageData: TestImageData,
     // Not a two-stage import's stand-in (#255).

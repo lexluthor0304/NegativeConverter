@@ -57,6 +57,18 @@ proof does not establish the unmeasured performance targets.
   Only getAutoFrameAspectTargets is tested. `inferAutoFrameConfidenceLevel` (:1311, the 0.72/0.55 classifier that round 1 found duplicated three times), `buildDensityAnalysis` (:276) and `scoreDensityRect` (:518) contain no OpenCV references between lines 276-560 and run in plain Node, yet have no tests. main.js:116-130 re-declares DEFAULT_FORMAT_RATIOS/DEFAULT_120_FORMATS/DEFAULT_SCORE_WEIGHTS verb…  
   _Suggested fix:_ Export DEFAULT_FORMAT_RATIOS/DEFAULT_120_FORMATS/DEFAULT_SCORE_WEIGHTS from the analyzer, import them in main.js and the test. Add tests: `inferAutoFrameConfidenceLevel` at 0.72/0.719/0.55/0.549 and with custom thresholds; `buildDensityAnalysis` on a synthetic dark frame inside a…
 
+## Focus recovery
+
+- **medium/memory** — The open photo's recovered frame is not in the memory ledger or the eviction order (2026-11-13)  
+  `negative2positive/src/app/focusStage.js` (`retainedBytes`), `docs/memory-budget.md`  
+  With focus recovery on, the stage keeps a second full-resolution frame beside `processedImageData`: 480 MB at 60 MP in 8 bits, 1.4 GB with its 16-bit plane. It is dropped when the frame, its pixel revision or the strength changes, but pressure does not release it and lane planning does not know a batch frame needs one more plane.  
+  _Suggested fix:_ Register `focusStage.retainedBytes` as a resident, let pressure call `focusStage.reset()` (the display falls back to the repaired frame and the next export recovers again), and add the plane to the per-lane figure when a job's recipe has focus recovery on.
+
+- **low/behaviour** — Undo after a focus change recomputes the frame; history holds only the strength (2026-11-13)  
+  `negative2positive/src/app/main.js` (`restoreSnapshot`, `focusStage.schedule`)  
+  The recovered frame is derived, so a snapshot keeps the slider's value and the stage recovers again after an undo or redo (about two seconds at 60 MP). The display shows the repaired frame until it lands.  
+  _Suggested fix:_ Keep the last two recovered frames by `(source, revision, strength)` when memory allows.
+
 ## Dust removal
 
 - **low/bug** — A short thin line alone on a calm background, on dust's side of the tones, is taken for a fibre and inpainted: on a negative a bright one (a sunlit antenna tip, a short light streak), on a positive a dark one (a twig end or a short wire against the sky)  

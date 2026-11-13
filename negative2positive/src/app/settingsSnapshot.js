@@ -73,6 +73,7 @@ export function deepCopySanitizedSettings(safe, { autoFrameMeta = safe.autoFrame
     frameMetadata: safe.frameMetadata ? { ...safe.frameMetadata } : { frameNumber: '', notes: '' },
     coreSaturation: safe.coreSaturation,
     coreGlow: safe.coreGlow,
+    focusRecovery: safe.focusRecovery || 0,
     coreFade: safe.coreFade,
     coreCurvePrecision: safe.coreCurvePrecision,
     coreUseWebGL: safe.coreUseWebGL,

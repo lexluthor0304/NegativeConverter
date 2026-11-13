@@ -6,6 +6,7 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { displaySessionStubs, DISPLAY_SESSION_HELPERS } from './displaySessionHarness.mjs';
 import { createCpuPreviewRenderer } from './cpuPreviewRenderer.js';
+import { INERT_FOCUS_STAGE } from './focusStage.js';
 
 const source = readFileSync(new URL('./main.js', import.meta.url), 'utf8');
 function functionSource(name) {
@@ -36,7 +37,7 @@ function image(width, height, fill = 0) {
   const state = { currentStep: 2, processedImageData: null, croppedImageData: null, originalImageData: negative,
     sprocketPreviewEnabled: false, exportSprocketHolesEnabled: false };
   const reads = [];
-  const context = vm.createContext({
+  const context = vm.createContext({ focusStage: INERT_FOCUS_STAGE,
     // #249: no photo here takes a display form.
     ...displaySessionStubs(),
     state, ImageData: TestImageData,
@@ -68,7 +69,7 @@ function image(width, height, fill = 0) {
 {
   const state = { processedImageData: null, croppedImageData: null, originalImageData: image(4, 4) };
   const painted = [];
-  const context = vm.createContext({ state, displayNegative: imageData => painted.push(imageData) });
+  const context = vm.createContext({ focusStage: INERT_FOCUS_STAGE, state, displayNegative: imageData => painted.push(imageData) });
   vm.runInContext(functionSource('showNegativeAfterFailedConversion'), context);
   context.showNegativeAfterFailedConversion();
   assert.deepEqual(painted, [state.originalImageData]);
@@ -86,7 +87,7 @@ for (const failure of ['null', 'throw']) {
     conversionSourceImageData: null, conversionPreviewImageData: null, beforeAfterActive: false };
   const painted = [];
   const alerts = [];
-  const context = vm.createContext({
+  const context = vm.createContext({ focusStage: INERT_FOCUS_STAGE,
     // #249: no photo here takes a display form.
     ...displaySessionStubs(),
     state, console: { error: noop }, loadGeneration: 1, coreReprocessGeneration: 0, geometryToken: 0, processNegativeInFlight: null,
@@ -189,7 +190,7 @@ function settleFixture({ width = 1200, height = 900, worker = 'real', gl = false
       return real.workerApplyAdjustments(source, prepared, quality, ...rest);
     }
   };
-  const context = vm.createContext({
+  const context = vm.createContext({ focusStage: INERT_FOCUS_STAGE,
     // #249: no photo here takes a display form.
     ...displaySessionStubs(),
     state, ImageData: TestImageData, Uint8ClampedArray, console,
@@ -396,7 +397,7 @@ function canvasFixture({ sprocket = false, step = 3 } = {}) {
   const full = { width: 6000, height: 4000, name: 'full plane' };
   const state = { currentStep: step, cropping: false, sprocketPreviewEnabled: sprocket, processedImageData: full,
     processedImageDataIsPreview: false, conversionSourceImageData: full, previewSourceImageData: image(1500, 1000) };
-  const context = vm.createContext({
+  const context = vm.createContext({ focusStage: INERT_FOCUS_STAGE,
     // #249: no photo here takes a display form.
     ...displaySessionStubs(),
     state, canvas, ctx: canvas.ctx, glCanvas, sprocketPreviewFrameCanvas: frameCanvas, sprocketPreviewFrameCtx: frameCanvas.ctx,
@@ -538,7 +539,7 @@ for (const [width, height] of [[1500, 1000], [1000, 1500]]) {
   class PageImageData extends TestImageData {
     constructor(...args) { super(...(typeof args[0] === 'number' ? [new Uint8ClampedArray(args[0] * args[1] * 4), ...args] : args)); }
   }
-  const context = vm.createContext({
+  const context = vm.createContext({ focusStage: INERT_FOCUS_STAGE,
     // #249: no photo here takes a display form.
     ...displaySessionStubs(),
     state, setTimeout, convertPreviewFrameInWorker: { displayNegative: async () => { throw Error('worker unavailable'); } }, previewRequestImage: () => ({}), buildRouterSettings: () => ({}), getColorAnalysisSample: () => null, ImageData: PageImageData, Uint16Array, Math, beforeAfterBuiltReference: null, beforeAfterCanvasSource: null,

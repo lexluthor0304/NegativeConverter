@@ -24,6 +24,7 @@ import { compactDustSteps, rebuildDustSteps, frameDigestSteps, coldDustRecordByt
 import { encodeTiffBlob } from './exportImageEncoders.js';
 import { detectDust, inpaintMasked } from '../silvercore/engine/DustRemoval.js';
 import { applyDustStroke } from '../silvercore/engine/DustBrush.js';
+import { INERT_FOCUS_STAGE } from './focusStage.js';
 
 globalThis.ImageData ||= class ImageData {
   constructor(data, width, height) { this.data = data; this.width = width; this.height = height; }
@@ -171,6 +172,7 @@ export function fixture({ width = 160, height = 120, specks = 8, ai = false, bud
     state.croppedImageData = state.cropRegion ? crop(base, state.cropRegion) : null;
   };
   const target = {
+    focusStage: INERT_FOCUS_STAGE,   // focus recovery is off in this harness
     coreReprocessSettledListeners: new Set(),
     // processNegative records which lens a source and its display level carry (#278).
     lensCorrectedSources: new WeakMap(), displayLevelLenses: new WeakMap(),

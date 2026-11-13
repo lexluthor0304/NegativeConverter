@@ -10,6 +10,7 @@ import { computeZoomGeometry } from './zoomGeometry.js';
 import { displaySessionStubs, DISPLAY_SESSION_HELPERS } from './displaySessionHarness.mjs';
 import { regionFrame } from '../render/previewTables.js';
 import { frameRectTransform } from './displayCanvas.js';
+import { INERT_FOCUS_STAGE } from './focusStage.js';
 
 // #248 part 5 in main.js (extracted with vm): when the detail layer asks for a
 // region, from what, how it is placed, and that a stale region is never drawn.
@@ -85,7 +86,7 @@ function fixture({ dpr = 2, container = { width: 600, height: 420 }, size = { wi
   const fit = Math.min((container.width - 20) / W, (container.height - 20) / H);
   // The base's box, whole CSS pixels (#279), as adjustCanvasDisplay sets it.
   const box = { width: Math.round(W * fit), height: Math.round(H * fit) };
-  const context = vm.createContext({
+  const context = vm.createContext({ focusStage: INERT_FOCUS_STAGE,
     // #249: no photo here takes a display form.
     ...displaySessionStubs(),
     state, window: { devicePixelRatio: dpr, location: { search: '' } }, console, performance,

@@ -942,6 +942,15 @@
               </div>
               <button class="toolbar-btn" id="dustClearMaskBtn" style="width: 100%; justify-content: center;" data-i18n="dustClearMask">Clear Mask</button>
             </div>
+            <div class="slider-group" id="focusRecoveryGroup">
+              <div class="slider-header">
+                <span class="slider-label" id="focusRecoveryLabel" data-i18n="focusRecovery">Focus recovery</span>
+                <input type="number" class="slider-number-input" id="focusRecoveryValue" min="0" max="100" step="1" value="0" aria-labelledby="focusRecoveryLabel">
+              </div>
+              <input type="range" class="slider-input" id="focusRecovery" min="0" max="100" step="1" value="0" aria-labelledby="focusRecoveryLabel">
+              <div class="info-box" id="focusRecoveryStatus" role="status" data-i18n="focusOff">Off</div>
+              <div class="info-box" style="font-size: 11px; padding: 6px 8px;" data-i18n="focusRecoveryHint">For photos shot slightly out of focus. 60 is a safe start; higher values can leave halos where the photo was already sharp.</div>
+            </div>
           </div>
         </div>
       </div>

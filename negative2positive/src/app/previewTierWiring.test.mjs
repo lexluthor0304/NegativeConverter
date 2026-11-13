@@ -12,6 +12,7 @@ import { isLargeImage } from './imageMemoryBudget.js';
 import { DISABLED_GPU_PREVIEW_SCHEDULER } from './gpuPreviewScheduler.js';
 import { displaySessionStubs, DISPLAY_SESSION_HELPERS } from './displaySessionHarness.mjs';
 import { poolRepairMask, repoolRepairMaskRect, countPooledCells } from './repairedPreview.js';
+import { INERT_FOCUS_STAGE } from './focusStage.js';
 
 // Drives the real preview-tier wiring of main.js (#263) together with the real
 // scheduler, reprocess and state-application functions, on synthetic images:
@@ -112,7 +113,7 @@ function fixture({ width = 3000, height = 2000, repairs = false, largePreviewFra
     nextStart() { return { tier: this.nextStartTier, reason: null }; },
     end(reason) { this.ends.push(reason); this.active = false; context.onPreviewTierChange('normal'); } };
   const idleCallbacks = [];
-  const context = vm.createContext({
+  const context = vm.createContext({ focusStage: INERT_FOCUS_STAGE,
     // #249: no photo here takes a display form.
     ...displaySessionStubs(),
     // #254 stand-ins: the live dodge frame note, the dust tint, the overlays.

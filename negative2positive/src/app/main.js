@@ -114,6 +114,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     import { toImageData8 } from '../silvercore/util/image16.js';
     import { VERTEX_SHADER_100, STEP3_FRAGMENT_SHADER_100 } from '../render/previewShader.js';
     import { createGpuPreviewRenderer, webgl2PrecisionOk } from '../render/gpuPreviewRenderer.js';
+    import { createFocusRecoverer, estimateFocus, focusPlan } from '../render/focusRecovery.js';
+    import { createFocusStage } from './focusStage.js';
     import { planDetailRegion, detailRegionServes, detailSlotSize, snapPanToDevicePixels, copyRegionRows, buildDetailFrameLevel,
       assertDetailAllocation, assertDetailRoiAllocation, detailSizeAllowed, DETAIL_MAX_NATIVE_PIXELS, DETAIL_MAX_OUTPUT_PIXELS, DETAIL_MAX_DIMENSION, DETAIL_SETTLE_MS,
       DETAIL_STEP_SETTLE_MS, planDetailBands, planDetailBandCount } from './detailLayer.js';
@@ -2511,6 +2513,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       dodgeBurn: { active: false, mode: 'burn', stops: 0.5, size: 12, feather: 50, showOverlay: true },
       coreSaturation: 100,
       coreGlow: 0,
+      focusRecovery: 0,     // 0-100: the share of the frame's excess blur to undo (focusRecovery.js); 0 is off
       coreFade: 0,
       coreCurvePrecision: 'auto',
       coreUseWebGL: true,
@@ -2913,7 +2916,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         coreExposure: '曝光', coreContrast: '对比度', coreHighlights: '高光',
         coreShadows: '阴影', coreWhites: '白色', coreBlacks: '黑色',
         coreBrightness: '亮度', coreTemperature: '色温', coreTint: '色调',
-        coreSaturation: '饱和度', coreGlow: '辉光', coreFade: '褪色',
+        coreSaturation: '饱和度', coreGlow: '辉光', coreFade: '褪色', focusRecovery: '对焦修复',
         coreWbMode: '白平衡模式', coreFilmPreset: '胶片预设',
         coreColorModel: '色彩模型', coreEnhancedProfile: '增强曲线',
         coreProfileStrength: '曲线强度', corePreSaturation: '预饱和度',
@@ -2940,7 +2943,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         coreExposure: 'Exposure', coreContrast: 'Contrast', coreHighlights: 'Highlights',
         coreShadows: 'Shadows', coreWhites: 'Whites', coreBlacks: 'Blacks',
         coreBrightness: 'Brightness', coreTemperature: 'Temperature', coreTint: 'Tint',
-        coreSaturation: 'Saturation', coreGlow: 'Glow', coreFade: 'Fade',
+        coreSaturation: 'Saturation', coreGlow: 'Glow', coreFade: 'Fade', focusRecovery: 'Focus recovery',
         coreWbMode: 'WB Mode', coreFilmPreset: 'Film Preset',
         coreColorModel: 'Color Model', coreEnhancedProfile: 'Enhanced Profile',
         coreProfileStrength: 'Profile Strength', corePreSaturation: 'Pre-Saturation',
@@ -2967,7 +2970,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         coreExposure: '露出', coreContrast: 'コントラスト', coreHighlights: 'ハイライト',
         coreShadows: 'シャドウ', coreWhites: 'ホワイト', coreBlacks: 'ブラック',
         coreBrightness: '明るさ', coreTemperature: '色温度', coreTint: '色合い',
-        coreSaturation: '彩度', coreGlow: 'グロー', coreFade: 'フェード',
+        coreSaturation: '彩度', coreGlow: 'グロー', coreFade: 'フェード', focusRecovery: 'ピント補正',
         coreWbMode: 'WBモード', coreFilmPreset: 'フィルムプリセット',
         coreColorModel: 'カラーモデル', coreEnhancedProfile: '強化プロファイル',
         coreProfileStrength: 'プロファイル強度', corePreSaturation: 'プリサチュレーション',
@@ -2998,7 +3001,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       'corePreSaturation', 'coreBorderBuffer', 'coreBorderBufferBorderValue',
       'coreBrightness', 'coreExposure', 'coreContrast', 'coreHighlights', 'coreShadows',
       'coreWhites', 'coreBlacks', 'coreWbMode', 'coreTemperature', 'coreTint',
-      'coreSaturation', 'coreGlow', 'coreFade', 'coreCurvePrecision', 'coreUseWebGL',
+      'coreSaturation', 'coreGlow', 'coreFade', 'coreCurvePrecision', 'coreUseWebGL', 'focusRecovery',
       'coreCyan', 'corePaper', 'corePaperToning', 'corePaperToningStrength', 'flatFieldId',
       'wbR', 'wbG', 'wbB', 'wbAutoConfidence', 'wbUserOverride', 'wbSemanticApplied',
       'filmType', 'positiveMode', 'filmTypeSource', 'filmTypeConfidence', 'filmTypeReason', 'filmBaseSet', 'grayPointSampled', 'step2Mode', 'rotationAngle',
@@ -3295,6 +3298,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       updateSlidersFromState();
       renderCurve();
       updateDustControlsVisibility();
+      // The focus recovery's strength came back with the snapshot: its frame and status follow.
+      focusStage.schedule(0);
       updateSprocketControlsUI();
 
       // Re-render
@@ -5003,6 +5008,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         flatFieldId: typeof (source.flatFieldId ?? fallbackSettings.flatFieldId) === 'string' ? String(source.flatFieldId ?? fallbackSettings.flatFieldId).slice(0, 64) : null,
         coreSaturation: sanitizeNumeric(source.coreSaturation, fallbackSettings.coreSaturation ?? 100, 0, 200),
         coreGlow: sanitizeNumeric(source.coreGlow, fallbackSettings.coreGlow ?? 0, 0, 100),
+        // Focus recovery is the photo's own, like its dust removal: the blur it undoes is that frame's.
+        focusRecovery: sanitizeNumeric(source.focusRecovery, fallbackSettings.focusRecovery ?? 0, 0, 100),
         coreFade: sanitizeNumeric(source.coreFade, fallbackSettings.coreFade ?? 0, 0, 100),
         coreCurvePrecision: String(source.coreCurvePrecision || fallbackSettings.coreCurvePrecision || 'auto'),
         coreUseWebGL: typeof source.coreUseWebGL === 'boolean'
@@ -5122,7 +5129,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const flatField = router.flatFieldId ? state.flatFields[router.flatFieldId] || null : null;
       // Repair strokes act on the converted positive (inpaintManualBrush); no
       // converter reads them, so they are not cloned into worker requests.
-      const { repairStrokes, ...conversion } = router;
+      // Nor dust removal and focus recovery, which follow the conversion.
+      const { repairStrokes, dustRemoval, focusRecovery, ...conversion } = router;
       return {
         ...conversion,
         analysisRegion: resolveAnalysisRegion({ ...settings, autoFrameMeta: meta }, source),
@@ -5378,8 +5386,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // preview tick converted just before a resize settled, is shown as it is.
     function buildPreviewSourceImageData(imageData) {
       const target = getDisplayPreviewSize(imageData);
-      if (displaySizeServes(imageData, target)) return imageData;
-      return noteTierImage(countMainResample(imageData, resizeDisplayPreview(imageData, target)), imageData);
+      // The open photo is shown with its focus recovered (displaySourceOf).
+      const shown = focusStage.sourceOf(imageData);
+      if (displaySizeServes(imageData, target)) return shown;
+      return noteTierImage(countMainResample(imageData, resizeDisplayPreview(shown, target)), imageData);
     }
 
     function buildHistogramSourceImageData(imageData) {
@@ -5448,18 +5458,20 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // of about 12 ms. A brush patch of `processed` meanwhile starts it over.
     function rebuildDisplayPreview(processed, target) {
       const pending = displayPreviewRebuild;
+      const shown = focusStage.sourceOf(processed);
       if (pending && pending.processed === processed && pending.target.width === target.width
-        && pending.target.height === target.height && pending.revision === state.dustRemoval.revision) return;
-      const job = { processed, target: { ...target }, revision: state.dustRemoval.revision };
+        && pending.target.height === target.height && pending.revision === state.dustRemoval.revision
+        && pending.shown === shown) return;
+      const job = { processed, shown, target: { ...target }, revision: state.dustRemoval.revision };
       displayPreviewRebuild = job;
       const isCurrent = () => (displayPreviewRebuild === job && state.processedImageData === processed) || Boolean(job.snapshots?.length);
       const banded = () => {
         displayCounters.bandedRebuilds += 1;
-        return resizeDisplayPreviewInBands(processed, target, { isCurrent });
+        return resizeDisplayPreviewInBands(shown, target, { isCurrent });
       };
       if (!isLargeImage(processed)) displayCounters.workerRebuilds += 1;
       const build = isLargeImage(processed) ? banded()
-        : convertPreviewFrameInWorker.resample(processed, target).then((preview) => {
+        : convertPreviewFrameInWorker.resample(shown, target).then((preview) => {
           noteDisplayFilter(preview, { kind: 'area', k: displayLevelFactor(processed.width, processed.height) });
           return preview;
         }, () => (isCurrent() ? banded() : null));
@@ -7032,6 +7044,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         repairs: true, mask: state.dustRemoval.mask, maskStale: dustMaskIsStale(),
         detectionScheduled: Boolean(dustDetectionTimer), processing: Boolean(state.dustRemoval.processing), pendingBrushRepairs
       })) return null;
+      // With focus recovery on, the frame to crop is the recovered one; until it is ready there is none.
+      if (focusStage.wanted()) return focusStage.current(processed) ? focusStage.sourceOf(processed) : null;
       return processed;
     }
 
@@ -7046,7 +7060,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (!tag || tag.source !== conversionSourceSize() || tag.generation !== coreReprocessGeneration
         || tag.token !== coreReprocessToken) return false;
       if (tag.full) return tag.full === detailFullFrame() && tag.dustRevision === state.dustRemoval.revision;
-      return !hasFrameRepairs() && !detailFullFrame();
+      return !hasFrameRepairs() && !focusStage.wanted() && !detailFullFrame();
     }
 
     function hideDetailLayer() {
@@ -7253,8 +7267,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         return;
       }
       const full = detailFullFrame();
-      if (!full && hasFrameRepairs()) {
-        // A region from the source would bring the dust back.
+      if (!full && (hasFrameRepairs() || focusStage.wanted())) {
+        // A region from the source would bring the dust back, and lack the recovered focus.
         hideDetailLayer();
         return;
       }
@@ -7585,6 +7599,21 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     const rasterIdentities = new WeakMap();
     let nextRasterIdentity = 1;
     let convertedPixelsRevision = 0;
+    // The open photo's focus recovery (focusStage.js): derived from the
+    // repaired frame at this revision, read by the display and the exports.
+    const focusStage = createFocusStage({
+      createRecoverer: () => createFocusRecoverer(),
+      estimate: estimateFocus, plan: focusPlan,
+      frame: () => state.processedImageData,
+      revision: () => convertedPixelsRevision,
+      strength: () => Number(state.focusRecovery) || 0,
+      active: () => state.currentStep >= 3,
+      repairsPending: () => Boolean(state.dustRemoval.processing || dustDetectionTimer),
+      frameIsPreview: () => Boolean(state.processedImageDataIsPreview || state.fullResolutionPending),
+      requestFullFrame: async () => { await flushScheduledCoreReprocess(); await ensureFullResolutionReadyForExport({ reason: 'focus-recovery' }); },
+      onChanged: () => refreshFocusDisplay(),
+      onStatus: (status) => showFocusStatus(status)
+    });
     const STUDIO_THUMBNAIL_SETTLE_MS = 250;
     // Long side of the light-table lane's render before the 144 px tile.
     const STUDIO_TILE_PREVIEW_MAX = 288;
@@ -8077,6 +8106,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // The CSS box follows at once; the 2D backing, when a frame is drawn.
       fitStep3CanvasBox();
       if (!expiredRescueUiReady && state.currentStep >= 3) updateExpiredRescueUI();
+      focusStage.noteSourceChanged();
     }
 
     // The display fields of a frame just applied. A full-resolution render
@@ -8131,6 +8161,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         webglState.sourceDirty = true;
         webglState.curveDirty = true;
       }
+      focusStage.noteSourceChanged();
       fitStep3CanvasBox();
     }
 
@@ -11245,6 +11276,43 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       }
     }
 
+    // ── Focus recovery (focusStage.js, render/focusRecovery.js) ──────────────
+    //
+    // A stage after the repairs and before Step 3: the display preview, the
+    // detail layer and exports read `focusStage.sourceOf(processed)`.
+    function updateFocusStatus(text) {
+      const el = document.getElementById('focusRecoveryStatus');
+      if (el) el.textContent = text;
+    }
+    function syncFocusRecoveryUI() {
+      const supported = focusStage.supported();
+      for (const id of ['focusRecovery', 'focusRecoveryValue']) {
+        const input = document.getElementById(id);
+        if (!input) continue;
+        input.disabled = !supported;
+        if (document.activeElement !== input) input.value = String(state.focusRecovery || 0);
+      }
+      if (!supported) updateFocusStatus(getLocalizedText('focusUnsupported', 'Focus recovery needs a GPU (WebGL2) that this device does not provide.'));
+      else if (!(state.focusRecovery > 0)) updateFocusStatus(getLocalizedText('focusOff', 'Off'));
+    }
+    function showFocusStatus({ kind, estimate, plan, error }) {
+      if (kind === 'working') updateFocusStatus(getLocalizedText('focusWorking', 'Recovering focus...'));
+      else if (kind === 'done') updateFocusStatus(getInterpolatedText('focusDone', { blur: estimate.sigma.toFixed(1), undone: plan.sigma.toFixed(1) },
+        `Edges about ${estimate.sigma.toFixed(1)} px soft; ${plan.sigma.toFixed(1)} px of it undone.`));
+      else if (kind === 'sharp') updateFocusStatus(getInterpolatedText('focusSharp', { blur: estimate.sigma.toFixed(1) },
+        `Already as sharp as this scan allows (edges about ${estimate.sigma.toFixed(1)} px).`));
+      else if (kind === 'no-edges') updateFocusStatus(getLocalizedText('focusNoEdges', 'No edges to read the focus from.'));
+      else if (kind === 'error') { console.error('Focus recovery failed:', error); updateFocusStatus('Error: ' + (error?.message || error)); }
+      else syncFocusRecoveryUI();
+    }
+    // The display and the detail layer read the recovered frame from here on (or stop to).
+    function refreshFocusDisplay() {
+      const processed = state.processedImageData;
+      if (!processed || state.currentStep < 3) return;
+      rebuildDisplayPreview(processed, getDisplayPreviewSize(processed));
+      noteDetailViewChanged(0);
+    }
+
     // ── Dust Removal UI Event Handlers ───────────────────────────────────────
 
     document.getElementById('dustRemovalEnabled')?.addEventListener('change', function () {
@@ -11657,6 +11725,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     function refreshDustDisplay(target, rects) {
       // Same objects, other pixels: the active tile made before is stale.
       convertedPixelsRevision += 1;
+      focusStage.noteSourceChanged();
       if (state.processedImageData !== target || state.processedImageDataIsPreview) {
         applyProcessedImageToState(target, { deferDisplay: true });
         updatePreview();
@@ -11720,6 +11789,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const restored = applyDustDelta(delta, direction);
       // In place, also when it is shown the ordinary way below.
       convertedPixelsRevision += 1;
+      focusStage.noteSourceChanged();
       const displayed = state.processedImageData === restored.target && dust.mask === restored.mask;
       const tagBefore = dust.maskTag;
       dust.cleanSource = restored.cleanSource;
@@ -20659,11 +20729,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // The request copies the editor's planes: one task for those the
       // editor patches in place.
       if (state.currentStep >= 3 && state.processedImageData) markInPlaceEditedPlanes();
+      await focusStage.ensureForExport();
       if (bitDepth === 16 && state.currentStep >= 3 && state.processedImageData?.__image16) {
-        return await applyAdjustmentsWithSettings(state.processedImageData, state, { bitDepth: 16, bridge, planeOnly });
+        return await applyAdjustmentsWithSettings(focusStage.sourceOf(state.processedImageData), state, { bitDepth: 16, bridge, planeOnly });
       }
       if (state.processedImageData && state.currentStep >= 3) {
-        return await applyAdjustmentsWithSettings(state.processedImageData, state, { bridge });
+        return await applyAdjustmentsWithSettings(focusStage.sourceOf(state.processedImageData), state, { bridge });
       }
       const sourceData = state.croppedImageData || state.originalImageData;
       if (!sourceData) return null;
@@ -20784,7 +20855,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           // never transferred. The SDR frame is this export's own: no display
           // buffer is an export frame (#242).
           markInPlaceEditedPlanes();
-          imageData.__gainMapSource = { processed: state.processedImageData, adjustmentSettings: buildAdjustmentSettings(state), transferPlane: false };
+          imageData.__gainMapSource = { processed: focusStage.sourceOf(state.processedImageData), adjustmentSettings: buildAdjustmentSettings(state), transferPlane: false };
           return imageData;
         }
         const high = await getCurrentExportImageData({ bitDepth: 16, bridge });
@@ -20837,9 +20908,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         // sent as a copy (it belongs to the editor), sliced unless the
         // editor patches it in place.
         if (state.currentStep >= 3 && state.processedImageData?.__image16) {
+          await focusStage.ensureForExport();
           onEncoding?.();
           markInPlaceEditedPlanes();
-          const blob = await encodeFused16(state.processedImageData, buildAdjustmentSettings(state), exportInfo, { bridge, metadata, onProgress, signal });
+          const blob = await encodeFused16(focusStage.sourceOf(state.processedImageData), buildAdjustmentSettings(state), exportInfo, { bridge, metadata, onProgress, signal });
           if (blob) return blob;
         }
       }
@@ -20875,7 +20947,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           inputRecently: isTauriRuntime() && backgroundGate.inputRecently(),
           poolSize: size
         }),
-        keepResident: () => !state.dustRemoval.enabled && !state.repairStrokes.length,
+        keepResident: () => !state.dustRemoval.enabled && !state.repairStrokes.length && !(state.focusRecovery > 0),
         resident: (data) => (data && data.buffer ? residentPlanes.get(data.buffer) || null : null),
         remember(processed, handle) {
           handles.add(handle);
@@ -21231,7 +21303,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // photo's crop onto every never-cropped frame a batch export, thumbnail or
     // roll pass cloned.
     function perPhotoSettingsFallback() {
-      return { ...state, cropRegion: null, autoFrameMeta: null, rotationAngle: 0, mirrored: false, dustRemoval: null };
+      return { ...state, cropRegion: null, autoFrameMeta: null, rotationAngle: 0, mirrored: false, dustRemoval: null, focusRecovery: 0 };
     }
 
     function cloneSettings(settings) {
@@ -21363,6 +21435,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         next.repairStrokes = structuredClone(item.settings?.repairStrokes || []);
         // Dust removal is switched per photo (the toolbar's button does it for the selection).
         next.dustRemoval = sanitizeDustRemoval(item.settings?.dustRemoval);
+        next.focusRecovery = Number(item.settings?.focusRecovery) || 0;
         // These describe the receiving photograph, not the copied colour recipe.
         next.reviewed = Boolean(item.settings?.reviewed);
         // Its focal length and aperture too, unless the copied ones were typed (#278).
@@ -21982,6 +22055,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         autoFrameMeta: null,
         // Off until it is switched on for the photo; the sensitivity carries over.
         dustRemoval: { ...sanitizeDustRemoval(state.dustRemoval), enabled: false },
+        focusRecovery: 0,
         ...importSettings,
         filmBase: filmBase,
         filmEdge: null,
@@ -22499,7 +22573,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const dustEnabled = !tileMax && Boolean(fileDustRemoval?.enabled);
       const automaticWb = Boolean(!savedSettings || pendingFrame || state.fileQueue.find(item => item.file === file)?.automaticSettings)
         && frameWantsAutoWhiteBalance(settings);
-      const resident = Boolean(options.bandResident) && !dustEnabled && !settings.repairStrokes?.length
+      // Focus recovery reads the whole repaired frame on the page's GPU.
+      const focusStrength = !tileMax && !previewMax ? Number(settings.focusRecovery) || 0 : 0;
+      const resident = Boolean(options.bandResident) && !dustEnabled && !settings.repairStrokes?.length && !(focusStrength > 0)
         && !(settings.expiredEnabled && !settings.expiredAnalysis)
         && (!automaticWb || Boolean(settings.autoFrameMeta?.analysisNeedsReview)
           || (!settings.semanticMap && Boolean(conversion.options.analysisImageData)));
@@ -22586,6 +22662,16 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         await applyFrameExpiredAnalysis(processed, settings, imageData, trace);
         assertRepairCurrent(isCurrent);
         adoptFrameExpiredAnalysis(queuedItem, settings, options);
+      }
+
+      // Focus recovery: after the repairs and the measurements (they read the
+      // frame as converted), before Step 3. Full-size frames only: a reduced
+      // tile or preview has no blur left to undo.
+      if (focusStrength > 0 && processed) {
+        const recovered = await focusStage.recoverFrame(processed, focusStrength, { isCurrent });
+        assertRepairCurrent(isCurrent);
+        if (recovered !== processed) processed = own(recovered, processed);
+        trace.mark('focusRecovery', { pixels: getImageDataPixelCount(processed) });
       }
 
       // A batch export adjusts, composes and encodes the frame itself (#250),
@@ -24403,6 +24489,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       updateExpiredRescueUI();
       state.coreSaturation = safe.coreSaturation;
       state.coreGlow = safe.coreGlow;
+      state.focusRecovery = safe.focusRecovery ?? 0;
+      syncFocusRecoveryUI();
       state.coreFade = safe.coreFade;
       state.coreCurvePrecision = safe.coreCurvePrecision;
       state.coreUseWebGL = safe.coreUseWebGL;
@@ -28410,6 +28498,15 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       } });
     }
     document.getElementById('expiredEnabled')?.addEventListener('change', (event) => setExpiredEnabled(event.target.checked));
+    // Focus recovery: the frame is recomputed once the slider rests (about two seconds at 60 MP).
+    setupSlider('focusRecovery', 'focusRecovery', {
+      onInput: () => updateFocusStatus(getLocalizedText('focusWorking', 'Recovering focus...')),
+      onCommit: () => {
+        markCurrentFileDirty();
+        focusStage.schedule(0);
+      }
+    });
+    syncFocusRecoveryUI();
     function analyzeExpiredAgain() {
       if (!state.processedImageData) return;
       pushUndo('expiredAnalyze');

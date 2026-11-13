@@ -190,6 +190,17 @@ per conversion source with no undo step); the tab and its controls appear only
 in the explicit expired-roll session. A positive in edit mode keeps it off outside the
 expired-roll session (its export stays the source). See `docs/expired-film-rescue.md`.
 
+### Focus Recovery
+A slider on the Retouch tab for photos shot slightly out of focus: a
+deconvolution of the luminance (damped Richardson-Lucy with a Gaussian of the
+frame's own excess blur), run on the GPU (WebGL2, R32F, tiles of 2048 px) as a
+stage after the repairs and before Step 3. It is the one place where the GPU
+produces exported pixels, and it has no CPU path (about 100 s per 60 MP frame
+against 2 s): `render/focusRecovery.js`, `app/focusStage.js`,
+`docs/focus-recovery.md`. Readers of the processed frame ask
+`focusStage.sourceOf(frame)`; test harnesses that run editor code pass
+`INERT_FOCUS_STAGE`.
+
 ### Rendering Strategy
 The app keeps dual-path rendering behavior:
 1. **Preview path** for responsive slider feedback.
