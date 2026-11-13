@@ -35,6 +35,8 @@ export function normalizePlatform(info) {
   return {
     shell: 'tauri', os: info.os,
     arch: typeof info.arch === 'string' ? info.arch : null,
+    // Apple systems only: WebKit comes with the system (inferenceBackend.js).
+    osVersion: typeof info.osVersion === 'string' && /^\d+(\.\d+){0,2}$/.test(info.osVersion) ? info.osVersion : null,
     mobile,
     capabilities: {
       nativeDialogs: !mobile && capabilities.nativeDialogs === true,

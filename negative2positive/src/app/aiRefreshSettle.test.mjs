@@ -87,7 +87,7 @@ function settleFixture({ loadFails = false } = {}) {
     aiRepairRunsInFlight: 0, aiRepairIdleTimer: null, aiRepairLastUsed: 0, activeLongJobs: 0, dustDetectionTimer: null,
     fullResolutionRenderTimer: null,
     AI_REPAIR_IDLE_RELEASE_MS: 300_000, AI_REPAIR_IDLE_RECHECK_MS: 30_000, getPerfNow: () => 0,
-    DEFAULT_MODEL_URL: '/models/migan.onnx', defaultInferencePreference: () => 'wasm',
+    DEFAULT_MODEL_URL: '/models/migan.onnx', defaultInferencePreference: () => 'wasm', webKitGpuInferenceAllowed: () => false,
     fetchModelBytes: async () => {
       if (context.failLoads) throw new Error('Failed to fetch');
       return new Uint8Array(4);
@@ -293,7 +293,7 @@ function brushFixture() {
       prefer: '', released: false, error: '', percent: 0, tiles: 0, ms: 0, revision: 0 },
     aiRepairRunsInFlight: 0, pendingBrushRepairs: 0, aiRepairLoadWatcher: null,
     noteAiRepairUsed: () => {}, hasFrameRepairs: () => false, scheduleDustDetection: () => {},
-    DEFAULT_MODEL_URL: '/models/migan.onnx', defaultInferencePreference: () => 'wasm', inpaintBackends: () => ({ webgpu: false }),
+    DEFAULT_MODEL_URL: '/models/migan.onnx', defaultInferencePreference: () => 'wasm', webKitGpuInferenceAllowed: () => false, inpaintBackends: () => ({ webgpu: false }),
     failLoads: false,
     fetchModelBytes: async () => { if (context.failLoads) throw new Error('Failed to fetch'); return new Uint8Array(4); },
     createInpaintSessionInWorker: async (bytes, { prefer }) => ({ provider: prefer, run: async () => {}, release: async () => {} }),

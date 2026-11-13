@@ -48,7 +48,7 @@ function fixture({ providers = ['webgpu'] } = {}) {
     setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length; },
     clearTimeout: noop => noop,
     updateAiRepairUI: () => {}, hasFrameRepairs: () => false, scheduleDustDetection: () => {},
-    defaultInferencePreference: () => 'webgpu',
+    defaultInferencePreference: () => 'webgpu', webKitGpuInferenceAllowed: () => false,
     fetchModelBytes: async () => new Uint8Array(4),
     createInpaintSessionInWorker: async (bytes, { prefer }) => {
       const provider = providers[Math.min(sessions.length, providers.length - 1)];

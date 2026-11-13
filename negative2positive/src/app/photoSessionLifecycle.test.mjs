@@ -765,7 +765,7 @@ for (const locked of [false, true]) {
 function aiFixture() {
   const f = fixture(), c = f.context;
   Object.assign(c, {
-    defaultInferencePreference: () => 'wasm', updateAiRepairUI: noop, showToast: noop,
+    defaultInferencePreference: () => 'wasm', webKitGpuInferenceAllowed: () => false, updateAiRepairUI: noop, showToast: noop,
     hasFrameRepairs: () => true, scheduleDustDetection: noop,
     DEFAULT_MODEL_URL: '/local-model.onnx',
     aiRepairReady: () => c.aiRepair.status === 'ready',

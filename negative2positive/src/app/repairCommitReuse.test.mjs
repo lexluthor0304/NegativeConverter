@@ -81,7 +81,7 @@ function fixture() {
       error: '', percent: 0, tiles: 0, ms: 0 },
     aiRepairRunsInFlight: 0, aiRepairLoadWatcher: null, DEFAULT_MODEL_URL: MODEL_URL, File: globalThis.File,
     updateAiRepairUI() {}, noteAiRepairUsed() {}, scheduleDustDetection() {},
-    defaultInferencePreference: () => 'wasm',
+    defaultInferencePreference: () => 'wasm', webKitGpuInferenceAllowed: () => false,
     fetchModelBytes: async () => new Uint8Array(4),
     createInpaintSessionInWorker: async () => {
       calls.loads++;
