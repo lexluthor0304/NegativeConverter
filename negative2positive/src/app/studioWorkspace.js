@@ -518,6 +518,20 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
   // licences ask that recipients can find the notices and LibRaw's source.
   // A row of its own in the site links' style, opened in a new tab so the
   // session stays (the desktop app sends every link to the browser).
+  // With a photo open the header is a work bar (add, history, export, menu):
+  // the public links and GitHub wait in the menu and return to the header on
+  // the empty Studio. The mobile shell keeps its own arrangement above.
+  const menuLinks = document.createElement('div');
+  menuLinks.id = 'studioMenuLinks';
+  $('studioLinks').prepend(menuLinks);
+  const mobileShell = Boolean(document.documentElement?.classList.contains('shell-mobile'));
+  const headerLinks = ['offlineDownloadLink', 'feedbackBtn', 'privacyDetailsLink', 'shopLink'].map(id => $(id));
+  let linksInMenu = false;
+  const placeHeaderLinks = inMenu => {
+    linksInMenu = inMenu;
+    if (!mobileShell) for (const link of headerLinks) (inMenu ? menuLinks : $('studioPublicLinks')).append(link);
+    if (github) { if (inMenu) menuLinks.append(github); else $('studioMenu').before(github); }
+  };
   const notices = document.createElement('div');
   notices.className = 'header-site-links';
   notices.innerHTML = '<a id="studioNotices" href="./licenses/raw-decoder-notices.txt" target="_blank" rel="noopener" data-i18n="navThirdPartyNotices"></a>';
@@ -557,6 +571,8 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
   };
   $('uploadPlaceholder').append(makeAutoCropOption('studioImportAutoCrop'));
   $('uploadPlaceholder').append($('uploadPlaceholder').querySelector('.upload-privacy-note'));
+  const discovery = welcome.querySelector('.studio-discovery');
+  if (discovery) $('uploadPlaceholder').append(discovery);
 
   const panel = $('controlsPanel');
   const tabs = document.createElement('div');
@@ -595,7 +611,7 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
     target.scrollIntoView({ block: 'start' });
   }));
   consoleJumps = [...quickColor.querySelectorAll('[data-jump="consoleSection"]')];
-  panes.edit.append(quickColor);
+  panelHeader.prepend(quickColor);
   let activeTab = 'edit';
   function selectTab(key) {
     activeTab = key;
@@ -604,6 +620,7 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
       $(`studioTab-${name}`).setAttribute('aria-selected', String(name === key));
       $(`studioTab-${name}`).tabIndex = name === key ? 0 : -1;
     }
+    quickColor.hidden = key !== 'edit';
     panel.scrollTop = 0;
     onTabSelect(key);
   }
@@ -693,7 +710,8 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
   analysisStatus.className = 'studio-pane-hint';
   analysisStatus.setAttribute('role', 'status');
   composition.append(analysisStatus);
-  for (const [key, source] of [['crop', 'cropBtn'], ['rotateLeft', 'rotateLeftBtn'], ['rotateRight', 'rotateRightBtn'], ['mirror', 'mirrorBtn']]) {
+  // Rotate and mirror stay in the viewer toolbar, which is always in view.
+  for (const [key, source] of [['crop', 'cropBtn']]) {
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'toolbar-btn';
@@ -708,6 +726,14 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
   makeDrawer(composition, 'studioAutoFrame', 'autoFrame', ['autoFrameSettingsSection']);
   move('aiBrushSection', panes.repair);
   move('dustRemovalSection', panes.repair);
+  // Focus recovery is a repair of its own, not a kind of dust cleanup: its
+  // slider leaves the Cleanup section's markup for a block beside it.
+  const focusSection = document.createElement('div');
+  focusSection.id = 'studioFocusSection';
+  focusSection.className = 'control-section';
+  focusSection.innerHTML = '<div class="control-group"></div>';
+  focusSection.firstChild.append($('focusRecoveryGroup'));
+  panes.repair.append(focusSection);
   makeDrawer(panes.repair, 'studioDodgeBurn', 'dodgeBurn', ['dodgeBurnSection']);
   makeDrawer(panes.repair, 'studioFlatField', 'flatField', ['flatFieldSection']);
   const lens = makeDrawer(panes.repair, 'studioLens', 'lens', []);
@@ -769,6 +795,7 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
     syncLayout();
   });
   document.querySelector('.preview-section').prepend(status);
+  status.after(status.querySelector('#studioTogglePanel'));
   const photoSwitchFeedback = document.createElement('div');
   photoSwitchFeedback.id = 'studioPhotoSwitchFeedback';
   photoSwitchFeedback.hidden = true;
@@ -916,6 +943,7 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
     const watchParent = loaded ? node.studioBatchActions : node.uploadPlaceholder;
     if (watcher && watcher.parentElement !== watchParent) { watchParent.append(watcher); writer.counters.writes++; }
     set(body, '.studio-loaded', loaded);
+    if (loaded !== linksInMenu) { placeHeaderLinks(loaded); writer.counters.writes++; }
     set(body, '.studio-ready', ready);
     // The sampling hint names the kind of sample; the loop below writes it.
     set(node.studioSampleHint, 'dataset.studio', state.samplingMode === 'filmBase' ? 'baseSampleHint' : 'sampleHint');
