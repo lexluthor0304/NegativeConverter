@@ -190,6 +190,18 @@ per conversion source with no undo step); the tab and its controls appear only
 in the explicit expired-roll session. A positive in edit mode keeps it off outside the
 expired-roll session (its export stays the source). See `docs/expired-film-rescue.md`.
 
+### Camera Scan (tethered capture)
+macOS desktop only, Leica M11 series only for now (the UI says so): the camera
+on one USB cable shows its live view converted in the live loupe's scan mode,
+the app releases the shutter and the RAW lands in the watch folder and is
+imported. Own PTP layer, no vendor SDK: `src-tauri/src/tether/` (ImageCaptureCore
+transport, Leica dialect), `app/tetherCamera.js`, `openScan` in `main.js`.
+Offered from the shell's `tether` capability; a body is added only after its
+dialect was measured on the real camera. A camera is only reachable from an
+app bundle (`npx tauri build --debug --bundles app`, not `tauri dev`), and the
+App Store build needs `com.apple.security.device.usb`. See
+`docs/tethered-capture.md`.
+
 ### Focus Recovery
 A slider on the Retouch tab for photos shot slightly out of focus: a
 deconvolution of the luminance (damped Richardson-Lucy with a Gaussian of the
