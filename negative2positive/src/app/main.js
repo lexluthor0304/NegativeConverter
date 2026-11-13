@@ -1083,6 +1083,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       });
     });
     document.getElementById('consoleResetBtn')?.addEventListener('click', resetConsoleChannels);
+    // The keys are off while a photo is switching, and the settings of the
+    // photo that arrives are restored during the switch: when it ends, by any
+    // of its exits, the keys follow.
+    if (typeof MutationObserver === 'function') {
+      new MutationObserver(updateConsoleReadouts).observe(document.body, { attributes: true, attributeFilter: ['data-photo-switching'] });
+    }
 
 
 
