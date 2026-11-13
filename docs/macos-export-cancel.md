@@ -22,6 +22,33 @@ WASM binary on WebKit, for both MI-GAN and semantic analysis. Other browsers
 retain the WebGPU runtime and CPU fallback. Each realm loads only one runtime,
 so provider registrations cannot overwrite each other. No model is sent off-device.
 
+### GPU inference in the macOS app from macOS 27.2
+
+On macOS 27.2 (WebKit 22625.2.8.11.9) the growth no longer happens, though
+both upstream reports are still open. The desktop shell reports the system's
+version (`platform_info().osVersion`, from `kern.osproductversion`), and
+`inferenceBackend.js` lets the macOS desktop app run MI-GAN on WebGPU from
+27.2: the page allows it for its realm after `resolvePlatform()` and passes
+it to the AI repair worker with the session's options (`webKitGpu`). The gate
+is the shell's answer, never the user agent. Everything else keeps the
+non-JSEP runtime: Safari, iPhone and iPad, an older macOS, a realm without
+`navigator.gpu`, the WASM retry after a GPU session fails (its new worker is
+not told), and the semantic model.
+
+Measured in the debug build of the app (`tauri://localhost`, M5 Pro, 24 GB),
+default model, twelve 512 px inferences and then two idle minutes:
+
+| | WASM, one thread | WebGPU |
+| --- | --- | --- |
+| one inference | 731 ms (WKWebView harness) | 102-142 ms |
+| WebContent RSS, peak | 631 MB | 1.9 GB for a few seconds while the session is built |
+| WebContent RSS, settled | | 565 MB, flat over 100 s idle |
+
+In a WKWebView harness the GPU result equals the WASM result inside the mask
+(largest difference 0, at most 1 outside it). When raising or lowering the
+gate, repeat the idle check: load the model, run a repair, leave the app idle
+for two minutes and watch the WebContent process; it must not grow.
+
 A WebContent kill is now recorded by the native
 `on_web_content_process_terminate` hook before it reloads the page, unfinished
 export streams and their `.part` files are dropped when a page starts loading,
