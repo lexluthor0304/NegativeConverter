@@ -9,6 +9,7 @@ import '../styles/studio-mobile.css';
 export const studioText = {
   zh: {
     preview: '本地胶片暗房', add: '添加照片', menu: '帮助与设置',
+    scan: '翻拍', scanHint: '用 USB 接上的 Leica M11 翻拍底片：实时看到转正后的画面，拍下自动转换。', scanMenu: '相机翻拍（目前仅支持 Leica M11）',
     loupe: '实时放大镜', loupeHint: '把相机对准底片，实时看到转正后的画面；拍下即加入照片列表。',
     title: '免费胶片负片转换', subtitle: '在本机转换负片、校正正片，无需上传照片。',
     importBatch: '可多选照片，也可把一组照片拖到这里',
@@ -59,6 +60,7 @@ export const studioText = {
   },
   en: {
     preview: 'Your local darkroom', add: 'Add photos', menu: 'Help & settings',
+    scan: 'Camera scan', scanHint: 'Scan film with the Leica M11 on USB: its live view converted live, each shot imported and converted.', scanMenu: 'Camera scan (Leica M11 only for now)',
     loupe: 'Live loupe', loupeHint: 'Point a camera at the negative and see it converted live; capture adds the frame to the photos.',
     title: 'Free film negative converter', subtitle: 'Convert negatives and correct slides on your device. No photo uploads.',
     importBatch: 'Select multiple photos, or drop a batch here',
@@ -108,6 +110,7 @@ export const studioText = {
   },
   ja: {
     preview: 'ローカルのフィルム暗室', add: '写真を追加', menu: 'ヘルプと設定',
+    scan: '複写', scanHint: 'USB でつないだ Leica M11 でフィルムを複写します。ライブ映像を変換して表示し、撮影した写真を自動で取り込みます。', scanMenu: 'カメラで複写（現在は Leica M11 のみ対応）',
     loupe: 'ライブルーペ', loupeHint: 'カメラを原板に向けると変換後の画面がライブで見え、撮影すると写真一覧に加わります。',
     title: '無料のフィルムネガ変換', subtitle: 'ネガ変換もポジ補正も端末内で。写真のアップロードは不要です。',
     importBatch: '複数選択、または写真をまとめてドロップ',
@@ -249,7 +252,7 @@ const STUDIO_SYNC_IDS = [
   'exportAllBtn', 'studioUndo', 'studioRedo', 'undoBtn', 'redoBtn', 'studioRetry', 'studioApplyLens', 'studioResetAll',
   'studioRestart', 'exportSprocketBtn', 'studioExportBorder', 'studioClearQueue', 'studioSaveProject',
   'studioOpenProject', 'studioRestoreProject', 'studioWelcomeRestore', 'studioWelcomeRestoreBtn', 'studioMergeAverage', 'studioMergeHdr', 'studioNewSession', 'studioAdd',
-  'studioLoupe', 'saveSettingsBtn', 'applyToSelectedBtn', 'exportBtn', 'filmSettingsSection',
+  'studioLoupe', 'studioScan', 'saveSettingsBtn', 'applyToSelectedBtn', 'exportBtn', 'filmSettingsSection',
   'studioPhotoSwitchFeedback', 'studioPhotoSwitchMessage', 'studioPhotoSwitchHint', 'canvasContainer',
   'previewToolbar', 'canvasTransformWrapper', 'studioBorderPreviewOff', 'sprocketPreviewBtn',
 ];
@@ -405,7 +408,7 @@ export function createPhotoSortControl({ select, onSortFiles }) {
   };
 }
 
-export function mountStudioWorkspace({ getState, getLanguage, getText, isExportLocked, isCropAreaDetecting = () => false, onTabSelect = () => {}, onStyle, onReset, onResetAll, onRestart, onNewSession, onSync, onSyncCrop = () => {}, onSortFiles, onRetry, onConfirm, onExportBorder, onAutoCrop, onRestoreFrame, onConfirmAnalysis, onMergeShots, onLoupe, onSaveProject, onOpenProject, onRestoreProject, onExpiredMode }) {
+export function mountStudioWorkspace({ getState, getLanguage, getText, isExportLocked, isCropAreaDetecting = () => false, onTabSelect = () => {}, onStyle, onReset, onResetAll, onRestart, onNewSession, onSync, onSyncCrop = () => {}, onSortFiles, onRetry, onConfirm, onExportBorder, onAutoCrop, onRestoreFrame, onConfirmAnalysis, onMergeShots, onLoupe, onScan, onSaveProject, onOpenProject, onRestoreProject, onExpiredMode }) {
   const $ = id => document.getElementById(id);
   const t = key => (studioText[getLanguage()] || studioText.en)[key];
   const move = (id, target) => target.append($(id));
@@ -425,8 +428,8 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
   header.innerHTML = `
     <div class="studio-brand"><span class="studio-mark">NeoAnalogLab</span><span>Negative Converter</span></div>
     <nav id="studioPublicLinks" class="studio-public-links"></nav>
-    <nav class="studio-actions"><button id="studioAdd" type="button" data-studio="add"></button><button id="studioLoupe" type="button" data-studio="loupe"></button><span id="studioHistory"></span><div id="studioExport"></div>
-      <details id="studioMenu"><summary data-studio="menu"></summary><div class="studio-menu-content"><div id="studioLanguages"></div><div id="studioLinks"></div><button id="studioExpiredMode" type="button"></button><button id="studioNewSession" type="button" data-studio="newSession"></button></div></details>
+    <nav class="studio-actions"><button id="studioAdd" type="button" data-studio="add"></button><button id="studioLoupe" type="button" data-studio="loupe"></button><button id="studioScan" type="button" data-studio="scan" hidden></button><span id="studioHistory"></span><div id="studioExport"></div>
+      <details id="studioMenu"><summary data-studio="menu"></summary><div class="studio-menu-content"><div id="studioLanguages"></div><div id="studioLinks"></div><button id="studioExpiredMode" type="button"></button><button id="studioMenuScan" type="button" data-studio="scanMenu" hidden></button><button id="studioNewSession" type="button" data-studio="newSession"></button></div></details>
     </nav>`;
   body.prepend(header);
   // GitHub はヘルプ内ではなく、編集中も常に見えるトップバーに置く。
@@ -543,7 +546,7 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
   const importActions = document.createElement('div');
   importActions.className = 'studio-import-actions';
   welcome.after(importActions);
-  ['uploadBtn', 'uploadFolderBtn', 'uploadExpiredBtn'].forEach(id => move(id, importActions));
+  ['uploadBtn', 'uploadFolderBtn', 'uploadExpiredBtn', 'uploadScanBtn'].forEach(id => move(id, importActions));
   // The recovery copy's way back from the empty Studio, where a restarted
   // page (a crash, an iOS memory kill) lands: the Batch tools that also offer
   // it sit in the filmstrip, which only shows once photos are in.
@@ -876,6 +879,8 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
   $('studioAdd').addEventListener('click', () => $('addFilesToolbarBtn').click());
   $('studioLoupe').hidden = !(navigator.mediaDevices && typeof navigator.mediaDevices.getUserMedia === 'function');
   $('studioLoupe').addEventListener('click', () => onLoupe?.());
+  // Shown by main.js where the shell can drive a camera (the `tether` capability).
+  $('studioScan').addEventListener('click', () => onScan?.());
   $('studioReset').addEventListener('click', onReset);
   $('studioSync').addEventListener('click', onSync);
   $('studioSyncCrop').addEventListener('click', onSyncCrop);
@@ -1064,6 +1069,8 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
     set(node.studioAdd, 'disabled', Boolean(locked));
     set(node.studioLoupe, 'disabled', Boolean(locked));
     set(node.studioLoupe, 'title', t('loupeHint'));
+    set(node.studioScan, 'disabled', Boolean(locked));
+    set(node.studioScan, 'title', t('scanHint'));
     set(togglePanel, 'disabled', Boolean(state.cropping));
     set(toggleStrip, 'disabled', Boolean(state.cropping));
     set(toggleLightTable, 'disabled', Boolean(state.cropping));

@@ -3,7 +3,7 @@
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
 use std::{collections::HashMap, fs, io::{Read, Seek, SeekFrom}, path::{Path, PathBuf}, sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant, UNIX_EPOCH}};
-use tauri::{Emitter, State};
+use tauri::{Emitter, Manager, State};
 
 // Must equal IMPORT_CHUNK_BYTES in desktopImportReader.js (its test reads this
 // line): a 90 MB DNG takes 12 reads instead of about 90.
@@ -17,12 +17,27 @@ impl ImportWatch {
     pub fn stop(&self) {
         *self.active.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     }
+    /// The folder the user granted in the picker, while its watch is active:
+    /// where a tethered camera's photos are written (tether/mod.rs).
+    /// The arrival of a file the app itself just wrote into the granted folder.
+    pub fn tethered_arrival(&self, path: &Path) -> Option<Arrival> {
+        let grant = self.active.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let active = grant.as_ref()?;
+        if !scoped(&active.directory, path) { return None; }
+        let (size, modified) = fingerprint(path)?;
+        Some(Arrival { name: path.file_name()?.to_string_lossy().into(), path: path.to_string_lossy().into(), size, modified, session: active.session.clone(), tethered: true })
+    }
+    pub fn directory(&self) -> Option<PathBuf> {
+        self.active.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).as_ref().map(|active| active.directory.clone())
+    }
 }
 struct Active { directory: PathBuf, stop: Arc<AtomicBool>, session: String }
 impl Drop for Active { fn drop(&mut self) { self.stop.store(true, Ordering::Relaxed); } }
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Arrival { path: String, name: String, size: u64, modified: String, session: String }
+pub struct Arrival { path: String, name: String, size: u64, modified: String, session: String,
+    /// Written by the tethered camera (tether/mod.rs): whole already, so the page queues it at once.
+    tethered: bool }
 #[derive(Serialize)]
 pub struct WatchResult { path: String, session: String }
 
@@ -41,7 +56,7 @@ fn fingerprint(path: &Path) -> Option<(u64, String)> {
     if !meta.is_file() || meta.file_type().is_symlink() || meta.len() == 0 { return None; }
     Some((meta.len(), meta.modified().ok()?.duration_since(UNIX_EPOCH).ok()?.as_nanos().to_string()))
 }
-fn scoped(directory: &Path, path: &Path) -> bool {
+pub(crate) fn scoped(directory: &Path, path: &Path) -> bool {
     supported(path) && fs::symlink_metadata(path).map(|m| m.is_file() && !m.file_type().is_symlink()).unwrap_or(false)
         && path.canonicalize().ok().and_then(|p| p.parent().map(Path::to_path_buf)).as_deref() == Some(directory)
 }
@@ -49,10 +64,44 @@ fn stable(previous: &(u64, String), current: &(u64, String), quiet: Duration) ->
     previous == current && quiet >= Duration::from_secs(1)
 }
 
+// The folder of the last grant, so the next launch can watch it again without
+// the picker. Only the picker writes it and only this module reads it: the
+// page never names a path. (Inside the App Store sandbox a path alone gives no
+// access after a relaunch; there the remembered folder fails to open and the
+// page falls back to the picker.)
+fn remembered_file(app: &tauri::AppHandle) -> Option<PathBuf> {
+    app.path().app_config_dir().ok().map(|directory| directory.join("watch-folder.txt"))
+}
+fn remember(app: &tauri::AppHandle, directory: &Path) {
+    let Some(file) = remembered_file(app) else { return; };
+    if let Some(parent) = file.parent() { let _ = fs::create_dir_all(parent); }
+    if let Err(error) = fs::write(&file, directory.to_string_lossy().as_bytes()) { eprintln!("[watch] could not remember the folder: {error}"); }
+}
+/// The remembered folder when it still exists and can be listed.
+fn remembered(app: &tauri::AppHandle) -> Option<PathBuf> {
+    let text = fs::read_to_string(remembered_file(app)?).ok()?;
+    let directory = PathBuf::from(text.trim()).canonicalize().ok()?;
+    (directory.is_dir() && fs::read_dir(&directory).is_ok()).then_some(directory)
+}
+/// Its path, for the button that offers to watch it again.
+#[tauri::command]
+pub fn remembered_import_folder(app: tauri::AppHandle) -> Option<String> {
+    remembered(&app).map(|directory| directory.to_string_lossy().into())
+}
+/// Watches the remembered folder again; None when there is none to open.
+#[tauri::command]
+pub fn watch_remembered_import_folder(app: tauri::AppHandle, state: State<'_, ImportWatch>, import_existing: bool) -> Result<Option<WatchResult>, String> {
+    let Some(directory) = remembered(&app) else { return Ok(None); };
+    start_watch(app, state, directory, import_existing).map(Some)
+}
 #[tauri::command]
 pub fn watch_import_folder(app: tauri::AppHandle, state: State<'_, ImportWatch>, import_existing: bool) -> Result<Option<WatchResult>, String> {
     let Some(picked) = rfd::FileDialog::new().pick_folder() else { return Ok(None); };
     let directory = picked.canonicalize().map_err(|e| e.to_string())?;
+    remember(&app, &directory);
+    start_watch(app, state, directory, import_existing).map(Some)
+}
+fn start_watch(app: tauri::AppHandle, state: State<'_, ImportWatch>, directory: PathBuf, import_existing: bool) -> Result<WatchResult, String> {
     let session = format!("{}", std::time::SystemTime::now().duration_since(UNIX_EPOCH).map_err(|e| e.to_string())?.as_nanos());
     let stop = Arc::new(AtomicBool::new(false));
     // Keep the OS watcher alive on its worker thread. Notifications wake the
@@ -83,14 +132,14 @@ pub fn watch_import_folder(app: tauri::AppHandle, state: State<'_, ImportWatch>,
                 let previous = pending.entry(path.clone()).or_insert_with(|| (fp.clone(), Instant::now()));
                 if previous.0 != fp { *previous = (fp.clone(), Instant::now()); continue; }
                 if stable(&previous.0, &fp, previous.1.elapsed()) && !stop.load(Ordering::Relaxed) {
-                    let _ = app.emit("import-folder-file", Arrival { name: path.file_name().unwrap().to_string_lossy().into(), path: path.to_string_lossy().into(), size: fp.0, modified: fp.1.clone(), session: session.clone() });
+                    let _ = app.emit("import-folder-file", Arrival { name: path.file_name().unwrap().to_string_lossy().into(), path: path.to_string_lossy().into(), size: fp.0, modified: fp.1.clone(), session: session.clone(), tethered: false });
                     emitted.insert(path.clone(), fp); pending.remove(&path);
                 }
             }
             pending.retain(|path, _| path.exists());
         }
     });
-    Ok(Some(result))
+    Ok(result)
 }
 #[tauri::command]
 pub fn stop_watch_import_folder(state: State<'_, ImportWatch>) -> Result<(), String> {

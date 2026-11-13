@@ -1,15 +1,15 @@
 // Native capabilities come from the shell, never from a device's user agent
 // or touchscreen. Browser-only ?shell=mobile|desktop previews the same UI.
 export const WEB_CAPABILITIES = Object.freeze({
-  nativeDialogs: false, watchFolder: false, updater: false, externalLinks: true, documentsExport: false, sourceRecovery: false
+  nativeDialogs: false, watchFolder: false, tether: false, updater: false, externalLinks: true, documentsExport: false, sourceRecovery: false
 });
 export const WEB_PLATFORM = Object.freeze({ shell: 'web', os: null, arch: null, mobile: false, capabilities: WEB_CAPABILITIES });
 const MOBILE_OS = new Set(['ios', 'android']);
 const DESKTOP_OS = new Set(['macos', 'windows', 'linux']);
 
 const SHELL_SIMULATIONS = Object.freeze({
-  mobile: { shell: 'tauri', os: 'ios', arch: 'aarch64', mobile: true, capabilities: { nativeDialogs: false, watchFolder: false, updater: false, externalLinks: true, documentsExport: true } },
-  desktop: { shell: 'tauri', os: 'macos', arch: 'aarch64', mobile: false, capabilities: { nativeDialogs: true, watchFolder: true, updater: true, externalLinks: true, documentsExport: false } },
+  mobile: { shell: 'tauri', os: 'ios', arch: 'aarch64', mobile: true, capabilities: { nativeDialogs: false, watchFolder: false, tether: false, updater: false, externalLinks: true, documentsExport: true } },
+  desktop: { shell: 'tauri', os: 'macos', arch: 'aarch64', mobile: false, capabilities: { nativeDialogs: true, watchFolder: true, tether: false, updater: true, externalLinks: true, documentsExport: false } },
   web: WEB_PLATFORM
 });
 
@@ -41,6 +41,8 @@ export function normalizePlatform(info) {
     capabilities: {
       nativeDialogs: !mobile && capabilities.nativeDialogs === true,
       watchFolder: !mobile && capabilities.watchFolder === true,
+      // A camera on USB writes into the watch folder (tetherCamera.js).
+      tether: !mobile && capabilities.watchFolder === true && capabilities.tether === true,
       updater: !mobile && capabilities.updater === true,
       externalLinks: capabilities.externalLinks === true,
       documentsExport: mobile && capabilities.documentsExport === true,
