@@ -155,6 +155,9 @@ export async function runFolderImportSmoke({send,evaluate,waitFor,wait,fail,inst
   await waitFor('folder import boot',`!!document.getElementById('autoRollOnImport')`);
   await installDialogAutoAccept();
   await wait(1500); // Static controls exist before asynchronous app startup finishes.
+  // This module measures the automatic roll, and modules before it in the
+  // shard switch that preference off for their own imports.
+  const autoRollBefore = await evaluate(`(()=>{const before=localStorage.getItem('nc_auto_roll_import_v1');const box=document.getElementById('autoRollOnImport');if(!box.checked)box.click();return before})()`);
   await evaluate(`(${installFolderImportProbe})(${classifyFolderReadStack})`);
   const rawFixture = process.env.NC_FOLDER_RAW_FIXTURE;
   const count = rawFixture ? 3 : 12;
@@ -219,5 +222,5 @@ export async function runFolderImportSmoke({send,evaluate,waitFor,wait,fail,inst
   console.log('folder sync colours:',JSON.stringify({before:synced,after:afterSync}));
   if(afterSync.reads!==synced.reads||afterSync.decodes!==synced.decodes)fail('Sync colours re-read or re-decoded photos: '+JSON.stringify({synced,afterSync}));
   console.log(`ok: Sync colours re-rendered ${count - 1} tiles from their tile sources in ${afterSync.ms} ms without reading or decoding a photo`);
-
+  await evaluate(`(()=>{const key='nc_auto_roll_import_v1',before=${JSON.stringify(autoRollBefore ?? null)};if(before===null)localStorage.removeItem(key);else localStorage.setItem(key,before)})()`);
 }
