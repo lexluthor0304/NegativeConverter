@@ -38,9 +38,11 @@ export async function runStudioSmoke({ send, evaluate, waitFor, wait, fail, inst
   // Mixed automatic imports are covered by positive-import-smoke.mjs.
   await evaluate(`document.getElementById('importFilmTypeAuto').checked && document.getElementById('importFilmTypeAuto').click()`);
   if (!await evaluate(`(() => {
-    const link = document.querySelector('.studio-header .github-star-btn-main');
-    return link?.href === 'https://github.com/lexluthor0304/NegativeConverter' && link.getBoundingClientRect().width > 0;
-  })()`)) fail('GitHub link is not visible in the studio header');
+    // The empty Studio shows GitHub and the public links in the header.
+    const link = document.querySelector('.studio-header > .studio-actions > .github-link .github-star-btn-main');
+    return link?.href === 'https://github.com/lexluthor0304/NegativeConverter' && link.getBoundingClientRect().width > 0
+      && document.querySelectorAll('.studio-public-links .header-link-btn').length === 4;
+  })()`)) fail('GitHub link is not visible in the empty studio header');
   if (!await evaluate(`['toneSection', 'colorSection', 'cmySection', 'histogramContainer', 'additionalSection', 'consoleSection', 'dustRemovalSection', 'filmSettingsSection', 'advancedSection'].every(id => document.getElementById(id)?.isConnected)`)) fail('professional controls were removed');
   // 既存の JPEG は正像なので、既知の反転と色マスクから合成ネガを作る。
   // 実フィルムの色再現評価ではなく、入力→変換→調色の回帰用データ。
@@ -319,7 +321,15 @@ export async function runStudioSmoke({ send, evaluate, waitFor, wait, fail, inst
   if (mobile.overflow || mobile.imageHeight < 100 || mobile.panelTop <= mobile.stripTop || mobile.panelBottom > mobile.viewport + 2) fail(`studio mobile layout: ${JSON.stringify(mobile)}`);
   await assertPreviewVisible();
   await capture('studio-mobile.png');
-  if (!await evaluate(`document.querySelector('.studio-header .github-star-btn-main').getBoundingClientRect().width > 0`)) fail('GitHub link is not visible on mobile');
+  // With a photo open the header is a work bar: GitHub and the public links wait in the menu.
+  if (!await evaluate(`(() => {
+    const menu = document.getElementById('studioMenu');
+    menu.open = true;
+    const shown = ['offlineDownloadLink', 'feedbackBtn', 'privacyDetailsLink', 'shopLink'].map(id => document.getElementById(id)).concat(document.querySelector('.github-star-btn-main'))
+      .every(link => link.closest('#studioMenu .studio-menu-content') && link.getBoundingClientRect().width > 0);
+    menu.open = false;
+    return shown && !document.querySelector('.studio-public-links').getClientRects().length;
+  })()`)) fail('GitHub and the public links are not in the menu while a photo is open');
   await evaluate(`document.getElementById('cropBtn').click()`);
   const mobileCorner = await evaluate(`(() => {
     const r = document.getElementById('cropOverlay').getBoundingClientRect();

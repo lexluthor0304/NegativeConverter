@@ -442,3 +442,69 @@ body.studio {
 @media (pointer: coarse) { .studio .studio-advanced-toggle { min-height: 44px; } }
 @media (prefers-reduced-motion: reduce) { .studio .studio-advanced-toggle, .studio-toggle-indicator::after { transition: none; } }
 
+/* ---- Workspace layout: the photo first ----
+   With a photo open the header is a work bar and the viewer's status, tools
+   and panel switch share one row; the public links wait in the menu
+   (studioWorkspace.js placeHeaderLinks). The mobile shell keeps its own
+   header (studio-mobile.css). */
+html:not(.shell-mobile) .studio-loaded .studio-header { min-height: 44px; padding-block: 4px; }
+html:not(.shell-mobile) .studio-loaded .studio-brand > span:last-child { display: none; }
+.studio-loaded .studio-public-links { display: none; }
+#studioMenuLinks { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
+#studioMenuLinks:empty { display: none; }
+.studio-menu-content .header-link-btn { display: flex; align-items: center; gap: 8px; min-height: 34px; padding: 6px 0; color: var(--text-secondary); border: 0; background: transparent; box-shadow: none; font-size: 12px; }
+.studio-menu-content .header-link-btn:hover { color: var(--text-primary); }
+.studio-menu-content .header-link-btn svg { width: 16px; height: 16px; flex-shrink: 0; }
+.studio-menu-content .header-link-btn > span { display: inline; position: static; width: auto; height: auto; margin: 0; overflow: visible; clip: auto; white-space: normal; }
+.studio-menu-content .header-shop-badge { display: none !important; }
+.studio-menu-content .github-star-btn-main, .studio-menu-content .github-star-btn-count { padding: 8px 8px 8px 0; }
+
+.studio .preview-section { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: auto minmax(0, 1fr) auto; }
+.studio .studio-image-status { grid-area: 1 / 1; min-width: 0; justify-content: flex-start; }
+.studio #studioTogglePanel { grid-area: 1 / 2; margin-left: 0; align-self: center; }
+.studio .canvas-container { grid-area: 2 / 1 / 3 / -1; }
+.studio .preview-toolbar { grid-area: 3 / 1 / 4 / -1; }
+.studio:not(.studio-loaded) #studioTogglePanel { display: none; }
+@media (min-width: 1280px) {
+  .studio .preview-section { grid-template-columns: minmax(0, 1fr) auto auto; grid-template-rows: auto minmax(0, 1fr); column-gap: 12px; }
+  .studio .studio-image-status { min-height: 40px; overflow: hidden; white-space: nowrap; }
+  .studio .studio-image-status > * { flex-shrink: 0; }
+  .studio #studioFilename { flex-shrink: 1; }
+  .studio .preview-toolbar { grid-area: 1 / 2; padding: 0; flex-wrap: nowrap; }
+  .studio #studioTogglePanel { grid-area: 1 / 3; }
+}
+
+/* Adjustments panel: the jumps and the Advanced switch share one row, the
+   histogram and the correction console are compact, so the basic sliders
+   start on the first screen with CMYD still ahead of them. */
+.studio-panel-options { flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 8px; min-height: 36px; padding: 6px 10px 0 12px; }
+.studio-panel-options .studio-color-jumps { flex-wrap: wrap; min-width: 0; padding: 0; gap: 2px; }
+.studio .studio-advanced-toggle { margin-left: auto; min-height: 28px; padding: 4px 8px; }
+.studio .histogram-container { min-height: 0; margin: 6px 18px 0; padding: 6px 8px; }
+.studio .histogram-header { position: absolute; width: 1px; height: 1px; margin: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.studio #histogramCanvas { height: 60px; }
+.studio #consoleSection { padding: 8px 12px; margin-bottom: 0; }
+.studio #consoleSection .section-header { margin-bottom: 6px; }
+.studio #consoleSection .section-content:not(.collapsed) { display: grid; grid-template-columns: minmax(0, 1fr) 48px; gap: 6px 8px; padding: 0; }
+.studio .console-keypad { padding: 6px; gap: 4px 6px; border-radius: 6px; }
+.studio .console-channel { gap: 3px; }
+.studio #consoleResetBtn { width: auto; margin: 0; align-self: stretch; }
+.studio .console-key-hint { grid-column: 1 / -1; margin: 0; line-height: 1.5; text-wrap: balance; }
+.studio-basic { padding-top: 8px; }
+
+/* Explanations read as notes beside their control, not as alerts. */
+.studio .controls-panel .info-box { border: 0; border-left: 2px solid var(--border-light); border-radius: 0; background: transparent; color: var(--text-secondary); padding: 2px 0 2px 10px; }
+
+/* Controls that had no Studio style and showed as the browser's light buttons. */
+.studio :is(#resetLearnedDefaults, #clearDisplayCache, #studioToggleLightTable, #studioReviewFilter, #displayCacheLimit, .file-review-menu > button) {
+  border: 1px solid var(--border-light); border-radius: 5px; background: transparent; color: var(--text-primary);
+  font: inherit; font-size: 12px; padding: 5px 10px; cursor: pointer;
+}
+.studio :is(#displayCacheLimit, .file-review-menu > button) { background: var(--bg-secondary); }
+.studio #studioReviewFilter { color: #edbf76; border-color: currentColor; }
+.studio :is(#resetLearnedDefaults, #clearDisplayCache, #studioToggleLightTable, #studioReviewFilter):hover:not(:disabled) { background: var(--bg-hover); }
+#learnedDefaultsLine, #displayCacheLine { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin-top: 10px; font-size: 12px; color: var(--text-secondary); }
+
+/* Focus recovery: its own block on the Retouch tab, shown once the photo is converted like the sections around it. */
+.studio:not(.studio-ready) #studioFocusSection { display: none; }
+.studio #studioFocusSection .slider-group { margin: 0; }

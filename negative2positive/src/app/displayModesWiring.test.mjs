@@ -170,8 +170,11 @@ class TestImageData {
   const style = {};
   const calls = [];
   const record = name => (...args) => calls.push([name, ...args]);
-  const overlayContext = Object.fromEntries(['clearRect', 'putImageData', 'save', 'restore', 'beginPath', 'rect', 'clip', 'translate',
+  const overlayContext = Object.fromEntries(['clearRect', 'putImageData', 'drawImage', 'save', 'restore', 'beginPath', 'rect', 'clip', 'translate',
     'moveTo', 'lineTo', 'stroke'].map(name => [name, record(name)]));
+  // The strokes' layer (drawDisplayOverlay): its drawing lands in the same call list.
+  const layers = [];
+  const layerDocument = { createElement: () => { const layer = { width: 0, height: 0, getContext: () => overlayContext }; layers.push(layer); return layer; } };
   const overlay = { width: 1, height: 1, style, getContext: () => overlayContext };
   const mask = new Uint8Array(4800 * 3200);
   mask[1000 * 4800 + 2000] = 255;
@@ -183,7 +186,7 @@ class TestImageData {
   const ids = new WeakMap(); let next = 1;
   const geometry = { baseWidth: 4800, baseHeight: 3200, rotatedWidth: 4800, rotatedHeight: 3200, rotationAngle: 0, mirrored: false, cropRegion: null };
   const context = vm.createContext({
-    state, JSON, Math, Boolean, console, ImageData: TestImageData, displayOverlay: overlay,
+    state, JSON, Math, Boolean, console, ImageData: TestImageData, displayOverlay: overlay, document: layerDocument,
     displayOverlayState: { key: null, plan: null, tint: null, counters: { tintRects: 0, bandedBuilds: 0, workerTints: 0 } },
     dustTint: { mask: null, tag: null, width: 0, height: 0, image: null, building: null },
     displayDebugCounters: { overlayPaints: 0 }, displaySourceImageData: () => shown, getDisplayPreviewSize: () => ({ width: 1200, height: 800 }),
@@ -240,17 +243,18 @@ class TestImageData {
   assert.deepEqual(calls[0].slice(2), [layout.x, layout.y, 750, 125, 10, 5], 'the dirty cells at the photo\'s offset');
   context.syncDisplayOverlay();
   assert.equal(calls.length, 1, 'the patched overlay is current');
-  // Saved dodge strokes: clipped to the photo's rectangle and drawn in its
-  // pixels, the same path as without the border.
+  // Saved dodge strokes: drawn on a layer of the photo's size, which is
+  // copied to the photo's place, the same path as without the border.
   state.dodgeBurn.active = true;
   state.localExposure = { strokes: [{ stops: 1, size: 0.1, feather: 0.5, points: [{ x: 0.02, y: 0.4, p: 1 }, { x: 0.5, y: 0.45, p: 1 }] }] };
   calls.length = 0;
   context.syncDisplayOverlay();
   const framedCalls = calls.map(call => call[0]);
-  assert.deepEqual(framedCalls.slice(0, 8), ['clearRect', 'putImageData', 'save', 'beginPath', 'rect', 'clip', 'translate', 'save']);
-  assert.deepEqual(calls[4].slice(1), [layout.x, layout.y, 1200, 800]);
-  assert.deepEqual(calls[6].slice(1), [layout.x, layout.y]);
-  assert.deepEqual(framedCalls.slice(-2), ['restore', 'restore']);
+  assert.deepEqual(framedCalls.slice(0, 3), ['clearRect', 'putImageData', 'save']);
+  assert.deepEqual(framedCalls.slice(-2), ['restore', 'drawImage']);
+  assert.deepEqual(calls.at(-1).slice(1), [layers.at(-1), layout.x, layout.y], 'the layer is copied to the photo\'s offset');
+  assert.deepEqual([layers.at(-1).width, layers.at(-1).height], [0, 0], 'the layer\'s backing is released');
+  assert.ok(!calls.some(call => call[0] === 'clip' || call[0] === 'translate'), 'no clip or offset with the border either');
   const path = () => calls.filter(call => call[0] === 'moveTo' || call[0] === 'lineTo').map(call => call.slice(1));
   const framedPath = path();
   state.sprocketPreviewEnabled = false;
@@ -258,6 +262,7 @@ class TestImageData {
   context.syncDisplayOverlay();
   assert.deepEqual(path(), framedPath, 'the strokes\' photo pixels are the same with and without the border');
   assert.ok(!calls.some(call => call[0] === 'clip' || call[0] === 'translate'), 'no clip or offset without the border');
+  assert.deepEqual(calls.at(-1).slice(1), [layers.at(-1), 0, 0], 'the same layer copy at the origin');
   noInlineBox();
   state.dodgeBurn.active = false;
   state.localExposure = null;

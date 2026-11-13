@@ -87,6 +87,8 @@ async function drain() { for (let i = 0; i < 20; i++) await settle(); }
   const ids = new WeakMap(); let nextId = 1;
   const context = vm.createContext({
     state, displayOverlay, Math, JSON, Boolean, console,
+    // The strokes' layer (drawDisplayOverlay): its drawing lands in the same call list.
+    document: { createElement: () => ({ width: 0, height: 0, getContext: () => overlayContext }) },
     ImageData: class { constructor(data, width, height) { Object.assign(this, { data, width, height }); } },
     dustTint: { mask: null, tag: null, width: 0, height: 0, image: null, building: null },
     displayOverlayState: { key: null, plan: null, tint: null, counters: { tintRects: 0, bandedBuilds: 0, workerTints: 0 } },

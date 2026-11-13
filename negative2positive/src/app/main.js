@@ -11231,16 +11231,18 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const { photo } = plan;
       if (plan.tint) context.putImageData(dustTint.image, photo.x, photo.y);
       if (!plan.strokes) return;
-      const framed = photo.x !== 0 || photo.y !== 0 || photo.width !== plan.width || photo.height !== plan.height;
-      if (framed) {
-        context.save();
-        context.beginPath();
-        context.rect(photo.x, photo.y, photo.width, photo.height);
-        context.clip();
-        context.translate(photo.x, photo.y);
-      }
-      renderDodgeBurnOverlay(context, photo.width, photo.height);
-      if (framed) context.restore();
+      // The strokes are drawn on a layer of the photo's size and copied to
+      // their place, so a backing with a border shows the same pixels as one
+      // without on every rasterizer: drawn through a clip and a translation,
+      // a few antialiased pixels differed on Linux at some display sizes.
+      const layer = document.createElement('canvas');
+      layer.width = photo.width;
+      layer.height = photo.height;
+      renderDodgeBurnOverlay(layer.getContext('2d'), photo.width, photo.height);
+      context.drawImage(layer, photo.x, photo.y);
+      // WebKit counts a canvas's backing against the page until it is collected.
+      layer.width = 0;
+      layer.height = 0;
     }
 
     function paintDisplayOverlay(plan = displayOverlayPlan()) {
