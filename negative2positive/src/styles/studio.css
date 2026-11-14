@@ -525,8 +525,8 @@ html:not(.shell-mobile) .studio-loaded .studio-brand > span:last-child { display
 .loupe-overlay[data-mode="scan"] .loupe-body { display: flex; flex: 1; min-height: 0; gap: 12px; }
 .loupe-overlay[data-mode="scan"] .loupe-stage { flex: 1; min-width: 0; min-height: 0; aspect-ratio: auto; max-height: none; border-radius: 6px; }
 .loupe-overlay[data-mode="scan"] .loupe-hint,
-.loupe-overlay[data-mode="scan"] .loupe-field,
-.loupe-overlay[data-mode="scan"] .loupe-toggle:has(#loupeTorch) { display: none; }
+.loupe-overlay[data-mode="scan"]:not([data-source="phone"]) .loupe-field,
+.loupe-overlay[data-mode="scan"]:not([data-source="phone"]) .loupe-toggle:has(#loupeTorch) { display: none; }
 .loupe-overlay[data-mode="scan"] .loupe-controls { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 12px 20px; min-height: 48px; }
 .loupe-overlay[data-mode="scan"] .scan-settings { grid-area: 1 / 1; justify-self: start; }
 .loupe-overlay[data-mode="scan"] .loupe-capture { grid-area: 1 / 2; margin-left: 0; min-width: 240px; min-height: 46px; padding: 0 22px; border-radius: 6px; background: var(--accent); border-color: var(--accent) !important; color: #211d17; font-size: 14px; font-weight: 600; cursor: pointer; }
@@ -592,10 +592,25 @@ html:not(.shell-mobile) .studio-loaded .studio-brand > span:last-child { display
 .studio .upload-scan { display: inline-flex; flex-direction: column; align-items: center; gap: 2px; padding-block: 6px; cursor: pointer; }
 .studio .upload-scan[hidden] { display: none; }
 .studio .upload-scan small { font-size: 10px; color: var(--text-secondary); }
+/* Touch: no keyboard to hint at, and no hover to reveal the discard button. */
+@media (pointer: coarse) {
+  .scan-key { display: none; }
+  .scan-frame .scan-remove { opacity: 1; }
+}
+/* Phone scan: the shutter on its own row, the phone's camera, zoom and torch under it. */
+.loupe-overlay[data-mode="scan"][data-source="phone"] .loupe-controls { grid-template-columns: repeat(4, auto); justify-content: center; }
+.loupe-overlay[data-mode="scan"][data-source="phone"] .loupe-capture { grid-area: 1 / 1 / 2 / -1; justify-self: center; }
+.loupe-overlay[data-mode="scan"][data-source="phone"] :is(.loupe-field, .loupe-toggle) { grid-area: auto; justify-self: center; }
+.loupe-overlay[data-source="phone"] .scan-empty :is(ol, .scan-supported) { display: none; }
 @media (max-width: 900px) {
+  .loupe-overlay[data-mode="scan"][data-source="phone"] .loupe-controls { grid-template-columns: repeat(2, auto); gap: 8px 16px; }
+  .loupe-overlay[data-mode="scan"][data-source="phone"] .loupe-capture { min-width: 0; width: 100%; }
   .loupe-overlay[data-mode="scan"] .loupe-body { flex-direction: column; }
   .scan-rail { width: auto; max-height: 150px; }
-  .loupe-overlay[data-mode="scan"] .loupe-controls { grid-template-columns: 1fr; justify-items: center; }
-  .loupe-overlay[data-mode="scan"] :is(.scan-settings, .loupe-capture, .loupe-raw) { grid-area: auto / 1; justify-self: center; }
+  /* Under the picture the shots are one row that scrolls sideways. */
+  .scan-frames { display: flex; overflow: auto hidden; }
+  .scan-frame, .scan-frame:first-child { flex: 0 0 112px; }
+  .loupe-overlay[data-mode="scan"]:not([data-source="phone"]) .loupe-controls { grid-template-columns: 1fr; justify-items: center; }
+  .loupe-overlay[data-mode="scan"]:not([data-source="phone"]) :is(.scan-settings, .loupe-capture, .loupe-raw) { grid-area: auto / 1; justify-self: center; }
 }
 .studio #studioWatchChange { border: 0; background: transparent; color: var(--text-secondary); font-size: 12px; padding: 6px; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }

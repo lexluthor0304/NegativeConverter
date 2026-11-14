@@ -8,13 +8,15 @@
   padding: var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left);
 }
 .shell-mobile :is(.studio-public-links, .github-link, .studio-discovery,
-  #uploadFolderBtn, #studioWatchControls, #desktopUpdateBanner, #studioLoupe),
+  #uploadFolderBtn, #studioWatchControls, #desktopUpdateBanner),
 .shell-unknown :is(#uploadFolderBtn, #studioWatchControls, #desktopUpdateBanner) { display: none !important; }
 .shell-mobile .studio-header { min-height: 60px; padding: 6px 12px; gap: 10px; }
 .shell-mobile .studio-mark { font-size: 20px; }
 .shell-mobile .studio-actions { gap: 8px; }
-/* Camera/loupe is outside the current iOS acceptance scope.
-   Help retains the feedback, privacy and support links hidden from the bar. */
+/* Help retains the feedback, privacy and support links hidden from the bar. */
+/* Phone scan fills the screen inside the safe areas. */
+.shell-mobile .loupe-overlay[data-mode="scan"] { padding: var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left); }
+.shell-mobile .loupe-overlay[data-mode="scan"] .loupe-modal { width: 100%; height: 100%; }
 .shell-mobile .studio :is(button, summary, select, .upload-btn, .zoom-btn) { min-height: 44px; }
 .shell-mobile .studio :is(.zoom-btn, .file-list-select-control) { min-width: 44px; min-height: 44px; }
 /* A 44 px selection label covered the centre of an 88 px compact tile.

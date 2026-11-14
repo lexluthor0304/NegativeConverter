@@ -12,9 +12,10 @@ update manifests. Feedback preserves `ios`/`android` as its source.
 ## Mobile editor
 
 The mobile shell keeps the existing Studio, neutral palette and pixel fonts.
-It hides the desktop folder picker, watch-folder controls, update banner,
-marketing bar and camera loupe (the mobile camera workflow has not been
-validated). Feedback, privacy and help remain reachable through the menu.
+It hides the desktop folder picker, watch-folder controls, update banner and
+marketing bar. Phone scan is offered since 2026-11-14 (the app declares
+`NSCameraUsageDescription`); its camera feed was checked in Chrome's phone
+emulation only, not yet on an iPhone or iPad. Feedback, privacy and help remain reachable through the menu.
 Safe-area padding accounts for the notch and home indicator. Primary controls
 have 44 px touch targets; text/number fields use 16 px to avoid focus zoom.
 On compact windows the Photos button expands the filmstrip on demand. Short

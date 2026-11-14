@@ -165,6 +165,16 @@ itself (`app/phoneCamera.js`; labels are readable only after access was
 granted, so the default camera opens first and is replaced). Choosing a camera
 in the list overrides it. Not yet tried on a phone.
 
+Phone scan runs the camera scan's sitting (`openScan('phone')`,
+`data-mode="scan"` with `data-source="phone"`): the converted live view fills
+the screen, each shot becomes a file in the photo list and a tile on the strip
+once the light table has converted it, a tile opens the photo in the editor,
+× takes it off the list, and the first shot opens when nothing was open. What
+differs from a camera on USB: the shot is the stream's still (`ImageCapture`,
+else the video frame) instead of a RAW from the camera, nothing is written to
+a folder, and the phone's camera, zoom and torch controls stay on screen
+instead of the exposure settings.
+
 **Phone scan** button in the header (shown when the browser can open a
 camera). The camera feed is converted continuously at 640 px through the
 current photo's recipe — film base, preset, colour controls and look,
