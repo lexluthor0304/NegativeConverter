@@ -90,6 +90,10 @@ mod session {
     const QUICK: Duration = Duration::from_secs(5);
     /// A 100 MB RAW at the 33 MB/s measured over USB 2 takes three seconds.
     const TRANSFER: Duration = Duration::from_secs(120);
+    /// The system lists the whole card when a camera is plugged in or wakes,
+    /// and passes no command on until it is done: 66 s was measured on a card
+    /// with years of photos. The first command of a connection waits that out.
+    const FIRST_ANSWER: Duration = Duration::from_secs(180);
 
     struct Session {
         id: String,
@@ -132,8 +136,11 @@ mod session {
         async fn set_u32(&self, app: &AppHandle, id: &str, what: &str, property: u16, value: u32) -> Result<(), String> {
             self.expect(app, id, what, op::SET_DEVICE_PROP_VALUE, &[property as u32], Some(value.to_le_bytes().to_vec())).await.map(|_| ())
         }
-        async fn device_info(&self, app: &AppHandle, id: &str) -> Result<ptp::DeviceInfo, String> {
-            let data = self.expect(app, id, "device info", op::GET_DEVICE_INFO, &[], None).await?;
+        async fn device_info(&self, app: &AppHandle, id: &str, timeout: Duration) -> Result<ptp::DeviceInfo, String> {
+            let data = match self.call(app, id, op::GET_DEVICE_INFO, &[], None, timeout).await? {
+                (rc::OK, data) => data,
+                (other, _) => return Err(format!("device info: the camera answered 0x{other:04x}")),
+            };
             ptp::DeviceInfo::parse(&data).ok_or_else(|| "the camera's device info could not be read".to_string())
         }
         fn current(&self) -> Result<(String, bool), String> {
@@ -185,11 +192,11 @@ mod session {
             let _busy = inner.busy.lock().await;
             macos::open(app, &id).await?;
             let opened = async {
-                inner.device_info(app, &id).await?;
+                inner.device_info(app, &id, FIRST_ANSWER).await?;
                 // The Leica session: live view and the transfer handshake are behind it.
                 inner.expect(app, &id, "Leica session", leica::OPEN_SESSION, &[leica::OPEN_SESSION_KEY], None).await?;
                 inner.set_u32(app, &id, "tethered shooting", leica::PROP_EXTERNAL_SHOOTING, 1).await?;
-                inner.device_info(app, &id).await
+                inner.device_info(app, &id, QUICK).await
             }
             .await;
             let info = match opened {
