@@ -6,8 +6,10 @@ Wi-Fi, nothing for the user to install.
 
 ## Where it works
 
-Leica M11 series: measured. Sony and Fujifilm cameras: beta, see their section
-below.
+Leica M11 series: measured. Every other Leica (vendor 0x1A98) is offered as beta
+with the same dialect, untried: a body that answers OperationNotSupported to the
+Leica session is reported as unsupported. Sony and Fujifilm cameras: beta, see
+their section below.
 
 | | State |
 |---|---|

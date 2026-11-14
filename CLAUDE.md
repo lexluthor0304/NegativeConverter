@@ -191,7 +191,7 @@ in the explicit expired-roll session. A positive in edit mode keeps it off outsi
 expired-roll session (its export stays the source). See `docs/expired-film-rescue.md`.
 
 ### Camera Scan (tethered capture)
-macOS desktop only. The Leica M11 series was measured on the camera; Sony
+macOS desktop only. The Leica M11 series was measured on the camera; other Leica bodies, Sony
 (PC Remote) and Fujifilm (USB tether shooting) cameras are driven from
 libgphoto2 and libfuji and are labelled Beta until they are measured too (`ptp::Dialect`). The camera
 on one USB cable shows its live view converted in the phone scan's scan mode,
