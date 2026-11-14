@@ -7,17 +7,24 @@
 /// Standard operation codes used here.
 pub mod op {
     pub const GET_DEVICE_INFO: u16 = 0x1001;
+    pub const GET_OBJECT_HANDLES: u16 = 0x1007;
     pub const GET_OBJECT_INFO: u16 = 0x1008;
     pub const GET_OBJECT: u16 = 0x1009;
+    pub const DELETE_OBJECT: u16 = 0x100B;
     pub const INITIATE_CAPTURE: u16 = 0x100E;
     pub const GET_DEVICE_PROP_DESC: u16 = 0x1014;
     pub const GET_DEVICE_PROP_VALUE: u16 = 0x1015;
     pub const SET_DEVICE_PROP_VALUE: u16 = 0x1016;
+    pub const TERMINATE_OPEN_CAPTURE: u16 = 0x1018;
+    pub const INITIATE_OPEN_CAPTURE: u16 = 0x101C;
 }
 
 /// Response codes this layer tells apart.
 pub mod rc {
     pub const OK: u16 = 0x2001;
+    pub const OPERATION_NOT_SUPPORTED: u16 = 0x2005;
+    pub const INVALID_OBJECT_HANDLE: u16 = 0x2009;
+    pub const ACCESS_DENIED: u16 = 0x200F;
     pub const DEVICE_BUSY: u16 = 0x2019;
     /// PTP 1.1: the stream the frame was asked from is not enabled (yet).
     pub const NO_STREAM_ENABLED: u16 = 0x2022;
@@ -35,6 +42,9 @@ pub mod prop {
     /// PTP 1.1: which of the camera's streams are on.
     pub const ENABLED_STREAMS: u16 = 0x5021;
 }
+
+/// Object format of a folder.
+pub const FORMAT_ASSOCIATION: u16 = 0x3001;
 
 const CONTAINER_COMMAND: u16 = 1;
 const CONTAINER_RESPONSE: u16 = 3;
@@ -146,6 +156,21 @@ impl<'a> Reader<'a> {
         let count = self.u8() as usize;
         let units: Vec<u16> = (0..count).map(|_| self.u16()).collect();
         String::from_utf16_lossy(&units).trim_end_matches('\0').to_string()
+    }
+    pub fn skip(&mut self, count: usize) {
+        self.take(count);
+    }
+    pub fn remaining(&self) -> usize {
+        self.bytes.len() - self.offset
+    }
+    /// The next u16 without consuming it.
+    pub fn peek16(&self) -> Option<u16> {
+        self.bytes.get(self.offset..self.offset + 2).map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
+    }
+    /// A PTP array of u32 (object handles): a u32 count, then the values.
+    pub fn array32(&mut self) -> Vec<u32> {
+        let count = (self.u32() as usize).min(65_536);
+        (0..count).map(|_| self.u32()).collect()
     }
     /// A PTP array of u16: a u32 count, then the values.
     pub fn array16(&mut self) -> Vec<u16> {
@@ -299,11 +324,11 @@ impl PropDesc {
 pub mod leica {
     pub const USB_VENDOR: u16 = 0x1A98;
 
-    /// Whether a Leica that names itself `name` is driven: the M11 series
-    /// ("LEICA M11", "LEICA M11-P", "LEICA M11 Monochrom", "LEICA M11-D"). The
-    /// dialect was measured on the M11; other Leica bodies wait for their own
-    /// measurement.
-    pub fn supported_model(name: &str) -> bool {
+    /// Whether a Leica that names itself `name` is of the M11 series ("LEICA
+    /// M11", "LEICA M11-P", "LEICA M11 Monochrom", "LEICA M11-D"), on which
+    /// the dialect was measured. Every other Leica is offered as beta: one
+    /// that has no Leica session says so when the connection is made.
+    pub fn measured_model(name: &str) -> bool {
         name.split_whitespace().any(|word| {
             let word = word.to_ascii_uppercase();
             word.strip_prefix("M11").is_some_and(|rest| !rest.starts_with(|next: char| next.is_ascii_alphanumeric()))
@@ -345,18 +370,297 @@ pub mod leica {
     }
 }
 
+/// Which vendor's sequences a camera is driven with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dialect {
+    Leica,
+    Sony,
+    Fuji,
+}
+
+impl Dialect {
+    /// The dialect for a camera on USB, or None for a body this app does not drive.
+    pub fn of(usb_vendor: u16, name: &str) -> Option<Self> {
+        match usb_vendor {
+            leica::USB_VENDOR => Some(Self::Leica),
+            sony::USB_VENDOR if sony::supported_model(name) => Some(Self::Sony),
+            fuji::USB_VENDOR if fuji::supported_model(name) => Some(Self::Fuji),
+            _ => None,
+        }
+    }
+    /// Whether this camera was measured on the real body: the Leica M11
+    /// series. Other Leica bodies share its session and commands but were not
+    /// tried; Sony and Fujifilm follow the published protocol notes of
+    /// libgphoto2 and libfuji. All of those are offered as beta.
+    pub fn measured(usb_vendor: u16, name: &str) -> bool {
+        usb_vendor == leica::USB_VENDOR && leica::measured_model(name)
+    }
+}
+
+/// Sony cameras in "PC Remote" (USB vendor 0x054C). The camera hides its
+/// controls behind a three-step connect; the state of everything, including
+/// "a captured file waits in memory", comes in one blob of property
+/// descriptions. Sequences after libgphoto2 (camlibs/ptp2); not yet measured
+/// on a camera by this app.
+pub mod sony {
+    use super::Reader;
+
+    pub const USB_VENDOR: u16 = 0x054C;
+
+    /// Every Sony camera is offered: the protocol is the same across the
+    /// Alpha, ZV and RX bodies, and one that has no PC Remote says so when
+    /// the connection is made (it does not list the connect operation).
+    pub fn supported_model(_name: &str) -> bool {
+        true
+    }
+
+    pub const CONNECT: u16 = 0x9201;
+    pub const GET_EXT_DEVICE_INFO: u16 = 0x9202;
+    /// The newest protocol asked for; a body answers with the one it speaks.
+    pub const PROTOCOL: u32 = 0x012C;
+    pub const SET_PROPERTY: u16 = 0x9205;
+    /// "Control" values: buttons that are pressed (2) and released (1).
+    pub const CONTROL: u16 = 0x9207;
+    pub const GET_ALL_PROPERTIES: u16 = 0x9209;
+
+    /// Who decides the settings: 1 is the application.
+    pub const PROP_PRIORITY: u16 = 0xD25A;
+    pub const PROP_FOCUS_FOUND: u16 = 0xD213;
+    /// 0x8000 and up: that many captured files wait at `CAPTURED_OBJECT`.
+    pub const PROP_OBJECT_IN_MEMORY: u16 = 0xD215;
+    pub const OBJECT_READY: i64 = 0x8000;
+    pub const BUTTON_HALF_PRESS: u16 = 0xD2C1;
+    pub const BUTTON_RELEASE: u16 = 0xD2C2;
+    pub const PRESS: u16 = 2;
+    pub const LET_GO: u16 = 1;
+
+    pub const CAPTURED_OBJECT: u32 = 0xFFFF_C001;
+    pub const LIVE_VIEW_OBJECT: u32 = 0xFFFF_C002;
+
+    /// The codes GetExtDeviceInfo lists: properties, then controls.
+    pub fn ext_device_info(bytes: &[u8]) -> Vec<u16> {
+        let mut reader = Reader::new(bytes);
+        reader.u16(); // protocol version
+        let mut codes = reader.array16();
+        codes.extend(reader.array16());
+        if reader.truncated { Vec::new() } else { codes }
+    }
+
+    fn value_size(reader: &mut Reader, kind: u16) -> Option<usize> {
+        Some(match kind {
+            0x0001 | 0x0002 => 1,
+            0x0003 | 0x0004 => 2,
+            0x0005 | 0x0006 => 4,
+            0x0007 | 0x0008 => 8,
+            0x0009 | 0x000A => 16,
+            0xFFFF => 2 * reader.u8() as usize,
+            0x4001..=0x400A => {
+                let element = [1, 1, 2, 2, 4, 4, 8, 8, 16, 16][(kind & 0xF) as usize - 1];
+                element * (reader.u32() as usize).min(1 << 20)
+            }
+            _ => return None,
+        })
+    }
+
+    /// The current value of one property in a GetAllProperties blob, for the
+    /// integer types up to 32 bits. Each entry: code, type, two flag bytes,
+    /// default, current, then a range or an enumeration (newer bodies send a
+    /// second enumeration after the first).
+    pub fn current_value(blob: &[u8], property: u16) -> Option<i64> {
+        let mut reader = Reader::new(blob);
+        reader.skip(8); // entry count, zero
+        while reader.remaining() >= 6 {
+            let code = reader.u16();
+            let kind = reader.u16();
+            reader.skip(2);
+            let size = value_size(&mut reader, kind)?;
+            reader.skip(size); // default
+            let current = if code == property {
+                Some(match kind {
+                    0x0001 => reader.u8() as i8 as i64,
+                    0x0002 => reader.u8() as i64,
+                    0x0003 => reader.u16() as i16 as i64,
+                    0x0004 => reader.u16() as i64,
+                    0x0005 => reader.u32() as i32 as i64,
+                    0x0006 => reader.u32() as i64,
+                    _ => return None,
+                })
+            } else {
+                let size = value_size(&mut reader, kind)?;
+                reader.skip(size);
+                None
+            };
+            if reader.truncated {
+                return None;
+            }
+            if current.is_some() {
+                return current;
+            }
+            let list = |reader: &mut Reader| -> Option<()> {
+                for _ in 0..reader.u16() {
+                    let size = value_size(reader, kind)?;
+                    reader.skip(size);
+                }
+                Some(())
+            };
+            match reader.u8() {
+                1 => {
+                    for _ in 0..3 {
+                        let size = value_size(&mut reader, kind)?;
+                        reader.skip(size);
+                    }
+                }
+                2 => {
+                    list(&mut reader)?;
+                    // A count where the next property code (0x5xxx, 0xDxxx) would be.
+                    if reader.peek16().is_some_and(|next| next < 0x200) {
+                        list(&mut reader)?;
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// The JPEG in a live view object: the payload starts with the picture's
+    /// offset and size.
+    pub fn live_view_jpeg(payload: &[u8]) -> Option<&[u8]> {
+        let word = |at: usize| payload.get(at..at + 4).map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()) as usize);
+        let (offset, size) = (word(0)?, word(4)?);
+        let jpeg = payload.get(offset..offset.checked_add(size)?).or_else(|| payload.get(offset..))?;
+        (jpeg.len() > 4 && jpeg[0] == 0xFF && jpeg[1] == 0xD8).then_some(jpeg)
+    }
+}
+
+/// Fujifilm bodies in "USB tether shooting" (USB vendor 0x04CB). Captures
+/// wait in the camera's memory as objects until the host fetches them; the
+/// live view is a pseudo object that is read and deleted per frame. Sequences
+/// after libgphoto2 (camlibs/ptp2) and libfuji; not yet measured on a camera
+/// by this app.
+pub mod fuji {
+    pub const USB_VENDOR: u16 = 0x04CB;
+
+    /// Every Fujifilm camera is offered: the GFX and X bodies share the
+    /// protocol, and one that has no tether shooting mode, or is not in it,
+    /// says so when the connection is made.
+    pub fn supported_model(_name: &str) -> bool {
+        true
+    }
+
+    /// 5 while the camera is in a tether shooting mode; a card reader has no such property.
+    pub const PROP_USB_MODE: u16 = 0xD16E;
+    pub const USB_MODE_TETHER: u16 = 5;
+    pub const PROP_PC_MODE: u16 = 0xD38C;
+    /// Who releases the shutter: 1 the camera's button, 2 the host.
+    pub const PROP_PRIORITY: u16 = 0xD207;
+    pub const PRIORITY_CAMERA: u16 = 1;
+    pub const PRIORITY_HOST: u16 = 2;
+    /// What the next InitiateCapture does.
+    pub const PROP_ACTION: u16 = 0xD208;
+    pub const ACTION_FOCUS: u16 = 0x0200;
+    pub const ACTION_SHOOT: u16 = 0x0304;
+    pub const ACTION_CANCEL: u16 = 0x0004;
+    /// 1 while focusing, 2 ready, 3 failed.
+    pub const PROP_FOCUS_STATUS: u16 = 0xD209;
+    pub const FOCUS_BUSY: u16 = 1;
+    pub const FOCUS_FAILED: u16 = 3;
+    /// Reading it clears the camera's list of changed properties.
+    pub const PROP_EVENTS: u16 = 0xD212;
+
+    pub const LIVE_VIEW_OBJECT: u32 = 0x8000_0001;
+    pub const ALL_STORAGES: u32 = 0xFFFF_FFFF;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn only_the_m11_series_is_driven() {
+    fn only_the_m11_series_counts_as_measured() {
         for name in ["LEICA M11", "Leica M11-P", "LEICA M11 Monochrom", "LEICA M11-D", "M11"] {
-            assert!(leica::supported_model(name), "{name}");
+            assert!(leica::measured_model(name), "{name}");
         }
         for name in ["LEICA SL3", "LEICA Q3", "LEICA M10-R", "LEICA M110", "LEICA M11X", ""] {
-            assert!(!leica::supported_model(name), "{name}");
+            assert!(!leica::measured_model(name), "{name}");
         }
+    }
+
+    #[test]
+    fn each_camera_gets_its_dialect() {
+        assert_eq!(Dialect::of(0x1A98, "LEICA M11"), Some(Dialect::Leica));
+        assert_eq!(Dialect::of(0x1A98, "LEICA SL3"), Some(Dialect::Leica));
+        // Sony and Fujifilm: the whole brand; the connection finds out what a body can do.
+        for name in ["ILCE-7RM5", "ILCE-7M4", "ILCE-1", "ZV-E10", "DSC-RX100M7", ""] {
+            assert_eq!(Dialect::of(0x054C, name), Some(Dialect::Sony), "{name}");
+        }
+        for name in ["GFX 50S", "GFX100S", "FUJIFILM GFX100RF", "X-T5", "X-H2S", ""] {
+            assert_eq!(Dialect::of(0x04CB, name), Some(Dialect::Fuji), "{name}");
+        }
+        // Another vendor is not driven, whatever it calls itself.
+        assert_eq!(Dialect::of(0x04A9, "ILCE-7RM5"), None);
+        // Only the M11 series was measured; everything else is beta.
+        assert!(Dialect::measured(0x1A98, "LEICA M11-P"));
+        for (vendor, name) in [(0x1A98, "LEICA SL3"), (0x1A98, "LEICA Q3"), (0x054C, "ILCE-7RM5"), (0x04CB, "GFX100S"), (0x054C, "M11")] {
+            assert!(!Dialect::measured(vendor, name), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_sony_property_blob_gives_current_values() {
+        let mut blob = vec![3, 0, 0, 0, 0, 0, 0, 0];
+        // A string property (skipped), then an enumeration with a second list, then the one asked for.
+        blob.extend_from_slice(&[0x01, 0xD2, 0xFF, 0xFF, 0, 1, 1, 0x41, 0, 2, 0x42, 0, 0x43, 0, 0]);
+        blob.extend_from_slice(&[0x1E, 0xD2, 0x06, 0x00, 1, 1]);
+        blob.extend_from_slice(&100u32.to_le_bytes());
+        blob.extend_from_slice(&400u32.to_le_bytes());
+        blob.push(2);
+        blob.extend_from_slice(&2u16.to_le_bytes());
+        blob.extend_from_slice(&100u32.to_le_bytes());
+        blob.extend_from_slice(&400u32.to_le_bytes());
+        blob.extend_from_slice(&1u16.to_le_bytes());
+        blob.extend_from_slice(&400u32.to_le_bytes());
+        blob.extend_from_slice(&[0x15, 0xD2, 0x04, 0x00, 0, 2, 0, 0, 0x01, 0x80, 0]);
+        assert_eq!(sony::current_value(&blob, 0xD21E), Some(400));
+        assert_eq!(sony::current_value(&blob, sony::PROP_OBJECT_IN_MEMORY), Some(0x8001));
+        assert_eq!(sony::current_value(&blob, sony::PROP_FOCUS_FOUND), None);
+        // Cut inside an entry, or a type this reader cannot step over: no value, no panic.
+        assert_eq!(sony::current_value(&blob[..blob.len() - 2], sony::PROP_OBJECT_IN_MEMORY), None);
+        assert_eq!(sony::current_value(&[0; 8], 0xD215), None);
+        assert_eq!(sony::current_value(&[0, 0, 0, 0, 0, 0, 0, 0, 0x15, 0xD2, 0x77, 0x00, 0, 0, 0, 0], 0xD215), None);
+    }
+
+    #[test]
+    fn sony_lists_its_codes_and_wraps_its_live_view() {
+        let mut info = 0x012Cu16.to_le_bytes().to_vec();
+        info.extend(array16(&[0x5010, sony::PROP_OBJECT_IN_MEMORY]));
+        info.extend(array16(&[sony::BUTTON_HALF_PRESS, sony::BUTTON_RELEASE]));
+        assert_eq!(sony::ext_device_info(&info), [0x5010, 0xD215, 0xD2C1, 0xD2C2]);
+        assert!(sony::ext_device_info(&info[..7]).is_empty());
+
+        let jpeg = [0xFF, 0xD8, 0xFF, 0xDB, 1, 2, 0xFF, 0xD9];
+        let mut payload = vec![0u8; 136];
+        payload[0..4].copy_from_slice(&136u32.to_le_bytes());
+        payload[4..8].copy_from_slice(&(jpeg.len() as u32).to_le_bytes());
+        payload.extend_from_slice(&jpeg);
+        payload.extend_from_slice(&[0; 5]); // padding after the picture
+        assert_eq!(sony::live_view_jpeg(&payload), Some(&jpeg[..]));
+        assert_eq!(sony::live_view_jpeg(&payload[..100]), None);
+        assert_eq!(sony::live_view_jpeg(&[0; 16]), None);
+        assert_eq!(sony::live_view_jpeg(&[]), None);
+    }
+
+    #[test]
+    fn object_handles_are_read_as_a_list() {
+        let mut bytes = 2u32.to_le_bytes().to_vec();
+        bytes.extend_from_slice(&fuji::LIVE_VIEW_OBJECT.to_le_bytes());
+        bytes.extend_from_slice(&7u32.to_le_bytes());
+        let mut reader = Reader::new(&bytes);
+        assert_eq!(reader.array32(), [fuji::LIVE_VIEW_OBJECT, 7]);
+        assert!(!reader.truncated);
+        let mut short = Reader::new(&bytes[..9]);
+        short.array32();
+        assert!(short.truncated);
     }
 
     fn string(text: &str) -> Vec<u8> {

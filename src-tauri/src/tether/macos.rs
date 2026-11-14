@@ -30,6 +30,8 @@ pub struct Camera {
     pub usb_product: u16,
     /// A body whose dialect this app speaks; the others are listed only to say so.
     pub supported: bool,
+    /// Driven from published protocol notes, not yet measured on the real camera.
+    pub beta: bool,
 }
 
 struct Main {
@@ -54,8 +56,9 @@ fn describe(device: &ICDevice) -> Camera {
             .filter(|uuid| !uuid.is_empty())
             .unwrap_or_else(|| format!("{:04x}:{:04x}:{name}", device.usbVendorID(), device.usbProductID()));
         let usb_vendor = device.usbVendorID() as u16;
-        let supported = usb_vendor == ptp::leica::USB_VENDOR && ptp::leica::supported_model(&name);
-        Camera { id, name, usb_vendor, usb_product: device.usbProductID() as u16, supported }
+        let dialect = ptp::Dialect::of(usb_vendor, &name);
+        let beta = dialect.is_some() && !ptp::Dialect::measured(usb_vendor, &name);
+        Camera { id, name, usb_vendor, usb_product: device.usbProductID() as u16, supported: dialect.is_some(), beta }
     }
 }
 
