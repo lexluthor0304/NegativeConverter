@@ -157,9 +157,15 @@ makes the next warp request an over-cap Mat, a genuine OpenCV `StsNoMem`
 pointer; the camera smoke uses it to check the alert, the released UI and
 the terminated worker.
 
-## Live loupe (#156)
+## Phone scan, formerly the live loupe (#156)
 
-**Live loupe** button in the header (shown when the browser can open a
+The screen opens the camera that focuses closest: one that calls itself macro,
+else the phone's combined back camera, which switches to its macro lens by
+itself (`app/phoneCamera.js`; labels are readable only after access was
+granted, so the default camera opens first and is replaced). Choosing a camera
+in the list overrides it. Not yet tried on a phone.
+
+**Phone scan** button in the header (shown when the browser can open a
 camera). The camera feed is converted continuously at 640 px through the
 current photo's recipe — film base, preset, colour controls and look,
 without its geometry, strokes, flat field or roll lock — or, before any

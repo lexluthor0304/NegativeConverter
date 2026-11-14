@@ -6,6 +6,9 @@ Wi-Fi, nothing for the user to install.
 
 ## Where it works
 
+Leica M11 series: measured. Sony and Fujifilm cameras: beta, see their section
+below.
+
 | | State |
 |---|---|
 | macOS desktop app, Leica M11 (firmware 2.6.4) | measured on the camera, 2026-11-13 |
@@ -130,6 +133,50 @@ Lightroom Classic's built-in Leica tether for the parameters and their order.
 Only protocol facts were taken: codes, parameters, order. Leica does not
 document them, so a firmware update can change them.
 
+## Sony and Fujifilm dialects (beta, not measured)
+
+Every Sony camera (vendor 0x054C) and every Fujifilm camera (vendor 0x04CB) is
+offered, since each brand shares one protocol across its bodies; what a body
+cannot do it says at connection. They are driven from published protocol notes: libgphoto2
+(`camlibs/ptp2/library.c`, `ptp.c`, `ptp-pack.c`) and, for Fujifilm, libfuji.
+**Nothing below was run on a camera by this app** (shipped 2026-11-14 at the
+owner's request, labelled Beta in the UI, `Dialect::measured`). The first
+session with a real body should expect to correct it.
+
+Sony, camera set to *PC Remote* (otherwise `sony-pc-remote`):
+- Connect: `0x9201` with 1, then 2; `0x9202(0x12C, 1)` lists properties and
+  controls; `0x9201` with 3; property `0xD25A` = 1 through `0x9205`.
+- Live view: GetObject `0xFFFFC002`; the payload starts with the JPEG's offset
+  and size. AccessDenied or InvalidObjectHandle means "ask again".
+- Shutter: controls `0xD2C1` then `0xD2C2` = 2 through `0x9207`, held until
+  `0xD213` reports focus (a second at most), then both = 1.
+- The file: property `0xD215` in the `0x9209` blob reaches 0x8000 or more;
+  GetObjectInfo and GetObject on `0xFFFFC001`. *Still image save destination*
+  must include the PC.
+
+Fujifilm, camera set to *USB tether shooting auto* (otherwise
+`fuji-tether-mode`: property `0xD16E` is not 5, or no InitiateCapture):
+- Live view: InitiateOpenCapture(0, 0); each frame is GetObjectInfo, GetObject
+  and DeleteObject on the pseudo object `0x80000001`; TerminateOpenCapture with
+  the transaction of the InitiateOpenCapture ends it. A capture ends it too and
+  the next frame request starts it again.
+- Shutter: `0xD207` = 2, `0xD208` = 0x0200 + InitiateCapture, wait while
+  `0xD209` is 1 (3 is "no focus": `0xD208` = 4 + InitiateCapture cancels),
+  `0xD208` = 0x0304 + InitiateCapture, `0xD207` = 1.
+- The file: GetObjectHandles(0xFFFFFFFF, 0, 0) lists what waits in the camera.
+  The handles present at connection are remembered and never fetched, so a
+  body that turns out to list its card does not copy the card.
+
+Both: no event announces a file, so the camera is asked once a second while
+the live view runs and every 0.4 s for 40 s after a shutter press. Exposure
+settings are not offered (each vendor encodes them its own way). The only
+DeleteObject sent is the Fujifilm live view frame; no photo is deleted.
+
+Wireless was looked at and not built: Sony's PC Remote over Wi-Fi sits behind
+its access authentication, and Fujifilm's wireless tether has the camera call
+a server on the computer (port 51560 in libfuji) before the same commands run
+over TCP. Neither can be written responsibly without the cameras at hand.
+
 ## The probe
 
 `scripts/tether/camera-probe.swift` is the research tool these numbers came
@@ -151,4 +198,5 @@ you press the shutter; `liveview` and `capture` run the Leica sequences above.
   camera; a quit relies on the camera resetting when the session drops).
 - Windows (WPD passes vendor commands through), Linux (libusb; gvfs must let
   go of the camera), iPadOS.
-- Sony (A7R V first: the current-generation dialect), Nikon, Canon, Fujifilm.
+- Sony and Fujifilm measured on real bodies (their dialects are beta), then
+  Nikon and Canon; exposure settings for Sony and Fujifilm; wireless.
