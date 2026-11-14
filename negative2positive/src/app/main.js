@@ -11,6 +11,7 @@ import { analyzeSemanticPreview } from './semanticModel.js';
 import { isLargeImage } from './imageMemoryBudget.js';
 import { defaultInferencePreference, allowWebKitGpuInference, webKitGpuInferenceSafe, webKitGpuInferenceAllowed } from './inferenceBackend.js';
 import { readDesktopImportFile } from './desktopImportReader.js';
+import { preferredScanCamera } from './phoneCamera.js';
 import { TETHER_PREFIX, isTetherDevice, tetherErrorKey, createTetherFeed, exposureVerdict, SHUTTER_AUTO, shutterLabel, shutterChoices, compensationLabel } from './tetherCamera.js';
 import { learnedDefaultsKey, learnedDelta, recordLearnedObservation, applyLearnedDefaults, withoutLearnedDefaults, snapLearnedDefaults, LEARNED_NUMERIC_KEYS, LEARNED_CATEGORY_KEYS } from './learnedDefaults.js';
 import { readLearnedDefaults, writeLearnedDefaults, resetLearnedDefaults } from './learnedDefaultsStore.js';
@@ -30866,12 +30867,14 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       empty.hidden = !liveLoupe.scan || phase === 'live';
       empty.dataset.phase = phase;
       const title = loupeElement('scanEmptyTitle');
-      if (title) title.textContent = phase === 'waiting' ? getLocalizedText('scanEmptyTitle', 'Connect your Leica M11') : text;
+      if (title) title.textContent = phase === 'waiting' ? getLocalizedText('scanEmptyTitle', 'Connect your camera') : text;
       const camera = loupeElement('scanCamera');
       if (camera) {
         const connected = liveLoupe.scan && phase === 'live' && liveLoupe.tether?.camera;
         camera.hidden = !connected;
-        if (connected) camera.textContent = getInterpolatedText('scanCameraChip', { model: connected.model, firmware: connected.firmware }, `${connected.model} · USB`);
+        const note = loupeElement('scanRailNote');
+        if (note) note.textContent = getLocalizedText(connected?.beta ? 'scanBetaNote' : 'scanRailNote', 'Each shot shows up here, converted.');
+        if (connected) camera.textContent = getInterpolatedText(connected.beta ? 'scanCameraChipBeta' : 'scanCameraChip', { model: connected.model, firmware: connected.firmware }, `${connected.model} · USB`);
       }
     }
 
@@ -31418,6 +31421,20 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         } else {
           if (!navigator.mediaDevices?.getUserMedia) throw new DOMException('No camera', 'NotFoundError');
           stream = await navigator.mediaDevices.getUserMedia({ video, audio: false });
+          // The lens that focuses closest, unless the user chose a camera:
+          // known only now, labels being readable once access was granted.
+          if (deviceId === null) {
+            const macro = preferredScanCamera(await (navigator.mediaDevices.enumerateDevices?.() ?? Promise.resolve([])).catch(() => []));
+            if (macro && macro !== stream.getVideoTracks()[0]?.getSettings?.().deviceId) {
+              try {
+                const closer = await navigator.mediaDevices.getUserMedia({ video: { deviceId: { exact: macro } }, audio: false });
+                for (const track of stream.getTracks()) track.stop();
+                stream = closer;
+              } catch (error) {
+                console.warn('Macro camera failed; staying on the default one:', error);
+              }
+            }
+          }
         }
         if (!isCurrent()) {
           for (const track of stream.getTracks()) track.stop();

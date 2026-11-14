@@ -15,6 +15,8 @@ const ERROR_KEYS = Object.freeze({
   'unsupported-camera': 'loupeTetherUnsupported',
   'unsupported-platform': 'loupeTetherUnsupported',
   'no-folder': 'loupeTetherFolder',
+  'sony-pc-remote': 'loupeTetherSonyMode',
+  'fuji-tether-mode': 'loupeTetherFujiMode',
   'camera-busy': 'loupeTetherBusy'
 });
 
