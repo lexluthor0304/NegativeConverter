@@ -30758,7 +30758,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // A camera on USB (tetherCamera.js): its feed, and the release of the previous one.
       tether: null, tetherReleased: Promise.resolve(),
       // Camera scan (openScan): the loupe as a copy-stand screen, and the photos of this sitting.
-      scan: false, scanItems: [], scanTimer: null, scanExposure: '', scanTicks: 0,
+      scan: false, scanSource: 'camera', scanItems: [], scanTimer: null, scanExposure: '', scanTicks: 0,
       // Shots released whose photo has not arrived yet (when each was taken).
       scanPending: [] };
     // Read by the camera smoke (?debugCounters=1).
@@ -30975,15 +30975,18 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const overlay = loupeElement('loupeOverlay');
       if (!overlay) return;
       const scan = liveLoupe.scan;
+      // The same sitting with either source: a camera on USB, or the device's own camera.
+      const phone = scan && liveLoupe.scanSource === 'phone';
       overlay.dataset.mode = scan ? 'scan' : 'loupe';
-      for (const [id, loupeKey, scanKey] of [['loupeTitle', 'loupeTitle', 'scanTitle'], ['loupeCloseBtn', 'loupeClose', 'scanFinish'], ['loupeCaptureLabel', 'loupeCapture', 'scanShoot']]) {
+      overlay.dataset.source = liveLoupe.scanSource;
+      for (const [id, loupeKey, scanKey] of [['loupeTitle', 'loupeTitle', phone ? 'loupeTitle' : 'scanTitle'], ['loupeCloseBtn', 'loupeClose', 'scanFinish'], ['loupeCaptureLabel', 'loupeCapture', 'scanShoot']]) {
         const element = loupeElement(id);
         if (!element) continue;
         element.dataset.i18n = scan ? scanKey : loupeKey;
         element.textContent = getLocalizedText(element.dataset.i18n, element.textContent);
       }
       loupeElement('scanStrip').hidden = !scan;
-      loupeElement('scanSettings').hidden = !scan;
+      loupeElement('scanSettings').hidden = !scan || phone;
       loupeElement('scanKey').hidden = !scan;
       if (!scan) {
         loupeElement('scanExposure').hidden = true;
@@ -31063,12 +31066,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       loupeElement('scanCount').textContent = getInterpolatedText('scanCount', { count: String(items.length) }, `${items.length} taken`);
       loupeElement('scanRailNote').hidden = items.length + pending > 0;
       const folder = loupeElement('scanFolder');
-      const folderName = hotFolder ? hotFolder.path.split(/[\\/]/).filter(Boolean).pop() || hotFolder.path : '';
+      const phone = liveLoupe.scanSource === 'phone';
+      const folderName = hotFolder && !phone ? hotFolder.path.split(/[\\/]/).filter(Boolean).pop() || hotFolder.path : '';
       folder.parentElement.hidden = !folderName;
       folder.textContent = getInterpolatedText('scanFolder', { folder: folderName }, `Saved to “${folderName}”`);
       folder.title = hotFolder?.path ?? '';
       const frames = loupeElement('scanFrames');
-      const removeLabel = getLocalizedText('scanRemove', 'Discard this shot (moves the file to the Trash)');
+      const removeLabel = phone ? getLocalizedText('scanRemovePhone', 'Discard this shot') : getLocalizedText('scanRemove', 'Discard this shot (moves the file to the Trash)');
       const openLabel = getLocalizedText('scanOpenLast', 'Open this photo in the editor');
       const waiting = getLocalizedText('scanArriving', 'On its way…');
       const total = pending + items.length;
@@ -31116,7 +31120,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         if (path) await window.__TAURI__.core.invoke('tether_trash', { path });
         if (!await removeQueueItem(item)) throw new Error('the photo could not be removed from the list');
         liveLoupe.scanItems = liveLoupe.scanItems.filter((entry) => entry !== item);
-        showToast(getInterpolatedText('scanRemoved', { name: item.file.name }, `${item.file.name} moved to the Trash`));
+        showToast(path
+          ? getInterpolatedText('scanRemoved', { name: item.file.name }, `${item.file.name} moved to the Trash`)
+          : getInterpolatedText('scanRemovedPhone', { name: item.file.name }, `${item.file.name} discarded`));
       } catch (error) {
         console.warn('Discarding a shot failed:', error);
         showToast(getLocalizedText('scanRemoveFailed', 'This shot could not be discarded.'));
@@ -31150,13 +31156,20 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       return true;
     }
 
-    async function openScan() {
-      if (!hasPlatformCapability('tether')) return;
-      liveLoupe.scan = true;
+    async function openScan(source = 'camera') {
+      if (source === 'camera' ? !hasPlatformCapability('tether') : !loupeSupported()) return;
       // Coming back from the editor continues the sitting: its photos stay on the strip.
-      liveLoupe.scanItems = liveLoupe.scanItems.filter((item) => state.fileQueue.includes(item));
+      liveLoupe.scanItems = source === liveLoupe.scanSource ? liveLoupe.scanItems.filter((item) => state.fileQueue.includes(item)) : [];
+      liveLoupe.scan = true;
+      liveLoupe.scanSource = source;
       applyScanMode();
       await openLoupe(null);
+    }
+
+    // Phone scan: the same sitting with the device's own camera. Each shot is
+    // a file in the photo list, as a camera's would be.
+    function openPhoneScan() {
+      return openScan('phone');
     }
 
     // No camera yet: the scan waits on this screen and starts when one is plugged in.
@@ -31331,7 +31344,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       } catch (error) {
         console.warn('Loupe camera list failed:', error);
       }
-      const tethered = await tetheredCameras();
+      const tethered = liveLoupe.scan && liveLoupe.scanSource === 'phone' ? [] : await tetheredCameras();
       const current = liveLoupe.tether ? TETHER_PREFIX + liveLoupe.tether.id : liveLoupe.track?.getSettings?.().deviceId || '';
       const options = [
         ...tethered.map((camera) => ({ value: TETHER_PREFIX + camera.id, label: getInterpolatedText('loupeTetherLabel', { name: camera.name }, `${camera.name} · USB`) })),
@@ -31396,8 +31409,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       overlay.dataset.frames = '0';
       liveLoupe.frames = 0;
       setLoupeStatus(getLocalizedText('loupeStarting', 'Starting camera…'));
+      const phone = liveLoupe.scan && liveLoupe.scanSource === 'phone';
+      if (phone) setScanPhase('connecting', getLocalizedText('loupeStarting', 'Starting camera…'));
       // A camera on USB that the app can drive comes first: it was plugged in for this.
-      if (deviceId === null) {
+      if (deviceId === null && !phone) {
         const [tethered] = await tetheredCameras();
         if (!isCurrent()) return;
         if (tethered) deviceId = TETHER_PREFIX + tethered.id;
@@ -31446,7 +31461,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         if (!isCurrent()) return;
         console.warn('Loupe camera failed:', error);
         const denied = error?.name === 'NotAllowedError' || error?.name === 'SecurityError';
-        setLoupeStatus(getLocalizedText(denied ? 'loupeDenied' : 'loupeNoCamera', denied ? 'Camera access was denied.' : 'No camera available.'));
+        const reason = getLocalizedText(denied ? 'loupeDenied' : 'loupeNoCamera', denied ? 'Camera access was denied.' : 'No camera available.');
+        if (liveLoupe.scan) setScanPhase('failed', reason);
+        else setLoupeStatus(reason);
         return;
       }
       const videoEl = loupeElement('loupeVideo');
@@ -31480,7 +31497,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         liveLoupe.scan = false;
         applyScanMode();
       }
-      document.getElementById('studioLoupe')?.focus();
+      document.getElementById(liveLoupe.scanSource === 'phone' ? 'studioLoupe' : 'studioScan')?.focus();
       // Captures made before any photo was open behave like added files.
       if (!state.originalImageData && state.fileQueue.length > 0) {
         void loadFile(state.fileQueue[Math.max(0, Math.min(state.currentFileIndex, state.fileQueue.length - 1))].file);
@@ -31531,8 +31548,16 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+$/, '').replace('T', '-');
         const extension = blob.type === 'image/jpeg' ? 'jpg' : 'png';
         const file = new File([blob], `loupe-${stamp}.${extension}`, { type: blob.type || 'image/png', lastModified: Date.now() });
-        addFilesToQueue([file]);
+        const imported = addFilesToQueue([file]);
         showToast(getInterpolatedText('loupeCaptured', { name: file.name }, `Captured ${file.name}`));
+        if (liveLoupe.scan && imported.length) {
+          liveLoupe.scanItems.push(...imported);
+          refreshScanStrip();
+          // As with a camera's photo: nothing open, or what is open was discarded, opens the shot.
+          if (!state.originalImageData || (state.loadedFile && !state.fileQueue.some((item) => item.file === state.loadedFile))) {
+            await switchToFile(state.fileQueue.indexOf(imported[0]));
+          }
+        }
       } catch (error) {
         console.warn('Loupe capture failed:', error);
         void appAlert(getLocalizedText('loupeCaptureFailed', 'The capture failed.'));
@@ -33390,7 +33415,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
             void appAlert(getLocalizedText('multiShotFailed', 'The selected shots could not be aligned, so nothing was merged.'));
           });
         },
-        onLoupe: () => { void openLoupe(); },
+        onLoupe: () => { void openPhoneScan(); },
         onScan: () => { void openScan(); },
         onSaveProject: () => { void saveProject(); },
         onOpenProject: () => { const input = document.getElementById('projectInput'); if (input) { input.value = ''; input.click(); } },

@@ -38,7 +38,7 @@ export async function runMobileShellSmoke({ send, evaluate, waitFor, wait, fail,
       await waitFor('mobile boot', `location.href === ${JSON.stringify(url)} && !!document.getElementById('studioAdd') && document.documentElement.classList.contains('shell-mobile')`);
       await evaluate(`for (const [edge, value] of Object.entries(${JSON.stringify({ top, bottom, left, right })})) document.documentElement.style.setProperty('--safe-' + edge, value + 'px')`);
       await wait(250);
-      const hidden = await evaluate(`['uploadFolderBtn', 'studioLoupe', 'studioWatchControls', 'desktopUpdateBanner'].every(id => !document.getElementById(id)?.getClientRects().length)`);
+      const hidden = await evaluate(`['uploadFolderBtn', 'studioWatchControls', 'desktopUpdateBanner'].every(id => !document.getElementById(id)?.getClientRects().length)`);
       if (!hidden) fail('mobile shows an unsupported control');
       const doc = await send('DOM.getDocument');
       const input = await send('DOM.querySelector', { nodeId: doc.result.root.nodeId, selector: '#fileInput' });
