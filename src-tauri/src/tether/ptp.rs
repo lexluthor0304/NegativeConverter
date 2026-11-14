@@ -22,6 +22,7 @@ pub mod op {
 /// Response codes this layer tells apart.
 pub mod rc {
     pub const OK: u16 = 0x2001;
+    pub const OPERATION_NOT_SUPPORTED: u16 = 0x2005;
     pub const INVALID_OBJECT_HANDLE: u16 = 0x2009;
     pub const ACCESS_DENIED: u16 = 0x200F;
     pub const DEVICE_BUSY: u16 = 0x2019;
@@ -323,11 +324,11 @@ impl PropDesc {
 pub mod leica {
     pub const USB_VENDOR: u16 = 0x1A98;
 
-    /// Whether a Leica that names itself `name` is driven: the M11 series
-    /// ("LEICA M11", "LEICA M11-P", "LEICA M11 Monochrom", "LEICA M11-D"). The
-    /// dialect was measured on the M11; other Leica bodies wait for their own
-    /// measurement.
-    pub fn supported_model(name: &str) -> bool {
+    /// Whether a Leica that names itself `name` is of the M11 series ("LEICA
+    /// M11", "LEICA M11-P", "LEICA M11 Monochrom", "LEICA M11-D"), on which
+    /// the dialect was measured. Every other Leica is offered as beta: one
+    /// that has no Leica session says so when the connection is made.
+    pub fn measured_model(name: &str) -> bool {
         name.split_whitespace().any(|word| {
             let word = word.to_ascii_uppercase();
             word.strip_prefix("M11").is_some_and(|rest| !rest.starts_with(|next: char| next.is_ascii_alphanumeric()))
@@ -381,16 +382,18 @@ impl Dialect {
     /// The dialect for a camera on USB, or None for a body this app does not drive.
     pub fn of(usb_vendor: u16, name: &str) -> Option<Self> {
         match usb_vendor {
-            leica::USB_VENDOR if leica::supported_model(name) => Some(Self::Leica),
+            leica::USB_VENDOR => Some(Self::Leica),
             sony::USB_VENDOR if sony::supported_model(name) => Some(Self::Sony),
             fuji::USB_VENDOR if fuji::supported_model(name) => Some(Self::Fuji),
             _ => None,
         }
     }
-    /// Measured on the real camera. The others follow the published protocol
-    /// notes of libgphoto2 and libfuji and are offered as beta until they are.
-    pub fn measured(self) -> bool {
-        self == Self::Leica
+    /// Whether this camera was measured on the real body: the Leica M11
+    /// series. Other Leica bodies share its session and commands but were not
+    /// tried; Sony and Fujifilm follow the published protocol notes of
+    /// libgphoto2 and libfuji. All of those are offered as beta.
+    pub fn measured(usb_vendor: u16, name: &str) -> bool {
+        usb_vendor == leica::USB_VENDOR && leica::measured_model(name)
     }
 }
 
@@ -574,19 +577,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_the_m11_series_is_driven() {
+    fn only_the_m11_series_counts_as_measured() {
         for name in ["LEICA M11", "Leica M11-P", "LEICA M11 Monochrom", "LEICA M11-D", "M11"] {
-            assert!(leica::supported_model(name), "{name}");
+            assert!(leica::measured_model(name), "{name}");
         }
         for name in ["LEICA SL3", "LEICA Q3", "LEICA M10-R", "LEICA M110", "LEICA M11X", ""] {
-            assert!(!leica::supported_model(name), "{name}");
+            assert!(!leica::measured_model(name), "{name}");
         }
     }
 
     #[test]
     fn each_camera_gets_its_dialect() {
         assert_eq!(Dialect::of(0x1A98, "LEICA M11"), Some(Dialect::Leica));
-        assert_eq!(Dialect::of(0x1A98, "LEICA SL3"), None);
+        assert_eq!(Dialect::of(0x1A98, "LEICA SL3"), Some(Dialect::Leica));
         // Sony and Fujifilm: the whole brand; the connection finds out what a body can do.
         for name in ["ILCE-7RM5", "ILCE-7M4", "ILCE-1", "ZV-E10", "DSC-RX100M7", ""] {
             assert_eq!(Dialect::of(0x054C, name), Some(Dialect::Sony), "{name}");
@@ -596,7 +599,11 @@ mod tests {
         }
         // Another vendor is not driven, whatever it calls itself.
         assert_eq!(Dialect::of(0x04A9, "ILCE-7RM5"), None);
-        assert!(Dialect::Leica.measured() && !Dialect::Sony.measured() && !Dialect::Fuji.measured());
+        // Only the M11 series was measured; everything else is beta.
+        assert!(Dialect::measured(0x1A98, "LEICA M11-P"));
+        for (vendor, name) in [(0x1A98, "LEICA SL3"), (0x1A98, "LEICA Q3"), (0x054C, "ILCE-7RM5"), (0x04CB, "GFX100S"), (0x054C, "M11")] {
+            assert!(!Dialect::measured(vendor, name), "{name}");
+        }
     }
 
     #[test]

@@ -57,7 +57,8 @@ fn describe(device: &ICDevice) -> Camera {
             .unwrap_or_else(|| format!("{:04x}:{:04x}:{name}", device.usbVendorID(), device.usbProductID()));
         let usb_vendor = device.usbVendorID() as u16;
         let dialect = ptp::Dialect::of(usb_vendor, &name);
-        Camera { id, name, usb_vendor, usb_product: device.usbProductID() as u16, supported: dialect.is_some(), beta: dialect.is_some_and(|dialect| !dialect.measured()) }
+        let beta = dialect.is_some() && !ptp::Dialect::measured(usb_vendor, &name);
+        Camera { id, name, usb_vendor, usb_product: device.usbProductID() as u16, supported: dialect.is_some(), beta }
     }
 }
 

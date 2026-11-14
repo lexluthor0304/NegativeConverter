@@ -4,9 +4,9 @@
 //! cable, no vendor SDK. See `docs/tethered-capture.md`.
 //!
 //! Supported where a transport exists (macOS). The Leica M11 series was
-//! measured on the real camera; Sony (PC Remote) and Fujifilm (USB tether
-//! shooting) cameras follow published protocol notes and are offered as beta
-//! (`ptp::Dialect`). Everything else answers "unsupported" rather than
+//! measured on the real camera; other Leica bodies, Sony (PC Remote) and
+//! Fujifilm (USB tether shooting) cameras are offered as beta
+//! (`ptp::Dialect::measured`). Everything else answers "unsupported" rather than
 //! guessing at a camera.
 pub mod ptp;
 
@@ -254,7 +254,12 @@ mod session {
                 match dialect {
                     Dialect::Leica => {
                         // The Leica session: live view and the transfer handshake are behind it.
-                        inner.expect(app, &id, "Leica session", leica::OPEN_SESSION, &[leica::OPEN_SESSION_KEY], None).await?;
+                        // A Leica without it (an older body, or one in mass storage mode) cannot be driven.
+                        match inner.call(app, &id, leica::OPEN_SESSION, &[leica::OPEN_SESSION_KEY], None, QUICK).await? {
+                            (rc::OK, _) => {}
+                            (rc::OPERATION_NOT_SUPPORTED, _) => return Err("unsupported-camera".to_string()),
+                            (other, _) => return Err(format!("Leica session: the camera answered 0x{other:04x}")),
+                        }
                         inner.set_u32(app, &id, "tethered shooting", leica::PROP_EXTERNAL_SHOOTING, 1).await?;
                         let info = inner.device_info(app, &id, QUICK).await?;
                         let live_view = info.supports(leica::CONTROL_LIVE_VIEW) && info.supports(leica::GET_STREAM_DATA);
@@ -303,7 +308,7 @@ mod session {
                     return Err(error);
                 }
             };
-            let connected = Connected { id: id.clone(), model: info.model.clone(), firmware: info.firmware.clone(), live_view, capture, beta: !dialect.measured() };
+            let connected = Connected { id: id.clone(), model: info.model.clone(), firmware: info.firmware.clone(), live_view, capture, beta: !Dialect::measured(camera.usb_vendor, &camera.name) };
             *inner.session.lock().map_err(|error| error.to_string())? =
                 Some(Session { id, info, directory, live_view: false, kept_alive: Instant::now(), dialect, open_capture: None, seen, polled: Instant::now() });
             Ok(connected)

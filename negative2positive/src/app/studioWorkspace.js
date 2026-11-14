@@ -9,7 +9,7 @@ import '../styles/studio-mobile.css';
 export const studioText = {
   zh: {
     preview: '本地胶片暗房', add: '添加照片', menu: '帮助与设置',
-    scan: '翻拍', scanHint: '用 USB 接上的相机翻拍底片：实时看到转正后的画面，拍下自动转换。', scanMenu: '相机翻拍（Leica M11；Sony、Fujifilm 为 Beta）',
+    scan: '翻拍', scanHint: '用 USB 接上的相机翻拍底片：实时看到转正后的画面，拍下自动转换。', scanMenu: '相机翻拍（Leica M11；其他 Leica、Sony、Fujifilm 为 Beta）',
     loupe: '手机翻拍', loupeHint: '把手机对准底片（有微距镜头时自动使用），实时看到转正后的画面；拍下即加入照片列表。',
     title: '免费胶片负片转换', subtitle: '在本机转换负片、校正正片，无需上传照片。',
     importBatch: '可多选照片，也可把一组照片拖到这里',
@@ -60,7 +60,7 @@ export const studioText = {
   },
   en: {
     preview: 'Your local darkroom', add: 'Add photos', menu: 'Help & settings',
-    scan: 'Camera scan', scanHint: 'Scan film with a camera on USB: its live view converted live, each shot imported and converted.', scanMenu: 'Camera scan (Leica M11; Sony and Fujifilm in beta)',
+    scan: 'Camera scan', scanHint: 'Scan film with a camera on USB: its live view converted live, each shot imported and converted.', scanMenu: 'Camera scan (Leica M11; other Leica, Sony and Fujifilm in beta)',
     loupe: 'Phone scan', loupeHint: 'Point your phone at the negative (its macro lens is used when it has one) and see it converted live; capture adds the frame to the photos.',
     title: 'Free film negative converter', subtitle: 'Convert negatives and correct slides on your device. No photo uploads.',
     importBatch: 'Select multiple photos, or drop a batch here',
@@ -110,7 +110,7 @@ export const studioText = {
   },
   ja: {
     preview: 'ローカルのフィルム暗室', add: '写真を追加', menu: 'ヘルプと設定',
-    scan: '複写', scanHint: 'USB でつないだカメラでフィルムを複写します。ライブ映像を変換して表示し、撮影した写真を自動で取り込みます。', scanMenu: 'カメラで複写（Leica M11、Sony・Fujifilm はベータ）',
+    scan: '複写', scanHint: 'USB でつないだカメラでフィルムを複写します。ライブ映像を変換して表示し、撮影した写真を自動で取り込みます。', scanMenu: 'カメラで複写（Leica M11、ほかの Leica・Sony・Fujifilm はベータ）',
     loupe: 'スマホで複写', loupeHint: 'スマホを原板に向けると（マクロレンズがあれば自動で使います）変換後の画面がライブで見え、撮影すると写真一覧に加わります。',
     title: '無料のフィルムネガ変換', subtitle: 'ネガ変換もポジ補正も端末内で。写真のアップロードは不要です。',
     importBatch: '複数選択、または写真をまとめてドロップ',
