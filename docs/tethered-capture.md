@@ -54,6 +54,15 @@ The system lists the card's files before it reports the session open, and
 shares the camera with whatever else attached to it (Google Drive and Preview
 did on the test Mac): 17 s for 748 files. `macos::open` waits a minute.
 
+The listing also holds back every PTP command, even when the session itself
+opens at once: with `ptpcamerad` freshly started on the same camera, each
+command went unanswered for 66 to 100 s and then took 0.1 s (2026-11-14). A
+connection made in that window used to fail at the 5 s command timeout, which
+is what "often cannot connect" was after plugging in or waking the camera. So
+the first command of a connection waits three minutes (`FIRST_ANSWER`), and
+after four seconds the scan screen says the Mac is reading the card. To see it
+again without touching the cable: `kill -9 $(pgrep -x ptpcamerad)`.
+
 ## The scan screen
 
 The live loupe in its scan mode (`openScan`, `data-mode="scan"`):

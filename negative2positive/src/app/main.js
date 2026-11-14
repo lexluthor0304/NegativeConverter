@@ -30811,6 +30811,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         if (!hotFolder) return null;
       }
       setScanPhase('connecting', getLocalizedText('loupeTetherStarting', 'Connecting to the camera…'));
+      // A camera just plugged in answers only after the system has listed its
+      // card, which takes a minute on a full one: say so instead of failing.
+      const listing = setTimeout(() => {
+        if (isCurrent()) setScanPhase('connecting', getLocalizedText('scanReadingCard', 'The Mac is reading the camera’s card. The live view starts by itself.'));
+      }, 4000);
       let camera;
       try {
         camera = await invoke('tether_connect', { id });
@@ -30818,8 +30823,14 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       } catch (error) {
         console.warn('Tethered camera failed:', error);
         void invoke('tether_disconnect').catch(() => {});
-        if (isCurrent()) setScanPhase('failed', getLocalizedText(tetherErrorKey(error), 'The camera could not be connected.'));
+        if (isCurrent()) {
+          setScanPhase('failed', getLocalizedText(tetherErrorKey(error), 'The camera could not be connected.'));
+          // Plugged in again, the scan goes on by itself.
+          if (liveLoupe.scan) void waitForTetheredCamera(liveLoupe.generation);
+        }
         return null;
+      } finally {
+        clearTimeout(listing);
       }
       const canvas = document.createElement('canvas');
       canvas.width = 1536;
