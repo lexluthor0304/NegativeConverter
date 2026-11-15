@@ -704,6 +704,11 @@ function buildDensityTemplateCandidates(imageData, context) {
       return true;
     })
     .slice(0, 18);
+  const hasPixel = turnedPreviewHasPixel(turnedPreviewSources.get(imageData), analysis.width, analysis.height);
+  for (const candidate of result) {
+    candidate.scoreBreakdown.sides = measureTemplateSides(candidate.bound, analysis, hasPixel)
+      .map(side => side && Object.fromEntries(Object.entries(side).map(([key, value]) => [key, Number(value.toFixed(2))])));
+  }
   // The preview's initial and zero-angle contour passes share exactly the same
   // pixels/settings. Retain only the small candidate list, not the three large
   // density integral planes. Other rotation candidates are never cached here.
@@ -1224,6 +1229,95 @@ function evaluateAutoFrameCropRegion(cropRegion, imageData, detectedFormat, cand
   };
 }
 
+// What each side of a template rectangle shows of a real frame boundary. A
+// frame's side is a step that keeps its sign along the whole side (film base
+// or holder outside, picture inside); a rectangle laid over picture content
+// has sides where the step comes and goes with the scene. Read from the
+// integral images, 16 segments a side: a few hundred lookups a rectangle.
+const TEMPLATE_SIDE_SEGMENTS = 16;
+// The fallback tries the preview turned by a few degrees. The turned picture
+// has empty corners, and a rectangle near its edges read them as film base:
+// the picture it was turned from (anglePassStage) says where pixels are.
+const turnedPreviewSources = new WeakMap();
+function turnedPreviewHasPixel(source, width, height) {
+  if (!source) return null;
+  const radians = source.angle * Math.PI / 180;
+  const cos = Math.cos(radians), sin = Math.abs(Math.sin(radians));
+  const halfW = source.width / 2 - 1, halfH = source.height / 2 - 1;
+  // Which way the preview was turned is the rotator's business: a point
+  // counts when it has a pixel for either direction.
+  return (x, y) => {
+    const dx = x - width / 2, dy = y - height / 2;
+    return Math.abs(dx * cos + dy * sin) <= halfW && Math.abs(dy * cos - dx * sin) <= halfH
+      && Math.abs(dx * cos - dy * sin) <= halfW && Math.abs(dy * cos + dx * sin) <= halfH;
+  };
+}
+export function measureTemplateSides(rect, analysis, hasPixel = null) {
+  const minSide = Math.max(1, Math.min(rect.width, rect.height));
+  const band = clampBetween(Math.round(minSide * 0.045), 4, 42);
+  const outer = clampBetween(Math.round(minSide * 0.06), 5, 56);
+  const { stride, lumaIntegral, width, height } = analysis;
+  const left = rect.x, top = rect.y, right = rect.x + rect.width, bottom = rect.y + rect.height;
+  const sides = [
+    { horizontal: true, start: left, length: rect.width, inner: top, outerAt: top - outer },
+    { horizontal: true, start: left, length: rect.width, inner: bottom - band, outerAt: bottom },
+    { horizontal: false, start: top, length: rect.height, inner: left, outerAt: left - outer },
+    { horizontal: false, start: top, length: rect.height, inner: right - band, outerAt: right }
+  ];
+  return sides.map((side) => {
+    const limit = side.horizontal ? height : width;
+    if (side.outerAt < 0 || side.outerAt + outer > limit) return null;
+    const from = side.start + side.length * 0.06;
+    const step = (side.length * 0.88) / TEMPLATE_SIDE_SEGMENTS;
+    const inner = new Float32Array(TEMPLATE_SIDE_SEGMENTS);
+    const outside = new Float32Array(TEMPLATE_SIDE_SEGMENTS);
+    const steps = new Float32Array(TEMPLATE_SIDE_SEGMENTS);
+    let positive = 0, negative = 0, empty = 0;
+    // The outside band's far edge, where a turned preview runs out first.
+    const far = side.outerAt < side.inner ? side.outerAt : side.outerAt + outer;
+    for (let i = 0; i < TEMPLATE_SIDE_SEGMENTS; i++) {
+      const at = from + step * i;
+      if (hasPixel && !(side.horizontal ? hasPixel(at + step / 2, far) : hasPixel(far, at + step / 2))) empty++;
+      inner[i] = side.horizontal
+        ? getRegionMean(lumaIntegral, stride, at, side.inner, step, band)
+        : getRegionMean(lumaIntegral, stride, side.inner, at, band, step);
+      outside[i] = side.horizontal
+        ? getRegionMean(lumaIntegral, stride, at, side.outerAt, step, outer)
+        : getRegionMean(lumaIntegral, stride, side.outerAt, at, outer, step);
+      const delta = outside[i] - inner[i];
+      steps[i] = Math.abs(delta);
+      if (delta > 5) positive++; else if (delta < -5) negative++;
+    }
+    if (empty * 4 > TEMPLATE_SIDE_SEGMENTS) return null;
+    const spread = (values) => {
+      let sum = 0, squares = 0;
+      for (const v of values) { sum += v; squares += v * v; }
+      const mean = sum / values.length;
+      return Math.sqrt(Math.max(0, squares / values.length - mean * mean));
+    };
+    return {
+      consistency: Math.max(positive, negative) / TEMPLATE_SIDE_SEGMENTS,
+      step: steps.slice().sort()[TEMPLATE_SIDE_SEGMENTS >> 1],
+      outerSpread: spread(outside),
+      innerSpread: spread(inner)
+    };
+  });
+}
+
+// Sides that are a boundary: the step between outside and inside keeps its
+// sign over four fifths of the side and is 20 levels at the median. True
+// frames measured 0.81-1.00 and 31-136 on every side (the bordered RAW set);
+// rectangles over picture content rarely reach it on two.
+const TEMPLATE_SIDE_CONSISTENCY = 0.8;
+const TEMPLATE_SIDE_STEP = 20;
+export function countTemplateBoundarySides(sides) {
+  let count = 0;
+  for (const side of sides) {
+    if (side && side.consistency >= TEMPLATE_SIDE_CONSISTENCY && side.step >= TEMPLATE_SIDE_STEP) count++;
+  }
+  return count;
+}
+
 function isDensityTemplateCandidate(candidate) {
   return Boolean(candidate && typeof candidate.method === 'string' && candidate.method.startsWith('density'));
 }
@@ -1267,6 +1361,14 @@ export function getDensityTemplateReliability(candidate, validation) {
     && areaRatio <= 0.88;
 
   if (!strong35mm && !strongImageWindow && !moderateImageWindow) {
+    return { usable: false, confidenceCap: 0 };
+  }
+  // The band means above compare all four sides at once, which picture
+  // content satisfies easily (sky over ground, a wall beside a window): on
+  // camera scans where the frame fills the capture, every template was a
+  // rectangle laid over the scene. Three sides have to be boundaries of
+  // their own (measureTemplateSides).
+  if (Array.isArray(breakdown.sides) && countTemplateBoundarySides(breakdown.sides) < 3) {
     return { usable: false, confidenceCap: 0 };
   }
 
@@ -1518,6 +1620,7 @@ export function fallbackPreviewStage(previewData, context, clock = null) {
 export function anglePassStage(previewData, context, angle, deterministicPreview) {
   const rotatedPreview = Math.abs(angle) < 0.001 ? previewData
     : (deterministicPreview ? rotatePreviewImageData(previewData, angle) : context.rotateImageData(previewData, angle));
+  if (rotatedPreview !== previewData) turnedPreviewSources.set(rotatedPreview, { angle, width: previewData.width, height: previewData.height });
   const cropPreview = detectAxisAlignedCropRegion(rotatedPreview, context.settings.marginRatio, context);
   return cropPreview
     ? { angle, cropPreview, rotatedPreviewWidth: rotatedPreview.width, rotatedPreviewHeight: rotatedPreview.height }
