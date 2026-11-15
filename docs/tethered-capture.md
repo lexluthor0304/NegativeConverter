@@ -16,8 +16,10 @@ their section below.
 | macOS desktop app, Leica M11 (firmware 2.6.4) | measured on the camera, 2026-11-13 |
 | The rest of the M11 series (M11-P, M11 Monochrom, M11-D) | offered: same dialect by Leica's own tether clients; not measured here |
 | Other Leica bodies (SL3, Q3 …) | not offered until measured |
-| Sony, Nikon, Canon, Fujifilm | not implemented; each needs its dialect measured on a body |
-| Windows, Linux, iPad | no transport yet (WPD, libusb, ImageCaptureCore on iPadOS) |
+| Sony, Fujifilm | beta: dialects from libgphoto2 and libfuji, not measured (section below) |
+| Nikon, Canon | not implemented; each needs its dialect measured on a body |
+| Windows desktop app | beta for every camera: the transport (`tether/wpd.rs`) was written from Microsoft's documentation and has not been run on a camera (section below) |
+| Linux, iPad | no transport yet (libusb, ImageCaptureCore on iPadOS) |
 | Web | not possible: the operating system owns the camera's USB interface |
 
 The feature ships for the Leica M11 series only, and says so wherever it is
@@ -33,6 +35,7 @@ page: live loupe ── tetherCamera.js ── invoke('tether_frame' | 'tether_c
 shell: tether/mod.rs   sessions, live view, capture, fetch       (per dialect)
        tether/ptp.rs   PTP containers and datasets, Leica dialect (no I/O, unit tested)
        tether/macos.rs ImageCaptureCore: find cameras, carry PTP transactions
+       tether/wpd.rs   Windows Portable Devices: the same, through the MTP driver
 ```
 
 - **Live view** is pulled: the page asks for a frame, the shell asks the
@@ -65,7 +68,7 @@ command went unanswered for 66 to 100 s and then took 0.1 s (2026-11-14). A
 connection made in that window used to fail at the 5 s command timeout, which
 is what "often cannot connect" was after plugging in or waking the camera. So
 the first command of a connection waits three minutes (`FIRST_ANSWER`), and
-after four seconds the scan screen says the Mac is reading the card. To see it
+after four seconds the scan screen says the computer is reading the card. To see it
 again without touching the cable: `kill -9 $(pgrep -x ptpcamerad)`.
 
 ## The scan screen
@@ -179,6 +182,51 @@ its access authentication, and Fujifilm's wireless tether has the camera call
 a server on the computer (port 51560 in libfuji) before the same commands run
 over TCP. Neither can be written responsibly without the cameras at hand.
 
+## Windows
+
+`tether/wpd.rs`, beta for every camera (`tether::beta`): it compiles and its
+helpers are tested, but no camera has been driven through it. The page says
+so (`scanEntryNoteWindows`, `scanSupportedWindows`).
+
+Windows binds its own MTP driver to a camera in PTP mode, and Windows
+Portable Devices passes any operation through it, vendor operations included:
+`WPD_COMMAND_MTP_EXT_EXECUTE_COMMAND_WITHOUT_DATA_PHASE`, `…_WITH_DATA_TO_READ`
+followed by `READ_DATA` in pieces, `…_WITH_DATA_TO_WRITE` followed by
+`WRITE_DATA`, and `END_DATA_TRANSFER`, whose results carry the camera's
+response. Nothing is installed and no driver is replaced (libusb would need
+WinUSB bound to the camera, which takes it away from Explorer). What differs
+from the Mac:
+
+- The driver has to be told before the command goes out whether the camera
+  answers with data. `ptp::wpd::sends_data` classifies every operation the
+  session sends; one it does not know is refused, never guessed at. A new
+  operation needs a line there (the test lists them).
+- The driver owns the session and numbers the transactions. Fujifilm's
+  TerminateOpenCapture wants the transaction of its InitiateOpenCapture, which
+  this app cannot know on Windows; the number it sends is its own count. The
+  capture sequence ends the live view anyway.
+- A new object arrives as the driver's `WPD_EVENT_OBJECT_ADDED` with the
+  driver's object id, `o` followed by the PTP handle in hexadecimal
+  (`ptp::wpd::object_handle`). This is how a Leica's photo is found; if a
+  driver names objects differently the photo stays on the card and nothing is
+  imported. Sony and Fujifilm are asked for their files and do not depend on it.
+- Cameras are found by reading the device list every three seconds while none
+  is open (portable devices are also phones and card readers: only USB
+  devices of the three vendors are listed). The id is the device path.
+- COM objects stay on one thread (`tether-wpd`). A command the camera never
+  answers is given up on by the caller but still occupies that thread until
+  the driver's own timeout.
+- A discarded shot goes to the Recycle Bin (`SHFileOperationW`).
+
+The Windows target can be type-checked on a Mac: `rustup target add
+x86_64-pc-windows-msvc`, a stand-in `llvm-rc` on `PATH` that creates the file
+named after `/fo` (nothing links during a check), then
+`cargo check --target x86_64-pc-windows-msvc --no-default-features`.
+
+First things to look at when a Windows user reports a camera: whether it is
+listed at all (its USB mode), the response code in the error text, and for a
+Leica whether the photo arrives after the shutter.
+
 ## The probe
 
 `scripts/tether/camera-probe.swift` is the research tool these numbers came
@@ -198,7 +246,7 @@ you press the shutter; `liveview` and `capture` run the Leica sequences above.
 - A preview from the first 512 KiB of the DNG while the rest transfers.
 - Leaving tethered shooting on app quit (the page-reload path releases the
   camera; a quit relies on the camera resetting when the session drops).
-- Windows (WPD passes vendor commands through), Linux (libusb; gvfs must let
-  go of the camera), iPadOS.
+- Windows measured on a camera (it is beta until then); Linux (libusb; gvfs
+  must let go of the camera), iPadOS.
 - Sony and Fujifilm measured on real bodies (their dialects are beta), then
   Nikon and Canon; exposure settings for Sony and Fujifilm; wireless.

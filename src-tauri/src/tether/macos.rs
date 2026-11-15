@@ -4,7 +4,7 @@
 //!
 //! ImageCaptureCore objects stay on the main thread (`MAIN`); the async side
 //! talks to them through `run_on_main_thread` and gets answers over channels.
-use super::ptp;
+use super::{ptp, Camera};
 use block2::{DynBlock, RcBlock};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
@@ -19,20 +19,6 @@ use std::ptr::NonNull;
 use std::sync::mpsc::{channel, Sender};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
-
-/// A camera as the page lists it.
-#[derive(Clone, serde::Serialize, PartialEq, Eq, Debug)]
-#[serde(rename_all = "camelCase")]
-pub struct Camera {
-    pub id: String,
-    pub name: String,
-    pub usb_vendor: u16,
-    pub usb_product: u16,
-    /// A body whose dialect this app speaks; the others are listed only to say so.
-    pub supported: bool,
-    /// Driven from published protocol notes, not yet measured on the real camera.
-    pub beta: bool,
-}
 
 struct Main {
     app: AppHandle,
@@ -57,7 +43,7 @@ fn describe(device: &ICDevice) -> Camera {
             .unwrap_or_else(|| format!("{:04x}:{:04x}:{name}", device.usbVendorID(), device.usbProductID()));
         let usb_vendor = device.usbVendorID() as u16;
         let dialect = ptp::Dialect::of(usb_vendor, &name);
-        let beta = dialect.is_some() && !ptp::Dialect::measured(usb_vendor, &name);
+        let beta = dialect.is_some() && super::beta(usb_vendor, &name);
         Camera { id, name, usb_vendor, usb_product: device.usbProductID() as u16, supported: dialect.is_some(), beta }
     }
 }

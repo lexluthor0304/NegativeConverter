@@ -397,6 +397,61 @@ impl Dialect {
     }
 }
 
+/// What Windows Portable Devices needs to carry these transactions
+/// (`wpd.rs`); no I/O, so it is tested on every platform.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub mod wpd {
+    use super::{leica, op, sony};
+
+    /// Whether the camera answers an operation with a data phase. The driver
+    /// has to be told before the command goes out, so an operation this app
+    /// has not classified is refused rather than guessed at.
+    pub fn sends_data(operation: u16) -> Option<bool> {
+        match operation {
+            op::GET_DEVICE_INFO
+            | op::GET_OBJECT_HANDLES
+            | op::GET_OBJECT_INFO
+            | op::GET_OBJECT
+            | op::GET_DEVICE_PROP_DESC
+            | op::GET_DEVICE_PROP_VALUE
+            | leica::GET_STREAM_DATA
+            | sony::GET_EXT_DEVICE_INFO
+            | sony::GET_ALL_PROPERTIES => Some(true),
+            op::DELETE_OBJECT
+            | op::INITIATE_CAPTURE
+            | op::TERMINATE_OPEN_CAPTURE
+            | op::INITIATE_OPEN_CAPTURE
+            | leica::OPEN_SESSION
+            | leica::REQUEST_OBJECT_TRANSFER_READY
+            | leica::CONTROL_LIVE_VIEW
+            | leica::KEEP_SESSION_ACTIVE
+            | sony::CONNECT => Some(false),
+            _ => None,
+        }
+    }
+
+    /// The USB vendor and product of a device path such as
+    /// `\\?\usb#vid_1a98&pid_2041#…`; None for a device that is not on USB.
+    pub fn usb_ids(device: &str) -> Option<(u16, u16)> {
+        let device = device.to_ascii_lowercase();
+        let number = |key: &str| {
+            let start = device.find(key)? + key.len();
+            u16::from_str_radix(device.get(start..start + 4)?, 16).ok()
+        };
+        Some((number("vid_")?, number("pid_")?))
+    }
+
+    /// The PTP handle behind an object id of the system's MTP driver, which
+    /// names objects `o` followed by the handle in hexadecimal (`o2F`).
+    pub fn object_handle(object: &str) -> Option<u32> {
+        let digits = object.strip_prefix(['o', 'O'])?;
+        if digits.is_empty() || digits.len() > 8 {
+            return None;
+        }
+        u32::from_str_radix(digits, 16).ok()
+    }
+}
+
 /// Sony cameras in "PC Remote" (USB vendor 0x054C). The camera hides its
 /// controls behind a three-step connect; the state of everything, including
 /// "a captured file waits in memory", comes in one blob of property
@@ -575,6 +630,41 @@ pub mod fuji {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_is_told_which_operations_send_data() {
+        // Every operation the session sends without a data-out phase is classified.
+        for operation in [
+            op::GET_DEVICE_INFO, op::GET_OBJECT_HANDLES, op::GET_OBJECT_INFO, op::GET_OBJECT, op::GET_DEVICE_PROP_DESC,
+            op::GET_DEVICE_PROP_VALUE, leica::GET_STREAM_DATA, sony::GET_EXT_DEVICE_INFO, sony::GET_ALL_PROPERTIES,
+        ] {
+            assert_eq!(wpd::sends_data(operation), Some(true), "0x{operation:04x}");
+        }
+        for operation in [
+            op::DELETE_OBJECT, op::INITIATE_CAPTURE, op::TERMINATE_OPEN_CAPTURE, op::INITIATE_OPEN_CAPTURE, leica::OPEN_SESSION,
+            leica::REQUEST_OBJECT_TRANSFER_READY, leica::CONTROL_LIVE_VIEW, leica::KEEP_SESSION_ACTIVE, sony::CONNECT,
+        ] {
+            assert_eq!(wpd::sends_data(operation), Some(false), "0x{operation:04x}");
+        }
+        // Never a guess: the vendor tables sit next to firmware and power commands.
+        assert_eq!(wpd::sends_data(0x9099), None);
+        assert_eq!(wpd::sends_data(op::SET_DEVICE_PROP_VALUE), None);
+    }
+
+    #[test]
+    fn windows_device_paths_and_object_ids() {
+        let leica_path = r"\\?\usb#vid_1a98&pid_2041#0123456789#{6ac27878-a6fa-4155-ba85-f98f491d4f33}";
+        assert_eq!(wpd::usb_ids(leica_path), Some((0x1A98, 0x2041)));
+        assert_eq!(wpd::usb_ids(r"\\?\USB#VID_054C&PID_0E78&MI_00#7&1a2b#{6ac27878-a6fa-4155-ba85-f98f491d4f33}"), Some((0x054C, 0x0E78)));
+        // A memory card or a phone on another bus is not a camera on USB.
+        assert_eq!(wpd::usb_ids(r"\\?\swd#wpdbusenum#_??_usbstor#disk&ven_generic#{6ac27878-a6fa-4155-ba85-f98f491d4f33}"), None);
+        assert_eq!(wpd::usb_ids(r"\\?\usb#vid_zz98&pid_2041"), None);
+        assert_eq!(wpd::object_handle("o2F"), Some(0x2F));
+        assert_eq!(wpd::object_handle("oFFFFC001"), Some(0xFFFF_C001));
+        for other in ["", "o", "DEVICE", "s10001", "o123456789", "oXYZ"] {
+            assert_eq!(wpd::object_handle(other), None, "{other:?}");
+        }
+    }
 
     #[test]
     fn only_the_m11_series_counts_as_measured() {
