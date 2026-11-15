@@ -433,7 +433,7 @@ fn platform_info() -> PlatformInfo {
         capabilities: PlatformCapabilities {
             native_dialogs: !mobile,
             watch_folder: !mobile,
-            tether: cfg!(target_os = "macos"),
+            tether: cfg!(any(target_os = "macos", target_os = "windows")),
             updater: cfg!(all(feature = "updater", desktop)),
             external_links: true,
             documents_export: mobile,
@@ -1487,7 +1487,7 @@ pub fn run() {
         // earlier run's spill removed.
         .setup(|app| {
             // Debug builds: `NC_TETHER_SELFTEST=<dir>` drives a connected camera once and logs what it answers.
-            #[cfg(all(debug_assertions, target_os = "macos"))]
+            #[cfg(all(debug_assertions, any(target_os = "macos", target_os = "windows")))]
             tether::self_test(app.handle());
             if let Ok(root) = display_proxy_store::root_for(app.handle()) {
                 if let Err(err) = display_proxy_store::prepare_root(&root) {
@@ -1602,7 +1602,7 @@ mod tests {
         assert_eq!(info.mobile, cfg!(mobile));
         assert_eq!(info.capabilities.native_dialogs, cfg!(desktop));
         assert_eq!(info.capabilities.watch_folder, cfg!(desktop));
-        assert_eq!(info.capabilities.tether, cfg!(target_os = "macos"));
+        assert_eq!(info.capabilities.tether, cfg!(any(target_os = "macos", target_os = "windows")));
         assert_eq!(info.capabilities.updater, cfg!(all(feature = "updater", desktop)));
         assert_eq!(info.capabilities.documents_export, cfg!(mobile));
         let json = serde_json::to_value(info).expect("serializes");

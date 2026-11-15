@@ -2326,6 +2326,8 @@ dependencies = [
  "tauri-plugin-process",
  "tauri-plugin-updater",
  "tauri-runtime-wry",
+ "windows",
+ "windows-core",
  "windows-sys 0.61.2",
 ]
 

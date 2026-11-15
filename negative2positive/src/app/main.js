@@ -30815,7 +30815,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // A camera just plugged in answers only after the system has listed its
       // card, which takes a minute on a full one: say so instead of failing.
       const listing = setTimeout(() => {
-        if (isCurrent()) setScanPhase('connecting', getLocalizedText('scanReadingCard', 'The Mac is reading the camera’s card. The live view starts by itself.'));
+        if (isCurrent()) setScanPhase('connecting', getLocalizedText('scanReadingCard', 'The computer is reading the camera’s card. The live view starts by itself.'));
       }, 4000);
       let camera;
       try {
@@ -31595,6 +31595,16 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     queueMicrotask(() => {
       if (!hasPlatformCapability('tether')) return;
       const { invoke } = window.__TAURI__.core;
+      // No camera was tried on Windows yet: there every body is beta, and the
+      // texts that name the verified ones say so instead.
+      if (platformInfo.os === 'windows') {
+        for (const key of ['scanEntryNote', 'scanSupported']) {
+          for (const element of document.querySelectorAll(`[data-i18n="${key}"]`)) {
+            element.dataset.i18n = `${key}Windows`;
+            element.textContent = getLocalizedText(`${key}Windows`, element.textContent);
+          }
+        }
+      }
       for (const id of ['uploadScanBtn', 'studioMenuScan']) {
         const entry = document.getElementById(id);
         if (!entry) continue;

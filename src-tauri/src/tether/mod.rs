@@ -3,15 +3,24 @@
 //! is imported from there like any other arrival (`import_folder.rs`). One
 //! cable, no vendor SDK. See `docs/tethered-capture.md`.
 //!
-//! Supported where a transport exists (macOS). The Leica M11 series was
-//! measured on the real camera; other Leica bodies, Sony (PC Remote) and
-//! Fujifilm (USB tether shooting) cameras are offered as beta
-//! (`ptp::Dialect::measured`). Everything else answers "unsupported" rather than
-//! guessing at a camera.
+//! Supported where a transport exists: macOS (ImageCaptureCore, `macos.rs`)
+//! and Windows (Windows Portable Devices, `wpd.rs`). The Leica M11 series was
+//! measured on the real camera, on a Mac; other Leica bodies, Sony (PC Remote)
+//! and Fujifilm (USB tether shooting) cameras are offered as beta
+//! (`ptp::Dialect::measured`), and so is every camera on Windows, where no
+//! camera was tried yet (`beta`). Everything else answers "unsupported" rather
+//! than guessing at a camera.
 pub mod ptp;
 
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "macos")]
+use macos as transport;
+
+#[cfg(target_os = "windows")]
+mod wpd;
+#[cfg(target_os = "windows")]
+use wpd as transport;
 
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -27,6 +36,29 @@ pub struct Connected {
     pub capture: bool,
     /// Not yet measured on the real camera.
     pub beta: bool,
+}
+
+/// A camera as the page lists it.
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+#[derive(Clone, Serialize, PartialEq, Eq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct Camera {
+    pub id: String,
+    pub name: String,
+    pub usb_vendor: u16,
+    pub usb_product: u16,
+    /// A body whose dialect this app speaks; the others are listed only to say so.
+    pub supported: bool,
+    /// Driven from published protocol notes, not yet measured on the real camera.
+    pub beta: bool,
+}
+
+/// Whether a camera is offered as beta here: every body but the measured
+/// ones, and on Windows every body, because the Windows transport has not
+/// been run on a camera yet.
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+pub fn beta(usb_vendor: u16, name: &str) -> bool {
+    cfg!(not(target_os = "macos")) || !ptp::Dialect::measured(usb_vendor, name)
 }
 
 /// One exposure setting as the camera reports it.
@@ -79,9 +111,10 @@ pub fn free_name(directory: &Path, wanted: &str, exists: impl Fn(&Path) -> bool)
     })
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 mod session {
-    use super::macos::{self, Camera};
+    use super::transport;
+    use super::Camera;
     use super::ptp::{self, ev, fuji, leica, op, prop, rc, sony, Dialect};
     use super::{free_name, Connected, Photo};
     use std::collections::HashSet;
@@ -136,7 +169,14 @@ mod session {
     impl Inner {
         async fn call(&self, app: &AppHandle, id: &str, code: u16, parameters: &[u32], out: Option<Vec<u8>>, timeout: Duration) -> Result<(u16, Vec<u8>), String> {
             let transaction = self.transaction.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
-            let (response, data) = macos::transact(app, id, ptp::command(code, transaction, parameters), out, timeout).await?;
+            #[cfg(target_os = "macos")]
+            let (response, data) = transport::transact(app, id, ptp::command(code, transaction, parameters), out, timeout).await?;
+            // The system's driver numbers the transactions itself.
+            #[cfg(target_os = "windows")]
+            let (response, data) = {
+                let _ = transaction;
+                transport::transact(app, id, code, parameters, out, timeout).await?
+            };
             Ok((response.code, data))
         }
         async fn expect(&self, app: &AppHandle, id: &str, what: &str, code: u16, parameters: &[u32], out: Option<Vec<u8>>) -> Result<Vec<u8>, String> {
@@ -237,7 +277,7 @@ mod session {
                 }
                 events.clone().unwrap()
             };
-            macos::cameras(app, events).await
+            transport::cameras(app, events).await
         }
 
         pub async fn connect(&self, app: &AppHandle, id: String, directory: PathBuf) -> Result<Connected, String> {
@@ -247,7 +287,7 @@ mod session {
             self.disconnect(app).await;
             let inner = &self.inner;
             let _busy = inner.busy.lock().await;
-            macos::open(app, &id).await?;
+            transport::open(app, &id).await?;
             // What the body offers (live view, capture) and the objects it already holds.
             let opened = async {
                 let first = inner.device_info(app, &id, FIRST_ANSWER).await?;
@@ -304,11 +344,11 @@ mod session {
             let (info, live_view, capture, seen) = match opened {
                 Ok(opened) => opened,
                 Err(error) => {
-                    macos::close(app, &id).await;
+                    transport::close(app, &id).await;
                     return Err(error);
                 }
             };
-            let connected = Connected { id: id.clone(), model: info.model.clone(), firmware: info.firmware.clone(), live_view, capture, beta: !Dialect::measured(camera.usb_vendor, &camera.name) };
+            let connected = Connected { id: id.clone(), model: info.model.clone(), firmware: info.firmware.clone(), live_view, capture, beta: super::beta(camera.usb_vendor, &camera.name) };
             *inner.session.lock().map_err(|error| error.to_string())? =
                 Some(Session { id, info, directory, live_view: false, kept_alive: Instant::now(), dialect, open_capture: None, seen, polled: Instant::now() });
             Ok(connected)
@@ -333,7 +373,7 @@ mod session {
                 }
                 Ok(Dialect::Sony) | Err(_) => {}
             }
-            macos::close(app, &id).await;
+            transport::close(app, &id).await;
             if let Ok(mut session) = inner.session.lock() {
                 *session = None;
             }
@@ -695,17 +735,17 @@ mod session {
 
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub use session::Tether;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 #[derive(Default)]
 pub struct Tether;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 const UNSUPPORTED: &str = "unsupported-platform";
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 mod commands {
     use super::*;
     use crate::import_folder::ImportWatch;
@@ -738,7 +778,7 @@ mod commands {
     pub async fn tether_capture(app: tauri::AppHandle, tether: State<'_, Tether>) -> Result<(), String> {
         tether.capture(&app).await
     }
-    /// Moves a photo of the watch folder to the Trash: a shot the user discards
+    /// Moves a photo of the watch folder to the Trash (the Recycle Bin on Windows): a shot the user discards
     /// on the scan screen. Only a file directly in the granted folder.
     #[tauri::command]
     pub async fn tether_trash(watch: State<'_, ImportWatch>, path: String) -> Result<(), String> {
@@ -748,7 +788,7 @@ mod commands {
             if !crate::import_folder::scoped(&directory, &path) {
                 return Err("the photo is not in the watched folder".to_string());
             }
-            macos::trash(&path)
+            transport::trash(&path)
         })
         .await
         .map_err(|error| error.to_string())?
@@ -763,7 +803,7 @@ mod commands {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 mod commands {
     use super::*;
 
@@ -811,7 +851,7 @@ pub use commands::*;
 /// to the first supported camera, reads a few live view frames, takes one
 /// picture into the directory and disconnects, logging each step. The way to
 /// check the native chain on a real camera without the page.
-#[cfg(all(debug_assertions, target_os = "macos"))]
+#[cfg(all(debug_assertions, any(target_os = "macos", target_os = "windows")))]
 pub fn self_test(app: &tauri::AppHandle) {
     use std::time::Duration;
     use tauri::Manager;
@@ -872,12 +912,12 @@ pub fn self_test(app: &tauri::AppHandle) {
 
 /// Leaves a connected camera as it was found: the page that drove it is gone.
 pub async fn release(app: &tauri::AppHandle) {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
         use tauri::Manager;
         app.state::<Tether>().disconnect(app).await;
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let _ = app;
 }
 
