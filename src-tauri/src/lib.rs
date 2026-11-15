@@ -1543,6 +1543,7 @@ pub fn run() {
             remembered_import_folder,
             #[cfg(desktop)]
             watch_remembered_import_folder,
+            #[cfg(desktop)]
             watch_default_import_folder,
             tether::tether_cameras,
             tether::tether_connect,
