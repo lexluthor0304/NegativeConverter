@@ -45,7 +45,12 @@ shell: tether/mod.rs   sessions, live view, capture, fetch       (per dialect)
 - **Photos** go to the active watch folder, written beside their final name
   and renamed, and are imported by the watch folder like any other arrival
   (`import_folder.rs`). The folder is the one the user picked, so this works
-  in the App Store sandbox and the RAW files are the user's.
+  in the App Store sandbox and the RAW files are the user's. When none was
+  ever picked, the direct-download builds use `Pictures/Negative Converter`
+  (`watch_default_import_folder`) instead of opening a picker: on Windows the
+  picker shows the camera as a device, users chose its card, and that is no
+  file-system folder (first Windows report, 2026-11-15). The App Store build
+  still asks, with a caption saying the folder is on the computer.
 - A capture is fetched on the camera's `ObjectAdded` event, whether the app or
   the camera's own shutter button released it.
 - One transaction at a time (`Inner::busy`); a page reload releases the

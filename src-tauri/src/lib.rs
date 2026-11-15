@@ -29,7 +29,7 @@ mod webview_recovery;
 use memory_info::get_memory_info;
 use import_folder::{ImportWatch, watch_import_folder, stop_watch_import_folder, read_import_file};
 #[cfg(desktop)]
-use import_folder::{remembered_import_folder, watch_remembered_import_folder};
+use import_folder::{remembered_import_folder, watch_default_import_folder, watch_remembered_import_folder};
 use export_stream::ExportStreams;
 use native_raw::{NativeRawDecodes, native_raw_info, native_raw_begin, native_raw_append, native_raw_open, native_raw_process, native_raw_release};
 
@@ -1543,6 +1543,7 @@ pub fn run() {
             remembered_import_folder,
             #[cfg(desktop)]
             watch_remembered_import_folder,
+            watch_default_import_folder,
             tether::tether_cameras,
             tether::tether_connect,
             tether::tether_disconnect,
