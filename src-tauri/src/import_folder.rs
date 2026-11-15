@@ -94,9 +94,27 @@ pub fn watch_remembered_import_folder(app: tauri::AppHandle, state: State<'_, Im
     let Some(directory) = remembered(&app) else { return Ok(None); };
     start_watch(app, state, directory, import_existing).map(Some)
 }
+/// A camera scan's folder when none was ever chosen: "Negative Converter" in
+/// the user's Pictures, made on first use, so the scan starts without a
+/// picker. (A bare picker led Windows users into the camera's own card, which
+/// is no folder of the file system and cannot be chosen.) None in the App
+/// Store build, whose sandbox has no Pictures folder the user would find: the
+/// page asks there.
 #[tauri::command]
-pub fn watch_import_folder(app: tauri::AppHandle, state: State<'_, ImportWatch>, import_existing: bool) -> Result<Option<WatchResult>, String> {
-    let Some(picked) = rfd::FileDialog::new().pick_folder() else { return Ok(None); };
+pub fn watch_default_import_folder(app: tauri::AppHandle, state: State<'_, ImportWatch>) -> Result<Option<WatchResult>, String> {
+    if !cfg!(feature = "updater") { return Ok(None); }
+    let Ok(pictures) = app.path().picture_dir() else { return Ok(None); };
+    let directory = pictures.join("Negative Converter");
+    if fs::create_dir_all(&directory).is_err() { return Ok(None); }
+    let Ok(directory) = directory.canonicalize() else { return Ok(None); };
+    start_watch(app, state, directory, false).map(Some)
+}
+/// `title` is the picker's caption (the page's language).
+#[tauri::command]
+pub fn watch_import_folder(app: tauri::AppHandle, state: State<'_, ImportWatch>, import_existing: bool, title: Option<String>) -> Result<Option<WatchResult>, String> {
+    let mut dialog = rfd::FileDialog::new();
+    if let Some(title) = title { dialog = dialog.set_title(title); }
+    let Some(picked) = dialog.pick_folder() else { return Ok(None); };
     let directory = picked.canonicalize().map_err(|e| e.to_string())?;
     remember(&app, &directory);
     start_watch(app, state, directory, import_existing).map(Some)

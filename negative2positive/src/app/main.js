@@ -30806,8 +30806,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       await liveLoupe.tetherReleased;
       if (!isCurrent()) return null;
       if (!hotFolder) {
-        setScanPhase('failed', getLocalizedText('loupeTetherFolder', 'Choose the folder the photos are saved to.'));
-        await startHotFolder();
+        setScanPhase('failed', getLocalizedText('loupeTetherFolder', 'Choose a folder on this computer for the photos (not one inside the camera).'));
+        await startHotFolder({ scan: true });
         if (!isCurrent()) return null;
         if (!hotFolder) return null;
       }
@@ -31584,8 +31584,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const previous = hotFolder?.path;
       stopLoupeStream();
       await stopHotFolder();
-      await startHotFolder({ pick: true });
-      if (!hotFolder && previous) await startHotFolder();
+      await startHotFolder({ pick: true, scan: true });
+      if (!hotFolder && previous) await startHotFolder({ scan: true });
       if (liveLoupe.scan && !loupeElement('loupeOverlay').hidden) void openLoupe(null);
     });
     loupeElement('scanRetry')?.addEventListener('click', () => { if (liveLoupe.scan) void openLoupe(null); });
@@ -32006,7 +32006,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // Asks for a folder and watches it; `hotFolder` stays null when the picker
     // is cancelled. Also the way a tethered camera gets the folder its photos
     // are written to (openTetherStream).
-    async function startHotFolder({ pick = false } = {}) {
+    // `scan`: a camera scan asks for it, and a folder of its own in Pictures
+    // serves when none was chosen before, so no picker comes first.
+    async function startHotFolder({ pick = false, scan = false } = {}) {
       if (hotFolder) return;
       const button = document.getElementById('studioWatchFolder');
       if (button) button.disabled = true;
@@ -32017,7 +32019,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         const importExisting = Boolean(document.getElementById('studioWatchExisting')?.checked);
         // The remembered folder first; the picker when there is none, it is gone, or another one is wanted.
         if (!pick) hotFolder = await window.__TAURI__.core.invoke('watch_remembered_import_folder', { importExisting });
-        if (!hotFolder) hotFolder = await window.__TAURI__.core.invoke('watch_import_folder', { importExisting });
+        if (!hotFolder && scan && !pick) hotFolder = await window.__TAURI__.core.invoke('watch_default_import_folder');
+        const title = scan ? getLocalizedText('scanFolderPick', 'Choose a folder on this computer for the photos (not the camera)') : null;
+        if (!hotFolder) hotFolder = await window.__TAURI__.core.invoke('watch_import_folder', { importExisting, title });
         if (hotFolder) hotFolderRemembered = hotFolder.path;
         if (!hotFolder && hotFolderUnlisten) { hotFolderUnlisten(); hotFolderUnlisten = null; }
         updateHotFolderUI();
