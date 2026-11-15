@@ -191,13 +191,14 @@ in the explicit expired-roll session. A positive in edit mode keeps it off outsi
 expired-roll session (its export stays the source). See `docs/expired-film-rescue.md`.
 
 ### Camera Scan (tethered capture)
-macOS desktop only. The Leica M11 series was measured on the camera; other Leica bodies, Sony
+macOS and Windows desktop. The Leica M11 series was measured on the camera, on a Mac; other Leica bodies, Sony
 (PC Remote) and Fujifilm (USB tether shooting) cameras are driven from
-libgphoto2 and libfuji and are labelled Beta until they are measured too (`ptp::Dialect`). The camera
+libgphoto2 and libfuji and are labelled Beta until they are measured too (`ptp::Dialect`), and on
+Windows every camera is Beta: its transport has not been run on a camera (`tether::beta`). The camera
 on one USB cable shows its live view converted in the phone scan's scan mode,
 the app releases the shutter and the RAW lands in the watch folder and is
 imported. Own PTP layer, no vendor SDK: `src-tauri/src/tether/` (ImageCaptureCore
-transport, the dialects), `app/tetherCamera.js`, `openScan` in `main.js`.
+transport on macOS, Windows Portable Devices on Windows, the dialects), `app/tetherCamera.js`, `openScan` in `main.js`.
 Offered from the shell's `tether` capability. A camera is only reachable from an
 app bundle (`npx tauri build --debug --bundles app`, not `tauri dev`), and the
 App Store build needs `com.apple.security.device.usb`. See
