@@ -129,3 +129,65 @@ console.log('autoFrameAnalyzer aspect-target tests passed');
   assert.equal(countCropEdgeContacts({ left: 0, top: 0, width: 10, height: 10 }, { width: 0, height: 0 }), 0);
   console.log('autoFrameAnalyzer fallback guard tests passed');
 }
+
+// A template rectangle is a frame only where its sides are boundaries of
+// their own (measureTemplateSides): a frame on film base has four, the same
+// rectangle laid over picture content that fills the scan has none, and a
+// template without three is not offered.
+{
+  const { buildDensityAnalysis, measureTemplateSides, countTemplateBoundarySides } = await import('./autoFrameAnalyzer.js');
+  const width = 600, height = 400;
+  // Picture content: blocks of 37 x 29 px with levels that have no relation
+  // to the rectangle.
+  const content = (x, y) => 60 + ((Math.floor(x / 37) * 53 + Math.floor(y / 29) * 97) % 120);
+  const image = (pixel) => {
+    const data = new Uint8ClampedArray(width * height * 4);
+    for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+      const v = pixel(x, y), i = (y * width + x) * 4;
+      data[i] = v; data[i + 1] = v; data[i + 2] = v; data[i + 3] = 255;
+    }
+    return { width, height, data };
+  };
+  const rect = { x: 90, y: 60, width: 420, height: 280 };
+  const inside = (x, y) => x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height;
+  const framed = measureTemplateSides(rect, buildDensityAnalysis(image((x, y) => inside(x, y) ? content(x, y) : 235)));
+  assert.equal(countTemplateBoundarySides(framed), 4);
+  const borderless = measureTemplateSides(rect, buildDensityAnalysis(image(content)));
+  assert.equal(countTemplateBoundarySides(borderless), 0);
+  // A side on the scan's edge has no outside to read and is not counted.
+  const onEdge = measureTemplateSides({ x: 0, y: 60, width: 420, height: 280 }, buildDensityAnalysis(image(content)));
+  assert.equal(onEdge[2], null);
+
+  const candidate = {
+    method: 'density-template', detectedFormat: '135',
+    scoreBreakdown: { boundaryCompleteness: 0.9, borderContrast: 0.5, outsideClean: 0.3, contentTexture: 0.1, sprocketLane: 0 },
+  };
+  const validation = { aspectScore: 0.9, areaRatio: 0.8 };
+  const withSides = (sides) => getDensityTemplateReliability({ ...candidate, scoreBreakdown: { ...candidate.scoreBreakdown, sides } }, validation);
+  assert.equal(withSides(framed).usable, true);
+  assert.deepEqual(withSides(borderless), { usable: false, confidenceCap: 0 });
+  assert.deepEqual(withSides([framed[0], framed[1], borderless[2], null]), { usable: false, confidenceCap: 0 });
+  assert.equal(withSides([framed[0], framed[1], framed[2], null]).usable, true);
+}
+
+// A preview turned by a few degrees has empty corners; a side whose outside
+// lies in them is not read (the picture ends there, not the frame).
+{
+  const { buildDensityAnalysis, measureTemplateSides, countTemplateBoundarySides } = await import('./autoFrameAnalyzer.js');
+  const width = 600, height = 400;
+  const rect = { x: 90, y: 60, width: 420, height: 280 };
+  const data = new Uint8ClampedArray(width * height * 4);
+  for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+    const inside = x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height;
+    const level = inside ? 60 + ((Math.floor(x / 37) * 53 + Math.floor(y / 29) * 97) % 120) : 0;
+    const i = (y * width + x) * 4;
+    data[i] = level; data[i + 1] = level; data[i + 2] = level; data[i + 3] = 255;
+  }
+  const analysis = buildDensityAnalysis({ width, height, data });
+  assert.equal(countTemplateBoundarySides(measureTemplateSides(rect, analysis)), 4);
+  // Nothing above y = 50 and nothing left of x = 80 is picture.
+  const sides = measureTemplateSides(rect, analysis, (x, y) => y >= 50 && x >= 80);
+  assert.equal(sides[0], null);
+  assert.equal(sides[2], null);
+  assert.equal(countTemplateBoundarySides(sides), 2);
+}
