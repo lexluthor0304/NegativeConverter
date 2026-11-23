@@ -109,10 +109,18 @@ jobs:
   # simulator with the self-test fixture build. Review the artifact and commit
   # the PNGs under fastlane/ios/screenshots/en-US/ (see its README). Skipped
   # until negative2positive/test-fixtures/store-negative.jpg exists.
+  # One job per device family: a simulator's first boot on a runner takes
+  # about five minutes, and both in one job made it the slowest check of a
+  # pull request (19 minutes). Each job validates its own captures beside the
+  # other family's committed ones.
   store-screenshots:
-    name: Store screenshots (simulator)
+    name: Store screenshots (${{ matrix.family }} simulator)
     runs-on: macos-26
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        family: [iphone, ipad]
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
       CARGO_BUILD_JOBS: 3
@@ -161,8 +169,10 @@ jobs:
         run: |
           npm run build:web
           npm run tauri -- ios build --ci --debug --no-sign --archive-only --target aarch64-sim --features p0-fixtures
-      - name: Capture iPhone and iPad screenshots
+      - name: Capture the screenshots
         if: steps.fixture.outputs.present == 'true'
+        env:
+          FAMILIES: ${{ matrix.family }}
         run: |
           APP="$(find src-tauri/gen/apple/build -type d -name '*.app' -path '*Products/Applications*' 2>/dev/null | head -n 1)"
           if [ -z "$APP" ]; then
@@ -184,6 +194,6 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: always() && steps.fixture.outputs.present == 'true'
         with:
-          name: ios-store-screenshots
+          name: ios-store-screenshots-${{ matrix.family }}
           path: output/ios-store-screenshots/
           if-no-files-found: warn

@@ -10,7 +10,7 @@
 # editor, strips the alpha channel (scripts/png-to-rgb.mjs) and checks the
 # pixel size App Store Connect expects (fastlane/ios/screenshots/README.md).
 #
-#   APP=<path to the .app> OUT=output/ios-store-screenshots bash scripts/ios-store-screenshots.sh
+#   APP=<path to the .app> OUT=output/ios-store-screenshots [FAMILIES=iphone] bash scripts/ios-store-screenshots.sh
 set -euo pipefail
 
 APP="${APP:?path to the simulator .app}"
@@ -102,8 +102,15 @@ capture() {
   done
 }
 
-IPHONE="$(pick_device iphone "iPhone 17 Pro" "iPhone 16 Pro")"
-IPAD="$(pick_device ipad "iPad Pro 13-inch (M5)" "iPad Pro 13-inch (M4)")"
-capture iphone-medium "$IPHONE" 1206x2622
-capture ipad13 "$IPAD" 2064x2752
+# FAMILIES names what to capture ("iphone", "ipad" or both, the default). CI
+# runs one job per family: each simulator takes five minutes to boot for the
+# first time on a runner, one after the other took 11.6 minutes, and two
+# booted at once on one runner took 16.6.
+for family in ${FAMILIES:-iphone ipad}; do
+  case "$family" in
+    iphone) capture iphone-medium "$(pick_device iphone "iPhone 17 Pro" "iPhone 16 Pro")" 1206x2622 ;;
+    ipad) capture ipad13 "$(pick_device ipad "iPad Pro 13-inch (M5)" "iPad Pro 13-inch (M4)")" 2064x2752 ;;
+    *) echo "unknown family: $family (iphone or ipad)" >&2; exit 1 ;;
+  esac
+done
 ls -la "$OUT"
