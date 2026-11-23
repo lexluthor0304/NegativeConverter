@@ -53,7 +53,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     import { AUTO_FRAME_FORMAT_RATIOS, AUTO_FRAME_DEFAULT_120_FORMATS, canAutoApplyImportFrame } from './autoFrameFormats.js';
     import { DEFAULT_CROP_RATIO_CHOICE, findCropRatioPreset, parseCropRatioChoice, serializeCropRatioChoice, fitRectToRatio, resizeRectWithRatio, drawRectWithRatio, preferredCropOrientation, flipOrientation } from './cropRatio.js';
     import { imageAreaFromDetection, resolveAnalysisRegion, analysisPixelBounds, imageAreaFromWorkingRect, sampleAnalysisArea } from './analysisRegion.js';
-    import { buildCropDetectionInput, detectCropAreaInRegion, workingPointsToBase, isSameAnalysisFrame } from './cropColorAnalysis.js';
+    import { buildCropDetectionInput, detectCropAreaInRegion, workingPointsToBase, isSameAnalysisFrame, cropWithinArea } from './cropColorAnalysis.js';
     import { createAreaResampler } from './areaResample.js';
     import { pickStudioColors, mergeStudioColors, createStudioThumbnail } from './studioSettings.js';
     import {
@@ -20041,6 +20041,15 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         // The miss outcome until the detection says otherwise.
         nextMeta.analysisNeedsReview = true;
         detect = true;
+        // A crop that reaches outside the stored image area (or with none
+        // stored) frames something that area is not the picture of: another
+        // frame of the strip, or a frame whose borders the crop just cut
+        // away. The analysis then reads the crop, not what lay around it.
+        // A crop inside the picture keeps the picture.
+        if (!cropWithinArea(nextMeta.imageArea, selectedArea)) {
+          nextMeta.imageArea = null;
+          nextMeta.analysisArea = selectedArea;
+        }
       }
       nextMeta.importAuto = true;
       return { meta: nextMeta, detect };
