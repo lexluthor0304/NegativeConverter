@@ -18,9 +18,12 @@ concurrency:
 
 jobs:
   # The checks run as parallel jobs: the unit suite and the web build, the
-  # Rust tests, and the end-to-end smoke in four shards (scripts/smoke-test.mjs
-  # plans them from the modules' weights; SMOKE_PLAN_ONLY=1 prints the plan).
-  # One job in a row took about 90 minutes; the slowest shard takes about 20.
+  # Rust tests, the end-to-end smoke in six shards (scripts/smoke-test.mjs
+  # plans them from the modules' weights; SMOKE_PLAN_ONLY=1 prints the plan)
+  # and the four-platform build beside them. One job in a row took about 90
+  # minutes and four shards about 20; six take about 14. More shards do not
+  # shorten the run: two halves of the two-stage import's history are 12.5
+  # weighted minutes each and are not divided further.
   unit:
     name: Unit tests and web build
     runs-on: ubuntu-latest
@@ -87,12 +90,12 @@ jobs:
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked
 
   smoke:
-    name: Smoke (shard ${{ matrix.shard }} of 4)
+    name: Smoke (shard ${{ matrix.shard }} of 6)
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6]
 
     steps:
       - name: Checkout
@@ -111,13 +114,15 @@ jobs:
       # scripts/smoke-test.mjs probes for.
       - name: End-to-end smoke test
         env:
-          SMOKE_SHARD: ${{ matrix.shard }}/4
+          SMOKE_SHARD: ${{ matrix.shard }}/6
         run: npm run test:smoke
 
   build:
     name: Build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    needs: [unit, rust, smoke]
+    # Beside the tests, not after them: the builds took the five minutes that
+    # followed the slowest smoke shard. A failed test no longer spares them,
+    # which costs nothing here (standard runners on a public repository).
     # On main the identical 4-platform build already runs in Desktop Release.
     if: github.event_name != 'push'
     strategy:
@@ -193,7 +198,6 @@ jobs:
   build-linux-legacy:
     name: Build Linux Legacy AppImage (glibc 2.35)
     runs-on: ubuntu-22.04
-    needs: [unit, rust, smoke]
     if: github.event_name != 'push'
 
     steps:

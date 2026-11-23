@@ -85,8 +85,8 @@ npm run test:smoke
 ```
 
 CI (`.github/workflows/desktop-ci.yml`) runs all three on every pull request
-before the four-platform Tauri build, as parallel jobs: the unit suite with
-the web build, the Rust tests, and the smoke in four shards (`SMOKE_SHARD=k/4`,
+beside the four-platform Tauri build, as parallel jobs: the unit suite with
+the web build, the Rust tests, and the smoke in six shards (`SMOKE_SHARD=k/6`,
 planned from the smoke modules' weights in `scripts/smoke-test.mjs`;
 `SMOKE_PLAN_ONLY=1` prints the plan). A local `npm run test:smoke` still goes
 through every module in order.
