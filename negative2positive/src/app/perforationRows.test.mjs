@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { pictureBetweenPerforations } from './perforationRows.js';
 import { detectImageWindow, projectWindowCrop } from './imageWindowDetector.js';
+import { detectFrameAndRotation } from './autoFrameAnalyzer.js';
 import { AUTO_FRAME_FORMAT_RATIOS } from './autoFrameFormats.js';
 
 // A 35 mm strip in a dark holder at 20 px/mm: the film 700 px wide, a pitch of
@@ -131,6 +132,18 @@ const targets = Object.entries(AUTO_FRAME_FORMAT_RATIOS).map(([key, ratio]) => (
   const crop = projectWindowCrop(result, image, image, image);
   near(crop.top, PICTURE.top, 6, 'crop top'); near(crop.top + crop.height, PICTURE.bottom, 6, 'crop bottom');
   near(crop.left, PICTURE.left, 6, 'crop left'); near(crop.left + crop.width, PICTURE.right, 6, 'crop right');
+  // The film's own corners stay with the window, for an import that keeps the edges.
+  const film = bounds(result.film);
+  near(film.top, FILM.top, 4, 'film top'); near(film.bottom, FILM.bottom, 4, 'film bottom');
+  near(film.left, FILM.left, 4, 'film left'); near(film.right, FILM.right, 4, 'film right');
+  // The whole detection gives both crops: the picture, and the film around it.
+  const detected = detectFrameAndRotation(new ImageData(image.data, image.width, image.height), {
+    formatRatios: AUTO_FRAME_FORMAT_RATIOS, rotateImageData: (source) => source
+  });
+  assert.equal(detected.detectedFormat, '135');
+  near(detected.cropRegion.top, PICTURE.top, 6, 'detected picture top'); near(detected.cropRegion.height, PICTURE.bottom - PICTURE.top, 10, 'detected picture height');
+  near(detected.filmCropRegion.top, FILM.top, 6, 'detected film top'); near(detected.filmCropRegion.height, FILM.bottom - FILM.top, 10, 'detected film height');
+  near(detected.filmCropRegion.left, FILM.left, 6, 'detected film left'); near(detected.filmCropRegion.width, FILM.right - FILM.left, 10, 'detected film width');
 }
 {
   // The same holder window without perforations keeps its four sides.
@@ -140,6 +153,11 @@ const targets = Object.entries(AUTO_FRAME_FORMAT_RATIOS).map(([key, ratio]) => (
   assert.equal(result.evidence.perforationPitch, undefined);
   const crop = projectWindowCrop(result, image, image, image);
   near(crop.top, FILM.top, 6, 'unchanged top'); near(crop.height, FILM.bottom - FILM.top, 10, 'unchanged height');
+  assert.equal(result.film, undefined, 'a window without perforations has no film around it');
+  const detected = detectFrameAndRotation(new ImageData(image.data, image.width, image.height), {
+    formatRatios: AUTO_FRAME_FORMAT_RATIOS, rotateImageData: (source) => source
+  });
+  assert.equal(detected.filmCropRegion, undefined);
 }
 
 console.log('perforationRows: ok');
