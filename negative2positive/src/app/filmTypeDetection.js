@@ -97,7 +97,7 @@ export function detectFilmType(image, { fallback = 'positive', filmEdge = null, 
     && (data instanceof Uint16Array || data instanceof Uint8ClampedArray || data instanceof Uint8Array);
   const samples = Math.ceil(width / stride) * Math.ceil(height / stride);
   const makeSet = (capacity) => new PixelSet(capacity, integer, maximum);
-  const all = makeSet(samples), inner = makeSet(samples), edge = makeSet(256);
+  const all = makeSet(samples), inner = makeSet(samples), edge = makeSet(256), centre = makeSet(Math.ceil(samples / 4));
   const sides = [makeSet(64), makeSet(64), makeSet(64), makeSet(64)];
   for (let y = 0; y < height; y += stride) for (let x = 0; x < width; x += stride) {
     // Box clamped to the image; a 1 px box is exactly the sampled pixel.
@@ -129,6 +129,7 @@ export function detectFilmType(image, { fallback = 'positive', filmEdge = null, 
     // statistics used by the existing colour-negative classifier.
     if (low > .98) continue;
     all.add(cr, cg, cb, luma, gray, maskRed, orange);
+    if (x >= width * .3 && x < width * .7 && y >= height * .3 && y < height * .7) centre.add(cr, cg, cb, luma, gray, maskRed, orange);
     if (x < width * .05 || x >= width * .95 || y < height * .05 || y >= height * .95) edge.add(cr, cg, cb, luma, gray, maskRed, orange);
     else inner.add(cr, cg, cb, luma, gray, maskRed, orange);
   }
@@ -154,19 +155,16 @@ export function detectFilmType(image, { fallback = 'positive', filmEdge = null, 
   // Camera white balance and the film base can tint a monochrome scan.
   // Require nearly all pixels to follow the same RGB ratios after a bounded
   // gain correction; low saturation alone also describes many colour scenes.
-  const medians = ['r', 'g', 'b'].map(key => all.quantile(key, .5));
-  const balance = Math.max(...medians) / Math.max(.02, Math.min(...medians));
-  let coherentGray = false;
-  if (balance < 1.6) {
-    const mr = Math.max(.02, medians[0]), mg = Math.max(.02, medians[1]), mb = Math.max(.02, medians[2]);
-    let coherent = 0;
-    for (let n = 0; n < all.length; n++) {
-      const cr = all.channel('r', n) / mr, cg = all.channel('g', n) / mg, cb = all.channel('b', n) / mb;
-      if (Math.max(cr, cg, cb) - Math.min(cr, cg, cb) < .055) coherent++;
-    }
-    coherentGray = coherent / all.length > .96;
-  }
-  if (all.fraction('gray') > .96 || coherentGray) {
+  const coherentGray = sharesOneTint(all);
+  // A camera scan shows more than the picture: a holder, perforations with
+  // coloured fringes, a rebate near clipping, each with a tint of its own, and
+  // the film's own tint changes with its density, so the frame as a whole is
+  // neither grey nor of one tint (17 % of a Delta 3200 roll's pixels were
+  // not). Its middle is the picture: when the tint there depends on the
+  // density alone, and loosely so over the whole frame, the scan is
+  // monochrome.
+  const monochromeScan = centre.length >= 64 && toneFollowsDensity(centre, .0175) && toneFollowsDensity(all, .045);
+  if (all.fraction('gray') > .96 || coherentGray || monochromeScan) {
     // Two opposing thin rebates survive a tight crop, perforations and an
     // incomplete outer border. Include clipped clear film in this evidence.
     const clearSides = sides.map(pixels => pixels.length >= 16
@@ -184,6 +182,58 @@ export function detectFilmType(image, { fallback = 'positive', filmEdge = null, 
   }
   if (orangeFraction > .35) return { filmType: fallback, confidence: 'low', reason: 'warmScene' };
   return { filmType: 'positive', confidence: 'medium', reason: 'noMask' };
+}
+
+// Whether nearly all pixels follow the same RGB ratios after a bounded gain
+// correction: a monochrome scan tinted by white balance or the film base.
+function sharesOneTint(pixels) {
+  const medians = ['r', 'g', 'b'].map(key => pixels.quantile(key, .5));
+  if (Math.max(...medians) / Math.max(.02, Math.min(...medians)) >= 1.6) return false;
+  const mr = Math.max(.02, medians[0]), mg = Math.max(.02, medians[1]), mb = Math.max(.02, medians[2]);
+  let coherent = 0;
+  for (let n = 0; n < pixels.length; n++) {
+    const cr = pixels.channel('r', n) / mr, cg = pixels.channel('g', n) / mg, cb = pixels.channel('b', n) / mb;
+    if (Math.max(cr, cg, cb) - Math.min(cr, cg, cb) < .055) coherent++;
+  }
+  return coherent / pixels.length > .96;
+}
+
+// A camera scan of B&W film is not one grey: the light source, the camera's
+// white balance and channels near clipping tint it, and by a different amount
+// at each density (a Delta 3200 roll on a Leica M11 read 0.03 yellow in its
+// midtones and 0.02 to 0.14 blue in the rebate, so a single set of RGB ratios
+// held for only 83 % of its pixels). What makes it monochrome is that the
+// tint depends on the density alone. Each sample is compared with the median
+// colour of the samples of its own luminance (24 bands): nearly all within
+// `tolerance`, and no band's median further than 0.2 from grey. A colour
+// picture has several colours at one luminance and fails the first; a
+// strongly toned one fails the second. Measured on camera scans (M11, the
+// app's own decode) within 0.0175 in the middle of the frame: 9 B&W frames
+// of two rolls hold 96.3 to 99.6 %, 13 colour negatives at most 75 %; over
+// the whole frame the B&W frames hold 98 % within 0.045. The middle's
+// tolerance is that tight for two muted colours side by side (0.02 either
+// way from grey) and for colour photographs of a nearly grey subject, two of
+// which among 834 finished photos held 96 % at 0.025.
+function toneFollowsDensity(pixels, tolerance) {
+  const BANDS = 24, bands = Array.from({ length: BANDS }, () => []);
+  for (let n = 0; n < pixels.length; n++) {
+    const r = pixels.channel('r', n), g = pixels.channel('g', n), b = pixels.channel('b', n);
+    bands[Math.min(BANDS - 1, Math.floor((.2126 * r + .7152 * g + .0722 * b) * BANDS))].push(r - g, b - g);
+  }
+  const median = (values) => values.sort((a, b) => a - b)[values.length >> 1];
+  let within = 0;
+  for (const band of bands) {
+    const count = band.length / 2;
+    // A band of a few samples has no median to speak of; its samples count against.
+    if (count < 8) continue;
+    const red = median(Array.from({ length: count }, (_, i) => band[i * 2]));
+    const blue = median(Array.from({ length: count }, (_, i) => band[i * 2 + 1]));
+    if (count > pixels.length * .01 && Math.max(Math.abs(red), Math.abs(blue)) > .2) return false;
+    for (let i = 0; i < count; i++) {
+      if (Math.max(Math.abs(band[i * 2] - red), Math.abs(band[i * 2 + 1] - blue)) < tolerance) within++;
+    }
+  }
+  return within / pixels.length > .96;
 }
 
 // `detect` lets a caller supply a memoised detectFilmType(image) (same default options).

@@ -61,6 +61,26 @@ because the sample count does not depend on the resolution: on a 60 MP decode th
 whole detection takes about 15 ms at k = 8 (14–31 ms over 14 decodes) against
 about 30 ms at 1703835 (Node, M1 Pro).
 
+A camera scan that shows the holder is neither grey nor of one tint, and both
+grey tests failed on it: the holder is dark and warm, the perforations are
+clipped with coloured fringes, the rebate sits near clipping, and the film's own
+tint changes with its density. On a Delta 3200 roll scanned with a Leica M11
+(L1002299–334, 2026-11-23, the whole film width in a holder) 54–93 % of a frame's
+samples were grey and 83–87 % shared one tint, so every frame without a readable
+DX code came out `positive`/`noMask` and was shown uninverted. A third test,
+`toneFollowsDensity`, compares each sample with the median colour of the samples
+of its own luminance (24 bands) and asks two things: in the middle of the frame
+(the central 40 % each way, the picture) at least 96 % within 0.0175, and over
+the whole frame at least 96 % within 0.045, with no populated band's median
+further than 0.2 from grey. Measured on the app's own decode: the middle of nine
+B&W frames of two rolls holds 96.3–99.6 % and the whole frame 98 % or more;
+thirteen colour negatives of 20261112 hold at most 75 % in the middle. The
+middle's tolerance is that tight on purpose: two muted colours side by side
+(0.02 either way from grey) must stay colour, and at 0.025 two colour
+photographs of a nearly grey subject among 834 finished photos passed. At 0.0175
+none of the 834 changes its verdict except one B&W frame with a white border,
+which becomes `clearRebate`.
+
 Borderless monochrome without a rebate is typed as a B&W negative at low
 confidence (`monochrome`), whatever the fallback. Film scans are more common here
 than prints or monochrome digital images; the frame is flagged for review and a
