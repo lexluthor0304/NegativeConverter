@@ -315,6 +315,8 @@ function createContext({ gainMap = 'on' } = {}) {
     getSprocketFrameComposeOptions: () => ({}),
     ensureSprocketFrameFonts: async () => {},
     composeSprocketFrame: (image) => new TestImageData(new Uint8ClampedArray(image.data), image.width, image.height),
+    // The export composes in slices; the stand-in is the same frame, resolved.
+    composeSprocketFrameAsync: async (image, compose) => context.composeSprocketFrame(image, compose),
     canvas: { width: 0, height: 0 }, ctx: null
   });
   vm.runInContext(runtime, context);
