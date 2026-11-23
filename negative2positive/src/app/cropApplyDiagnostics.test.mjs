@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { imageAreaFromWorkingRect, imageAreaFromDetection } from './analysisRegion.js';
-import { isSameAnalysisFrame } from './cropColorAnalysis.js';
+import { isSameAnalysisFrame, cropWithinArea } from './cropColorAnalysis.js';
 import { rotatedDimensions } from './imageGeometry.js';
 
 const source = readFileSync(new URL('./main.js', import.meta.url), 'utf8');
@@ -28,14 +28,15 @@ const callStart = handler.indexOf('        const selectedArea =');
 const callEnd = handler.indexOf("\n\n        const edit = pushUndo('crop');", callStart);
 assert.ok(callStart >= 0 && callEnd > callStart, 'the handler calculates diagnostics before recording its edit');
 
-const context = vm.createContext({ structuredClone, imageAreaFromWorkingRect, isSameAnalysisFrame });
+const context = vm.createContext({ structuredClone, imageAreaFromWorkingRect, isSameAnalysisFrame, cropWithinArea });
 vm.runInContext(functionSource('appliedCropDiagnostics'), context);
 vm.runInContext(`function applyFromHandler(state, draft, cropRegion, nextGeometry, base) {
 ${handler.slice(callStart, callEnd)}
 return { meta: nextMeta, detect };
 }`, context);
 const fresh = (state, draft, cropRegion, nextGeometry, base) => context.applyFromHandler(state, draft, cropRegion, nextGeometry, base);
-// d9bb55b's handler, from `const selectedArea` to `nextMeta.importAuto = true`.
+// d9bb55b's handler, from `const selectedArea` to `nextMeta.importAuto = true`,
+// with the one rule added since (marked below).
 function inline(state, draft, cropRegion, nextGeometry, base) {
   const selectedArea = imageAreaFromWorkingRect(cropRegion, nextGeometry, base);
   const nextMeta = structuredClone(state.autoFrame.lastDiagnostics || {});
@@ -49,6 +50,12 @@ function inline(state, draft, cropRegion, nextGeometry, base) {
   } else if (!isSameAnalysisFrame(nextMeta.imageArea, selectedArea)) {
     nextMeta.analysisNeedsReview = true;
     detect = true;
+    // Since 2026-11-23: a crop that reaches outside the stored image area (or
+    // with none stored) is what the analysis reads until the detection hits.
+    if (!cropWithinArea(nextMeta.imageArea, selectedArea)) {
+      nextMeta.imageArea = null;
+      nextMeta.analysisArea = selectedArea;
+    }
   }
   nextMeta.importAuto = true;
   return { meta: nextMeta, detect };
@@ -81,4 +88,30 @@ for (const size of [{ width: 90, height: 64 }, { width: 1600, height: 1066 }]) {
   }
 }
 assert.ok(detected > 0 && detected < cases, 'both detection decisions are covered');
+
+// What the analysis reads when the detection has not hit (and when it misses).
+{
+  const base = { width: 1600, height: 1066 }, geometry = { rotationAngle: 0, mirrored: false };
+  const rect = (left, top, width, height) => ({ left, top, width, height });
+  const picture = imageAreaFromDetection({ cropRegion: rect(160, 128, 1280, 810), angle: 0 }, base);
+  const apply = (meta, crop) => fresh({ rotationAngle: 0, mirrored: false, cropRegion: null, originalImageData: base, autoFrame: { lastDiagnostics: meta } },
+    { analysisOnly: false }, crop, geometry, base);
+  const areaOf = crop => JSON.stringify(imageAreaFromWorkingRect(crop, geometry, base));
+  // A detail well inside the picture, off its centre: the picture stays.
+  const detail = rect(162, 130, 90, 70);
+  let applied = apply({ imageArea: picture }, detail);
+  assert.ok(applied.detect && applied.meta.analysisNeedsReview, 'an off-centre detail is looked at again');
+  assert.equal(JSON.stringify(applied.meta.imageArea), JSON.stringify(picture), 'a crop inside the picture keeps the picture for the analysis');
+  // A crop past the picture's corner frames something else: the crop is read.
+  const beyond = rect(0, 0, 640, 373);
+  applied = apply({ imageArea: picture }, beyond);
+  assert.equal(applied.meta.imageArea, null, 'the stored picture is not the picture of a crop that leaves it');
+  assert.equal(JSON.stringify(applied.meta.analysisArea), areaOf(beyond), 'the analysis reads the crop');
+  // No picture known (the frame was never detected): a crop that cuts the borders away is read, not the frame before it.
+  const tightened = rect(300, 200, 1000, 660);
+  applied = apply({ imageArea: null, analysisArea: null }, tightened);
+  assert.equal(JSON.stringify(applied.meta.analysisArea), areaOf(tightened), 'without a picture the analysis follows the crop');
+  applied = apply({ imageArea: null, analysisArea: imageAreaFromWorkingRect(rect(0, 0, 1600, 1066), geometry, base) }, tightened);
+  assert.equal(JSON.stringify(applied.meta.analysisArea), areaOf(tightened), 'an earlier frame kept as the analysis area gives way to the crop');
+}
 console.log(`cropApplyDiagnostics: appliedCropDiagnostics equals the Apply handler's inline diagnostics in ${cases} cases (${detected} detect)`);

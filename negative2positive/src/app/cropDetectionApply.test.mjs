@@ -29,7 +29,7 @@ import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { createHarness, makeBase, applyCropHandlerSource, settle, functionSource } from './geometryTestHarness.mjs';
 import { imageAreaFromWorkingRect } from './analysisRegion.js';
-import { isSameAnalysisFrame, workingPointsToBase, buildCropDetectionInput } from './cropColorAnalysis.js';
+import { isSameAnalysisFrame, cropWithinArea, workingPointsToBase, buildCropDetectionInput } from './cropColorAnalysis.js';
 import { normalizeAngleDegrees } from './imageGeometry.js';
 
 const base = makeBase(90, 64, 5);
@@ -40,6 +40,10 @@ function headMissMeta(previous, state, cropRegion, nextGeometry) {
   const meta = structuredClone(previous || {});
   meta.analysisArea ||= imageAreaFromWorkingRect(state.cropRegion || { left: 0, top: 0, width: state.originalImageData.width, height: state.originalImageData.height }, state, base);
   meta.analysisNeedsReview = true;
+  // Since 2026-11-23: a crop outside the stored image area (or with none
+  // stored) is what the analysis reads.
+  const selected = imageAreaFromWorkingRect(cropRegion, nextGeometry, base);
+  if (!cropWithinArea(meta.imageArea, selected)) { meta.imageArea = null; meta.analysisArea = selected; }
   meta.importAuto = true;
   return meta;
 }
@@ -59,7 +63,7 @@ function setup({ expired = false, step = 3, points = null, immediate = false, au
     applyCropBtn: { disabled: false }, cancelCropBtn: { disabled: false },
     getLoadingOverlay: () => ({ show: async () => {}, hide() {} }),
     studioWorkspace: { sync() {}, text: key => key },
-    imageAreaFromWorkingRect, isSameAnalysisFrame, workingPointsToBase, buildCropDetectionInput,
+    imageAreaFromWorkingRect, isSameAnalysisFrame, cropWithinArea, workingPointsToBase, buildCropDetectionInput,
     estimateAutoWhiteBalance: () => ({ ...HIT_WB, confidence: HIT_WB.wbAutoConfidence }),
     resolveAnalysisRegion: () => null, analysisRegionSample: () => ({}), baseSizeSource: () => base,
     exitCropMode: () => { h.state.cropping = false; h.state.cropDraft = null; },
@@ -546,7 +550,7 @@ async function fullResolutionRun({ hitFirst = false } = {}) {
     applyCropBtn: { disabled: false }, cancelCropBtn: { disabled: false },
     getLoadingOverlay: () => ({ show: async () => {}, updateProgress() {}, hide() {} }),
     studioWorkspace: { sync() {}, text: key => key },
-    imageAreaFromWorkingRect, isSameAnalysisFrame, workingPointsToBase, buildCropDetectionInput,
+    imageAreaFromWorkingRect, isSameAnalysisFrame, cropWithinArea, workingPointsToBase, buildCropDetectionInput,
     exitCropMode: () => { h.state.cropping = false; h.state.cropDraft = null; },
     runOpenCvTask: async (type, task) => {
       const input = await task.build();
