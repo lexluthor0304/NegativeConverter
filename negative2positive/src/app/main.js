@@ -12027,6 +12027,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       canvasTransformWrapper.style.transform = `matrix(${z}, 0, 0, ${z}, ${state.panX}, ${state.panY}) ${interimGeometryCss()}`.trim();
       // A stroke being painted follows the image it is painted on (#254).
       if (brushFeedback.drawing) remapBrushStroke();
+      if (state.cropping) placeZoomControlsForCrop();
       if (z > 1) {
         zoomIndicator.textContent = zoomIndicatorText(z);
         zoomIndicator.style.display = 'block';
@@ -19157,6 +19158,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       updateCropRatioUi();
       cropOverlay.style.display = active ? 'block' : 'none';
       canvasContainer.classList.toggle('crop-mode', active);
+      if (!active) placeZoomControlsForCrop();
       canvasContainer.classList.toggle('straighten-line-mode', false);
       canvasContainer.style.touchAction = active ? 'none' : '';
       // No brush paints in crop mode: the overlay and the brush layer hide.
@@ -19267,6 +19269,44 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       cropOverlay.style.top = (draft.rect.top / scaleY) + 'px';
       cropOverlay.style.width = (draft.rect.width / scaleX) + 'px';
       cropOverlay.style.height = (draft.rect.height / scaleY) + 'px';
+      placeZoomControlsForCrop();
+    }
+
+    // The zoom buttons sit in the picture's bottom left corner, where the
+    // crop rectangle's corner and edges often are: a press meant for the
+    // handle landed on a button, and the buttons hid where the crop ends.
+    // While they would cover the rectangle's border they move just inside
+    // its bottom left corner, and hide when it is too small to hold them.
+    const ZOOM_CONTROLS_INSET = 12;
+    const CROP_BORDER_REACH = 16;
+    function placeZoomControlsForCrop() {
+      zoomControls.style.left = '';
+      zoomControls.style.bottom = '';
+      zoomControls.style.visibility = '';
+      if (!state.cropping || zoomControls.style.display === 'none' || cropOverlay.style.display === 'none') return;
+      const box = canvasContainer.getBoundingClientRect();
+      const crop = cropOverlay.getBoundingClientRect();
+      const width = zoomControls.offsetWidth;
+      const height = zoomControls.offsetHeight;
+      const left = box.left + canvasContainer.clientLeft + ZOOM_CONTROLS_INSET;
+      const bottom = box.top + canvasContainer.clientTop + canvasContainer.clientHeight - ZOOM_CONTROLS_INSET;
+      const clear = (l, b) => {
+        const inside = l >= crop.left + CROP_BORDER_REACH && l + width <= crop.right - CROP_BORDER_REACH
+          && b - height >= crop.top + CROP_BORDER_REACH && b <= crop.bottom - CROP_BORDER_REACH;
+        const outside = l >= crop.right + CROP_BORDER_REACH || l + width <= crop.left - CROP_BORDER_REACH
+          || b - height >= crop.bottom + CROP_BORDER_REACH || b <= crop.top - CROP_BORDER_REACH;
+        return inside || outside;
+      };
+      if (clear(left, bottom)) return;
+      const movedLeft = Math.max(left, crop.left + CROP_BORDER_REACH + 4);
+      const movedBottom = Math.min(bottom, crop.bottom - CROP_BORDER_REACH - 4);
+      if (!clear(movedLeft, movedBottom)) { zoomControls.style.visibility = 'hidden'; return; }
+      zoomControls.style.left = `${ZOOM_CONTROLS_INSET + movedLeft - left}px`;
+      zoomControls.style.bottom = `${ZOOM_CONTROLS_INSET + bottom - movedBottom}px`;
+    }
+    // A press on a zoom button is not the start of a crop drag.
+    for (const type of ['mousedown', 'pointerdown']) {
+      zoomControls.addEventListener(type, (event) => { if (state.cropping) event.stopPropagation(); });
     }
 
     // Sizes the canvas for the draft angle, redraws and keeps the rectangle
