@@ -51,7 +51,7 @@ export const studioText = {
     restart: '从原片重新处理…', restartConfirm: '清除当前照片的构图、调色和历史记录，从原片重新转换？请先导出需要保留的结果。',
     settingsConfirm: '将当前照片的处理设置（包括片基、白平衡校正、镜头等）应用到其他所选照片？各照片的构图会保留。',
     borderScope: '边框与边码设置用于本次导出的所有所选照片。', quickColor: '快速定位调色工具',
-    autoCrop: '自动裁切成像区域（关闭则保留边字与齿孔）', restoreFrame: '恢复完整画面', frameApplied: '已自动裁切 · 查看构图', frameReview: '未自动裁切 · 请确认构图',
+    autoCrop: '自动裁切成像区域（关闭则保留边字与齿孔）', restoreFrame: '恢复完整画面', frameApplied: '已自动裁切 · 查看构图', frameFilm: '已裁到胶片（保留齿孔与边字）· 查看构图', frameReview: '未自动裁切 · 请确认构图',
     detectingFrame: '正在识别成像区域与倾斜角度…', frameAnalysis: '颜色仅分析成像区域', preparingOriginal: '正在准备原图…',
     frameIncomplete: '画格边界不完整 · 已保留全图，请手动确认构图',
     confirmAnalysis: '确认成像区域', analysisHint: '框住要处理的那一格画面，避开片边和齿孔。这里只改变颜色分析范围，不裁切输出，也不重新取样片基。', analysisReview: '成像区域待确认 · 保留原有颜色基准',
@@ -101,7 +101,7 @@ export const studioText = {
     restart: 'Reprocess from original…', restartConfirm: 'Clear geometry, color and history for this photo and convert the original again? Export any results you want to keep first.',
     settingsConfirm: 'Copy film base, WB gains, lens and other processing settings to the other selected photos? Their geometry will be preserved.',
     borderScope: 'These border and marking settings apply to all photos in this export.', quickColor: 'Jump to color tools',
-    autoCrop: 'Crop image area (off: keep original film edges)', restoreFrame: 'Restore full image', frameApplied: 'Auto-cropped · Review framing', frameReview: 'Not auto-cropped · Review framing',
+    autoCrop: 'Crop image area (off: keep original film edges)', restoreFrame: 'Restore full image', frameApplied: 'Auto-cropped · Review framing', frameFilm: 'Cropped to the film, edges kept · Review framing', frameReview: 'Not auto-cropped · Review framing',
     detectingFrame: 'Detecting the image area and tilt…', frameAnalysis: 'Color analysis uses the image area only', preparingOriginal: 'Preparing original…',
     frameIncomplete: 'Incomplete frame edges · Full image kept; review framing manually',
     confirmAnalysis: 'Confirm image area', analysisHint: 'Frame the intended image, excluding film edges and holes. This changes color analysis only, not output framing or film-base sampling.', analysisReview: 'Confirm image area · Previous color reference retained',
@@ -151,7 +151,7 @@ export const studioText = {
     restart: '元画像から再処理…', restartConfirm: '現在の写真の構図・色・履歴を消去して再変換しますか？必要な結果を先に書き出してください。',
     settingsConfirm: 'ベース・WB補正・レンズなどの処理設定を他の選択写真にコピーしますか？各写真の構図は保持します。',
     borderScope: '枠と端文字の設定は、今回書き出す選択写真すべてに適用します。', quickColor: '色調整ツールへの移動',
-    autoCrop: '撮影窓を切り抜く（オフで元の端文字・穴を保持）', restoreFrame: '画像全体に戻す', frameApplied: '自動切り抜き済み · 構図確認', frameReview: '未切り抜き · 構図を確認',
+    autoCrop: '撮影窓を切り抜く（オフで元の端文字・穴を保持）', restoreFrame: '画像全体に戻す', frameApplied: '自動切り抜き済み · 構図確認', frameFilm: 'フィルムで切り抜き（穴と端文字を保持）· 構図確認', frameReview: '未切り抜き · 構図を確認',
     detectingFrame: '撮影窓と傾きを検出しています…', frameAnalysis: '撮影窓のみで色を解析', preparingOriginal: '元画像を準備しています…',
     frameIncomplete: '画枠の端が不足 · 全体を保持しました。構図を確認してください',
     confirmAnalysis: '撮影窓を確認', analysisHint: '目的の一コマを、端や穴を除いて囲んでください。色の解析範囲のみ変更し、出力の構図やベース採取は変更しません。', analysisReview: '撮影窓の確認が必要 · 前の色基準を維持',
@@ -990,7 +990,7 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
     set(node.studioConfirmAnalysis, 'disabled', !loaded || locked || state.cropping || busy);
     set(node.studioAnalysisStatus, 'textContent', t(areaReview ? 'analysisReview' : 'analysisHint'));
     set(node.studioFrameNotice, 'hidden', Boolean(switching) || !ready || (!preparing && !frameDetecting && !frameMeta?.importAuto) || Boolean(state.samplingMode));
-    set(node.studioFrameNotice, 'textContent', t(preparing ? 'preparingOriginal' : frameDetecting ? 'detectingFrame' : areaReview ? 'analysisReview' : frameMeta?.appliedMode === 'crop' ? 'frameApplied' : frameMeta?.frameIncomplete ? 'frameIncomplete' : frameMeta?.imageArea ? 'frameAnalysis' : 'frameReview'));
+    set(node.studioFrameNotice, 'textContent', t(preparing ? 'preparingOriginal' : frameDetecting ? 'detectingFrame' : areaReview ? 'analysisReview' : frameMeta?.appliedMode === 'crop' ? (frameMeta.filmEdges ? 'frameFilm' : 'frameApplied') : frameMeta?.frameIncomplete ? 'frameIncomplete' : frameMeta?.imageArea ? 'frameAnalysis' : 'frameReview'));
     set(node.studioFrameNotice, 'dataset.status', preparing ? 'preparing' : frameDetecting ? 'detecting' : frameMeta?.appliedMode || '');
     set(node.studioFrameNotice, 'disabled', Boolean(state.cropping || busy));
     set(node.studioBorderPreviewOff, 'hidden', !loaded || !state.sprocketPreviewEnabled || Boolean(state.cropping));
