@@ -81,6 +81,31 @@ photographs of a nearly grey subject among 834 finished photos passed. At 0.0175
 none of the 834 changes its verdict except one B&W frame with a white border,
 which becomes `clearRebate`.
 
+## Masks that are not orange
+
+The orange tests ask for R > 1.18 G > 1.18² B. Camera scans of C-41 rolls with
+a Leica M11 (client rolls of 2026-11-12, the app's own decode) are red to
+magenta instead, blue at or above green, so none of their pixels were orange
+and 12 of 14 sampled frames came out `positive`/`noMask`, uninverted. The
+mask is still there, over the whole frame and deeper where the film is
+denser, and `magentaMask` reads it (`color`, medium confidence):
+
+- red is the largest channel of at least 90 % of the samples;
+- at least 75 % have red a tenth over green and blue not under 0.85 of green;
+- in the darkest fifth red is at least 1.7 times green and blue at least 0.8
+  of green;
+- in the brightest fifth red is still a tenth over green.
+
+The last two tell it from a positive: a red-lit scene's shadows fall to black
+and its lights to white, a slide faded to magenta keeps its clear film white,
+and a magenta subject sits on a paper without a mask. The twelve frames have
+84–99 % such samples, 1.86–3.25 in the dark fifth and 1.15–1.44 in the bright
+fifth. Of 834 finished photos none meets all four conditions, and the two
+nearest fail two of them (`L1000496` red-largest 0.87 and 68 % magenta,
+`L1005288` 55 % magenta). Two of the fourteen stay as they were: `L1002036`,
+a thin frame whose lights are nearly white (42 % magenta, bright fifth 1.03),
+and `L1002067`, half orange and half magenta (`warmScene`).
+
 Borderless monochrome without a rebate is typed as a B&W negative at low
 confidence (`monochrome`), whatever the fallback. Film scans are more common here
 than prints or monochrome digital images; the frame is flagged for review and a

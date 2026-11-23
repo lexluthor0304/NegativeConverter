@@ -152,6 +152,9 @@ export function detectFilmType(image, { fallback = 'positive', filmEdge = null, 
       && all.quantile('r', .1) > all.quantile('b', .9) * .9) {
     return { filmType: 'color', confidence: 'medium', reason: 'orangeMask' };
   }
+  // A masked negative need not be orange: under a cool white balance, or with
+  // a blue subject, its mask reads red to magenta (blue at or above green).
+  if (magentaMask(all)) return { filmType: 'color', confidence: 'medium', reason: 'magentaMask' };
   // Camera white balance and the film base can tint a monochrome scan.
   // Require nearly all pixels to follow the same RGB ratios after a bounded
   // gain correction; low saturation alone also describes many colour scenes.
@@ -182,6 +185,46 @@ export function detectFilmType(image, { fallback = 'positive', filmEdge = null, 
   }
   if (orangeFraction > .35) return { filmType: fallback, confidence: 'low', reason: 'warmScene' };
   return { filmType: 'positive', confidence: 'medium', reason: 'noMask' };
+}
+
+// The mask of a colour negative that is not orange. Camera scans of C-41
+// rolls (Leica M11, the app's own decode) came out red to magenta, with blue
+// at or above green, so none of their pixels passed the orange test and 12
+// of 14 frames were typed positive. The mask lies over the whole frame and
+// deepens with density, which a red or magenta picture does not do all at
+// once:
+// - red is the largest channel of at least 90 % of the pixels;
+// - at least 75 % are red over green by a tenth with blue not under 0.85 of
+//   green (red to magenta; the orange test has the rest);
+// - in the darkest fifth red is at least 1.7 times green and blue at least
+//   0.8 of green: the densest film is the most strongly masked, where the
+//   shadows of a positive turn neutral or keep one hue;
+// - in the brightest fifth red is still a tenth over green: clear film
+//   carries the mask too, where a positive's highlights (and a faded slide's
+//   clear film) are white.
+// The twelve frames have 84 to 99 % such pixels, 1.86 to 3.25 in the dark
+// fifth and 1.15 to 1.44 in the bright fifth; of 834 finished photos none
+// meets all four, and the two nearest fail two of them.
+function magentaMask(pixels) {
+  const count = pixels.length;
+  let redLargest = 0, magenta = 0;
+  const luma = new Float64Array(count);
+  for (let n = 0; n < count; n++) {
+    const r = pixels.channel('r', n), g = pixels.channel('g', n), b = pixels.channel('b', n);
+    if (r >= g && r >= b) redLargest++;
+    if (r > g * 1.1 && b >= g * .85) magenta++;
+    luma[n] = .2126 * r + .7152 * g + .0722 * b;
+  }
+  if (redLargest < count * .9 || magenta < count * .75) return false;
+  const sorted = Float64Array.from(luma).sort();
+  const dark = sorted[Math.floor((count - 1) * .2)], bright = sorted[Math.floor((count - 1) * .8)];
+  const sums = { dark: [0, 0, 0], bright: [0, 0, 0] };
+  for (let n = 0; n < count; n++) {
+    const fifth = luma[n] <= dark ? sums.dark : luma[n] >= bright ? sums.bright : null;
+    if (!fifth) continue;
+    fifth[0] += pixels.channel('r', n); fifth[1] += pixels.channel('g', n); fifth[2] += pixels.channel('b', n);
+  }
+  return sums.dark[0] >= sums.dark[1] * 1.7 && sums.dark[2] >= sums.dark[1] * .8 && sums.bright[0] >= sums.bright[1] * 1.1;
 }
 
 // Whether nearly all pixels follow the same RGB ratios after a bounded gain
