@@ -298,12 +298,18 @@ export function getSprocketFrameLayout(width, height, options = {}) {
 }
 
 function blendPixel(data, index, fill, alpha) {
+  blendChannels(data, index, fill[0], fill[1], fill[2], fill[3], alpha);
+}
+
+// blendPixel with the colour as four numbers: a loop that blends a pixel of
+// another image need not build an array for each one.
+function blendChannels(data, index, red, green, blue, opacity, alpha) {
   const amount = clamp(alpha, 0, 1);
   const keep = 1 - amount;
-  data[index] = Math.round(data[index] * keep + fill[0] * amount);
-  data[index + 1] = Math.round(data[index + 1] * keep + fill[1] * amount);
-  data[index + 2] = Math.round(data[index + 2] * keep + fill[2] * amount);
-  data[index + 3] = Math.max(data[index + 3], Math.round(fill[3] * amount));
+  data[index] = Math.round(data[index] * keep + red * amount);
+  data[index + 1] = Math.round(data[index + 1] * keep + green * amount);
+  data[index + 2] = Math.round(data[index + 2] * keep + blue * amount);
+  data[index + 3] = Math.max(data[index + 3], Math.round(opacity * amount));
 }
 
 function addPixel(data, index, fill, alpha) {
@@ -342,80 +348,171 @@ function smoothNoise(x, y, scale, seed) {
   return a * (1 - ty) + b * ty;
 }
 
-function filmBasePixel(metrics, filmColor, x, y) {
-  const cx = metrics.outputWidth / 2;
-  const cy = metrics.outputHeight / 2;
-  const nx = Math.abs((x + 0.5 - cx) / Math.max(1, cx));
-  const ny = Math.abs((y + 0.5 - cy) / Math.max(1, cy));
-  const radial = clamp((nx * nx + ny * ny) * 0.9, 0, 1);
-  const inTopBand = y < metrics.bandHeight;
-  const inBottomBand = y >= metrics.bottomBandTop;
-  const bandDepth = inTopBand
-    ? y / Math.max(1, metrics.bandHeight)
-    : (inBottomBand ? (metrics.outputHeight - y - 1) / Math.max(1, metrics.bandHeight) : 0.48);
-  const outerEdge = inTopBand || inBottomBand ? 1 - clamp(bandDepth, 0, 1) : 0.22;
-  const framePitch = Math.max(1, getEdgeFramePitch(metrics));
-  const phaseStartX = metrics.frameStartX ?? metrics.startX;
-  const frameShade = Math.sin(((x - phaseStartX) / framePitch) * Math.PI * 2) * 0.55;
-  const sprocketShade = Math.sin(((x - phaseStartX) / Math.max(1, metrics.pitch)) * Math.PI * 2) * 0.12;
-  const coarse = smoothNoise(x, y, 18, NATURAL_FILM_TEXTURE_SEED + 19) - 0.5;
-  const fine = hashNoise(x, y, NATURAL_FILM_TEXTURE_SEED + 31) - 0.5;
-  const density = 1.5 + radial * 3.5 + outerEdge * 2.6 + frameShade + sprocketShade + coarse * 6 + fine * 2.4;
-
-  return [
-    clamp(Math.round(filmColor[0] + density), 0, 255),
-    clamp(Math.round(filmColor[1] + density * 0.9), 0, 255),
-    clamp(Math.round(filmColor[2] + density * 0.62), 0, 255),
-    filmColor[3]
-  ];
+// smoothNoise(x / divisor, y / divisor, scale, seed) for every x of [x0, x1),
+// one row at a time: `row(y)` returns the row's values (indexed x - x0) in a
+// buffer it reuses. The same arithmetic per pixel; what depends on the column
+// is computed once, and the lattice hashes once per lattice row instead of
+// four per pixel.
+function smoothNoiseRows(x0, x1, divisor, scale, seed) {
+  const count = Math.max(0, x1 - x0);
+  const cell = new Int32Array(count), weight = new Float64Array(count), rest = new Float64Array(count);
+  let first = 0, last = -1;
+  for (let i = 0; i < count; i++) {
+    const u = (x0 + i) / divisor;
+    const sx = Math.floor(u / scale), fx = u / scale - sx;
+    if (i === 0) first = sx;
+    last = sx;
+    cell[i] = sx;
+    weight[i] = fx * fx * (3 - 2 * fx);
+    rest[i] = 1 - weight[i];
+  }
+  for (let i = 0; i < count; i++) cell[i] -= first;
+  const cells = Math.max(0, last - first) + 2;
+  const upper = new Float64Array(cells), lower = new Float64Array(cells), values = new Float64Array(count);
+  let latticeRow = NaN;
+  return (y) => {
+    const v = y / divisor;
+    const sy = Math.floor(v / scale), fy = v / scale - sy;
+    const ty = fy * fy * (3 - 2 * fy), restY = 1 - ty;
+    if (sy !== latticeRow) {
+      for (let i = 0; i < cells; i++) { upper[i] = hashNoise(first + i, sy, seed); lower[i] = hashNoise(first + i, sy + 1, seed); }
+      latticeRow = sy;
+    }
+    for (let i = 0; i < count; i++) {
+      const c = cell[i], tx = weight[i], restX = rest[i];
+      const a = upper[c] * restX + upper[c + 1] * tx;
+      const b = lower[c] * restX + lower[c + 1] * tx;
+      values[i] = a * restY + b * ty;
+    }
+    return values;
+  };
 }
 
-function fillFilmBase(data, metrics, filmColor) {
-  for (let i = 0; i < data.length; i += 4) {
-    data[i] = filmColor[0];
-    data[i + 1] = filmColor[1];
-    data[i + 2] = filmColor[2];
-    data[i + 3] = filmColor[3];
+// hashNoise's term of a seed, and the hash of integer coordinates with it.
+function noiseSeedTerm(seed) {
+  return Math.imul(seed, 1442695041);
+}
+
+function hashNoiseAt(x, y, seedTerm) {
+  let value = Math.imul(x, 374761393) ^ Math.imul(y, 668265263) ^ seedTerm;
+  value = Math.imul(value ^ (value >>> 13), 1274126177);
+  return ((value ^ (value >>> 16)) >>> 0) / 4294967295;
+}
+
+// The film base: a dark, slightly uneven density over the whole border. Each
+// pixel's value is the sum filmBasePixel computed (radial falloff, the outer
+// edge of the bands, a shade per frame and per perforation, coarse and fine
+// noise), term by term and in the same order, so the bytes are the same.
+// What depends on the column or on the row alone is computed once per column
+// or row, and the coarse noise's four lattice hashes once per lattice cell
+// instead of once per pixel. One step per row.
+function* fillFilmBaseSteps(data, metrics, filmColor) {
+  const outputWidth = metrics.outputWidth, outputHeight = metrics.outputHeight;
+  // The whole frame in the film colour first, as one 32-bit fill where the
+  // platform is little-endian (every one the app runs on).
+  const packed = new Uint8ClampedArray([filmColor[0], filmColor[1], filmColor[2], filmColor[3]]);
+  if (data.byteOffset % 4 === 0 && new Uint8Array(new Uint32Array([1]).buffer)[0] === 1) {
+    const words = new Uint32Array(data.buffer, data.byteOffset, data.length >> 2), word = new Uint32Array(packed.buffer)[0];
+    for (let from = 0; from < words.length; from += 4194304) {
+      words.fill(word, from, Math.min(words.length, from + 4194304));
+      yield;
+    }
+  } else {
+    for (let i = 0; i < data.length; i += 4) { data[i] = packed[0]; data[i + 1] = packed[1]; data[i + 2] = packed[2]; data[i + 3] = packed[3]; }
+    yield;
   }
 
-  const paintSpan = (left, top, width, height) => {
-    const right = Math.min(metrics.outputWidth, left + width);
-    const bottom = Math.min(metrics.outputHeight, top + height);
+  const cx = outputWidth / 2, cy = outputHeight / 2;
+  const framePitch = Math.max(1, getEdgeFramePitch(metrics));
+  const phaseStartX = metrics.frameStartX ?? metrics.startX;
+  const pitch = Math.max(1, metrics.pitch);
+  const COARSE = 18;
+  const coarseSeed = noiseSeedTerm(NATURAL_FILM_TEXTURE_SEED + 19), fineSeed = noiseSeedTerm(NATURAL_FILM_TEXTURE_SEED + 31);
+  const nxSquared = new Float64Array(outputWidth), shade = new Float64Array(outputWidth), sprocketShade = new Float64Array(outputWidth);
+  const cell = new Int32Array(outputWidth), weight = new Float64Array(outputWidth), rest = new Float64Array(outputWidth);
+  for (let x = 0; x < outputWidth; x++) {
+    const nx = Math.abs((x + 0.5 - cx) / Math.max(1, cx));
+    nxSquared[x] = nx * nx;
+    shade[x] = Math.sin(((x - phaseStartX) / framePitch) * Math.PI * 2) * 0.55;
+    sprocketShade[x] = Math.sin(((x - phaseStartX) / pitch) * Math.PI * 2) * 0.12;
+    const sx = Math.floor(x / COARSE), fx = x / COARSE - sx;
+    cell[x] = sx;
+    weight[x] = fx * fx * (3 - 2 * fx);
+    rest[x] = 1 - weight[x];
+  }
+  const cells = Math.floor((outputWidth - 1) / COARSE) + 2;
+  const upper = new Float64Array(cells), lower = new Float64Array(cells);
+  let latticeRow = NaN;
+  const red = filmColor[0], green = filmColor[1], blue = filmColor[2], opacity = filmColor[3];
+
+  const paintSpan = function* (left, top, width, height) {
+    const x0 = Math.max(0, left), right = Math.min(outputWidth, left + width);
+    const bottom = Math.min(outputHeight, top + height);
     for (let y = Math.max(0, top); y < bottom; y++) {
-      for (let x = Math.max(0, left); x < right; x++) {
-        const fill = filmBasePixel(metrics, filmColor, x, y);
-        const index = (y * metrics.outputWidth + x) * 4;
-        data[index] = fill[0];
-        data[index + 1] = fill[1];
-        data[index + 2] = fill[2];
-        data[index + 3] = fill[3];
+      const ny = Math.abs((y + 0.5 - cy) / Math.max(1, cy));
+      const nySquared = ny * ny;
+      const inTopBand = y < metrics.bandHeight;
+      const inBottomBand = y >= metrics.bottomBandTop;
+      const bandDepth = inTopBand
+        ? y / Math.max(1, metrics.bandHeight)
+        : (inBottomBand ? (outputHeight - y - 1) / Math.max(1, metrics.bandHeight) : 0.48);
+      const outerEdge = inTopBand || inBottomBand ? 1 - clamp(bandDepth, 0, 1) : 0.22;
+      const sy = Math.floor(y / COARSE), fy = y / COARSE - sy;
+      const ty = fy * fy * (3 - 2 * fy), restY = 1 - ty;
+      if (sy !== latticeRow) {
+        for (let i = 0; i < cells; i++) { upper[i] = hashNoiseAt(i, sy, coarseSeed); lower[i] = hashNoiseAt(i, sy + 1, coarseSeed); }
+        latticeRow = sy;
       }
+      let index = (y * outputWidth + x0) * 4;
+      for (let x = x0; x < right; x++, index += 4) {
+        const radial = clamp((nxSquared[x] + nySquared) * 0.9, 0, 1);
+        const sx = cell[x], tx = weight[x], restX = rest[x];
+        const a = upper[sx] * restX + upper[sx + 1] * tx;
+        const b = lower[sx] * restX + lower[sx + 1] * tx;
+        const coarse = (a * restY + b * ty) - 0.5;
+        const fine = hashNoiseAt(x, y, fineSeed) - 0.5;
+        const density = 1.5 + radial * 3.5 + outerEdge * 2.6 + shade[x] + sprocketShade[x] + coarse * 6 + fine * 2.4;
+        // A clamped array clamps the rounded value as clamp(…, 0, 255) did.
+        data[index] = Math.round(red + density);
+        data[index + 1] = Math.round(green + density * 0.9);
+        data[index + 2] = Math.round(blue + density * 0.62);
+        data[index + 3] = opacity;
+      }
+      yield;
     }
   };
 
-  paintSpan(0, 0, metrics.outputWidth, metrics.bandHeight);
-  paintSpan(0, metrics.bottomBandTop, metrics.outputWidth, metrics.outputHeight - metrics.bottomBandTop);
+  yield* paintSpan(0, 0, outputWidth, metrics.bandHeight);
+  yield* paintSpan(0, metrics.bottomBandTop, outputWidth, outputHeight - metrics.bottomBandTop);
   if (metrics.sideMargin > 0) {
     const middleTop = metrics.bandHeight;
     const middleHeight = metrics.sourceHeight;
-    paintSpan(0, middleTop, metrics.sideMargin, middleHeight);
-    paintSpan(metrics.sideMargin + metrics.sourceWidth, middleTop, metrics.sideMargin, middleHeight);
+    yield* paintSpan(0, middleTop, metrics.sideMargin, middleHeight);
+    yield* paintSpan(metrics.sideMargin + metrics.sourceWidth, middleTop, metrics.sideMargin, middleHeight);
   }
 }
 
-function copyPhotoRegion(data, metrics, imageData) {
-  const src = imageData.data;
+// Rows of a plain copy between two steps: about 4 MB.
+function rowsPerStep(rowBytes) {
+  return Math.max(1, Math.floor(4194304 / Math.max(1, rowBytes)));
+}
+
+function* copyPhotoRegionSteps(data, metrics, imageData) {
+  const src = imageData.data, rowBytes = metrics.sourceWidth * 4, chunk = rowsPerStep(rowBytes);
   for (let y = 0; y < metrics.sourceHeight; y++) {
-    const srcOffset = y * metrics.sourceWidth * 4;
+    const srcOffset = y * rowBytes;
     const dstOffset = ((y + metrics.bandHeight) * metrics.outputWidth + metrics.sideMargin) * 4;
-    data.set(src.subarray(srcOffset, srcOffset + metrics.sourceWidth * 4), dstOffset);
+    data.set(src.subarray(srcOffset, srcOffset + rowBytes), dstOffset);
+    if (y % chunk === chunk - 1) yield;
   }
 }
 
-function clearPhotoRegion(data, metrics) {
+function* clearPhotoRegionSteps(data, metrics) {
+  const rowBytes = metrics.sourceWidth * 4, chunk = rowsPerStep(rowBytes);
   for (let y = 0; y < metrics.sourceHeight; y++) {
     const dstOffset = ((y + metrics.bandHeight) * metrics.outputWidth + metrics.sideMargin) * 4;
-    data.fill(0, dstOffset, dstOffset + metrics.sourceWidth * 4);
+    data.fill(0, dstOffset, dstOffset + rowBytes);
+    if (y % chunk === chunk - 1) yield;
   }
 }
 
@@ -443,13 +540,15 @@ function paintSprocketHole(data, metrics, left, top, fill) {
   }
 }
 
-function forEachSprocketHole(metrics, callback) {
+// Every hole as [left, top], the upper row's and the lower row's in turn.
+function sprocketHoles(metrics) {
+  const holes = [];
   for (let i = 0; i < metrics.holeCount; i++) {
     const holeIndex = (metrics.firstHoleIndex || 0) + i;
     const left = (metrics.frameStartX ?? metrics.startX) + holeIndex * metrics.pitch;
-    callback(left, metrics.topY, holeIndex);
-    callback(left, metrics.bottomY, holeIndex);
+    holes.push([left, metrics.topY], [left, metrics.bottomY]);
   }
+  return holes;
 }
 
 function roundedRectDistance(px, py, left, top, width, height, radius) {
@@ -457,7 +556,9 @@ function roundedRectDistance(px, py, left, top, width, height, radius) {
   const centerY = top + height / 2;
   const qx = Math.abs(px - centerX) - (width / 2 - radius);
   const qy = Math.abs(py - centerY) - (height / 2 - radius);
-  const outside = Math.hypot(Math.max(qx, 0), Math.max(qy, 0));
+  // Math.hypot(a, 0) is a itself: only a point beyond a corner needs the
+  // root, and every other point (most of them) skips it for the same value.
+  const outside = qx <= 0 ? Math.max(qy, 0) : qy <= 0 ? qx : Math.hypot(qx, qy);
   const inside = Math.min(Math.max(qx, qy), 0);
   return outside + inside - radius;
 }
@@ -468,7 +569,7 @@ function getSprocketBandClip(metrics, top) {
     : { top: metrics.bottomBandTop, bottom: metrics.outputHeight };
 }
 
-function paintSprocketGlow(data, metrics, left, top, fill, strength = 1) {
+function* paintSprocketGlowSteps(data, metrics, left, top, fill, strength = 1) {
   const amount = clamp(Number(strength) || 0, 0, 2);
   if (amount <= 0) return;
   // 拡張した孔マスクの二段階の羽根ぼかし。外側の低密度ハローと内側の暖色芯を分ける。
@@ -481,7 +582,9 @@ function paintSprocketGlow(data, metrics, left, top, fill, strength = 1) {
   const rectRight = Math.min(metrics.outputWidth, Math.round(left + metrics.holeWidth + spread));
   const rectBottom = Math.min(bandClip.bottom, Math.round(top + metrics.holeHeight + spread));
 
+  const noiseRow = smoothNoiseRows(rectLeft, rectRight, metrics.mm, 1.1, 914);
   for (let y = rectTop; y < rectBottom; y++) {
+    const noise = noiseRow(y);
     for (let x = rectLeft; x < rectRight; x++) {
       const distance = roundedRectDistance(
         x + 0.5, y + 0.5,
@@ -489,26 +592,29 @@ function paintSprocketGlow(data, metrics, left, top, fill, strength = 1) {
       );
       if (distance < 0 || distance > spread) continue;
       const d = Math.max(0, distance - metrics.mm * 0.18);
-      const localExposure = 0.92 + (smoothNoise(x / metrics.mm, y / metrics.mm, 1.1, 914) - 0.5) * 0.3;
+      const localExposure = 0.92 + (noise[x - rectLeft] - 0.5) * 0.3;
       const inner = Math.exp(-(d * d) / (2 * sigma * sigma));
       const outer = Math.exp(-(d * d) / (4 * sigma * sigma));
       const index = (y * metrics.outputWidth + x) * 4;
       addPixel(data, index, fill, outer * amount * 0.16 * localExposure);
       addPixel(data, index, core, inner * amount * 0.54 * localExposure);
     }
+    if ((y & 31) === 31) yield;
   }
 }
 
-function paintSprocketRows(data, metrics, fill) {
-  forEachSprocketHole(metrics, (left, top) => {
+function* paintSprocketRowsSteps(data, metrics, fill) {
+  for (const [left, top] of sprocketHoles(metrics)) {
     paintSprocketHole(data, metrics, left, top, fill);
-  });
+    yield;
+  }
 }
 
-function paintOverexposedSprockets(data, metrics, fill) {
-  forEachSprocketHole(metrics, (left, top) => {
-    paintSprocketGlow(data, metrics, left, top, fill, metrics.edgeOverexposureStrength);
-  });
+function* paintOverexposedSprocketsSteps(data, metrics, fill) {
+  for (const [left, top] of sprocketHoles(metrics)) {
+    yield* paintSprocketGlowSteps(data, metrics, left, top, fill, metrics.edgeOverexposureStrength);
+    yield;
+  }
 }
 
 const unicodeBitmapGlyphs = new Map();
@@ -633,37 +739,91 @@ function toCssFontFamilyList(input) {
 
 // 文字とバーコードを一枚の露光マスクにしてから走査の柔らかさを付ける。
 // 隣接する筆画を加算しないので、交点だけ黄色く発光することがない。
-function softenMarkingMask(mask, width, height, sigma) {
+// Each sum runs over the same taps in the same order as before; rows of the
+// mask that are empty are not summed (they add nothing), and the taps are a
+// typed array. One step per 64 rows.
+function* softenMarkingMaskSteps(mask, width, height, sigma) {
   const radius = Math.max(1, Math.ceil(sigma * 2.5));
-  const kernel = Array.from({ length: radius * 2 + 1 }, (_, i) => Math.exp(-((i - radius) ** 2) / (2 * sigma * sigma)));
-  const total = kernel.reduce((a, b) => a + b, 0);
-  for (let i = 0; i < kernel.length; i++) kernel[i] /= total;
+  const weights = Array.from({ length: radius * 2 + 1 }, (_, i) => Math.exp(-((i - radius) ** 2) / (2 * sigma * sigma)));
+  const total = weights.reduce((a, b) => a + b, 0);
+  for (let i = 0; i < weights.length; i++) weights[i] /= total;
+  const kernel = Float64Array.from(weights);
   const horizontal = new Float32Array(mask.length), result = new Float32Array(mask.length);
-  for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
-    let value = 0;
-    for (let k = -radius; k <= radius; k++) if (x + k >= 0 && x + k < width) value += mask[y * width + x + k] * kernel[k + radius];
-    horizontal[y * width + x] = value;
+  // Rows with anything in them: the horizontal pass keeps a row's emptiness.
+  const filled = new Uint8Array(height);
+  for (let y = 0; y < height; y++) {
+    const end = (y + 1) * width;
+    for (let i = y * width; i < end; i++) if (mask[i] !== 0) { filled[y] = 1; break; }
   }
-  for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
-    let value = 0;
-    for (let k = -radius; k <= radius; k++) if (y + k >= 0 && y + k < height) value += horizontal[(y + k) * width + x] * kernel[k + radius];
-    result[y * width + x] = value;
+  // Tap by tap along a whole row: every pixel still adds its taps in the same
+  // order, and the loops read and write memory in a straight line.
+  const sums = new Float64Array(width);
+  for (let y = 0; y < height; y++) {
+    if (filled[y]) {
+      const row = y * width;
+      sums.fill(0);
+      for (let k = -radius; k <= radius; k++) {
+        const tap = kernel[k + radius], to = Math.min(width, width - k);
+        for (let x = Math.max(0, -k); x < to; x++) sums[x] += mask[row + x + k] * tap;
+      }
+      horizontal.set(sums, row);
+    }
+    if ((y & 63) === 63) yield;
+  }
+  for (let y = 0; y < height; y++) {
+    const from = Math.max(-radius, -y), to = Math.min(radius, height - 1 - y);
+    let any = false;
+    for (let k = from; k <= to; k++) if (filled[y + k]) { any = true; break; }
+    if (any) {
+      sums.fill(0);
+      for (let k = from; k <= to; k++) {
+        // An empty row adds nothing.
+        if (!filled[y + k]) continue;
+        const tap = kernel[k + radius], source = (y + k) * width;
+        for (let x = 0; x < width; x++) sums[x] += horizontal[source + x] * tap;
+      }
+      result.set(sums, y * width);
+    }
+    if ((y & 63) === 63) yield;
   }
   return result;
 }
 
-function compositeMarkingMask(data, metrics, mask, width, height, left, top, fill) {
-  const softened = softenMarkingMask(mask, width, height, Math.max(0.38, metrics.mm * 0.026));
+function* compositeMarkingMaskSteps(data, metrics, mask, width, height, left, top, fill) {
+  const softened = yield* softenMarkingMaskSteps(mask, width, height, Math.max(0.38, metrics.mm * 0.026));
   const glow = metrics.edgeOverexposed ? metrics.edgeOverexposureStrength : 0;
   const core = mixColor(fill, [255, 232, 125, fill[3]], glow * 0.22);
-  for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
-    const px = left + x, py = top + y;
-    if (px < 0 || px >= metrics.outputWidth || py < 0 || py >= metrics.outputHeight) continue;
-    const coverage = softened[y * width + x];
-    if (coverage < 0.002) continue;
-    const density = 0.88 + (smoothNoise(px / metrics.mm, py / metrics.mm, 0.27, 4501) - 0.5) * 0.14;
-    blendPixel(data, (py * metrics.outputWidth + px) * 4, core, coverage * density);
+  const firstX = Math.max(0, -left), endX = Math.min(width, metrics.outputWidth - left);
+  const noiseRow = smoothNoiseRows(left + firstX, left + Math.max(firstX, endX), metrics.mm, 0.27, 4501);
+  for (let y = 0; y < height; y++) {
+    const py = top + y;
+    if (py >= 0 && py < metrics.outputHeight) {
+      let noise = null;
+      for (let x = firstX; x < endX; x++) {
+        const px = left + x;
+        const coverage = softened[y * width + x];
+        if (coverage < 0.002) continue;
+        noise ??= noiseRow(py);
+        const density = 0.88 + (noise[x - firstX] - 0.5) * 0.14;
+        blendChannels(data, (py * metrics.outputWidth + px) * 4, core[0], core[1], core[2], core[3], coverage * density);
+      }
+    }
+    if ((y & 63) === 63) yield;
   }
+}
+
+// While a frame is composed in steps, the markings stage only builds its
+// masks: each composite is kept here, in order, and run in steps afterwards.
+// The stage itself never yields, so two frames composed at once cannot mix
+// their lists.
+let deferredMarkings = null;
+
+function compositeMarkingMask(data, metrics, mask, width, height, left, top, fill) {
+  if (deferredMarkings) {
+    deferredMarkings.push([data, metrics, mask, width, height, left, top, fill]);
+    return;
+  }
+  for (const step of compositeMarkingMaskSteps(data, metrics, mask, width, height, left, top, fill)) void step;
 }
 
 function paintMarkingRectangles(data, metrics, rectangles, fill) {
@@ -951,14 +1111,14 @@ function paintFrameNumberMarker(data, metrics, edge) {
   });
 }
 
-function paintSprocketTextureSmear(data, metrics, sourceImageData, strength = 1) {
+function* paintSprocketTextureSmearSteps(data, metrics, sourceImageData, strength = 1) {
   const source = sourceImageData?.data;
   if (!source) return;
   const amount = clamp(Number(strength) || 0, 0, 2);
   if (amount <= 0) return;
   const spread = Math.max(5, Math.round(metrics.holeHeight * 0.58));
 
-  forEachSprocketHole(metrics, (left, top) => {
+  for (const [left, top] of sprocketHoles(metrics)) {
     const isTopRow = top < metrics.bandHeight;
     const bandClip = getSprocketBandClip(metrics, top);
     const rectLeft = Math.max(0, Math.round(left - spread));
@@ -991,15 +1151,12 @@ function paintSprocketTextureSmear(data, metrics, sourceImageData, strength = 1)
         const falloff = 1 - distance / spread;
         const grain = clamp(0.68 + smoothNoise(x, y, Math.max(4, Math.round(metrics.holeHeight * 0.4)), 777) * 0.62, 0.45, 1.3);
         const alpha = falloff * falloff * clamp(0.045 + amount * 0.055, 0.03, 0.16) * grain;
-        blendPixel(
-          data,
-          (y * metrics.outputWidth + x) * 4,
-          [source[srcIndex], source[srcIndex + 1], source[srcIndex + 2], 255],
-          alpha
-        );
+        blendChannels(data, (y * metrics.outputWidth + x) * 4, source[srcIndex], source[srcIndex + 1], source[srcIndex + 2], 255, alpha);
       }
+      if ((y & 31) === 31) yield;
     }
-  });
+    yield;
+  }
 }
 
 function paintPhotoText(data, metrics, edge) {
@@ -1026,7 +1183,10 @@ function paintEdgeMarkings(data, metrics, edge) {
   if (edge.frameNumberEnabled) paintFrameNumberMarker(data, metrics, edge);
 }
 
-function createSprocketFrameImageData(imageData, options = {}, { includePhoto = true } = {}) {
+// A frame in steps: the same passes in the same order, each long one yielding
+// between rows, holes or markings, so a caller can let the page breathe
+// between steps (composeSprocketFrameAsync) or run them through at once.
+function* createSprocketFrameSteps(imageData, options = {}, { includePhoto = true } = {}) {
   if (!imageData || !imageData.data || !imageData.width || !imageData.height) {
     throw new Error('ImageData is required to compose sprocket holes.');
   }
@@ -1041,20 +1201,31 @@ function createSprocketFrameImageData(imageData, options = {}, { includePhoto = 
     : sanitizeColor(options.holeColor ?? edge.holeColor, DEFAULT_HOLE_COLOR);
   const output = new Uint8ClampedArray(metrics.outputWidth * metrics.outputHeight * 4);
 
-  fillFilmBase(output, metrics, filmColor);
+  yield* fillFilmBaseSteps(output, metrics, filmColor);
 
   if (edge.overexposedSprockets) {
-    paintSprocketTextureSmear(output, metrics, imageData, edge.overexposureStrength);
-    paintOverexposedSprockets(output, metrics, edge.overexposureColor);
+    yield* paintSprocketTextureSmearSteps(output, metrics, imageData, edge.overexposureStrength);
+    yield* paintOverexposedSprocketsSteps(output, metrics, edge.overexposureColor);
   }
-  paintEdgeMarkings(output, metrics, edge);
+  // The markings build their masks at once; the composites run in steps.
+  const markings = [];
+  deferredMarkings = markings;
+  try {
+    paintEdgeMarkings(output, metrics, edge);
+  } finally {
+    deferredMarkings = null;
+  }
+  for (const marking of markings) {
+    yield* compositeMarkingMaskSteps(...marking);
+    yield;
+  }
   // バーコードは孔の外に隔離せず外縁まで印字し、打ち抜き部分を最後に抜く。
-  paintSprocketRows(output, metrics, holeColor);
+  yield* paintSprocketRowsSteps(output, metrics, holeColor);
   if (includePhoto) {
     // Hard guardrail: edge effects are allowed to touch only the added film border.
-    copyPhotoRegion(output, metrics, imageData);
+    yield* copyPhotoRegionSteps(output, metrics, imageData);
   } else {
-    clearPhotoRegion(output, metrics);
+    yield* clearPhotoRegionSteps(output, metrics);
   }
 
   return new ImageData(output, metrics.outputWidth, metrics.outputHeight);
@@ -1064,12 +1235,13 @@ function isPortrait(imageData) {
   return imageData && imageData.height > imageData.width;
 }
 
-function rotateImageData90(imageData) {
+function* rotateImageData90Steps(imageData) {
   // Rotate 90° clockwise: landscape → portrait, or portrait → landscape
   const srcW = imageData.width, srcH = imageData.height;
   const dstW = srcH, dstH = srcW;
   const src = imageData.data;
   const dst = new Uint8ClampedArray(dstW * dstH * 4);
+  const chunk = rowsPerStep(srcW * 16);
   for (let y = 0; y < srcH; y++) {
     for (let x = 0; x < srcW; x++) {
       const si = (y * srcW + x) * 4;
@@ -1077,17 +1249,19 @@ function rotateImageData90(imageData) {
       dst[di] = src[si]; dst[di + 1] = src[si + 1];
       dst[di + 2] = src[si + 2]; dst[di + 3] = src[si + 3];
     }
+    if (y % chunk === chunk - 1) yield;
   }
   return new ImageData(dst, dstW, dstH);
 }
 
-function rotateImageData270(imageData) {
+function* rotateImageData270Steps(imageData) {
   // Rotate 270° clockwise (90° counter-clockwise)
   // Source (x,y) → Destination (dstH-1-x, y)
   const srcW = imageData.width, srcH = imageData.height;
   const dstW = srcH, dstH = srcW;
   const src = imageData.data;
   const dst = new Uint8ClampedArray(dstW * dstH * 4);
+  const chunk = rowsPerStep(srcW * 16);
   for (let y = 0; y < srcH; y++) {
     for (let x = 0; x < srcW; x++) {
       const si = (y * srcW + x) * 4;
@@ -1095,26 +1269,65 @@ function rotateImageData270(imageData) {
       dst[di] = src[si]; dst[di + 1] = src[si + 1];
       dst[di + 2] = src[si + 2]; dst[di + 3] = src[si + 3];
     }
+    if (y % chunk === chunk - 1) yield;
   }
   return new ImageData(dst, dstW, dstH);
 }
 
-export function composeSprocketFrame(imageData, options = {}) {
-  if (isPortrait(imageData)) {
-    const rotated = rotateImageData90(imageData);
-    const framed = createSprocketFrameImageData(rotated, options, { includePhoto: true });
-    return rotateImageData270(framed);
+// The photo with its film border (or, with `includePhoto` false, the border
+// around a transparent hole for the photo), as steps: a generator whose
+// return value is the frame.
+function* composeSprocketFrameSteps(imageData, options, includePhoto) {
+  if (!isPortrait(imageData)) return yield* createSprocketFrameSteps(imageData, options, { includePhoto });
+  const rotated = yield* rotateImageData90Steps(imageData);
+  const framed = yield* createSprocketFrameSteps(rotated, options, { includePhoto });
+  return yield* rotateImageData270Steps(framed);
+}
+
+function runSteps(steps) {
+  for (;;) {
+    const step = steps.next();
+    if (step.done) return step.value;
   }
-  return createSprocketFrameImageData(imageData, options, { includePhoto: true });
+}
+
+export function composeSprocketFrame(imageData, options = {}) {
+  return runSteps(composeSprocketFrameSteps(imageData, options, true));
 }
 
 export function composeSprocketFrameBackground(imageData, options = {}) {
-  if (isPortrait(imageData)) {
-    const rotated = rotateImageData90(imageData);
-    const framed = createSprocketFrameImageData(rotated, options, { includePhoto: false });
-    return rotateImageData270(framed);
+  return runSteps(composeSprocketFrameSteps(imageData, options, false));
+}
+
+/**
+ * composeSprocketFrame for a full-size export on the page's own thread: the
+ * same frame, byte for byte, composed in slices of `budgetMs` with a task
+ * boundary between them (`pause`), so the page keeps painting and answering
+ * input while a 60 MP border is drawn (it took one task of five seconds).
+ * `pause` defaults to scheduler.yield() where there is one, else a
+ * MessageChannel task, which a hidden page does not throttle.
+ */
+export async function composeSprocketFrameAsync(imageData, options = {}, { budgetMs = 12, pause = pauseForPage, includePhoto = true } = {}) {
+  const steps = composeSprocketFrameSteps(imageData, options, includePhoto);
+  let sliceStart = performance.now();
+  for (;;) {
+    const step = steps.next();
+    if (step.done) return step.value;
+    if (performance.now() - sliceStart >= budgetMs) {
+      await pause();
+      sliceStart = performance.now();
+    }
   }
-  return createSprocketFrameImageData(imageData, options, { includePhoto: false });
+}
+
+function pauseForPage() {
+  if (typeof globalThis.scheduler?.yield === 'function') return globalThis.scheduler.yield();
+  return new Promise((resolve) => {
+    if (typeof MessageChannel !== 'function') { setTimeout(resolve, 0); return; }
+    const { port1, port2 } = new MessageChannel();
+    port1.onmessage = () => { port1.close(); resolve(); };
+    port2.postMessage(null);
+  });
 }
 
 export function hasSprocketFrameEnabled(settings) {
