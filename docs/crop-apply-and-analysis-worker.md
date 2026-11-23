@@ -42,8 +42,17 @@ balance run; a miss sets `analysisNeedsReview`, which skips auto white
 balance. On a roll where the detector misses (most frames of the user's M11
 roll), the search held every Apply for about a second before the positive.
 
-Apply now installs the miss outcome (`analysisNeedsReview = true`, the image
-area unchanged) and converts at once. That provisional conversion is the
+Apply now installs the miss outcome and converts at once: `analysisNeedsReview
+= true`, and the image area unchanged when the crop lies inside it (at least
+85 % of the crop, `cropWithinArea`), since a crop inside the picture is a
+composition and the picture stays what the colour analysis reads. A crop that
+reaches outside the stored image area, or one applied with no image area
+stored, frames something that area is not the picture of (another frame of
+the strip, or a frame whose borders the crop just cut away): the image area
+is then dropped and `analysisArea` becomes the crop, so the analysis reads
+what the user framed and not what lay around it. Before 2026-11-23 the stored
+area, or the frame before the crop, was kept in that case too, and a crop
+that cut a holder or perforations away still had them in its levels. That provisional conversion is the
 exact result when the detection misses. The detection runs in the auto-frame
 worker meanwhile (`startCropDetection`):
 
