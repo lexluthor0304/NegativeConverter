@@ -1,4 +1,5 @@
 import { findWindowLineQuads, sampleMedian } from './imageWindowLines.js';
+import { pictureBetweenPerforations } from './perforationRows.js';
 
 // OpenCV の四辺形から実際の撮影窓を求める。画幅比率のテンプレートで切り抜かない。
 const median = values => sampleMedian(values);
@@ -190,7 +191,20 @@ export function windowFromCandidates(image, targets, contourCandidates, lineResu
     });
     if (ambiguous) return targeted ? null : { requiresReview: true, ambiguous: true };
   }
-  return candidates[0] || (!targeted && lineResult.incomplete ? { incomplete: true } : null);
+  if (candidates[0]) return withoutPerforations(image, targets, candidates[0]);
+  return !targeted && lineResult.incomplete ? { incomplete: true } : null;
+}
+
+// A window that shows the whole width of a 35 mm film is the film, not the
+// picture: its corners move to the picture between the two rows of
+// perforations (perforationRows.js), which the crop and the colour analysis
+// then use. Any other window is returned as it is.
+function withoutPerforations(image, targets, window) {
+  const picture = pictureBetweenPerforations(image, window.points);
+  if (!picture) return window;
+  return { ...window, points: picture.points,
+    detectedFormat: targets.some(target => target.key === '135') ? '135' : window.detectedFormat,
+    evidence: { ...window.evidence, perforationPitch: Number(picture.pitch.toFixed(2)) } };
 }
 
 export const NO_LINE_QUADS = Object.freeze({ quads: Object.freeze([]), incomplete: false });
