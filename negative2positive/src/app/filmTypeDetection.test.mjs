@@ -250,3 +250,27 @@ const greyMiddle = fixture((x, y) => {
 assert.notEqual(detectFilmType(greyMiddle).filmType, 'bw', 'a grey subject among colours is not a monochrome scan');
 console.log('filmTypeDetection: camera scans whose tint follows density passed');
 
+// A masked colour negative that is not orange: red to magenta, the mask over
+// the whole frame and deepening with density (camera scans of C-41 rolls under
+// a cool white balance). Its base is pink, its densest film deep red.
+const maskedNegative = (hue = 0) => fixture((x, y) => {
+  const density = ((x * 7 + y * 5) % 100) / 100;
+  // Each layer's own density, so the frame has colours and is not monochrome.
+  const layer = (shift) => Math.min(1, Math.max(0, density + .12 * Math.sin((x + shift) / 9) * Math.cos(y / 7)));
+  const mix = (clear, dense, d) => Math.round(255 * clear * (dense / clear) ** d);
+  return [mix(.94, .25, layer(0)), mix(.75, .08, layer(20 + hue)), mix(.84, .08, layer(40))];
+});
+assert.deepEqual(detectFilmType(maskedNegative()), { filmType: 'color', confidence: 'medium', reason: 'magentaMask' },
+  'a red-to-magenta mask over the whole frame is a colour negative');
+assert.equal(detectFilmType(maskedNegative(30), { blockSize: 4 }).filmType, 'color');
+// A red-lit positive: red everywhere, but its shadows fall to black and its lights to white.
+const redLit = fixture((x, y) => { const v = ((x * 7 + y * 5) % 100) / 100; return [Math.round(255 * v ** .6), Math.round(255 * v ** 1.2), Math.round(255 * v ** 1.1)]; });
+assert.notEqual(detectFilmType(redLit).filmType, 'color', 'a red-lit positive is not a masked negative');
+// A slide faded to magenta: red shadows, clear film still white.
+const fadedSlide = fixture((x, y) => { const v = .04 + .96 * ((x * 7 + y * 5) % 100) / 100; return [Math.round(255 * v ** .45), Math.round(255 * v), Math.round(255 * v ** .9)]; });
+assert.notEqual(detectFilmType(fadedSlide).filmType, 'color', 'a slide faded to magenta keeps its white clear film');
+// A magenta subject on white: no mask in the paper.
+const magentaSubject = fixture((x, y) => (x > 40 && x < 120 && y > 30 && y < 90 ? [200, 60, 150] : [245, 244, 240]));
+assert.notEqual(detectFilmType(magentaSubject).filmType, 'color');
+console.log('filmTypeDetection: red-to-magenta masks and the positives that are not passed');
+
