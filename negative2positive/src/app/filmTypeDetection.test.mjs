@@ -217,3 +217,36 @@ for (const image of parityImages) {
 }
 assert.ok(monochromeChanges > 0, 'parity set includes the flagged monochrome change');
 console.log('filmTypeDetection: block means, noisy neutral/colour fixtures and single-pixel parity passed');
+
+// A camera scan of B&W film in a holder: the picture in the middle is tinted
+// by an amount that changes with its density, the rebate by another, the
+// holder is dark and warm, the perforations are clipped with coloured fringes.
+// No single set of RGB ratios holds, yet the tint depends on density alone.
+const cameraScan = (picture) => fixture((x, y) => {
+  const u = x / 160, v = y / 120;
+  if (u < .2 || u >= .8 || v < .12 || v >= .9) return [37, 34, 30];
+  if (v < .28 || v >= .76) {
+    const hole = Math.floor(u * 40) % 3 === 0;
+    return hole ? (Math.floor(u * 80) % 6 === 0 ? [255, 240, 225] : [255, 255, 255]) : [214, 217, 226];
+  }
+  return picture(x, y);
+});
+const tintedByDensity = (x, y) => {
+  const value = 50 + (x * 5 + y * 3) % 150;
+  return [value - 1, value, Math.round(value * (value < 130 ? .93 : .97))];
+};
+assert.deepEqual(detectFilmType(cameraScan(tintedByDensity)), { filmType: 'bw', confidence: 'low', reason: 'monochrome' },
+  'a camera scan whose tint follows density is monochrome');
+// The same holder around a picture with two colours at one luminance.
+const twoHues = (x, y) => { const value = 50 + (x * 5 + y * 3) % 150; return x % 2 ? [value + 6, value, value - 6] : [value - 6, value, value + 6]; };
+assert.notEqual(detectFilmType(cameraScan(twoHues)).filmType, 'bw', 'two hues at one luminance are colour, however muted');
+assert.notEqual(detectFilmType(cameraScan((x) => x < 80 ? [110, 115, 120] : [120, 115, 110])).filmType, 'bw', 'two muted colours side by side');
+// A grey middle does not make a colour frame monochrome.
+const greyMiddle = fixture((x, y) => {
+  const u = x / 160, v = y / 120, value = 60 + (x + y) % 120;
+  if (u >= .3 && u < .7 && v >= .3 && v < .7) return [value, value, value];
+  return u < .5 ? [value + 40, value, value - 30] : [value - 30, value, value + 40];
+});
+assert.notEqual(detectFilmType(greyMiddle).filmType, 'bw', 'a grey subject among colours is not a monochrome scan');
+console.log('filmTypeDetection: camera scans whose tint follows density passed');
+
