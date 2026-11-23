@@ -1482,9 +1482,12 @@ export function settleFromWindow(detection, window) {
     }
     // Only the rotated frame's size is read here.
     const cropRegion = projectWindowCrop({ ...window, angle }, previewData, imageData, frame);
+    // The film around the picture (a window with perforations): the crop of
+    // an import that keeps the film edges.
+    const filmCropRegion = window.film ? projectWindowCrop({ points: window.film, angle }, previewData, imageData, frame) : null;
     clock.mark('rotateFull');
     if (cropRegion) return withStages({
-      angle, cropRegion, confidence: window.confidence,
+      angle, cropRegion, ...(filmCropRegion ? { filmCropRegion } : {}), confidence: window.confidence,
       confidenceLevel: inferAutoFrameConfidenceLevel(window.confidence, context.settings),
       detectedFormat: window.detectedFormat, ...frameOutput(frame),
       diagnostics: { method: window.method || 'opencv-image-window', scoreBreakdown: window.evidence, lineSearch: detection.lineSearchRecord() }

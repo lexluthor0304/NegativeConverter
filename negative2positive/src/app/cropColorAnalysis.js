@@ -34,6 +34,19 @@ export function isSameAnalysisFrame(area, cropArea) {
     && Math.abs((a.t + a.b - b.t - b.b) / 2) < (a.b - a.t) * .45;
 }
 
+// Whether the crop lies inside the area, by the same bounds: at least 85 % of
+// the crop. A crop inside the picture is a composition, and the picture stays
+// what the colour analysis reads; a crop that reaches outside it frames
+// something else (another frame of the strip, or more than the picture).
+export function cropWithinArea(area, cropArea) {
+  if (!validImageArea(area) || !validImageArea(cropArea)) return false;
+  const bounds = points => ({ l: Math.min(...points.map(p => p.x)), r: Math.max(...points.map(p => p.x)), t: Math.min(...points.map(p => p.y)), b: Math.max(...points.map(p => p.y)) });
+  const a = bounds(area), b = bounds(cropArea);
+  const intersection = Math.max(0, Math.min(a.r, b.r) - Math.max(a.l, b.l)) * Math.max(0, Math.min(a.b, b.b) - Math.max(a.t, b.t));
+  const cropSize = (b.r - b.l) * (b.b - b.t);
+  return cropSize > 0 && intersection / cropSize > .85;
+}
+
 // Apply Crop's crop-area detection runs in two halves (#245): the input is
 // built on the page, which holds the pixels, and the OpenCV search runs in
 // the auto-frame worker (openCvAnalysisTasks.js), or on the page only when the

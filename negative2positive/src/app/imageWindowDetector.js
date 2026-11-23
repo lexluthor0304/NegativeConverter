@@ -198,11 +198,12 @@ export function windowFromCandidates(image, targets, contourCandidates, lineResu
 // A window that shows the whole width of a 35 mm film is the film, not the
 // picture: its corners move to the picture between the two rows of
 // perforations (perforationRows.js), which the crop and the colour analysis
-// then use. Any other window is returned as it is.
+// then use, and the film's own corners are kept as `film` for an import that
+// keeps the film edges. Any other window is returned as it is.
 function withoutPerforations(image, targets, window) {
   const picture = pictureBetweenPerforations(image, window.points);
   if (!picture) return window;
-  return { ...window, points: picture.points,
+  return { ...window, points: picture.points, film: window.points,
     detectedFormat: targets.some(target => target.key === '135') ? '135' : window.detectedFormat,
     evidence: { ...window.evidence, perforationPitch: Number(picture.pitch.toFixed(2)) } };
 }

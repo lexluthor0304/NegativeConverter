@@ -53,7 +53,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     import { AUTO_FRAME_FORMAT_RATIOS, AUTO_FRAME_DEFAULT_120_FORMATS, canAutoApplyImportFrame } from './autoFrameFormats.js';
     import { DEFAULT_CROP_RATIO_CHOICE, findCropRatioPreset, parseCropRatioChoice, serializeCropRatioChoice, fitRectToRatio, resizeRectWithRatio, drawRectWithRatio, preferredCropOrientation, flipOrientation } from './cropRatio.js';
     import { imageAreaFromDetection, resolveAnalysisRegion, analysisPixelBounds, imageAreaFromWorkingRect, sampleAnalysisArea } from './analysisRegion.js';
-    import { buildCropDetectionInput, detectCropAreaInRegion, workingPointsToBase, isSameAnalysisFrame } from './cropColorAnalysis.js';
+    import { buildCropDetectionInput, detectCropAreaInRegion, workingPointsToBase, isSameAnalysisFrame, cropWithinArea } from './cropColorAnalysis.js';
     import { createAreaResampler } from './areaResample.js';
     import { pickStudioColors, mergeStudioColors, createStudioThumbnail } from './studioSettings.js';
     import {
@@ -17204,6 +17204,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         appliedMode: 'crop',
         lowConfidenceApplied: (result.confidenceLevel || inferConfidenceLevel(result.confidence || 0)) === 'low'
       };
+      delete state.autoFrame.lastDiagnostics.filmEdges;
       updateAutoFrameDiagnosticsUI();
       // The border-mode suggestion reads the new planes.
       await afterGeometry(ready, () => setStep2Mode(suggestStep2Mode()));
@@ -20026,6 +20027,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // window's crop on the full base with it (#255).
     function appliedCropDiagnostics(meta, { selectedArea, base, previous, analysisOnly = false }) {
       const nextMeta = structuredClone(meta || {});
+      // The frame is the user's from here, whatever the import kept.
+      delete nextMeta.filmEdges;
       // 不確かな再検出では前回の解析範囲・WB を維持する。
       nextMeta.analysisArea ||= imageAreaFromWorkingRect(previous.cropRegion || { left: 0, top: 0, width: previous.frame.width, height: previous.frame.height }, previous, base);
       let detect = false;
@@ -20038,6 +20041,15 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         // The miss outcome until the detection says otherwise.
         nextMeta.analysisNeedsReview = true;
         detect = true;
+        // A crop that reaches outside the stored image area (or with none
+        // stored) frames something that area is not the picture of: another
+        // frame of the strip, or a frame whose borders the crop just cut
+        // away. The analysis then reads the crop, not what lay around it.
+        // A crop inside the picture keeps the picture.
+        if (!cropWithinArea(nextMeta.imageArea, selectedArea)) {
+          nextMeta.imageArea = null;
+          nextMeta.analysisArea = selectedArea;
+        }
       }
       nextMeta.importAuto = true;
       return { meta: nextMeta, detect };
@@ -24328,6 +24340,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           confidenceLevel: meta.confidenceLevel || inferConfidenceLevel(meta.confidence || 0),
           rotateOnly: restoredMode === 'rotateOnly',
           appliedMode: restoredMode,
+          ...(meta.filmEdges && restoredMode === 'crop' ? { filmEdges: true } : {}),
           lowConfidenceApplied: Boolean(meta.lowConfidenceApplied),
           importAuto: Boolean(meta.importAuto),
           imageArea: meta.imageArea ? structuredClone(meta.imageArea) : null,
@@ -26727,23 +26740,30 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (result?.stageMs) recordPerfStages('autoFrameStages', result.stageMs, { method: result.diagnostics?.method });
       const reliable = canAutoApplyImportFrame(result, autoFrame);
       const apply = reliable && autoFrame.onImport && allowCrop;
+      // With the crop off the film edges stay in the photo. Of a camera scan
+      // that shows 35 mm film in a holder, the film is what stays: its
+      // perforations and edge print, not the holder around it. The colour
+      // analysis reads the picture either way (`imageArea`).
+      const film = reliable && !autoFrame.onImport && allowCrop && result.filmCropRegion ? result.filmCropRegion : null;
       const meta = {
         confidence: result?.confidence || 0,
         confidenceLevel: result?.confidenceLevel || 'low',
         detectedFormat: result?.detectedFormat || 'unknown',
         method: result?.diagnostics?.method || 'unavailable',
-        appliedMode: apply ? 'crop' : 'none',
+        appliedMode: apply || film ? 'crop' : 'none',
+        ...(film ? { filmEdges: true } : {}),
         importAuto: true,
         frameIncomplete: Boolean(result?.diagnostics?.incomplete),
         imageArea: reliable ? imageAreaFromDetection(result, source) : null
       };
-      if (!apply) return { ...settings, autoFrameMeta: meta };
+      if (!apply && !film) return { ...settings, autoFrameMeta: meta };
       const angle = autoFrameEffectiveAngle(result.angle);
       // Only the rotated frame's size is needed here: the one pixel build of
       // this geometry is restoreSettings' (#244), not a second rotation.
       const rotated = rotatedDimensions(source.width, source.height, angle);
+      const detected = film || result.cropRegion;
       const cropRegion = autoFrame.rotate180Default
-        ? rotate180CropRegion(result.cropRegion, rotated.width, rotated.height) : result.cropRegion;
+        ? rotate180CropRegion(detected, rotated.width, rotated.height) : detected;
       return { ...settings, rotationAngle: angle, mirrored: false, cropRegion, autoFrameMeta: meta };
     }
 
@@ -32653,7 +32673,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
             const defaults = createDefaultSettings(frame, item);
             if (!itemValid()) return null;
             const scaled = decoded.fullSize && detection?.cropRegion
-              ? { ...detection, cropRegion: scaleHalfSizeCrop(detection.cropRegion, full, detection.angle || 0) } : detection;
+              ? { ...detection, cropRegion: scaleHalfSizeCrop(detection.cropRegion, full, detection.angle || 0),
+                ...(detection.filmCropRegion ? { filmCropRegion: scaleHalfSizeCrop(detection.filmCropRegion, full, detection.angle || 0) } : {}) } : detection;
             let settings = await analyzeStudioImportFrame(frame, defaults, { silent: true, filmType, detection: { result: scaled } });
             const edge = await mergeImportFilmEdge(frame, settings, read, { applyDefaults: state.importFilmTypeAuto });
             if (!itemValid()) return null;
