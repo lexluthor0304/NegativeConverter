@@ -370,4 +370,58 @@ assert.equal(
   'The text limit must not split supplementary CJK characters'
 );
 
+// The frame is composed in steps (rows, holes, markings) so that an export can
+// pause between them. What the steps draw is pinned to what the single pass
+// drew before them (FNV-1a of the frame and of its background, taken at
+// 4f09b4c7), and the sliced composer returns the same frame.
+{
+  const { composeSprocketFrameAsync } = await import('./sprocketFrame.js');
+  const fnv = (data) => { let h = 2166136261; for (let i = 0; i < data.length; i++) h = Math.imul(h ^ data[i], 16777619); return (h >>> 0).toString(16).padStart(8, '0'); };
+  const frameOf = (w, h) => {
+    const d = new Uint8ClampedArray(w * h * 4);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const i = (y * w + x) * 4; d[i] = (x * 7 + y * 3) & 255; d[i + 1] = (x * 5 + y * 11) & 255; d[i + 2] = (x ^ y) & 255; d[i + 3] = 255; }
+    return new ImageData(d, w, h);
+  };
+  const E = DEFAULT_SPROCKET_EDGE_MARKINGS;
+  const optionSets = {
+    plain: {},
+    markings: { edgeMarkings: { ...E, textEnabled: true, text: 'NEO ANALOG LAB 400', frameNumberEnabled: true, dxEnabled: true } },
+    glow: { edgeMarkings: { ...E, overexposedSprockets: true, overexposureStrength: 1.4 } },
+    all: { edgeMarkings: { ...E, textEnabled: true, frameNumberEnabled: true, frameNumber: 7, dxEnabled: true, dx1: 108, dx2: 10, overexposedSprockets: true, firstHoleOffsetMm: 1.3, halfFrameMarksEnabled: true } },
+    holes: { transparentHoles: true, filmColor: [20, 12, 9, 255], edgeMarkings: { ...E, dxEnabled: true, holeColor: '#112233' } }
+  };
+  const pinned = {
+    '640x427 plain': '676x623:44480184 bg:f0f7f404',
+    '640x427 all': '676x623:f3ababec bg:d87b9c6c',
+    '1203x801 markings': '1269x1167:996506d9 bg:c8239adb',
+    '1203x801 glow': '1269x1167:1c279644 bg:06d96046',
+    '427x640 all': '623x676:e6ac3c5c bg:a297cb88',
+    '960x320 all': '986x466:c7d2f772 bg:4eabf172',
+    '97x61 holes': '113x133:21da6b98 bg:eb4a5b2d'
+};
+  for (const [key, expected] of Object.entries(pinned)) {
+    const [size, name] = key.split(' '), [w, h] = size.split('x').map(Number);
+    const image = frameOf(w, h), options = optionSets[name];
+    const whole = composeSprocketFrame(image, options), background = composeSprocketFrameBackground(image, options);
+    assert.equal(`${whole.width}x${whole.height}:${fnv(whole.data)} bg:${fnv(background.data)}`, expected, `${key}: the frame is the one the single pass drew`);
+    // Every step ends a slice, and two frames are composed at once: the
+    // sliced frames are the same bytes, and neither sees the other's markings.
+    let pauses = 0;
+    const pause = () => { pauses++; return Promise.resolve(); };
+    const [sliced, other] = await Promise.all([
+      composeSprocketFrameAsync(image, options, { budgetMs: 0, pause }),
+      composeSprocketFrameAsync(frameOf(h + 40, w), optionSets.all, { budgetMs: 0, pause })
+    ]);
+    assert.equal(fnv(sliced.data), fnv(whole.data), `${key}: sliced and whole agree`);
+    assert.equal(fnv(other.data), fnv(composeSprocketFrame(frameOf(h + 40, w), optionSets.all).data), `${key}: a frame composed alongside is its own`);
+    assert.ok(pauses > 10, `${key}: the composer paused between steps (${pauses})`);
+    const sliceBackground = await composeSprocketFrameAsync(image, options, { budgetMs: 0, pause, includePhoto: false });
+    assert.equal(fnv(sliceBackground.data), fnv(background.data));
+  }
+  // With a budget the composer pauses only when a slice has run its time.
+  let pauses = 0;
+  await composeSprocketFrameAsync(frameOf(640, 427), optionSets.all, { budgetMs: 1e9, pause: () => { pauses++; return Promise.resolve(); } });
+  assert.equal(pauses, 0, 'no pause inside the budget');
+}
+
 console.log('sprocketFrame.test.mjs passed');

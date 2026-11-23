@@ -150,6 +150,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     import {
       DEFAULT_SPROCKET_EDGE_MARKINGS,
       composeSprocketFrame,
+      composeSprocketFrameAsync,
       composeSprocketFrameBackground,
       areSprocketFrameFontsReady,
       ensureSprocketFrameFonts,
@@ -20707,8 +20708,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (!(job?.sprocket ?? state.exportSprocketHolesEnabled)) return imageData;
       const options = getSprocketFrameComposeOptions(settings, position, job?.sprocketEdge);
       await ensureSprocketFrameFonts(options);
-      // A fresh frame this export owns (#250).
-      return markOwnedPlanes(composeSprocketFrame(imageData, options));
+      // A fresh frame this export owns (#250). Composed in slices: a 60 MP
+      // border was one task of five seconds, during which nothing on the
+      // page moved.
+      return markOwnedPlanes(await composeSprocketFrameAsync(imageData, options));
     }
 
     // Repairs settle once on idle, after the exact render (#237). An export
@@ -29600,7 +29603,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
               if (sprockets) {
                 const options = getSprocketFrameComposeOptions(settingsForFile, i);
                 await ensureSprocketFrameFonts(options);
-                adjusted = markOwnedPlanes(composeSprocketFrame(adjusted, options));
+                adjusted = markOwnedPlanes(await composeSprocketFrameAsync(adjusted, options));
                 ownedPlanes.push(adjusted);
               }
               return createImageBitmap(adjusted);
