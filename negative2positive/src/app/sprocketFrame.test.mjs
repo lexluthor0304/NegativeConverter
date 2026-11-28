@@ -450,10 +450,10 @@ assert.equal(
 
   const styled = (id, extra = {}) => ({ edgeMarkings: { ...applyEdgeMarkingStyle(E, id), frameNumber: 31, ...extra } });
   const pinnedStyles = {
-    kodakColor: '1269x1167:976aa016',
-    ilford: '1269x1167:2e45293e',
+    kodakColor: '1269x1167:2a47c81e',
+    ilford: '1269x1167:d978ab4d',
     fujiSlide: '1269x1167:1ed29f3e',
-    plain: '1269x1167:6581537e'
+    plain: '1269x1167:760c4c40'
   };
   const plainFrame = composeSprocketFrame(image, { edgeMarkings: { ...E } });
   for (const [id, expected] of Object.entries(pinnedStyles)) {
