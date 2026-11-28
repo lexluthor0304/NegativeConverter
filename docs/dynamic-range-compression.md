@@ -246,15 +246,22 @@ no key or plane changes, and every output is byte-identical
 
 ## Leading users to it
 
-After a photo's automatic conversion the adapter estimates, on a strided
-sample of 32k pixels and with that conversion's curves, how much of the frame
-sits within 3 % of black or white without the compression and with it at
-Amount 30, 50 and 70 (`estimateDrcEffect`, about 150 ms in the worker). If
+With a photo's first automatic conversion in a session the adapter
+estimates, on a strided sample of 16k pixels and with that conversion's
+curves, how much of the frame sits within 3 % of black or white without the
+compression and with it at Amount 30, 50 and 70 (`estimateDrcEffect`). The
+estimate solves on its own 256 px grid so the conversion it rides on is not
+held up for long (about 40–70 ms on one thread for a 2 MP frame; at 512 px it
+was 150–400 ms, which slowed a reopened photo past the display-session
+smoke's budget and the history tests past their time limit; at 160 px it no
+longer told the frames apart). If
 Amount 50 brings back at least 8 % of the frame (`DRC_HINT_THRESHOLD`), a
 toast offers it: "This photo has a wide brightness range…" with **Apply**
 (Auto) and **Not now**. The threshold was set on the owner's 46 negatives
 and 32 public frames (`.cache/drc/proto/hintdata.mjs`, cropped to the
-picture): it offers it on 4 of the owner's frames (reductions 13.0–26.8 %)
+picture, measured with the full conversion): it offers it on 4 of the
+owner's frames (reductions 13.0–26.8 %; the 256 px estimate reads 11.8–16.2 %
+for the same four and under 1 % for the others tried)
 and on 11 of the public ones, which were made with an expanded range; frames
 that are dark or bright by design (a tunnel, a white wall: 90 % near black,
 none recovered) are not offered it. In the Studio the estimate is taken on
