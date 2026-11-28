@@ -424,4 +424,75 @@ assert.equal(
   assert.equal(pauses, 0, 'no pause inside the budget');
 }
 
+// Brand styles (edgeMarkingStyles.js). A setting without a style, or with an
+// unknown one, is custom: byte for byte the frame drawn before styles existed.
+// Each style's frame is pinned, keeps the photo's pixels, and is the same
+// composed in slices.
+{
+  const { composeSprocketFrameAsync, styledFrameSlots } = await import('./sprocketFrame.js');
+  const { applyEdgeMarkingStyle, edgeMarkingStyle } = await import('./edgeMarkingStyles.js');
+  const fnv = (data) => { let h = 2166136261; for (let i = 0; i < data.length; i++) h = Math.imul(h ^ data[i], 16777619); return (h >>> 0).toString(16).padStart(8, '0'); };
+  const frameOf = (w, h) => {
+    const d = new Uint8ClampedArray(w * h * 4);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const i = (y * w + x) * 4; d[i] = (x * 7 + y * 3) & 255; d[i + 1] = (x * 5 + y * 11) & 255; d[i + 2] = (x ^ y) & 255; d[i + 3] = 255; }
+    return new ImageData(d, w, h);
+  };
+  const E = DEFAULT_SPROCKET_EDGE_MARKINGS;
+  const legacy = { ...E, textEnabled: true, text: 'NEO ANALOG LAB 400', frameNumberEnabled: true, dxEnabled: true };
+  delete legacy.style;
+  const image = frameOf(1203, 801);
+  const legacyHash = fnv(composeSprocketFrame(image, { edgeMarkings: legacy }).data);
+  assert.equal(legacyHash, '996506d9', 'a setting saved before styles draws the pinned frame');
+  assert.equal(fnv(composeSprocketFrame(image, { edgeMarkings: { ...legacy, style: 'custom' } }).data), legacyHash);
+  assert.equal(fnv(composeSprocketFrame(image, { edgeMarkings: { ...legacy, style: 'agfa' } }).data), legacyHash, 'an unknown id is custom');
+  assert.equal(normalizeSprocketEdgeMarkings({}).style, 'custom');
+  assert.equal(normalizeSprocketEdgeMarkings({ style: 'fujiSlide' }).style, 'fujiSlide');
+
+  const styled = (id, extra = {}) => ({ edgeMarkings: { ...applyEdgeMarkingStyle(E, id), frameNumber: 31, ...extra } });
+  const pinnedStyles = {
+    kodakColor: '1269x1167:976aa016',
+    ilford: '1269x1167:2e45293e',
+    fujiSlide: '1269x1167:1ed29f3e',
+    plain: '1269x1167:6581537e'
+  };
+  const plainFrame = composeSprocketFrame(image, { edgeMarkings: { ...E } });
+  for (const [id, expected] of Object.entries(pinnedStyles)) {
+    const options = styled(id);
+    const whole = composeSprocketFrame(image, options);
+    const metricsOf = getSprocketFrameMetrics(image.width, image.height, options);
+    assert.equal(`${whole.width}x${whole.height}:${fnv(whole.data)}`, expected, `${id}: pinned frame`);
+    assertPhotoRegionMatchesSource(whole, metricsOf, image);
+    // The markings are on the film: the border differs from a bare one.
+    assert.notEqual(fnv(whole.data), fnv(plainFrame.data), `${id}: markings drawn`);
+    let pauses = 0;
+    const sliced = await composeSprocketFrameAsync(image, options, { budgetMs: 0, pause: () => { pauses++; return Promise.resolve(); } });
+    assert.equal(fnv(sliced.data), fnv(whole.data), `${id}: sliced and whole agree`);
+    assert.ok(pauses > 10);
+    // Switching every marking off leaves the bare border.
+    const off = composeSprocketFrame(image, styled(id, { textEnabled: false, frameNumberEnabled: false, dxEnabled: false }));
+    assert.equal(fnv(off.data), fnv(composeSprocketFrame(image, { edgeMarkings: { ...E, textEnabled: false } }).data), `${id}: nothing when all switches are off`);
+  }
+  // A portrait photo keeps its pixels too.
+  const portrait = frameOf(401, 601);
+  const portraitFrame = composeSprocketFrame(portrait, styled('kodakColor'));
+  assert.equal(portraitFrame.width, getSprocketFrameMetrics(601, 401, styled('kodakColor')).outputHeight);
+
+  // The frames a style numbers: eight perforations apart, numbered on from
+  // the photo's own number, the main number at the film's phase to the holes.
+  const m = getSprocketFrameMetrics(1203, 801, styled('kodakColor'));
+  const slots = styledFrameSlots(m, { frameNumber: 31 }, edgeMarkingStyle('kodakColor'));
+  const own = slots.find((slot) => slot.number === 31);
+  assert.ok(Math.abs(own.x - (m.frameStartX + 1.5 * m.pitch)) < 1e-9);
+  assert.ok(slots.every((slot, i) => i === 0 || Math.abs(slot.x - slots[i - 1].x - 8 * m.pitch) < 1e-9));
+  // A caller composing several photos on one film names each frame itself.
+  const given = [{ x: m.frameStartX + 1.5 * m.pitch, number: 5 }];
+  const withSlots = composeSprocketFrame(image, { ...styled('kodakColor'), frameSlots: given });
+  const withNumber = composeSprocketFrame(image, styled('kodakColor', { frameNumber: 5 }));
+  assert.notEqual(fnv(withSlots.data), fnv(withNumber.data), 'only the named frame is drawn');
+
+  // Letters the style has no shape for fall back to the pixel font.
+  const cjk = composeSprocketFrame(image, styled('kodakColor', { text: 'KODAK 中文' }));
+  assertPhotoRegionMatchesSource(cjk, getSprocketFrameMetrics(1203, 801, styled('kodakColor')), image);
+}
+
 console.log('sprocketFrame.test.mjs passed');

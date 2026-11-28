@@ -133,7 +133,10 @@ export async function runStudioSmoke({ send, evaluate, waitFor, wait, fail, inst
     const band = Math.floor((frame.height - shown[1]) / 2);
     for (let i = 0; i < frame.width * band * 4; i += 4) {
       if (data[i] > 240 && data[i + 1] > 240 && data[i + 2] > 240) holes++;
-      if (data[i] > 100 && data[i] > data[i + 1] * 1.2 && data[i + 1] > data[i + 2] * 1.5) markings++;
+      // Warm print on the dark rebate: the custom amber, or a brand style's
+      // pale gold when "auto" recognises the film (this fixture's own border
+      // reads as a Kodak code).
+      if (data[i] > 100 && data[i] >= data[i + 1] && data[i + 1] > data[i + 2] * 1.2 && !(data[i + 2] > 240)) markings++;
     }
     return { surface: frame.surface, width: frame.width, height: frame.height, source: shown, holes, markings };
   })()`);
@@ -141,6 +144,34 @@ export async function runStudioSmoke({ send, evaluate, waitFor, wait, fail, inst
   await assertPreviewVisible();
   await evaluate(`document.getElementById('controlsPanel').scrollTop = 0`);
   await capture('studio-border.png');
+  // Brand edge styles: one dropdown at the top of the border panel. Choosing
+  // a style puts its text in the field and redraws the film band in its
+  // layout and letters at the same frame size; going back to custom with the
+  // earlier text and colour draws the band above again.
+  const bandHash = `(() => { const f = window.__ncDisplay.shownFrame(); const shown = window.__ncDisplay.frame().display;
+    const band = Math.floor((f.height - shown[1]) / 2); let h = 2166136261;
+    for (let i = 0; i < f.width * band * 4; i += 3) h = Math.imul(h ^ f.data[i], 16777619);
+    return [f.width, f.height, h >>> 0].join(':'); })()`;
+  const startStyle = await evaluate(`({ style: document.getElementById('sprocketStyleSelect').value, auto: document.querySelector('#sprocketStyleSelect option[value=auto]').textContent })`);
+  if (startStyle.style !== 'auto' || !/ · /.test(startStyle.auto)) fail('a new session starts on the auto edge style, which names what it draws: ' + JSON.stringify(startStyle));
+  if (!await evaluate(`(() => { const r = document.getElementById('sprocketStyleSelect').getBoundingClientRect(); return r.width > 0 && r.height > 0; })()`)) fail('edge style dropdown is not visible');
+  const chooseStyle = (id) => evaluate(`(() => { const s = document.getElementById('sprocketStyleSelect'); s.value = '${id}'; s.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+  await chooseStyle('custom');
+  await wait(1000);
+  const customBand = await evaluate(bandHash);
+  const customValues = await evaluate(`({ text: document.getElementById('sprocketTextInput').value, color: document.getElementById('sprocketLetteringColorInput').value })`);
+  await chooseStyle('kodakColor');
+  await waitFor('Kodak edge style drawn', `document.getElementById('sprocketTextInput').value === 'KODAK GC 400' && ${bandHash} !== ${JSON.stringify(customBand)}`, 30_000);
+  const styledBand = await evaluate(bandHash);
+  if (styledBand.split(':').slice(0, 2).join(':') !== customBand.split(':').slice(0, 2).join(':')) fail(`a style changed the frame size: ${styledBand} vs ${customBand}`);
+  await capture('studio-border-kodak.png');
+  await chooseStyle('custom');
+  await evaluate(`(() => {
+    const text = document.getElementById('sprocketTextInput'); text.value = ${JSON.stringify(customValues.text)}; text.dispatchEvent(new Event('input', { bubbles: true }));
+    const color = document.getElementById('sprocketLetteringColorInput'); color.value = ${JSON.stringify(customValues.color)}; color.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+  await waitFor('custom edge drawn again', `${bandHash} === ${JSON.stringify(customBand)}`, 30_000);
+  console.log('ok: edge styles redraw the film band at the same size and custom draws it as before');
   await clickVisible('sprocketPreviewBtn');
   await wait(500);
   await clickVisible('studioTab-edit');
