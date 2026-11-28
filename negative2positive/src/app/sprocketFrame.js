@@ -411,7 +411,7 @@ function hashNoiseAt(x, y, seedTerm) {
 // What depends on the column or on the row alone is computed once per column
 // or row, and the coarse noise's four lattice hashes once per lattice cell
 // instead of once per pixel. One step per row.
-function* fillFilmBaseSteps(data, metrics, filmColor) {
+function* fillFilmBaseSteps(data, metrics, filmColor, interiorSpans = []) {
   const outputWidth = metrics.outputWidth, outputHeight = metrics.outputHeight;
   // The whole frame in the film colour first, as one 32-bit fill where the
   // platform is little-endian (every one the app runs on).
@@ -495,6 +495,8 @@ function* fillFilmBaseSteps(data, metrics, filmColor) {
     yield* paintSpan(0, middleTop, metrics.sideMargin, middleHeight);
     yield* paintSpan(metrics.sideMargin + metrics.sourceWidth, middleTop, metrics.sideMargin, middleHeight);
   }
+  // A strip's film between and around its pictures.
+  for (const span of interiorSpans) yield* paintSpan(span.left, metrics.bandHeight, span.width, metrics.sourceHeight);
 }
 
 // Rows of a plain copy between two steps: about 4 MB.
@@ -980,6 +982,15 @@ function getFrameNumberAnchorX(metrics, edge) {
 
 function forEachVisibleFrameRepeat(metrics, edge, callback) {
   const framePitch = getEdgeFramePitch(metrics);
+  if (metrics.filmFrames) {
+    // A strip of several photos (composeFilmStrip): each frame by its own
+    // first perforation and number.
+    metrics.filmFrames.forEach((frame, index) => {
+      const mainX = Math.round(frame.x + metrics.holeWidth + (edge.frameNumberHole - 1) * metrics.pitch);
+      callback({ index, frameNumber: clampInt(frame.number, 0, 99), mainX, halfX: mainX + framePitch / 2 });
+    });
+    return;
+  }
   const baseX = getFrameNumberAnchorX(metrics, edge);
   const minIndex = Math.floor((0 - baseX - framePitch) / framePitch);
   const maxIndex = Math.ceil((metrics.outputWidth - baseX + framePitch) / framePitch);
@@ -1211,7 +1222,8 @@ function markingPad(metrics) {
  * The frames whose markings a styled border draws: { x, number } with x the
  * main number's position (pixels from the left of the frame image). One frame
  * per eight perforations, numbered on from the photo's own number. A caller
- * that composes several photos on one film passes its own (`frameSlots`).
+ * that composes several photos on one film names its frames itself
+ * (`filmFrames`: each frame's first perforation and number).
  */
 export function styledFrameSlots(metrics, edge, style) {
   const framePitch = getEdgeFramePitch(metrics);
@@ -1316,10 +1328,12 @@ function styledDx(data, metrics, edge, style, x, frameNumber, half) {
   paintDxSequence(data, metrics, edge, x, top, modulePitch, modulePitch * 1.02, blockHeight, blockHeight, half, frameNumber);
 }
 
-function paintStyledEdgeMarkings(data, metrics, edge, style, frameSlots) {
+function paintStyledEdgeMarkings(data, metrics, edge, style) {
   const fill = edge.letteringColor;
   const sX = metrics.imagePxPerMmX, pitch = metrics.pitch;
-  const slots = frameSlots || styledFrameSlots(metrics, edge, style);
+  const slots = metrics.filmFrames
+    ? metrics.filmFrames.map((frame) => ({ x: frame.x + style.anchorPerf * metrics.pitch, number: clampInt(frame.number, 0, 99) }))
+    : styledFrameSlots(metrics, edge, style);
   const cache = new Map();
   const halfMarks = edge.frameNumberEnabled && edge.halfFrameMarksEnabled;
   for (const slot of slots) {
@@ -1375,12 +1389,12 @@ function paintStyledEdgeMarkings(data, metrics, edge, style, frameSlots) {
   }
 }
 
-function paintEdgeMarkings(data, metrics, edge, frameSlots = null) {
+function paintEdgeMarkings(data, metrics, edge) {
   // A brand style draws its own layout; custom (and every setting saved
   // before styles existed) draws the markings below, unchanged.
   const style = edgeMarkingStyle(edge.style === EDGE_STYLE_AUTO ? EDGE_STYLE_PLAIN : edge.style);
   if (style) {
-    paintStyledEdgeMarkings(data, metrics, edge, style, frameSlots);
+    paintStyledEdgeMarkings(data, metrics, edge, style);
     return;
   }
   if (edge.textEnabled) paintPhotoText(data, metrics, edge);
@@ -1416,7 +1430,7 @@ function* createSprocketFrameSteps(imageData, options = {}, { includePhoto = tru
   const markings = [];
   deferredMarkings = markings;
   try {
-    paintEdgeMarkings(output, metrics, edge, options.frameSlots || null);
+    paintEdgeMarkings(output, metrics, edge);
   } finally {
     deferredMarkings = null;
   }
@@ -1529,6 +1543,187 @@ export async function composeSprocketFrameAsync(imageData, options = {}, { budge
       sliceStart = performance.now();
     }
   }
+}
+
+// ---- Film strips (contact sheets) ----------------------------------------
+//
+// A cut strip of a 135 roll: several pictures on one continuous film, the
+// perforations running through from end to end, the edge markings repeating
+// with the frames and each frame carrying its own number. Pictures sit in
+// 36 × 24 mm windows eight perforations (38 mm) apart, so 2 mm of film
+// between them and half of that at each cut; half-frame pictures in
+// 18 × 24 mm windows four perforations (19 mm) apart. The film's own
+// printing does not change with the camera: on a half-frame strip the
+// numbers still come every eight perforations, "nA" between them.
+
+/** Window and pitch of a strip whose pictures are `windowHeight` pixels (24 mm) tall. */
+export function filmStripGeometry(count, { windowHeight, halfFrame = false } = {}) {
+  const height = Math.max(8, Math.round(Number(windowHeight) || 0));
+  const pxPerMm = height / THIRTY_FIVE_MM_SPROCKET_SPEC.stillFrameHeightMm;
+  const probe = getSprocketFrameMetrics(Math.round(height * 1.5), height, { edgeMarkings: { textEnabled: true } });
+  const perforations = halfFrame ? 4 : 8;
+  const framePitch = perforations * probe.pitch;
+  const windowWidth = Math.round((halfFrame ? 18 : 36) * pxPerMm);
+  const frames = Math.max(1, Math.round(count) || 1);
+  return { pxPerMm, pitch: probe.pitch, perforations, framePitch, windowWidth, windowHeight: height, frames, interiorWidth: (frames - 1) * framePitch + windowWidth };
+}
+
+function filmStripMetrics(geometry, edge) {
+  const metrics = getSprocketFrameMetrics(geometry.interiorWidth, geometry.windowHeight, { edgeMarkings: edge });
+  // The cut falls in the middle of the film between two frames.
+  metrics.sideMargin = Math.max(1, Math.round((geometry.framePitch - geometry.windowWidth) / 2));
+  metrics.outputWidth = metrics.sourceWidth + metrics.sideMargin * 2;
+  const span = (geometry.perforations - 1) * metrics.pitch + metrics.holeWidth;
+  metrics.frameStartX = metrics.sideMargin + Math.round((geometry.windowWidth - span) / 2 + edge.firstHoleOffsetMm * metrics.imagePxPerMmX);
+  metrics.firstHoleIndex = Math.floor((0 - metrics.frameStartX - metrics.holeWidth) / metrics.pitch);
+  const lastHoleIndex = Math.ceil((metrics.outputWidth - metrics.frameStartX) / metrics.pitch);
+  metrics.holeCount = Math.max(0, lastHoleIndex - metrics.firstHoleIndex + 1);
+  metrics.startX = metrics.frameStartX + metrics.firstHoleIndex * metrics.pitch;
+  return metrics;
+}
+
+// Bilinear resampling of a picture to width × height.
+function* resampleImageDataSteps(source, width, height) {
+  if (source.width === width && source.height === height) return source;
+  const src = source.data, sw = source.width, sh = source.height;
+  const out = new Uint8ClampedArray(width * height * 4);
+  const sx = sw / width, sy = sh / height;
+  for (let y = 0; y < height; y++) {
+    const fy = Math.min(sh - 1, Math.max(0, (y + 0.5) * sy - 0.5));
+    const y0 = Math.floor(fy), y1 = Math.min(sh - 1, y0 + 1), ty = fy - y0;
+    for (let x = 0; x < width; x++) {
+      const fx = Math.min(sw - 1, Math.max(0, (x + 0.5) * sx - 0.5));
+      const x0 = Math.floor(fx), x1 = Math.min(sw - 1, x0 + 1), tx = fx - x0;
+      const a = (y0 * sw + x0) * 4, b = (y0 * sw + x1) * 4, c = (y1 * sw + x0) * 4, d = (y1 * sw + x1) * 4, o = (y * width + x) * 4;
+      for (let k = 0; k < 4; k++) {
+        out[o + k] = (src[a + k] * (1 - tx) + src[b + k] * tx) * (1 - ty) + (src[c + k] * (1 - tx) + src[d + k] * tx) * ty;
+      }
+    }
+    if ((y & 31) === 31) yield;
+  }
+  return new ImageData(out, width, height);
+}
+
+/**
+ * Where each picture goes: turned a quarter clockwise when its orientation
+ * differs from the window's (a portrait photo in a 36 × 24 window, a
+ * landscape one in a half-frame window), then fitted inside the window,
+ * centred, never stretched or cropped. Pure: { rotate, x, y, width, height }
+ * relative to the window.
+ */
+export function fitPictureInWindow(pictureWidth, pictureHeight, windowWidth, windowHeight) {
+  const windowPortrait = windowHeight > windowWidth;
+  const rotate = pictureWidth !== pictureHeight && (pictureHeight > pictureWidth) !== windowPortrait;
+  const w = rotate ? pictureHeight : pictureWidth, h = rotate ? pictureWidth : pictureHeight;
+  const scale = Math.min(windowWidth / w, windowHeight / h);
+  const width = Math.max(1, Math.min(windowWidth, Math.round(w * scale)));
+  const height = Math.max(1, Math.min(windowHeight, Math.round(h * scale)));
+  return { rotate, x: Math.floor((windowWidth - width) / 2), y: Math.floor((windowHeight - height) / 2), width, height };
+}
+
+function* createFilmStripSteps(pictures, options = {}) {
+  if (!Array.isArray(pictures) || !pictures.length) throw new Error('A film strip needs at least one picture.');
+  const edge = getComposeEdgeMarkings(options);
+  const halfFrame = Boolean(options.halfFrame);
+  const geometry = filmStripGeometry(pictures.length, { windowHeight: options.windowHeight, halfFrame });
+  const metrics = filmStripMetrics(geometry, edge);
+  metrics.edgeOverexposureStrength = edge.overexposureStrength;
+  metrics.edgeOverexposed = edge.overexposedSprockets;
+  // The film's frames: one per eight perforations, numbered by the picture
+  // that starts it, plus one beyond each cut so the printing runs on.
+  const step = halfFrame ? 2 : 1;
+  const holeOf = (i) => metrics.frameStartX + i * geometry.framePitch;
+  const frames = [];
+  for (let i = 0; i < pictures.length; i += step) frames.push({ x: holeOf(i), number: clampInt(pictures[i].number, 0, 99) });
+  const filmPitch = 8 * metrics.pitch;
+  frames.unshift({ x: frames[0].x - filmPitch, number: Math.max(0, frames[0].number - 1) });
+  frames.push({ x: frames[frames.length - 1].x + filmPitch, number: Math.min(99, frames[frames.length - 1].number + 1) });
+  metrics.filmFrames = frames;
+
+  const filmColor = sanitizeColor(options.filmColor, DEFAULT_FILM_COLOR);
+  const holeColor = options.transparentHoles === true
+    ? [0, 0, 0, 0]
+    : sanitizeColor(options.holeColor ?? edge.holeColor, DEFAULT_HOLE_COLOR);
+
+  // The pictures, turned and fitted into their windows, on one sheet the size
+  // of the strip's picture band (the smear of overexposed perforations reads it).
+  const band = new Uint8ClampedArray(metrics.sourceWidth * metrics.sourceHeight * 4);
+  const placed = [];
+  for (let i = 0; i < pictures.length; i++) {
+    const source = pictures[i].imageData;
+    if (!source?.data) continue;
+    const fit = fitPictureInWindow(source.width, source.height, geometry.windowWidth, geometry.windowHeight);
+    let picture = source;
+    if (fit.rotate) picture = yield* rotateImageData90Steps(picture);
+    picture = yield* resampleImageDataSteps(picture, fit.width, fit.height);
+    const left = i * geometry.framePitch + fit.x, top = fit.y;
+    for (let y = 0; y < fit.height; y++) band.set(picture.data.subarray(y * fit.width * 4, (y + 1) * fit.width * 4), ((top + y) * metrics.sourceWidth + left) * 4);
+    placed.push({ left, top, width: fit.width, height: fit.height });
+    yield;
+  }
+  const bandImage = new ImageData(band, metrics.sourceWidth, metrics.sourceHeight);
+
+  const output = new Uint8ClampedArray(metrics.outputWidth * metrics.outputHeight * 4);
+  yield* fillFilmBaseSteps(output, metrics, filmColor, [{ left: metrics.sideMargin, width: metrics.sourceWidth }]);
+  if (edge.overexposedSprockets) {
+    yield* paintSprocketTextureSmearSteps(output, metrics, bandImage, edge.overexposureStrength);
+    yield* paintOverexposedSprocketsSteps(output, metrics, edge.overexposureColor);
+  }
+  const markings = [];
+  deferredMarkings = markings;
+  try {
+    paintEdgeMarkings(output, metrics, edge);
+  } finally {
+    deferredMarkings = null;
+  }
+  for (const marking of markings) {
+    if (Array.isArray(marking)) {
+      yield* compositeMarkingMaskSteps(...marking);
+    } else {
+      const args = yield* marking.build();
+      if (args) yield* compositeMarkingMaskSteps(...args);
+    }
+    yield;
+  }
+  yield* paintSprocketRowsSteps(output, metrics, holeColor);
+  // Hard guardrail as for one photo: the pictures go in last, untouched.
+  for (const rect of placed) {
+    for (let y = 0; y < rect.height; y++) {
+      const from = ((rect.top + y) * metrics.sourceWidth + rect.left) * 4;
+      output.set(band.subarray(from, from + rect.width * 4), ((metrics.bandHeight + rect.top + y) * metrics.outputWidth + metrics.sideMargin + rect.left) * 4);
+    }
+    yield;
+  }
+  const strip = new ImageData(output, metrics.outputWidth, metrics.outputHeight);
+  strip.windows = placed.map((rect) => ({ x: metrics.sideMargin + rect.left, y: metrics.bandHeight + rect.top, width: rect.width, height: rect.height }));
+  strip.pitch = metrics.pitch;
+  strip.frameStartX = metrics.frameStartX;
+  return strip;
+}
+
+/**
+ * A strip of `pictures` ([{ imageData, number }]) on one film, with the edge
+ * markings of `options.edgeMarkings` (a brand style or the custom markings),
+ * the perforations continuous and each frame's own number. `windowHeight`
+ * is the pictures' height in pixels (24 mm); `halfFrame` for 18 × 24 mm
+ * pictures four perforations apart. Composed in slices like an export.
+ * The ImageData carries `windows` (each picture's rectangle) and `pitch`.
+ */
+export async function composeFilmStripAsync(pictures, options = {}, { budgetMs = 12, pause = pauseForPage } = {}) {
+  const steps = createFilmStripSteps(pictures, options);
+  let sliceStart = performance.now();
+  for (;;) {
+    const step = steps.next();
+    if (step.done) return step.value;
+    if (performance.now() - sliceStart >= budgetMs) {
+      await pause();
+      sliceStart = performance.now();
+    }
+  }
+}
+
+export function composeFilmStrip(pictures, options = {}) {
+  return runSteps(createFilmStripSteps(pictures, options));
 }
 
 function pauseForPage() {
