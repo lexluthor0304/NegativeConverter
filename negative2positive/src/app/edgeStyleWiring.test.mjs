@@ -101,10 +101,10 @@ state.rollMetadata = { stock: 'Fomapan 400' };
 edge = getSprocketFrameComposeOptions(state, 0, auto).edgeMarkings;
 assert.equal(edge.style, 'fomapan');
 assert.equal(edge.text, 'FOMAPAN 400');
-state.rollMetadata = { stock: 'Kentmere 400' };
+state.rollMetadata = { stock: 'Lomography 400' };
 edge = getSprocketFrameComposeOptions(state, 0, auto).edgeMarkings;
 assert.equal(edge.style, 'custom', 'a brand without a style draws as before');
-assert.equal(edge.text, 'KENTMERE 400', 'with the roll stock as its text, as before');
+assert.equal(edge.text, 'LOMOGRAPHY 400', 'with the roll stock as its text, as before');
 state.rollMetadata = {};
 
 // The panel: one dropdown at the top of the edge section, the text field's
