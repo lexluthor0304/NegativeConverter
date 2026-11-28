@@ -69,7 +69,7 @@ for (const stock of stocks) {
   else unbranded.push(stock);
 }
 assert.deepEqual(unbranded.sort(), [
-  'CINESTILL', 'KENTMERE', 'LOMOGRAPHY', 'SUPERIA', 'SUPERIA 400', 'EKTACHROME'
+  'KENTMERE', 'LOMOGRAPHY', 'SUPERIA', 'SUPERIA 400', 'EKTACHROME'
 ].sort(), 'stocks without a style are exactly the brands left out');
 assert.ok(LEFT_OUT_BRANDS.includes('KENTMERE') && !LEFT_OUT_BRANDS.includes('KODAK VISION3'));
 assert.ok(!LEFT_OUT_BRANDS.includes('FOMAPAN'));
@@ -194,7 +194,15 @@ for (const dash of vision.elements.filter((e) => e.kind === 'dash')) assert.ok(M
 assert.equal(edgeTextForFilmName('Kodak Vision3 500T 5219'), 'EJ 07 7020');
 assert.equal(edgeTextForFilmName('Kodak Vision3 250D'), 'EN 18 1402');
 assert.equal(edgeTextForFilmName('Kodak Vision3 50D'), 'ER 04 8812');
-assert.equal(edgeStyleForFilmName('CineStill 800T'), null, 'CineStill prints its own edge');
+// CineStill's later rolls print their own edge (Harman's layout), not Vision3's.
+assert.equal(edgeStyleForFilmName('CineStill 800T'), 'cineStill');
+assert.equal(edgeStyleForFilmName('CineStill BWXX'), null);
+assert.equal(edgeTextForFilmName('CineStill 50D'), 'CINESTILL 50D');
+assert.equal(edgeTextForFilmName('CineStill 400D'), 'CINESTILL 400D');
+const cine = edgeMarkingStyle('cineStill');
+assert.equal(cine.dxEnabled, false);
+assert.equal(cine.codes['CINESTILL 800T'], '8034-11');
+assert.deepEqual(cine.elements.map((e) => `${e.edge}:${e.kind}`), ['top:text', 'top:code', 'bottom:number', 'bottom:triangle', 'bottom:halfNumber']);
 assert.ok(hasEdgeGlyphs('grid', 'EJ 07 7020 4499+32 •'));
 
 // Choosing a style fills its values; custom keeps them.
