@@ -128,26 +128,38 @@ rendering below, same scale, perforations aligned) are under
   perforation past a hole (a hand-held photograph at an angle, so less sure
   than the flat Ultra Max scans' 0.50).
 
-**Ilford (`ilford`)**
+**Ilford (`ilford`)** — HP5 Plus
 
-- [SWNegativ](https://commons.wikimedia.org/wiki/File:SWNegativ.jpg) (Delta 400 Pro, Florian Schott, 2009, CC BY-SA 3.0): both edges.
-- Fil Nenna, ["The luxury of scanned sprocket holes"](https://filnenna.squarespace.com/blog/2018/12/29/the-luxury-of-scanned-sprocket-holes), 2018: HP5 Plus, positive.
-- [ILFORD HP5 PLUS SAFETY FILM](https://commons.wikimedia.org/wiki/File:ILFORD_HP5_PLUS_SAFETY_FILM.JPG) (2008, 448 px: text and numbering only).
-- Measured: text edge carries text only, no numbers (all three). HP5 Plus
-  prints "ILFORD HP5 PLUS" as one line starting 1.93 perforations before the
-  main number, cap 1.2 mm. DX edge (Delta 400 Pro): number (cap 1.07 mm,
-  0.65–1.72 mm), the DX code 0.46 perforations after it (2.3 mm deep), a solid
-  right-pointing triangle at +3.26 (1.34 × 0.89 mm), "nA" at +3.69 (0.92 mm),
-  the code again at +4.28; the number 0.92 perforations past a hole's edge.
-  Print white in a positive (the HP5 positive; dense silver on the negatives).
-- Approximate / disagreeing: the bold letters are the Kodak set (the Ilford
-  references show a similar geometric bold sans); Delta 400 Pro's text edge
-  splits "ILFORD" and "DELTA 400 PRO" far apart and uses a larger cap (1.42 mm);
-  the HP5 sample (probably bulk-loaded film) has larger numbers (1.46 mm), "nA"
-  only 2.79 perforations after the number, no triangle and no DX code. The
-  style follows HP5 Plus on the text edge and Delta 400 Pro on the DX edge.
-  The HP5 positive shows the perforations black (the scan was inverted with
-  them); the panel's hole colour stays the user's.
+- [ILFORD HP5 PLUS SAFETY FILM](https://commons.wikimedia.org/wiki/File:ILFORD_HP5_PLUS_SAFETY_FILM.JPG) (Commons, 2008, 448 px, frames 7A–9A).
+- Fil Nenna, ["The luxury of scanned sprocket holes"](https://filnenna.squarespace.com/blog/2018/12/29/the-luxury-of-scanned-sprocket-holes) (2018, a positive scan at 39 px/mm, frames 4A–5).
+- Measured (both agree): the text edge carries "ILFORD HP5 PLUS" and no
+  numbers; the line starts 2.0 perforations before a frame number (1.93 and
+  2.05), cap 1.2 mm, 0.55–1.75 mm from the edge, letters heavy (stroke about
+  0.28 of the cap) and round. The other edge carries only the frame number
+  and "nA", the same size (cap 1.43 mm, 0.28–1.72 mm from the edge), "nA"
+  2.79–2.88 perforations after the number: **no DX code and no triangle on
+  either strip**. The 2008 strip prints the line before frame 8 and not
+  before 9, so it comes every other frame (drawn on even numbers). Print white
+  in a positive.
+- Not drawn / approximate: "SAFETY", which the 2008 strip prints 2
+  perforations after frame 9, is on that strip only. The 2018 scan shows the
+  line before an odd number (5), so its parity to the numbers is not fixed;
+  even was taken from the 2008 strip. The number's phase to the holes differs
+  (0.66 of a pitch on the 2018 scan, 0.19–0.33 on the 2008 one; 0.66 used).
+  The letters are the bold set at the references' weight and 8 % wider; the
+  references' print is bloomed, so their counters look smaller. Both
+  references show the holes black (inverted scans); the hole colour stays the
+  panel's.
+- DX code: neither HP5 Plus reference shows a barcode on either edge. No image
+  of current-production HP5 Plus with a DX edge code was found (Commons,
+  Ilford's site and blogs searched; Ilford's data sheet speaks of DX-coded
+  cassettes, and a forum thread quoting Ilford on an edge barcode for frame
+  detection could not be read). The style draws none; the DX switch has no
+  place to print it in this style.
+- Delta 400 Pro ([SWNegativ](https://commons.wikimedia.org/wiki/File:SWNegativ.jpg), 2009) prints a different layout (DX code, a solid triangle
+  before "nA", "ILFORD" and "DELTA 400 PRO" far apart), on that one image
+  only, so it is not drawn as its own look and its wording is not offered;
+  a Delta film under Auto gets this HP5 Plus layout with its trade name.
   Kentmere, made by the same company, prints a different thin letter
   ([Ilford Photo, "Shooting Sprockets"](https://ilfordphoto.com/shooting-sprockets), 2022) and is not drawn in this style.
 
