@@ -196,7 +196,10 @@ export const EDGE_MARKING_STYLES = Object.freeze([
     // code with the number and "→nA" between. Coloured stripes run along
     // the perforation rows, different for each stock (stripes below).
     text: 'S-200',
-    stocks: ['S-200', 'PRO400H'],
+    // C200 prints "200", Superia X-TRA 400 "S-400" (C200: Flickr 23297380040,
+    // 2015; 32503911854, Ruud Welten; 12210026456, 2013. X-TRA 400: Flickr
+    // 7849873466, 2012; 52220527040, 2022; Mark Frey on EMULSIVE, 2023).
+    stocks: ['S-200', 'PRO400H', '200', 'S-400'],
     alternates: {},
     letteringColor: '#f0d75a',
     dx: [24, 3],
@@ -214,6 +217,21 @@ export const EDGE_MARKING_STYLES = Object.freeze([
       ],
       'PRO400H': [
         { rows: ['top', 'bottom'], offsetMm: -0.1, widthMm: 0.9, color: '#dc5a55', period: 4, on: [0.45, 2.45] }
+      ],
+      // C200: a red line through the middle of the row, continuous, and two
+      // green lines 0.7 mm either side of it, on four perforations of eight
+      // (Welten and Joelsson rolls; Welten's phase is drawn).
+      '200': [
+        { rows: ['top', 'bottom'], offsetMm: 0, widthMm: 0.3, color: '#ec2c3c', period: 8, on: [-1, 7] },
+        { rows: ['top', 'bottom'], offsetMm: -0.69, widthMm: 0.25, color: '#5fae1e', period: 8, on: [-3.4, 0.6] },
+        { rows: ['top', 'bottom'], offsetMm: 0.71, widthMm: 0.25, color: '#5fae1e', period: 8, on: [-3.4, 0.6] }
+      ],
+      // Superia X-TRA 400: a thin green line 0.6 mm toward the film edge,
+      // continuous, and a red band 0.75 mm wide just toward the picture, on
+      // four perforations of eight (Donato and Frey rolls; Donato's phase).
+      'S-400': [
+        { rows: ['top', 'bottom'], offsetMm: -0.6, widthMm: 0.2, color: '#6cb82e', period: 8, on: [-1, 7] },
+        { rows: ['top', 'bottom'], offsetMm: 0.27, widthMm: 0.75, color: '#f0412f', period: 8, on: [-0.97, 3.03] }
       ]
     },
     elements: Object.freeze([
@@ -397,7 +415,7 @@ export const EDGE_MARKING_STYLES = Object.freeze([
 // not offered. A film of theirs resolves to the unbranded style under "auto".
 export const LEFT_OUT_BRANDS = Object.freeze([
   'KODAK BW400CN', 'CINESTILL BWXX', 'KODAK ELITE CHROME',
-  'FUJICOLOR C200', 'FUJIFILM SUPERIA X-TRA', 'FUJIFILM 200', 'FUJIFILM 400', 'KENTMERE', 'AGFA', 'LOMOGRAPHY'
+  'FUJIFILM 200', 'FUJIFILM 400', 'KENTMERE', 'AGFA', 'LOMOGRAPHY'
 ]);
 
 const STYLE_BY_ID = new Map(EDGE_MARKING_STYLES.map((style) => [style.id, style]));
@@ -445,6 +463,8 @@ const KNOWN_EDGE_PRINTS = [
   { words: ['FP4'], text: 'ILFORD FP4 PLUS' },
   { words: ['SUPERIA 200', 'S-200'], text: 'S-200' },
   { words: ['PRO 400H', 'PRO400H'], text: 'PRO400H' },
+  { words: ['FUJICOLOR C200', 'FUJICOLOR C 200', ' C200 ', ' C200,', 'C200 135'], text: '200' },
+  { words: ['X-TRA 400', 'XTRA 400', 'X-TRA400', 'XTRA400'], text: 'S-400' },
   { words: ['HP5'], text: 'ILFORD HP5 PLUS' },
   { words: ['PROVIA 100F', 'RDP III', 'RDPIII'], text: 'FUJI RDPIII' },
   { words: ['APX 100', 'APX100'], text: 'AGFAPHOTO APX 100' },
@@ -466,7 +486,7 @@ const STYLE_RULES = [
   { id: 'kodakSlide', words: ['EKTACHROME E100', 'KODAK E100', 'EKTACHROME 100'], not: ['ELITE'] },
   { id: 'kodakColor', words: ['ULTRA MAX', 'ULTRAMAX', 'PORTRA', 'EKTAR', 'GOLD', 'COLORPLUS', 'COLOR PLUS', 'PRO IMAGE', 'KODACOLOR', 'VERICOLOR', 'GC400', 'GC 400', 'KODAK 200', 'KODAK 400'], not: ['TRI-X', 'TRI X', 'T-MAX', 'TMAX', 'BW400', 'T400CN', 'VISION', 'CHROME', 'CINESTILL', 'LOMOGRAPHY'] },
   { id: 'ilford', words: ['ILFORD', 'HP5', 'FP4', 'DELTA', 'PAN F', 'XP2', 'SFX', 'ORTHO PLUS'], not: ['KENTMERE'] },
-  { id: 'fujiColor', words: ['SUPERIA 200', 'S-200', 'PRO 400H', 'PRO400H'], not: ['X-TRA', 'XTRA'] },
+  { id: 'fujiColor', words: ['SUPERIA 200', 'S-200', 'PRO 400H', 'PRO400H', 'FUJICOLOR C200', 'FUJICOLOR C 200', ' C200 ', ' C200,', 'C200 135', 'X-TRA 400', 'XTRA 400', 'X-TRA400', 'XTRA400'], not: ['X-TRA 800', 'XTRA 800', 'X-TRA800', 'AGFA', 'HDC', 'KODAK'] },
   { id: 'cineStill', words: ['CINESTILL'], not: ['BWXX', 'DOUBLE-X'] },
   { id: 'kodakVision3', words: ['VISION3', 'VISION 3', '5219', '5207', '5203', '5213'], not: ['CINESTILL'] },
   { id: 'agfaApx', words: ['APX 100', 'APX 400', 'APX100', 'APX400', 'AGFAPHOTO APX', 'AGFA APX'], not: ['PROFESSIONAL'] },
