@@ -185,6 +185,51 @@ export const EDGE_MARKING_STYLES = Object.freeze([
     ])
   }),
   Object.freeze({
+    id: 'fujiColor',
+    labelKey: 'filmEdgeStyleFujiColor',
+    brand: 'FUJI',
+    filmKind: 'color',
+    // Fujicolor made by Fujifilm: Superia 200 (Flickr 8439023084, 2013;
+    // 16641180517, 2015; c't Digital Photography 22/2016) and Pro 400H
+    // (Flickr 9283150390, 2013; 49692716807, 2020). One edge: the number,
+    // the stock code ("S-200", "PRO400H"), "nA" and "FUJI"; the other: a DX
+    // code with the number and "→nA" between. Coloured stripes run along
+    // the perforation rows, different for each stock (stripes below).
+    text: 'S-200',
+    stocks: ['S-200', 'PRO400H'],
+    alternates: {},
+    letteringColor: '#f0d75a',
+    dx: [24, 3],
+    dxEnabled: true,
+    anchorPerf: 1.35,
+    dxGeometry: { moduleMm: 0.405, rowMm: 1.08 },
+    // Stripes by stock: across the film relative to the middle of the
+    // perforation row (positive toward the picture), along it on `on` of
+    // every `period` perforations from the frame number.
+    stripes: {
+      'S-200': [
+        { rows: ['top', 'bottom'], offsetMm: 0, widthMm: 0.14, color: '#e8829f', period: 8, on: [-1, 7] },
+        { rows: ['top', 'bottom'], offsetMm: -0.68, widthMm: 0.14, color: '#5fd27e', period: 8, on: [-0.6, 3.4] },
+        { rows: ['top', 'bottom'], offsetMm: 0.64, widthMm: 0.14, color: '#5fd27e', period: 8, on: [-0.6, 3.4] }
+      ],
+      'PRO400H': [
+        { rows: ['top'], offsetMm: -0.1, widthMm: 0.9, color: '#dc5a55', period: 4, on: [0.45, 2.45] }
+      ]
+    },
+    elements: Object.freeze([
+      { kind: 'stripes' },
+      { kind: 'number', edge: 'top', at: 0, from: [0.65, 1.68], glyphs: 'grid', stroke: 0.26, tracking: 0.12, digitWidth: 0.95 },
+      { kind: 'text', edge: 'top', at: 1.75, from: [0.92, 1.68], glyphs: 'grid', stroke: 0.15, tracking: 0.16, wordSpace: 0.8 },
+      { kind: 'halfNumber', edge: 'top', at: 4.06, from: [0.65, 1.68], glyphs: 'grid', stroke: 0.26, tracking: 0.12, digitWidth: 0.95 },
+      { kind: 'label', edge: 'top', at: 6.0, from: [0.92, 1.68], glyphs: 'grid', stroke: 0.15, value: 'FUJI', tracking: 0.16, always: true },
+      { kind: 'number', edge: 'bottom', at: 0, from: [0.5, 1.6], glyphs: 'grid', stroke: 0.26, tracking: 0.12, digitWidth: 0.95 },
+      { kind: 'dx', edge: 'bottom', at: 0.59, half: false },
+      { kind: 'arrow', edge: 'bottom', at: 3.68, from: [0.85, 1.25], lengthMm: 1.0, shaftMm: 0.12, headMm: 0.4 },
+      { kind: 'halfNumber', edge: 'bottom', at: 3.92, from: [0.6, 1.5], glyphs: 'grid', stroke: 0.24, tracking: 0.12, digitWidth: 0.95 },
+      { kind: 'dx', edge: 'bottom', at: 4.7, half: true }
+    ])
+  }),
+  Object.freeze({
     id: EDGE_STYLE_PLAIN,
     labelKey: 'filmEdgeStylePlain',
     brand: '',
@@ -207,7 +252,7 @@ export const EDGE_MARKING_STYLES = Object.freeze([
 // not offered. A film of theirs resolves to the unbranded style under "auto".
 export const LEFT_OUT_BRANDS = Object.freeze([
   'KODAK BW400CN', 'KODAK VISION3', 'CINESTILL', 'KODAK ELITE CHROME',
-  'FUJICOLOR', 'FUJIFILM SUPERIA', 'KENTMERE', 'FOMAPAN', 'AGFA', 'LOMOGRAPHY'
+  'FUJICOLOR C200', 'FUJIFILM SUPERIA X-TRA', 'FUJIFILM 200', 'FUJIFILM 400', 'KENTMERE', 'FOMAPAN', 'AGFA', 'LOMOGRAPHY'
 ]);
 
 const STYLE_BY_ID = new Map(EDGE_MARKING_STYLES.map((style) => [style.id, style]));
@@ -215,7 +260,7 @@ const STYLE_BY_ID = new Map(EDGE_MARKING_STYLES.map((style) => [style.id, style]
 // Every id a setting may hold.
 export const EDGE_STYLE_IDS = Object.freeze([EDGE_STYLE_AUTO, ...EDGE_MARKING_STYLES.map((style) => style.id), EDGE_STYLE_CUSTOM]);
 // The ids the dropdown lists, in order.
-export const EDGE_STYLE_MENU = Object.freeze([EDGE_STYLE_AUTO, 'kodakColor', 'kodakBw', 'kodakSlide', 'ilford', 'fujiSlide', EDGE_STYLE_PLAIN, EDGE_STYLE_CUSTOM]);
+export const EDGE_STYLE_MENU = Object.freeze([EDGE_STYLE_AUTO, 'kodakColor', 'kodakBw', 'kodakSlide', 'ilford', 'fujiColor', 'fujiSlide', EDGE_STYLE_PLAIN, EDGE_STYLE_CUSTOM]);
 export const EDGE_STYLE_LABEL_KEYS = Object.freeze({
   [EDGE_STYLE_AUTO]: 'filmEdgeStyleAuto',
   [EDGE_STYLE_CUSTOM]: 'filmEdgeStyleCustom',
@@ -253,6 +298,8 @@ const KNOWN_EDGE_PRINTS = [
   { words: ['T-MAX 400', 'TMAX 400', '400TMY', 'T-MAX 400'], text: 'KODAK 400-2TMY' },
   { words: ['E100', 'EKTACHROME 100'], text: 'KODAK E100' },
   { words: ['FP4'], text: 'ILFORD FP4 PLUS' },
+  { words: ['SUPERIA 200', 'S-200'], text: 'S-200' },
+  { words: ['PRO 400H', 'PRO400H'], text: 'PRO400H' },
   { words: ['HP5'], text: 'ILFORD HP5 PLUS' },
   { words: ['PROVIA 100F', 'RDP III', 'RDPIII'], text: 'FUJI RDPIII' }
 ];
@@ -263,6 +310,7 @@ const STYLE_RULES = [
   { id: 'kodakSlide', words: ['EKTACHROME E100', 'KODAK E100', 'EKTACHROME 100'], not: ['ELITE'] },
   { id: 'kodakColor', words: ['ULTRA MAX', 'ULTRAMAX', 'PORTRA', 'EKTAR', 'GOLD', 'COLORPLUS', 'COLOR PLUS', 'PRO IMAGE', 'KODACOLOR', 'VERICOLOR', 'GC400', 'GC 400', 'KODAK 200', 'KODAK 400'], not: ['TRI-X', 'TRI X', 'T-MAX', 'TMAX', 'BW400', 'T400CN', 'VISION', 'CHROME', 'CINESTILL', 'LOMOGRAPHY'] },
   { id: 'ilford', words: ['ILFORD', 'HP5', 'FP4', 'DELTA', 'PAN F', 'XP2', 'SFX', 'ORTHO PLUS'], not: ['KENTMERE'] },
+  { id: 'fujiColor', words: ['SUPERIA 200', 'S-200', 'PRO 400H', 'PRO400H'], not: ['X-TRA', 'XTRA'] },
   { id: 'fujiSlide', words: ['FUJICHROME', 'VELVIA', 'PROVIA', 'ASTIA', 'SENSIA', 'RDP', 'RVP', 'RXP'], not: [] }
 ];
 
