@@ -230,6 +230,41 @@ export const EDGE_MARKING_STYLES = Object.freeze([
     ])
   }),
   Object.freeze({
+    id: 'fomapan',
+    labelKey: 'filmEdgeStyleFomapan',
+    brand: 'FOMAPAN',
+    filmKind: 'bw',
+    // Foma's current print (from 2021; Flickr georgsfoto 2021, a Pentax 17
+    // roll on Reddit 2025, Fat Films Lab 2026): a number every four
+    // perforations on one edge, counting on along the roll, no "A", arrow or
+    // DX code; on the other edge, once every 24 numbers, the name in widely
+    // set capitals, the speed one digit per perforation and a batch number
+    // one digit per 1.65 perforations. Rolls of 2012-2020 print thinner,
+    // narrower numbers and set the name twice as wide: not drawn.
+    text: 'FOMAPAN 100',
+    stocks: ['FOMAPAN 100', 'FOMAPAN 200', 'FOMAPAN 400'],
+    alternates: {},
+    // The batch numbers of the two reference rolls (100: Fat Films Lab,
+    // 400: the Pentax 17 roll); Fomapan 200's current print was not seen.
+    codes: { 'FOMAPAN 100': '0216', 'FOMAPAN 400': '0116' },
+    letteringColor: '#ffffff',
+    inkDensity: 1,
+    dx: [87, 3],
+    dxEnabled: false,
+    numberEvery: 4,
+    // The numbers start 0.70 of a pitch past a hole's left edge (all three rolls).
+    anchorPerf: 1.7,
+    dxGeometry: { moduleMm: 0.405, rowMm: 1.08 },
+    elements: Object.freeze([
+      { kind: 'number', edge: 'bottom', at: 0, from: [0.70, 1.86], glyphs: 'grotesk', stroke: 0.22, digitWidth: 0.8, tracking: 0.15 },
+      // From the number that leaves 3 over 24: the name 1.25 perforations
+      // after it, the speed at 13.65, the batch number at 26.1 (Fat Films Lab roll).
+      { kind: 'text', edge: 'top', at: 1.25, every: 24, onNumber: 3, words: [0, 1], from: [0.52, 1.82], glyphs: 'grotesk', stroke: 0.17, letterWidth: 0.82, tracking: 0.51, digitWidth: 0.7 },
+      { kind: 'text', edge: 'top', at: 13.65, every: 24, onNumber: 3, words: [1], from: [0.52, 1.82], glyphs: 'grotesk', stroke: 0.19, digitWidth: 0.7, pitchPerf: 1.04 },
+      { kind: 'code', edge: 'top', at: 26.1, every: 24, onNumber: 3, from: [0.52, 1.82], glyphs: 'grotesk', stroke: 0.19, digitWidth: 0.7, pitchPerf: 1.65 }
+    ])
+  }),
+  Object.freeze({
     id: EDGE_STYLE_PLAIN,
     labelKey: 'filmEdgeStylePlain',
     brand: '',
@@ -252,7 +287,7 @@ export const EDGE_MARKING_STYLES = Object.freeze([
 // not offered. A film of theirs resolves to the unbranded style under "auto".
 export const LEFT_OUT_BRANDS = Object.freeze([
   'KODAK BW400CN', 'KODAK VISION3', 'CINESTILL', 'KODAK ELITE CHROME',
-  'FUJICOLOR C200', 'FUJIFILM SUPERIA X-TRA', 'FUJIFILM 200', 'FUJIFILM 400', 'KENTMERE', 'FOMAPAN', 'AGFA', 'LOMOGRAPHY'
+  'FUJICOLOR C200', 'FUJIFILM SUPERIA X-TRA', 'FUJIFILM 200', 'FUJIFILM 400', 'KENTMERE', 'AGFA', 'LOMOGRAPHY'
 ]);
 
 const STYLE_BY_ID = new Map(EDGE_MARKING_STYLES.map((style) => [style.id, style]));
@@ -260,7 +295,7 @@ const STYLE_BY_ID = new Map(EDGE_MARKING_STYLES.map((style) => [style.id, style]
 // Every id a setting may hold.
 export const EDGE_STYLE_IDS = Object.freeze([EDGE_STYLE_AUTO, ...EDGE_MARKING_STYLES.map((style) => style.id), EDGE_STYLE_CUSTOM]);
 // The ids the dropdown lists, in order.
-export const EDGE_STYLE_MENU = Object.freeze([EDGE_STYLE_AUTO, 'kodakColor', 'kodakBw', 'kodakSlide', 'ilford', 'fujiColor', 'fujiSlide', EDGE_STYLE_PLAIN, EDGE_STYLE_CUSTOM]);
+export const EDGE_STYLE_MENU = Object.freeze([EDGE_STYLE_AUTO, 'kodakColor', 'kodakBw', 'kodakSlide', 'ilford', 'fomapan', 'fujiColor', 'fujiSlide', EDGE_STYLE_PLAIN, EDGE_STYLE_CUSTOM]);
 export const EDGE_STYLE_LABEL_KEYS = Object.freeze({
   [EDGE_STYLE_AUTO]: 'filmEdgeStyleAuto',
   [EDGE_STYLE_CUSTOM]: 'filmEdgeStyleCustom',
@@ -301,7 +336,10 @@ const KNOWN_EDGE_PRINTS = [
   { words: ['SUPERIA 200', 'S-200'], text: 'S-200' },
   { words: ['PRO 400H', 'PRO400H'], text: 'PRO400H' },
   { words: ['HP5'], text: 'ILFORD HP5 PLUS' },
-  { words: ['PROVIA 100F', 'RDP III', 'RDPIII'], text: 'FUJI RDPIII' }
+  { words: ['PROVIA 100F', 'RDP III', 'RDPIII'], text: 'FUJI RDPIII' },
+  { words: ['FOMAPAN 100'], text: 'FOMAPAN 100' },
+  { words: ['FOMAPAN 200'], text: 'FOMAPAN 200' },
+  { words: ['FOMAPAN 400', 'ACTION 400'], text: 'FOMAPAN 400' }
 ];
 
 const STYLE_RULES = [
@@ -311,6 +349,7 @@ const STYLE_RULES = [
   { id: 'kodakColor', words: ['ULTRA MAX', 'ULTRAMAX', 'PORTRA', 'EKTAR', 'GOLD', 'COLORPLUS', 'COLOR PLUS', 'PRO IMAGE', 'KODACOLOR', 'VERICOLOR', 'GC400', 'GC 400', 'KODAK 200', 'KODAK 400'], not: ['TRI-X', 'TRI X', 'T-MAX', 'TMAX', 'BW400', 'T400CN', 'VISION', 'CHROME', 'CINESTILL', 'LOMOGRAPHY'] },
   { id: 'ilford', words: ['ILFORD', 'HP5', 'FP4', 'DELTA', 'PAN F', 'XP2', 'SFX', 'ORTHO PLUS'], not: ['KENTMERE'] },
   { id: 'fujiColor', words: ['SUPERIA 200', 'S-200', 'PRO 400H', 'PRO400H'], not: ['X-TRA', 'XTRA'] },
+  { id: 'fomapan', words: ['FOMAPAN', 'FOMA '], not: ['RETROPAN', 'ORTHO'] },
   { id: 'fujiSlide', words: ['FUJICHROME', 'VELVIA', 'PROVIA', 'ASTIA', 'SENSIA', 'RDP', 'RVP', 'RXP'], not: [] }
 ];
 

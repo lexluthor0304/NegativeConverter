@@ -55,7 +55,10 @@ below it stay as fine adjustments.
   preview and in the export, and be pinned by hashes.
 - `src/app/sprocketFrame.js`: `paintStyledEdgeMarkings` reads a style and
   draws its elements per frame; `styledFrameSlots` gives the frames (one per
-  eight perforations, numbered on from the photo's own number), and a caller
+  eight perforations, numbered on from the photo's own number, or one per
+  number for a film that numbers more often, `numberEvery`; a marking with
+  `every`/`onNumber` is printed once every so many numbers, `words` prints
+  part of the text, `pitchPerf` sets characters a fixed distance apart), and a caller
   composing several photos on one film passes `frameSlots` itself. Glyph
   masks are built inside the stepped composite (one glyph per step), so a
   60 MP export keeps its slices short (Node, M5 Pro: longest slice 24–45 ms,
@@ -69,8 +72,8 @@ or the baseline end flat there (feet of A, V, K), not round.
 
 ### Settings and compatibility
 
-`sprocketEdge.style` is one of `auto`, `kodakColor`, `ilford`, `fujiSlide`,
-`plain`, `custom`. A setting without it (a project, photo snapshot, history
+`sprocketEdge.style` is one of `auto`, `kodakColor`, `kodakBw`, `kodakSlide`,
+`ilford`, `fomapan`, `fujiColor`, `fujiSlide`, `plain`, `custom`. A setting without it (a project, photo snapshot, history
 step or interrupted batch job saved before styles) and any unknown id are
 `custom`: the border drawn before, byte for byte (`sprocketFrame.test.mjs`
 pins it). A new session starts on `auto`. The layout, letters and marks come
@@ -250,6 +253,56 @@ contact sheet of 2004 (Kyppi archive, V.-P. Suhonen) shows the same DX code and 
   roll-end marks ("E", "264PF5") are not drawn; Velvia's and Astia's own edge
   prints were not seen (they get this style with their trade name).
 
+**Fomapan (`fomapan`)** — current print (from 2021), Fomapan 100 and 400
+
+- References (kept locally, not in the repository): Fomapan 100 negatives on
+  [Fat Films Lab](https://fatfilms.co.uk/products/new-b-w-film-developing)
+  (page image of 2026, numbers 5–67 of one roll), a Fomapan 400 roll from a
+  Pentax 17 on [Reddit](https://www.reddit.com/r/AnalogCommunity/comments/1ivs6zx/fomapan_400_edge_numbering/)
+  (2025, numbers 28–45), Fomapan 400 on Flickr
+  [51304889105](https://www.flickr.com/photos/40522311@N03/51304889105/)
+  (georgsfoto, taken July 2021, numbers 56–59 and batch "0108").
+- Older print, not drawn: Fomapan 100 [8020052300](https://www.flickr.com/photos/kblh-mlog/8020052300/)
+  (2012), Fomapan 200 [8910618156](https://www.flickr.com/photos/web-rettung/8910618156/)
+  (2013) and [51913784371](https://www.flickr.com/photos/oburrozurra/51913784371/)
+  (taken February 2020), an expired Fomapan Action 400
+  ([51256561679](https://www.flickr.com/photos/tomhusa/51256561679/)). Thin,
+  narrow numbers, the name about twice as wide (4.4 perforations), the batch
+  digits two perforations apart, the group about 40 perforations long. The
+  change falls between February 2020 and July 2021.
+- Measured (current print, perforations along the film, mm from the edge):
+  one edge carries a bold number every **four** perforations, counting on
+  along the roll (a 36-exposure roll runs to about 72; one number per
+  half-frame picture on the Pentax 17 roll), 0.70 of a pitch past a hole's
+  left edge on all three rolls, cap 1.16 mm between 0.70 and 1.86 mm from the
+  edge (Fat Films 0.80–1.94, georgsfoto 0.62–1.79), digits 0.8 of the cap
+  wide. No "A" numbers, arrows, wedges or DX bars on any of them. The other
+  edge is blank except, once every 24 numbers (96 perforations), a group:
+  "FOMAPAN" in capitals 1.30 mm tall (0.52–1.82 mm), letters 1.70 mm apart,
+  11.2 mm long; the speed ("100", "400") one digit every 1.04 perforations;
+  the batch number ("0216", "0116", "0108") one digit every 1.65
+  perforations. Measured from the number whose remainder over 24 is 3, on
+  the Fat Films roll: the name at +1.25, the speed at +13.65, the batch at
+  +26.1. The group sits at the same place against the numbers on all three
+  rolls: batch at 9.52, 9.59 and 9.21 numbers past a multiple of 24 (Fat
+  Films, Pentax 17, georgsfoto), and the Fat Films roll shows two names 23.5
+  numbers apart. Print white (a B&W negative's print is dense).
+- So one photo's border shows the whole group only on frames near it (frame
+  51 shows the name, 53 or 54 the speed, 31 part of the speed, 63 nothing on
+  that edge), as on the film; a contact-sheet strip runs the numbers and the
+  group along the film.
+- Approximate: within the group, the Pentax 17 roll prints the name 1.1 and
+  the speed 2.2 perforations later than the Fat Films roll, georgsfoto's
+  batch 1.3 earlier; the Fat Films positions are drawn. The 24-number period
+  rests on one roll's two names and the three rolls' agreement, not on a
+  longer run. Letters are the `grotesk` set narrowed, not traced; the batch
+  number is the reference roll's ("0216" for 100, "0116" for 400, nothing
+  for 200, whose current print was not seen; Fomapan 200 gets this layout
+  with its name). The number at the photo is the panel's frame number, then
+  one more every four perforations; which hole of the frame it falls on
+  depends on the camera (1.7 drawn: the Fat Films camera put it 1.9 after
+  the picture's edge).
+
 **Unbranded (`plain`)**: Kodak's numbering (numbers, arrows, measured as
 above) without text or DX code, for re-spooled and rebranded rolls.
 
@@ -262,8 +315,6 @@ drawn:
 
 - Fujicolor C200, Superia X-TRA 400 and Fujifilm 200/400: see the
   Fujicolor section.
-- Fomapan: numbers every four perforations without "A", widely spaced
-  letters, and an old/new print whose changeover is not dated.
 - Agfa Vista (two print generations, discontinued) and AgfaPhoto APX (wedge
   before "nA", no DX): not measured in this round.
 - Kodak Vision3 (KeyKode every 64 perforations, one edge only) and CineStill

@@ -69,9 +69,10 @@ for (const stock of stocks) {
   else unbranded.push(stock);
 }
 assert.deepEqual(unbranded.sort(), [
-  'CINESTILL', 'FOMAPAN', 'KENTMERE', 'LOMOGRAPHY', 'SUPERIA', 'SUPERIA 400', 'EKTACHROME'
+  'CINESTILL', 'KENTMERE', 'LOMOGRAPHY', 'SUPERIA', 'SUPERIA 400', 'EKTACHROME'
 ].sort(), 'stocks without a style are exactly the brands left out');
-assert.ok(LEFT_OUT_BRANDS.includes('KODAK VISION3') && LEFT_OUT_BRANDS.includes('FOMAPAN'));
+assert.ok(LEFT_OUT_BRANDS.includes('KODAK VISION3') && LEFT_OUT_BRANDS.includes('KENTMERE'));
+assert.ok(!LEFT_OUT_BRANDS.includes('FOMAPAN'));
 assert.equal(edgeStyleForFilmName('Kodak ULTRA MAX 400 Film GC400'), 'kodakColor');
 assert.equal(edgeStyleForFilmName('Kodak EKTAR 100'), 'kodakColor');
 assert.equal(edgeStyleForFilmName('KODAK PORTRA 400'), 'kodakColor');
@@ -142,6 +143,24 @@ assert.equal(edgeTextForFrame(fuji, 'FUJI RDPIII', 9), 'FUJI RDPIII');
 assert.equal(edgeTextForFrame(fuji, 'FUJI RDPIII', 10), 'RDPIII-043');
 assert.equal(edgeGlyphText('grid', 'FUJI RDPIII-043'), 'FUJI RDPⅢ-043');
 
+// Fomapan (current print): a number every four perforations, no DX, no
+// "A"; the name, speed and batch number once every 24 numbers, each from
+// the number that leaves 3, the speed and batch digits at a fixed pitch.
+const foma = edgeMarkingStyle('fomapan');
+assert.equal(edgeStyleForFilmName('Foma Fomapan 400 ProfiLine Action T400'), 'fomapan');
+assert.equal(edgeStyleForFilmName('Fomapan 100 Classic'), 'fomapan');
+assert.equal(edgeStyleForFilmName('Foma Retropan 320'), null);
+assert.equal(edgeTextForFilmName('Foma Fomapan 400 ProfiLine Action T400'), 'FOMAPAN 400');
+assert.equal(edgeTextForFilmName('Fomapan 100 Classic'), 'FOMAPAN 100');
+assert.equal(resolveAutoEdgeStyle({ filmNames: ['FOMAPAN'] }).style, 'fomapan');
+assert.equal(foma.numberEvery, 4);
+assert.equal(foma.dxEnabled, false);
+assert.ok(!foma.elements.some((element) => ['dx', 'halfNumber', 'arrow', 'triangle'].includes(element.kind)));
+for (const element of foma.elements.filter((e) => e.edge === 'top')) assert.deepEqual([element.every, element.onNumber], [24, 3]);
+assert.deepEqual(foma.elements.filter((e) => e.pitchPerf).map((e) => e.pitchPerf), [1.04, 1.65]);
+assert.equal(foma.codes['FOMAPAN 100'], '0216');
+assert.equal(applyEdgeMarkingStyle({}, 'fomapan').dxEnabled, false);
+
 // Choosing a style fills its values; custom keeps them.
 const before = { text: 'MY ROLL', letteringColor: '#123456', textEnabled: false, frameNumberEnabled: false, dxEnabled: false, dx1: 1, dx2: 2, style: 'custom' };
 const kodakSettings = applyEdgeMarkingStyle(before, 'kodakColor');
@@ -160,8 +179,8 @@ assert.equal(before.style, 'custom', 'the input is not changed');
 assert.deepEqual(resolveAutoEdgeStyle({ filmNames: ['Kodak ULTRA MAX 400 Film GC400'], dxNumber: '95-7' }), {
   style: 'kodakColor', text: 'KODAK GC 400', letteringColor: kodak.letteringColor, dx: [95, 7], filmName: 'Kodak ULTRA MAX 400 Film GC400'
 });
-assert.equal(resolveAutoEdgeStyle({ filmNames: ['Fomapan 400', 'Ilford HP5 PLUS'] }).style, 'ilford');
-assert.equal(resolveAutoEdgeStyle({ filmNames: ['Fomapan 400'] }), null, 'a brand without a style draws as before');
+assert.equal(resolveAutoEdgeStyle({ filmNames: ['Kentmere 400', 'Ilford HP5 PLUS'] }).style, 'ilford');
+assert.equal(resolveAutoEdgeStyle({ filmNames: ['Kentmere 400'] }), null, 'a brand without a style draws as before');
 assert.equal(resolveAutoEdgeStyle({}), null);
 assert.equal(resolveAutoEdgeStyle({ filmNames: ['Kodak Gold 200'], dxNumber: 'garbage' }).dx, null);
 

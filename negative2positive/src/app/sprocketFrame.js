@@ -1224,19 +1224,40 @@ function markingPad(metrics) {
 /**
  * The frames whose markings a styled border draws: { x, number } with x the
  * main number's position (pixels from the left of the frame image). One frame
- * per eight perforations, numbered on from the photo's own number. A caller
- * that composes several photos on one film names its frames itself
- * (`filmFrames`: each frame's first perforation and number).
+ * per eight perforations, numbered on from the photo's own number; a film
+ * that numbers itself more often (Fomapan: every four perforations,
+ * `numberEvery`) has a slot per number, counting on by one. `count` is the
+ * number before it is kept to 0-99, for markings printed once every so many
+ * numbers. A caller that composes several photos on one film names its
+ * frames itself (`filmFrames`: each frame's first perforation and number).
  */
 export function styledFrameSlots(metrics, edge, style) {
-  const framePitch = getEdgeFramePitch(metrics);
+  const slotPitch = (style.numberEvery ?? THIRTY_FIVE_MM_SPROCKET_SPEC.perforationsPerStillFrame) * metrics.pitch;
   const anchor = (metrics.frameStartX ?? metrics.startX) + style.anchorPerf * metrics.pitch;
-  const reach = 9 * metrics.pitch;
-  const first = Math.floor((0 - reach - anchor) / framePitch);
-  const last = Math.ceil((metrics.outputWidth + reach - anchor) / framePitch);
+  // Far enough on both sides for a marking that starts off the frame and
+  // runs into it; a style whose markings sit further than the next frame
+  // from their number reaches back that much more.
+  const farthest = Math.max(0, ...style.elements.map((element) => element.at ?? 0));
+  const reachBack = (9 + Math.max(0, farthest - 8)) * metrics.pitch, reach = 9 * metrics.pitch;
+  const first = Math.floor((0 - reachBack - anchor) / slotPitch);
+  const last = Math.ceil((metrics.outputWidth + reach - anchor) / slotPitch);
   const slots = [];
-  for (let k = first; k <= last; k++) slots.push({ x: anchor + k * framePitch, number: clampInt(edge.frameNumber + k, 0, 99) });
+  for (let k = first; k <= last; k++) slots.push({ x: anchor + k * slotPitch, number: clampInt(edge.frameNumber + k, 0, 99), count: edge.frameNumber + k });
   return slots;
+}
+
+// A marking printed once every `every` numbers, on the numbers that leave
+// `onNumber` (Fomapan's name, speed and batch every 24 numbers).
+function isOnRepeat(element, slot) {
+  if (!element.every) return true;
+  const count = Math.round(slot.count ?? slot.number);
+  return ((count % element.every) + element.every) % element.every === (element.onNumber ?? 0);
+}
+
+// The words `[from, to)` of a text, for a style that prints them apart.
+function textWords(text, element) {
+  if (!element.words) return text;
+  return String(text || '').trim().split(/\s+/).slice(element.words[0], element.words[1]).join(' ');
 }
 
 function styledBand(metrics, element) {
@@ -1274,12 +1295,16 @@ function styledText(data, metrics, edge, element, text, x, fill, cache, brand = 
   const firstSpace = brand && words[0] === brand ? chars.indexOf(' ') : -1;
   const lastSpace = brand && words.length > 1 && words[words.length - 1] === brand ? chars.lastIndexOf(' ') : -1;
   const pad = markingPad(metrics);
+  // Characters set at a fixed pitch along the film (Fomapan's speed and
+  // batch digits, one every so many perforations), left edge to left edge.
+  const charPitch = element.pitchPerf ? element.pitchPerf * metrics.pitch : 0;
   deferStyledMarking(function* () {
     const placed = [];
     let pen = 0;
     for (let i = 0; i < chars.length; i++) {
       const char = chars[i];
-      if (char === ' ') { pen += (i === firstSpace || i === lastSpace ? brandGap : wordGap) - tracking; continue; }
+      if (charPitch) pen = i * charPitch;
+      if (char === ' ') { if (!charPitch) pen += (i === firstSpace || i === lastSpace ? brandGap : wordGap) - tracking; continue; }
       const widthScale = (/[0-9]/.test(char) ? digitScale : (element.letterWidth ?? 1)) * xScale;
       const key = `${set}\0${char}\0${capPx.toFixed(3)}\0${element.stroke}\0${widthScale.toFixed(4)}`;
       let glyph = cache.get(key);
@@ -1347,6 +1372,7 @@ function paintStyledEdgeMarkings(data, metrics, edge, style) {
       if (x > metrics.outputWidth || x < -30 * sX) continue;
       // A marking printed every other frame.
       if (element.parity && (Math.abs(slot.number) % 2 === 0) !== (element.parity === 'even')) continue;
+      if (!isOnRepeat(element, slot)) continue;
       switch (element.kind) {
         case 'number':
           if (edge.frameNumberEnabled) styledText(data, metrics, edge, element, String(slot.number), x, fill, cache);
@@ -1357,7 +1383,7 @@ function paintStyledEdgeMarkings(data, metrics, edge, style) {
         case 'code': {
           // An emulsion code printed with the text, when the style knows it for this text.
           const code = style.codes?.[String(edge.text).trim().toUpperCase()];
-          if (edge.textEnabled && code) styledText(data, metrics, edge, element, code, x, fill, cache);
+          if (edge.textEnabled && code) styledText(data, metrics, edge, element, textWords(code, element), x, fill, cache);
           break;
         }
         case 'stripes': {
@@ -1385,7 +1411,7 @@ function paintStyledEdgeMarkings(data, metrics, edge, style) {
           if (element.always ? edge.textEnabled : halfMarks) styledText(data, metrics, edge, element, element.value, x, fill, cache);
           break;
         case 'text':
-          if (edge.textEnabled) styledText(data, metrics, edge, element, edgeTextForFrame(style, edge.text, slot.number), x, fill, cache, style.brand);
+          if (edge.textEnabled) styledText(data, metrics, edge, element, textWords(edgeTextForFrame(style, edge.text, slot.number), element), x, fill, cache, style.brand);
           break;
         case 'dx':
           if (edge.dxEnabled) styledDx(data, metrics, edge, style, x, slot.number, element.half);
