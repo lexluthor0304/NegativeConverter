@@ -23,7 +23,7 @@ for (const style of EDGE_MARKING_STYLES) {
   assert.ok(style.dx[0] >= 0 && style.dx[0] <= 126 && style.dx[1] >= 0 && style.dx[1] <= 15);
   assert.ok(style.elements.length > 0);
   for (const element of style.elements) {
-    assert.ok(['number', 'halfNumber', 'label', 'text', 'dx', 'arrow', 'triangle', 'outlineArrow'].includes(element.kind), element.kind);
+    assert.ok(['number', 'halfNumber', 'label', 'code', 'text', 'dx', 'arrow', 'triangle', 'outlineArrow'].includes(element.kind), element.kind);
     assert.ok(['top', 'bottom'].includes(element.edge));
     assert.ok(Number.isFinite(element.at));
     if (element.from) {
@@ -61,14 +61,22 @@ for (const stock of stocks) {
   else unbranded.push(stock);
 }
 assert.deepEqual(unbranded.sort(), [
-  'CINESTILL', 'FOMAPAN', 'KENTMERE', 'LOMOGRAPHY', 'PRO 400H', 'SUPERIA', 'SUPERIA 200', 'SUPERIA 400',
-  'T-MAX', 'TMAX', 'TRI-X', 'EKTACHROME'
+  'CINESTILL', 'FOMAPAN', 'KENTMERE', 'LOMOGRAPHY', 'PRO 400H', 'SUPERIA', 'SUPERIA 200', 'SUPERIA 400', 'EKTACHROME'
 ].sort(), 'stocks without a style are exactly the brands left out');
-assert.ok(LEFT_OUT_BRANDS.includes('KODAK TRI-X') && LEFT_OUT_BRANDS.includes('FOMAPAN'));
+assert.ok(LEFT_OUT_BRANDS.includes('KODAK VISION3') && LEFT_OUT_BRANDS.includes('FOMAPAN'));
 assert.equal(edgeStyleForFilmName('Kodak ULTRA MAX 400 Film GC400'), 'kodakColor');
 assert.equal(edgeStyleForFilmName('Kodak EKTAR 100'), 'kodakColor');
 assert.equal(edgeStyleForFilmName('KODAK PORTRA 400'), 'kodakColor');
-assert.equal(edgeStyleForFilmName('Kodak Tri-X 400'), null);
+assert.equal(edgeStyleForFilmName('Kodak Tri-X 400'), 'kodakBw');
+assert.equal(edgeStyleForFilmName('Kodak T-Max 400'), 'kodakBw');
+assert.equal(edgeStyleForFilmName('Kodak Ektachrome E100'), 'kodakSlide');
+assert.equal(edgeTextForFilmName('Kodak Tri-X 400'), 'KODAK 400TX');
+assert.equal(edgeTextForFilmName('Kodak T-Max 400'), 'KODAK 400-2TMY');
+assert.equal(edgeTextForFilmName('Kodak Portra 800'), 'KODAK PORTRA 800-3');
+assert.equal(edgeTextForFilmName('Kodak Gold 200'), 'KODAK GB 200-7');
+assert.equal(edgeTextForFilmName('Kodak ColorPlus 200'), 'KODAK 200-8');
+assert.equal(edgeTextForFrame(edgeMarkingStyle('kodakColor'), 'KODAK GB 200-7', 17), 'GB 200-7 KODAK');
+assert.equal(edgeTextForFrame(edgeMarkingStyle('kodakColor'), 'KODAK PORTRA 400', 17), 'KODAK PORTRA 400');
 assert.equal(edgeStyleForFilmName('Kodak Vision3 500T'), null);
 assert.equal(edgeStyleForFilmName('Ilford HP5 PLUS 400 HP5+ (black box)'), 'ilford');
 assert.equal(edgeStyleForFilmName('Kentmere 400'), null);
@@ -84,19 +92,18 @@ assert.equal(edgeTextForFilmName('Ilford HP5 PLUS 400 HP5+ (white box)'), 'ILFOR
 // so a Delta film gets the HP5 Plus layout with its trade name.
 assert.equal(edgeTextForFilmName('Ilford Delta 400 Pro D400'), 'ILFORD DELTA 400 PRO D400');
 assert.ok(!edgeMarkingStyle('ilford').stocks.some((stock) => stock.includes('DELTA')));
-// HP5 Plus: no DX code and no triangle on either reference; the line every other frame.
+// Ilford current production: DX code, a wedge before "nA", the emulsion code after the text.
 const ilford = edgeMarkingStyle('ilford');
-assert.equal(ilford.dxEnabled, false);
-assert.ok(!ilford.elements.some((element) => ['dx', 'triangle', 'arrow'].includes(element.kind)));
-assert.equal(ilford.elements.find((element) => element.kind === 'text').parity, 'even');
-// Its own letters, printed white at full density as on the scans.
-assert.ok(ilford.elements.filter((element) => element.glyphs).every((element) => element.glyphs === 'ilford'));
+assert.equal(ilford.dxEnabled, true);
+assert.ok(ilford.elements.some((element) => element.kind === 'dx') && ilford.elements.some((element) => element.kind === 'triangle'));
+assert.equal(ilford.codes['ILFORD HP5 PLUS'], '5051-11');
 assert.equal(ilford.letteringColor, '#ffffff');
-assert.equal(ilford.inkDensity, 1);
+// Kodak black-and-white and slide films print no DX code.
+for (const id of ['kodakBw', 'kodakSlide']) assert.ok(!edgeMarkingStyle(id).elements.some((element) => element.kind === 'dx'), id);
 // A 5 is open on its left between the stem and the bowl (it must not read as
 // a 6 at a dozen pixels): somewhere in the left column between 0.45 and 0.75
 // of the height a 5 shows film where a 6 is solid ink, in every set.
-for (const set of ['grotesk', 'ilford', 'grid']) {
+for (const set of ['grotesk', 'grid']) {
   const leftColumnMin = (char) => {
     const g = rasterizeEdgeGlyph(set, char, { capPx: 40, stroke: 0.28 });
     const x = g.originX + Math.round(g.advance * 0.1);
@@ -107,6 +114,7 @@ for (const set of ['grotesk', 'ilford', 'grid']) {
   assert.ok(leftColumnMin('6') > 0.5 && leftColumnMin('5') < 0.2, `${set}: 5 and 6 differ on the left (${leftColumnMin('5')} vs ${leftColumnMin('6')})`);
 }
 assert.equal(edgeTextForFilmName('Kodak Portra 400'), 'KODAK PORTRA 400');
+assert.equal(edgeTextForFilmName('Ilford FP4 Plus'), 'ILFORD FP4 PLUS');
 assert.equal(edgeTextForFilmName('Kodak Gold Ultra 400 Film, GC135-36C-5'), 'KODAK GOLD ULTRA 400');
 
 // Ultra Max turns its text round on odd frames (frames 21, 31 and 35 of the
@@ -139,8 +147,8 @@ assert.equal(before.style, 'custom', 'the input is not changed');
 assert.deepEqual(resolveAutoEdgeStyle({ filmNames: ['Kodak ULTRA MAX 400 Film GC400'], dxNumber: '95-7' }), {
   style: 'kodakColor', text: 'KODAK GC 400', letteringColor: kodak.letteringColor, dx: [95, 7], filmName: 'Kodak ULTRA MAX 400 Film GC400'
 });
-assert.equal(resolveAutoEdgeStyle({ filmNames: ['Kodak Tri-X', 'Ilford HP5 PLUS'] }).style, 'ilford');
-assert.equal(resolveAutoEdgeStyle({ filmNames: ['Kodak Tri-X'] }), null, 'a brand without a style draws as before');
+assert.equal(resolveAutoEdgeStyle({ filmNames: ['Fomapan 400', 'Ilford HP5 PLUS'] }).style, 'ilford');
+assert.equal(resolveAutoEdgeStyle({ filmNames: ['Fomapan 400'] }), null, 'a brand without a style draws as before');
 assert.equal(resolveAutoEdgeStyle({}), null);
 assert.equal(resolveAutoEdgeStyle({ filmNames: ['Kodak Gold 200'], dxNumber: 'garbage' }).dx, null);
 
