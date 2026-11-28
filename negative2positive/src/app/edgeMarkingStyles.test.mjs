@@ -190,6 +190,17 @@ for (const kind of ['triangle', 'halfNumber']) {
   assert.ok(Math.abs(apx.elements.find((e) => e.kind === kind).at - ilford.elements.find((e) => e.kind === kind).at) < 0.05, kind);
 }
 
+// Fujifilm 200/400 (made in the USA): Kodak's numbering, "FUJI 200"/"FUJI 400" in light letters.
+const fujiUs = edgeMarkingStyle('fujifilmUs');
+assert.equal(edgeStyleForFilmName('Fujifilm 400'), 'fujifilmUs');
+assert.equal(edgeTextForFilmName('Fujifilm 200'), 'FUJI 200');
+assert.equal(edgeStyleForFilmName('Fujicolor Pro 400H'), 'fujiColor', 'Pro 400H is not the US-made film');
+assert.equal(edgeStyleForFilmName('FUJIFILM 400H'), null);
+assert.ok(!fujiUs.stripes);
+for (const element of fujiUs.elements.filter((e) => ['dx', 'arrow', 'halfNumber'].includes(e.kind))) {
+  assert.ok(edgeMarkingStyle('kodakColor').elements.some((k) => k.kind === element.kind && k.at === element.at && k.edge === element.edge), `${element.kind} at Kodak's place`);
+}
+
 // Kodak Vision3: one edge, a 64-perforation KeyKode cycle placed by the
 // frame number, the key number with its count, the mid-foot "+32", the
 // manufacturing line, bar codes and hyphens; no still-frame numbers.
