@@ -301,6 +301,80 @@ export const EDGE_MARKING_STYLES = Object.freeze([
     ])
   }),
   Object.freeze({
+    id: 'kodakVision3',
+    labelKey: 'filmEdgeStyleKodakVision3',
+    brand: 'EASTMAN',
+    filmKind: 'color',
+    // Kodak's motion-picture negatives (Vision3 5219 500T, 5207 250D, 5203
+    // 50D), as respooled for still cameras: one edge only, Kodak's KeyKode
+    // cycle of 64 perforations (one foot): the key number (film code, roll
+    // prefix, a count that goes up by one a foot) with its dot and bar code,
+    // the manufacturing line ("EASTMAN 5219 ..."), the mid-foot key number
+    // "+32" with its bar code, and a frame-index hyphen every four
+    // perforations where nothing else is printed. No still-frame numbers.
+    // Measured on a 5203 roll laid out on a light table (Aram Hăvărneanu,
+    // 2016, CC BY-SA 3.0) and Kodak's 35 mm KeyKode diagram (2022); the
+    // manufacturing line and hyphens on 5219 (Flickr 14083695025, 2014), the
+    // hyphens before an EJ key number (Flickr 30078776796, 2016).
+    text: 'EJ 07 7020',
+    stocks: ['EJ 07 7020', 'EN 18 1402', 'ER 04 8812'],
+    alternates: {},
+    // The key-number counts and manufacturing lines of the reference rolls.
+    keyCounts: { 'EJ 07 7020': 4499, 'EN 18 1402': 6869, 'ER 04 8812': 8829 },
+    codes: { 'EJ 07 7020': 'EASTMAN 5219 304 02201 18 173 2013', 'ER 04 8812': 'EASTMAN 5203 014 01201 14 177 2012' },
+    // The print is exposed on the film: pale cream in a positive (5219, 5207 scans).
+    letteringColor: '#f5efdf',
+    dx: [0, 0],
+    // The bar codes are drawn with the DX switch.
+    dxEnabled: true,
+    numberEvery: 64,
+    framePosition: true,
+    // The key number starts 0.2 of a pitch past a hole's left edge (0.17 and 0.20).
+    anchorPerf: 0.2,
+    dxGeometry: { moduleMm: 0.405, rowMm: 1.08 },
+    elements: Object.freeze([
+      { kind: 'keyNumber', edge: 'bottom', at: 0, suffix: '•', from: [0.26, 1.86], glyphs: 'grid', stroke: 0.17, letterWidth: 0.83, digitWidth: 0.72, tracking: 0.25, wordSpace: 1.25 },
+      { kind: 'barcode', edge: 'bottom', at: 6.04, lengthPerf: 4.93, from: [0.32, 1.95] },
+      { kind: 'code', edge: 'bottom', at: 15.47, from: [0.6, 1.55], glyphs: 'grid', stroke: 0.2, letterWidth: 0.72, digitWidth: 0.65, tracking: 0.08, wordSpace: 1.05 },
+      { kind: 'keyNumber', edge: 'bottom', at: 34.28, suffix: '+32 •', from: [0.52, 1.49], glyphs: 'grid', stroke: 0.17, letterWidth: 0.8, digitWidth: 0.68, tracking: 0.14, wordSpace: 0.55 },
+      { kind: 'barcode', edge: 'bottom', at: 38.04, lengthPerf: 4.93, from: [0.32, 1.95] },
+      // The hyphens every four perforations, left out where they would run
+      // into the key numbers, bar codes or the manufacturing line.
+      ...[13.35, 21.35, 25.35, 29.35, 33.35, 45.35, 49.35, 53.35, 57.35, 61.35].map((at) => ({ kind: 'dash', edge: 'bottom', at, from: [0.9, 1.15], lengthMm: 1.2 }))
+    ])
+  }),
+  Object.freeze({
+    id: 'cineStill',
+    labelKey: 'filmEdgeStyleCineStill',
+    brand: 'CINESTILL',
+    filmKind: 'color',
+    // CineStill's own print on its later rolls (800T: Flickr 54284730212,
+    // Jay Smith 2025, and 52713899704, Tom Hart 2023; 400D: 54881331048,
+    // 2025, and 53998201851, 2024): the name every frame on the top edge with
+    // an emulsion code ("8034-11"); the number on the bottom edge with a
+    // wedge and needle before the smaller "nA", the layout Harman prints for
+    // Ilford and AgfaPhoto. No DX code, no cine KeyKode. Early rolls (2014-
+    // 2016) carry Kodak's Vision3 print instead (the Vision3 style).
+    text: 'CINESTILL 800T',
+    stocks: ['CINESTILL 800T', 'CINESTILL 400D', 'CINESTILL 50D'],
+    alternates: {},
+    codes: { 'CINESTILL 800T': '8034-11' },
+    // Yellow in a positive (800T and 400D scans).
+    letteringColor: '#f8e65a',
+    dx: [0, 0],
+    dxEnabled: false,
+    // The number starts 0.58 of a pitch past a hole's left edge (0.57, 0.59).
+    anchorPerf: 1.58,
+    dxGeometry: { moduleMm: 0.405, rowMm: 1.08 },
+    elements: Object.freeze([
+      { kind: 'text', edge: 'top', at: -1.56, from: [0.31, 1.71], glyphs: 'grid', stroke: 0.16, letterWidth: 0.83, digitWidth: 0.83, tracking: 0.3, wordSpace: 1.0 },
+      { kind: 'code', edge: 'top', at: 3.47, from: [0.47, 1.47], glyphs: 'grid', stroke: 0.16, digitWidth: 0.83, tracking: 0.25 },
+      { kind: 'number', edge: 'bottom', at: 0, from: [0.09, 1.75], glyphs: 'grid', stroke: 0.24, tracking: 0.14, digitWidth: 0.92 },
+      { kind: 'triangle', edge: 'bottom', at: 3.76, from: [0.31, 1.12], lengthMm: 1.1, needleMm: 0.55, needleWidthMm: 0.1 },
+      { kind: 'halfNumber', edge: 'bottom', at: 4.14, from: [0.31, 1.12], glyphs: 'grid', stroke: 0.2, tracking: 0.12, digitWidth: 0.79 }
+    ])
+  }),
+  Object.freeze({
     id: EDGE_STYLE_PLAIN,
     labelKey: 'filmEdgeStylePlain',
     brand: '',
@@ -322,7 +396,7 @@ export const EDGE_MARKING_STYLES = Object.freeze([
 // Brands whose edge print could not be confirmed from images of real film:
 // not offered. A film of theirs resolves to the unbranded style under "auto".
 export const LEFT_OUT_BRANDS = Object.freeze([
-  'KODAK BW400CN', 'KODAK VISION3', 'CINESTILL', 'KODAK ELITE CHROME',
+  'KODAK BW400CN', 'CINESTILL BWXX', 'KODAK ELITE CHROME',
   'FUJICOLOR C200', 'FUJIFILM SUPERIA X-TRA', 'FUJIFILM 200', 'FUJIFILM 400', 'KENTMERE', 'AGFA', 'LOMOGRAPHY'
 ]);
 
@@ -331,7 +405,7 @@ const STYLE_BY_ID = new Map(EDGE_MARKING_STYLES.map((style) => [style.id, style]
 // Every id a setting may hold.
 export const EDGE_STYLE_IDS = Object.freeze([EDGE_STYLE_AUTO, ...EDGE_MARKING_STYLES.map((style) => style.id), EDGE_STYLE_CUSTOM]);
 // The ids the dropdown lists, in order.
-export const EDGE_STYLE_MENU = Object.freeze([EDGE_STYLE_AUTO, 'kodakColor', 'kodakBw', 'kodakSlide', 'ilford', 'agfaApx', 'fomapan', 'fujiColor', 'fujiSlide', EDGE_STYLE_PLAIN, EDGE_STYLE_CUSTOM]);
+export const EDGE_STYLE_MENU = Object.freeze([EDGE_STYLE_AUTO, 'kodakColor', 'kodakBw', 'kodakSlide', 'ilford', 'agfaApx', 'fomapan', 'fujiColor', 'fujiSlide', 'kodakVision3', 'cineStill', EDGE_STYLE_PLAIN, EDGE_STYLE_CUSTOM]);
 export const EDGE_STYLE_LABEL_KEYS = Object.freeze({
   [EDGE_STYLE_AUTO]: 'filmEdgeStyleAuto',
   [EDGE_STYLE_CUSTOM]: 'filmEdgeStyleCustom',
@@ -375,6 +449,12 @@ const KNOWN_EDGE_PRINTS = [
   { words: ['PROVIA 100F', 'RDP III', 'RDPIII'], text: 'FUJI RDPIII' },
   { words: ['APX 100', 'APX100'], text: 'AGFAPHOTO APX 100' },
   { words: ['APX 400', 'APX400'], text: 'AGFAPHOTO APX 400' },
+  { words: ['CINESTILL 800T', 'CINESTILL 800 T'], text: 'CINESTILL 800T' },
+  { words: ['CINESTILL 400D'], text: 'CINESTILL 400D' },
+  { words: ['CINESTILL 50D'], text: 'CINESTILL 50D' },
+  { words: ['VISION3 500T', 'VISION 3 500T', '5219'], text: 'EJ 07 7020' },
+  { words: ['VISION3 250D', 'VISION 3 250D', '5207'], text: 'EN 18 1402' },
+  { words: ['VISION3 50D', 'VISION 3 50D', '5203'], text: 'ER 04 8812' },
   { words: ['FOMAPAN 100'], text: 'FOMAPAN 100' },
   { words: ['FOMAPAN 200'], text: 'FOMAPAN 200' },
   { words: ['FOMAPAN 400', 'ACTION 400'], text: 'FOMAPAN 400' }
@@ -387,6 +467,8 @@ const STYLE_RULES = [
   { id: 'kodakColor', words: ['ULTRA MAX', 'ULTRAMAX', 'PORTRA', 'EKTAR', 'GOLD', 'COLORPLUS', 'COLOR PLUS', 'PRO IMAGE', 'KODACOLOR', 'VERICOLOR', 'GC400', 'GC 400', 'KODAK 200', 'KODAK 400'], not: ['TRI-X', 'TRI X', 'T-MAX', 'TMAX', 'BW400', 'T400CN', 'VISION', 'CHROME', 'CINESTILL', 'LOMOGRAPHY'] },
   { id: 'ilford', words: ['ILFORD', 'HP5', 'FP4', 'DELTA', 'PAN F', 'XP2', 'SFX', 'ORTHO PLUS'], not: ['KENTMERE'] },
   { id: 'fujiColor', words: ['SUPERIA 200', 'S-200', 'PRO 400H', 'PRO400H'], not: ['X-TRA', 'XTRA'] },
+  { id: 'cineStill', words: ['CINESTILL'], not: ['BWXX', 'DOUBLE-X'] },
+  { id: 'kodakVision3', words: ['VISION3', 'VISION 3', '5219', '5207', '5203', '5213'], not: ['CINESTILL'] },
   { id: 'agfaApx', words: ['APX 100', 'APX 400', 'APX100', 'APX400', 'AGFAPHOTO APX', 'AGFA APX'], not: ['PROFESSIONAL'] },
   { id: 'fomapan', words: ['FOMAPAN', 'FOMA '], not: ['RETROPAN', 'ORTHO'] },
   { id: 'fujiSlide', words: ['FUJICHROME', 'VELVIA', 'PROVIA', 'ASTIA', 'SENSIA', 'RDP', 'RVP', 'RXP'], not: [] }

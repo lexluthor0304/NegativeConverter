@@ -73,7 +73,8 @@ or the baseline end flat there (feet of A, V, K), not round.
 ### Settings and compatibility
 
 `sprocketEdge.style` is one of `auto`, `kodakColor`, `kodakBw`, `kodakSlide`,
-`ilford`, `agfaApx`, `fomapan`, `fujiColor`, `fujiSlide`, `plain`, `custom`. A setting without it (a project, photo snapshot, history
+`ilford`, `agfaApx`, `fomapan`, `fujiColor`, `fujiSlide`, `kodakVision3`,
+`cineStill`, `plain`, `custom`. A setting without it (a project, photo snapshot, history
 step or interrupted batch job saved before styles) and any unknown id are
 `custom`: the border drawn before, byte for byte (`sprocketFrame.test.mjs`
 pins it). A new session starts on `auto`. The layout, letters and marks come
@@ -335,6 +336,82 @@ contact sheet of 2004 (Kyppi archive, V.-P. Suhonen) shows the same DX code and 
   depends on the camera (1.7 drawn: the Fat Films camera put it 1.9 after
   the picture's edge).
 
+**Kodak Vision3 (`kodakVision3`)** — 5219 500T, 5207 250D, 5203 50D (cine
+negative respooled for still cameras)
+
+- References: Kodak's [35 mm KeyKode diagram](https://www.kodak.com/content/products-brochures/Film/post-production-35mm-keycode-diagram.pdf)
+  (2022, current format) and [film identification table](https://www.kodak.com/en/motion/page/keykode-id-table/)
+  (EJ 5219, EN 5207, ER 5203); a whole 5203 roll on a light table
+  ([photo.stackexchange](https://photo.stackexchange.com/questions/76707/green-fog-in-color-negative-scan),
+  Aram Hăvărneanu, 2016, CC BY-SA 3.0; keys 8828–8830 and the mid-foot
+  numbers, manufactured 2012); 5219 on Flickr [14083695025](https://www.flickr.com/photos/mohawkedgeekcris/14083695025/)
+  (2014, "EASTMAN 5219 304 02201 18 173 2013" and hyphens) and
+  [30078776796](https://www.flickr.com/photos/rubbernglue/30078776796/)
+  (2016, hyphens before "EJ 07 7020 4499•"); 5207 [3644962920](https://www.flickr.com/photos/26000545@N02/3644962920/)
+  (2009, "EN 18 1402 6869•" and bar code) and Hashem McAdam's
+  [exaframe](https://www.exaframe.com/blog/filmborders) sample (2020, dash
+  before "EN 28 2486 9108"); 5203 on [35mmc](https://www.35mmc.com/27/12/2023/5-frames-with-wp-tech-100-and-a-repaired-xa2/)
+  (2023, "EASTMAN 5203 096 02402 17 177 2023", the same five groups as
+  2012, so the 2012 roll is the current format).
+- Measured (light table, perforations from the key number's first letter,
+  0.17–0.20 of a pitch past a hole's left edge; mm from the edge): one edge
+  only, nothing on the other. Every 64 perforations: the key number
+  "ER 04 8812 8829•" from 0 to 5.0, cap 1.6 mm (0.26–1.86), digits 1.15 mm
+  wide 1.55 apart, word gaps 2.0 mm, a round dot; its bar code from 6.04 to
+  10.97, 0.32–1.95 mm; the manufacturing line "EASTMAN 5203 014 01201 14
+  177 2012" from 15.47 to 20.5, cap 0.92–1.0 mm (0.6–1.55), narrow
+  letters 0.68 mm apart (the 5219 frame agrees: 24.5 mm long, hyphens 5.88
+  and 9.89 perforations after "EASTMAN", against 5.88 and 9.88 on the
+  roll); the mid-foot number "ER 04 8812 8829+32 •" (cap 0.97 mm,
+  0.52–1.49) from 34.28, its bar code from 38.04, exactly 32 after the
+  first (both strips); frame-index hyphens 1.2 mm long at 0.9–1.15 mm every
+  four perforations from 1.35, left out where they would meet the other
+  print (seen at 13.35, 21.35, 25.35, 45.35, 49.35, 53.35, 57.35 and 61.35;
+  Kodak: "not printed when it interferes"). The count goes up by one a
+  cycle (8828, 8829, 8830 on consecutive strips; Kodak: one per foot). The
+  print is exposed on the film, so pale cream in a positive (5219 scans).
+- Along a film: a still camera's frames are eight perforations, so one
+  photo's border shows an eighth of the cycle: the frame number places the
+  photo along the film (frame 32 starts a cycle with the key number, 31 shows
+  two hyphens, 36 the mid-foot number); a contact-sheet strip runs the
+  cycle on from its first picture.
+- Approximate: the bar codes are bars and spaces of one to four modules
+  from a seeded pattern, not a decodable USS-128 KeyKode; the key prefix,
+  counts and manufacturing lines are those of the reference rolls (5207's
+  manufacturing line was not seen and is not drawn); letters are the `grid`
+  set, Kodak's are rounder; the cycle's place against frame numbers is
+  arbitrary (the film's own place depends on where the roll was cut).
+- Left out: the match-check symbols (Kodak places two at random in each
+  foot: "#", "↑", "[", "■", "△", "$" on the roll), and the older KeyKode
+  format of Kodak's diagram.
+
+**CineStill (`cineStill`)** — 800T, 400D, 50D, later rolls
+
+- References (Flickr; kept locally): 800T [54284730212](https://www.flickr.com/photos/grimesmc/54284730212/)
+  (Jay Smith, 2025) and [52713899704](https://www.flickr.com/photos/thart2009/52713899704/)
+  (Tom Hart, 2023, CC BY 2.0); 400D [54881331048](https://www.flickr.com/photos/40940504@N06/54881331048/)
+  (Roger, 2025) and [53998201851](https://www.flickr.com/photos/jacklandau/53998201851/)
+  (Jack Landau, 2024). Four rolls, two stocks, the same wordmark and
+  numbering. A 50D roll of 2024 ([Lomography](https://www.lomography.com/photos/27537970))
+  shows the same "34 ▶34A"; earlier rolls (2014–2016) carry Kodak's own
+  Vision3 print and are drawn with the Vision3 style.
+- Measured: Harman's layout (as Ilford and AgfaPhoto print it). Top edge:
+  "CINESTILL 800T" every frame from −1.56 (−1.47 on Tom Hart's roll),
+  square monoline capitals 1.4 mm tall, and the emulsion code "8034-11" at
+  +3.47 ("-11" smaller on the film; 400D shows "…-11"). Bottom edge: the
+  number, 0.58 of a pitch past a hole's left edge (0.60 and 0.59 on the
+  other rolls), cap 1.66 mm; a wedge with a needle at +3.76 (both 800T
+  rolls; 3.66 on 400D) and the smaller "nA" just after it. No DX code. The
+  print is yellow in a positive (about 253, 245, 80; the 400D scan's
+  wordmark paler).
+- Approximate: both 800T scans and one 400D cut the film's top edge, so
+  the heights of the name are inferred; the wedge is drawn as Ilford's
+  triangle and needle, CineStill's is stepped and blockier; the numbers on
+  the film are heavier. On the 400D scan the numbers 18 and 19 are 7.66
+  perforations apart (the wordmarks 8.0); the 800T rolls show 8.0, which
+  is drawn. The code is drawn for 800T only; 400D's and 50D's were not
+  readable. CineStill BWXX is not mapped (not seen).
+
 **Unbranded (`plain`)**: Kodak's numbering (numbers, arrows, measured as
 above) without text or DX code, for re-spooled and rebranded rolls.
 
@@ -352,9 +429,6 @@ drawn:
   cut the top edge, and the stripes, under light that the camera let onto
   the rebate, do not show their on/off period; an earlier print ("AGFA VISTA
   400-C", green triangles between the holes, 2010-2014) differs. Not drawn.
-- Kodak Vision3 (KeyKode every 64 perforations, one edge only) and CineStill
-  (its own still numbering and wordmark on later rolls): not measured in this
-  round; they need a layout of their own.
 - Kodak Elite Chrome, Ilford Delta, Kentmere: one readable image of the
   current print each.
 

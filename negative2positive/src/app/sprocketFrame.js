@@ -1232,8 +1232,20 @@ function markingPad(metrics) {
  * frames itself (`filmFrames`: each frame's first perforation and number).
  */
 export function styledFrameSlots(metrics, edge, style) {
-  const slotPitch = (style.numberEvery ?? THIRTY_FIVE_MM_SPROCKET_SPEC.perforationsPerStillFrame) * metrics.pitch;
-  const anchor = (metrics.frameStartX ?? metrics.startX) + style.anchorPerf * metrics.pitch;
+  const perFrame = THIRTY_FIVE_MM_SPROCKET_SPEC.perforationsPerStillFrame;
+  const every = style.numberEvery ?? perFrame;
+  const slotPitch = every * metrics.pitch;
+  let anchor = (metrics.frameStartX ?? metrics.startX) + style.anchorPerf * metrics.pitch;
+  let first0 = edge.frameNumber;
+  if (style.framePosition) {
+    // A film whose printing repeats over several still frames (Vision3:
+    // every 64 perforations): the photo's frame number places it along the
+    // film, eight perforations a frame, so frame after frame shows the
+    // part of the cycle that falls beside it; `count` counts the cycles.
+    const position = perFrame * Math.max(0, Math.round(Number(edge.frameNumber) || 0));
+    anchor -= (position % every) * metrics.pitch;
+    first0 = Math.floor(position / every);
+  }
   // Far enough on both sides for a marking that starts off the frame and
   // runs into it; a style whose markings sit further than the next frame
   // from their number reaches back that much more.
@@ -1242,7 +1254,7 @@ export function styledFrameSlots(metrics, edge, style) {
   const first = Math.floor((0 - reachBack - anchor) / slotPitch);
   const last = Math.ceil((metrics.outputWidth + reach - anchor) / slotPitch);
   const slots = [];
-  for (let k = first; k <= last; k++) slots.push({ x: anchor + k * slotPitch, number: clampInt(edge.frameNumber + k, 0, 99), count: edge.frameNumber + k });
+  for (let k = first; k <= last; k++) slots.push({ x: anchor + k * slotPitch, number: clampInt(first0 + k, 0, 99), count: first0 + k });
   return slots;
 }
 
@@ -1410,6 +1422,43 @@ function paintStyledEdgeMarkings(data, metrics, edge, style) {
             }
             paintMarkingRectangles(data, metrics, rects, sanitizeColor(stripe.color, fill));
           }
+          break;
+        }
+        case 'keyNumber': {
+          // Kodak's KeyKode key number: the roll's prefix (the text), a count
+          // that goes up by one every cycle, then the element's suffix
+          // ("•", "+32 •"). A brand print: shown with the text switch.
+          if (!edge.textEnabled || !String(edge.text || '').trim()) break;
+          const base = style.keyCounts?.[String(edge.text).trim().toUpperCase()] ?? 0;
+          const count = String(((base + (slot.count ?? slot.number)) % 10000 + 10000) % 10000).padStart(4, '0');
+          styledText(data, metrics, edge, element, `${String(edge.text).trim()} ${count}${element.suffix || ''}`, x, fill, cache);
+          break;
+        }
+        case 'barcode': {
+          // A machine-readable bar code beside the key number, drawn with
+          // the DX switch: bars and spaces of one to four modules from a
+          // pattern seeded by the text and count (not a decodable code).
+          if (!edge.dxEnabled) break;
+          const { top, height } = styledBand(metrics, element);
+          const modules = element.modules ?? 123, length = element.lengthPerf * pitch, unit = length / modules;
+          let seed = 2166136261;
+          for (const ch of `${edge.text}|${slot.count ?? slot.number}|${element.at}`) seed = Math.imul(seed ^ ch.charCodeAt(0), 16777619);
+          const rects = [];
+          let m = 0, bar = true;
+          while (m < modules) {
+            seed = Math.imul(seed ^ (seed >>> 15), 2246822519) >>> 0;
+            const width = Math.min(modules - m, 1 + (seed % 4));
+            if (bar) rects.push([x + m * unit, top, width * unit, height]);
+            m += width; bar = !bar;
+          }
+          paintMarkingRectangles(data, metrics, rects, fill);
+          break;
+        }
+        case 'dash': {
+          // Kodak's frame-index hyphen.
+          if (!edge.frameNumberEnabled) break;
+          const { top, height } = styledBand(metrics, element);
+          paintMarkingRectangles(data, metrics, [[x, top, element.lengthMm * sX, Math.max(1, height)]], fill);
           break;
         }
         case 'label':
