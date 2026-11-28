@@ -75,26 +75,29 @@ export const EDGE_MARKING_STYLES = Object.freeze([
     labelKey: 'filmEdgeStyleIlford',
     brand: 'ILFORD',
     filmKind: 'bw',
-    // HP5 Plus prints "ILFORD HP5 PLUS" as one line (Fil Nenna, 2018);
-    // Delta 400 Pro "ILFORD" and "DELTA 400 PRO" (Commons, Florian Schott 2009).
+    // HP5 Plus, from two references that agree: a 2008 strip (Commons,
+    // "ILFORD HP5 PLUS SAFETY FILM") and a 2018 scan (Fil Nenna). The text
+    // edge carries "ILFORD HP5 PLUS" once a frame and no numbers; the other
+    // edge the frame number and "nA", both large and heavy, and nothing else:
+    // no DX code, no triangle.
     text: 'ILFORD HP5 PLUS',
-    stocks: ['ILFORD HP5 PLUS', 'ILFORD DELTA 400 PRO'],
+    stocks: ['ILFORD HP5 PLUS'],
     alternates: {},
     // A black-and-white negative's print is dense silver: white in a positive.
     letteringColor: '#ececec',
     dx: [109, 9],
-    dxEnabled: true,
-    anchorPerf: 0.92,
-    dxGeometry: { moduleMm: 0.405, rowMm: 1.14 },
+    dxEnabled: false,
+    anchorPerf: 0.66,
+    dxGeometry: { moduleMm: 0.405, rowMm: 1.08 },
     elements: Object.freeze([
-      // Text edge: the line only, no frame numbers (both references).
-      { kind: 'text', edge: 'top', at: -1.93, from: [0.30, 1.50], glyphs: 'grotesk', stroke: 0.21, tracking: 0.2, wordSpace: 0.62, digitWidth: 0.8 },
-      // DX edge (Delta 400 Pro): number, code; a solid triangle, "nA", code.
-      { kind: 'number', edge: 'bottom', at: 0, from: [0.65, 1.72], glyphs: 'grotesk', stroke: 0.2, digitWidth: 0.8 },
-      { kind: 'dx', edge: 'bottom', at: 0.46, half: false },
-      { kind: 'triangle', edge: 'bottom', at: 3.26, from: [0.65, 1.54], lengthMm: 1.34 },
-      { kind: 'halfNumber', edge: 'bottom', at: 3.69, from: [0.59, 1.51], glyphs: 'grotesk', stroke: 0.2, digitWidth: 0.8 },
-      { kind: 'dx', edge: 'bottom', at: 4.28, half: true }
+      // The line starts two perforations before a number (1.93 and 2.05 on the
+      // references) and comes every other frame: the 2008 strip prints it
+      // before frame 8 and not before 9 (where it prints "SAFETY" past the
+      // number instead, seen on that strip only and not drawn).
+      { kind: 'text', edge: 'top', at: -2.0, from: [0.55, 1.75], glyphs: 'grotesk', stroke: 0.28, letterWidth: 1.08, tracking: 0.14, wordSpace: 0.62, digitWidth: 0.75, parity: 'even' },
+      { kind: 'number', edge: 'bottom', at: 0, from: [0.28, 1.72], glyphs: 'grotesk', stroke: 0.28, tracking: 0.1, digitWidth: 0.75 },
+      // "nA" as large as the number, 2.79 and 2.88 perforations after it.
+      { kind: 'halfNumber', edge: 'bottom', at: 2.83, from: [0.28, 1.72], glyphs: 'grotesk', stroke: 0.28, tracking: 0.1, digitWidth: 0.75 }
     ])
   }),
   Object.freeze({
@@ -186,7 +189,6 @@ const KNOWN_EDGE_PRINTS = [
   { words: ['ULTRA MAX', 'ULTRAMAX', 'GC400', 'GC 400'], text: 'KODAK GC 400' },
   { words: ['EKTAR'], text: 'KODAK EKTAR 100' },
   { words: ['HP5'], text: 'ILFORD HP5 PLUS' },
-  { words: ['DELTA 400'], text: 'ILFORD DELTA 400 PRO' },
   { words: ['PROVIA 100F', 'RDP III', 'RDPIII'], text: 'FUJI RDPIII' }
 ];
 
