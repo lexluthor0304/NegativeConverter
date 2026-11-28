@@ -12,6 +12,7 @@ import { loadProfile, applyLut3D } from './EnhancedProfiles.js'
 import { applyUnsharpMask } from './Sharpening.js'
 import { buildPaperLuts, applyPaperLuts } from './PaperProfiles.js'
 import { applyExposureStopsToImage16, exposureStopsCover } from '../util/localExposure.js'
+import { applyDrcProtection } from '../../pipeline/dynamicRange.js'
 
 // A 65536 × 1 RGBA16 grey ramp (R = G = B = v). Stages that only map a pixel's own
 // value can be evaluated once over it instead of over every pixel of a grey image.
@@ -286,6 +287,7 @@ export class Engine {
     if (!analysis.wb.every(Number.isFinite)) return null
     const stops = params.localExposureStops
     if (stops && exposureStopsCover(stops, width, height)) return null
+    if (params.drc) return null
     const rounded = new Uint16Array(65536)
     const fold = []
     for (let c = 0; c < 3; c++) {
@@ -375,6 +377,11 @@ export class Engine {
   // The stops are a dense map or, for a full-resolution frame, a tiled one
   // (#254): only its allocated tiles are visited.
   _applyLocalExposure(imageData, params) {
+    // Dynamic range compression: its stage exposes the plane, the strokes with it.
+    if (params.drc) {
+      params.drc.expose(imageData, this)
+      return
+    }
     const stops = params.localExposureStops
     if (!exposureStopsCover(stops, imageData.width, imageData.height)) return
     applyExposureStopsToImage16(imageData, stops)
@@ -433,6 +440,12 @@ export class Engine {
     }
     if (saturation !== 100) {
       adjustSaturation(imageData, saturation)
+    }
+    // Dynamic range compression's saturation protection: the frame's own
+    // compression stops, so only a frame of their size (never a ramp).
+    const protection = params.drcProtection
+    if (protection && protection.width === imageData.width && protection.height === imageData.height) {
+      applyDrcProtection(imageData, protection.weights, protection.protect)
     }
     // Paper emulation: the print's characteristic curve, density limits, base
     // tint and toning, after every colour decision and before sharpening.

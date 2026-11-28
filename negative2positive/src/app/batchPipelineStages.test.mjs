@@ -17,6 +17,7 @@ import {
   DECODE_AHEAD_CEILING_BYTES,
   PROCESSING_SLOT_BYTES_PER_PIXEL,
   BAND_POOL_BYTES_PER_PIXEL,
+  DRC_BYTES_PER_PIXEL,
   LANE_BYTES_PER_PIXEL
 } from './batchExportScheduler.js';
 import { createMemoryBudget, budgetFor, GIB } from './memoryBudget.js';
@@ -554,6 +555,11 @@ for (const readyBeforeCancel of [false, true]) {
   });
   assert.equal(before.admit, false);
   assert.equal(before.reason, 'ceiling');
+  // A lane whose recipe compresses the dynamic range counts its weight plane.
+  const compressing = planDecodeAhead({
+    candidatePixels: px60, processingPixels: [px60], unwrittenBytes: 0.36e9, residentBytes: 2.46e9, compressing: true
+  });
+  assert.equal(compressing.bytes - example.bytes, px60 * DRC_BYTES_PER_PIXEL);
   // Low-memory devices and the hidden-window limit switch it off.
   assert.equal(planDecodeAhead({ candidatePixels: 1e6, deviceMemory: 4 }).reason, 'low-memory');
   assert.equal(planDecodeAhead({ candidatePixels: 1e6, deviceMemory: 8 }).admit, true);

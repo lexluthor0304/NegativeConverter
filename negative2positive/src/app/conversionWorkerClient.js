@@ -25,6 +25,14 @@ export const WORKER_TIMEOUT = 'WORKER_TIMEOUT';
 // convert on the main thread, which would read a detached plane.
 export const INPUT_LOST = 'INPUT_LOST';
 
+// Where the conversion workers' dynamic range compression ran, per frame:
+// 'gpu', 'gpu+reference' (some bands finished by the reference) or
+// 'reference' (no WebGL2 in the worker). For the smoke and support.
+const drcPaths = { gpu: 0, 'gpu+reference': 0, reference: 0 };
+export function drcPathStats() {
+  return { ...drcPaths };
+}
+
 export function isConversionInputLost(err) {
   return Boolean(err) && err.code === INPUT_LOST;
 }
@@ -346,6 +354,11 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
     if (result.liveFrame) liveFrames.set(out, { ...result.liveFrame, worker: w });
     // The analysis a full-resolution frame was converted with (#254 follow-up).
     if (result.analysis) out.__analysis = result.analysis;
+    if (result.drcEstimate) out.__drcEstimate = result.drcEstimate;
+    if (result.drcPath) {
+      out.__drcPath = result.drcPath;
+      if (result.drcPath in drcPaths) drcPaths[result.drcPath] += 1;
+    }
     if (result.histogram) {
       const sample = result.histogram;
       const histogram = new ImageData(new Uint8ClampedArray(sample.rgba), sample.width, sample.height);
@@ -780,7 +793,10 @@ export function createConversionBandPool({
   let jobSeq = 0;
   const stats = {
     frames: 0, adjusts: 0, resident: 0, fetches: 0, bands: 0, maxBands: 0, sharedFrames: 0, failures: 0,
-    workersStarted: 0, copyTasks: 0, longestCopyMs: 0
+    workersStarted: 0, copyTasks: 0, longestCopyMs: 0,
+    // Bands whose dynamic range compression ran on the GPU, on the GPU with
+    // the reference finishing some of its tiles, or on the reference alone.
+    drcBands: { gpu: 0, 'gpu+reference': 0, reference: 0 }
   };
 
   function spawn() {
@@ -1001,6 +1017,7 @@ export function createConversionBandPool({
       const halo = tables.sharpen ? unsharpMaskHaloRows(tables.sharpen) : 0;
       let replies = await untilAborted(Promise.all(plan.map(({ y0, y1 }, index) =>
         post(index, { type: 'apply', job, index, tables, halo, keep: keepResident }, [], (y1 - y0) * width))), signal);
+      for (const reply of replies) if (reply?.drcPath in stats.drcBands) stats.drcBands[reply.drcPath] += 1;
       if (halo) {
         const edges = replies.map((reply, index) => ({ ...plan[index], top: reply.top, bottom: reply.bottom }));
         replies = await untilAborted(Promise.all(plan.map(({ y0, y1 }, index) => {

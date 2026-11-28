@@ -8,6 +8,7 @@
 
 import { Engine } from '../silvercore/engine/Engine.js';
 import { resolveSilverCoreParams, toGrayscaleInPlace } from '../pipeline/silverAdapter.js';
+import { solveDrcMap, sampleDrcInput, drcMethodParams } from '../pipeline/dynamicRange.js';
 import { toRGBA8 } from '../silvercore/util/image16.js';
 import { applyPreviewChain, displayStageUniforms } from './previewTables.js';
 import { computeAdjustmentParams } from '../workers/pixelAdjustments.js';
@@ -146,7 +147,7 @@ function clonePlane(image) {
  * resolved params, the seeded engine and its plan (what the renderer uploads), and
  * `expected`, the engine's 8-bit RGBA. `filmPresets` resolves a named preset.
  */
-export function buildPreviewCase({ name, mode, settings, image, stops = null, profile = null, positive = null, filmPresets = null }) {
+export function buildPreviewCase({ name, mode, settings, image, stops = null, profile = null, positive = null, filmPresets = null, drc = null }) {
   const params = resolveSilverCoreParams(mode, settings, filmPresets);
   const engine = new Engine(image.width, image.height);
   engine.enhancedLut = profile;
@@ -156,10 +157,10 @@ export function buildPreviewCase({ name, mode, settings, image, stops = null, pr
   engine.analyze(sample, params);
   if (positive) engine.positiveAnalysis = { gain: positive.gain, wb: [...positive.wb] };
   const plan = engine.previewPlan(params, { grey: mode === 'bw' });
-  const output = applyPreviewChain(engine, clonePlane(image), params, mode, stops);
+  const output = applyPreviewChain(engine, clonePlane(image), params, mode, stops, drc);
   return {
     name, mode, width: image.width, height: image.height,
-    prepared: image, stops, params, engine, plan,
+    prepared: image, stops, params, engine, plan, drc,
     profile: engine.enhancedLut, positive: engine.positiveAnalysis,
     expected: toRGBA8(output).data,
   };
@@ -177,6 +178,28 @@ export function buildSelfTestCases() {
     name: spec.name, mode: spec.mode, settings: spec.settings, image: fixture,
     stops: spec.stops ? stops : null, profile: spec.profile ? profile : null, positive: spec.positive || null,
   }));
+}
+
+/**
+ * The compression's own self-test cases (dynamic range compression's shader
+ * stage against the CPU chain): a colour negative with strong protection and
+ * a positive, on the parity frame. Run after the main self-test; a failure
+ * keeps compressed photos on the preview worker, not the GPU preview as a whole.
+ */
+export function buildDrcSelfTestCases(width = 96, height = 64) {
+  const specs = [
+    { name: 'drc colour', mode: 'color', settings: { colorModel: 'standard', saturation: 140 }, drc: { drcAmount: 100, drcSaturation: 100, drcHighlights: 80 } },
+    { name: 'drc positive', mode: 'positive', settings: { colorModel: 'basic' }, drc: { drcAmount: 70 }, positive: { gain: 1.6, wb: [0.95, 1, 0.9] } },
+  ];
+  return specs.map((spec, k) => {
+    const image = parityFrame(spec.mode, width, height);
+    const inverted = spec.mode !== 'positive';
+    const map = solveDrcMap(sampleDrcInput(image.data, width, height), spec.drc, { inverted });
+    map.key = `selftest:${k}`;
+    const method = drcMethodParams(spec.drc);
+    return buildPreviewCase({ name: spec.name, mode: spec.mode, settings: spec.settings, image, positive: spec.positive || null,
+      drc: { map, method, inverted, protect: spec.mode !== 'bw' ? method.protect : 0 } });
+  });
 }
 
 // A parity frame for the GPU checks: the top half from the edge-case fixture, the

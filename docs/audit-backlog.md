@@ -69,6 +69,18 @@ proof does not establish the unmeasured performance targets.
   The recovered frame is derived, so a snapshot keeps the slider's value and the stage recovers again after an undo or redo (about two seconds at 60 MP). The display shows the repaired frame until it lands.  
   _Suggested fix:_ Keep the last two recovered frames by `(source, revision, strength)` when memory allows.
 
+## Dynamic range compression
+
+- **low/behaviour** — The hint and Auto see the conversion's curves, not the stages after them (2026-11-28)  
+  `negative2positive/src/pipeline/dynamicRange.js` (`estimateDrcEffect`), `negative2positive/src/app/main.js` (`measureDrcEstimate`)  
+  The estimate runs in the conversion worker with the engine's curves. The automatic colour correction's tone (expired-film rescue, on for every photo), Step 3 and a look come after it on the page. Where they crush or lift a photo's ends further, the hint can miss a photo whose gain would show on screen (seen on a synthetic photo whose dark third the rescue's tone takes to black: the estimate read its shadows as already showing detail).  
+  _Suggested fix:_ Send the rescue's luminance tone (and Step 3's) with the estimate request and evaluate the ends through it.
+
+- **low/colour** — Lifted shadows lose saturation (2026-11-28)  
+  `negative2positive/src/pipeline/dynamicRange.js` (`applyDrcProtection`)  
+  Saturation protection only reduces the chroma of pixels the compression darkened. Lifted shadows come out less saturated than they were (mean HSV saturation 0.407 → 0.286 on 31 colour negatives at Amount 50).  
+  _Suggested fix:_ Restore the chroma of lifted pixels towards their original saturation, with the same weight plane (signed).
+
 ## Dust removal
 
 - **low/bug** — A short thin line alone on a calm background, on dust's side of the tones, is taken for a fibre and inpainted: on a negative a bright one (a sunlit antenna tip, a short light streak), on a positive a dark one (a twig end or a short wire against the sky)  

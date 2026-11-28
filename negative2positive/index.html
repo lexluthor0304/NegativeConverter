@@ -1376,6 +1376,72 @@
               <input type="range" class="slider-input" id="coreShadows" min="-100" max="100" step="1" value="0" aria-labelledby="coreShadowsLabel">
             </div>
           </div>
+          <div class="control-group drc-group" id="drcGroup" data-drc-off="true">
+            <div class="control-group-title drc-title">
+              <span data-i18n="drcTitle">Dynamic range compression</span>
+              <div class="drc-title-actions">
+                <button type="button" class="film-base-btn drc-auto-btn" id="drcAutoBtn" data-i18n="drcAuto">Auto</button>
+                <button type="button" class="film-base-btn drc-auto-btn" id="drcCompareBtn" aria-pressed="false" data-i18n="drcCompare" disabled>Hold to see before</button>
+              </div>
+            </div>
+            <div class="control-group-hint" data-i18n="drcHelp">Keeps detail in bright and dark areas at once, for contrasty scenes: backlight, windows, sun and shade. 0 is off.</div>
+            <div class="slider-control">
+              <div class="slider-header">
+                <span class="slider-label" id="drcAmountLabel" data-i18n="drcAmount">Compression amount</span>
+                <button type="button" class="drc-reset" data-drc-reset="drcAmount" data-i18n-aria-label="drcResetOne" aria-label="Reset">↺</button>
+                <input type="number" class="slider-number-input" id="drcAmountValue" min="0" max="100" step="1" value="0" aria-labelledby="drcAmountLabel">
+              </div>
+              <input type="range" class="slider-input" id="drcAmount" min="0" max="100" step="1" value="0" aria-labelledby="drcAmountLabel">
+            </div>
+            <fieldset class="drc-fine" id="drcFineControls" disabled>
+              <legend class="sr-only" data-i18n="drcFineLegend">Fine adjustments</legend>
+              <div class="slider-control">
+                <div class="slider-header">
+                  <span class="slider-label" id="drcDetailLabel" data-i18n="drcDetail">drcDetail</span>
+                  <button type="button" class="drc-reset" data-drc-reset="drcDetail" data-i18n-aria-label="drcResetOne" aria-label="Reset">↺</button>
+                  <input type="number" class="slider-number-input" id="drcDetailValue" min="0" max="100" step="1" value="50" aria-labelledby="drcDetailLabel">
+                </div>
+                <input type="range" class="slider-input" id="drcDetail" min="0" max="100" step="1" value="50" aria-labelledby="drcDetailLabel" aria-describedby="drcDetailHint">
+                <div class="control-group-hint drc-control-hint" id="drcDetailHint" data-i18n="drcDetailHint">How much fine detail keeps its contrast while the range is compressed.</div>
+              </div>
+              <div class="slider-control">
+                <div class="slider-header">
+                  <span class="slider-label" id="drcShadowsLabel" data-i18n="drcShadows">drcShadows</span>
+                  <button type="button" class="drc-reset" data-drc-reset="drcShadows" data-i18n-aria-label="drcResetOne" aria-label="Reset">↺</button>
+                  <input type="number" class="slider-number-input" id="drcShadowsValue" min="0" max="100" step="1" value="50" aria-labelledby="drcShadowsLabel">
+                </div>
+                <input type="range" class="slider-input" id="drcShadows" min="0" max="100" step="1" value="50" aria-labelledby="drcShadowsLabel" aria-describedby="drcShadowsHint">
+                <div class="control-group-hint drc-control-hint" id="drcShadowsHint" data-i18n="drcShadowsHint">How far dark areas are lifted.</div>
+              </div>
+              <div class="slider-control">
+                <div class="slider-header">
+                  <span class="slider-label" id="drcHighlightsLabel" data-i18n="drcHighlights">drcHighlights</span>
+                  <button type="button" class="drc-reset" data-drc-reset="drcHighlights" data-i18n-aria-label="drcResetOne" aria-label="Reset">↺</button>
+                  <input type="number" class="slider-number-input" id="drcHighlightsValue" min="0" max="100" step="1" value="50" aria-labelledby="drcHighlightsLabel">
+                </div>
+                <input type="range" class="slider-input" id="drcHighlights" min="0" max="100" step="1" value="50" aria-labelledby="drcHighlightsLabel" aria-describedby="drcHighlightsHint">
+                <div class="control-group-hint drc-control-hint" id="drcHighlightsHint" data-i18n="drcHighlightsHint">How far bright areas are brought down.</div>
+              </div>
+              <div class="slider-control">
+                <div class="slider-header">
+                  <span class="slider-label" id="drcLocalContrastLabel" data-i18n="drcLocalContrast">drcLocalContrast</span>
+                  <button type="button" class="drc-reset" data-drc-reset="drcLocalContrast" data-i18n-aria-label="drcResetOne" aria-label="Reset">↺</button>
+                  <input type="number" class="slider-number-input" id="drcLocalContrastValue" min="0" max="100" step="1" value="50" aria-labelledby="drcLocalContrastLabel">
+                </div>
+                <input type="range" class="slider-input" id="drcLocalContrast" min="0" max="100" step="1" value="50" aria-labelledby="drcLocalContrastLabel" aria-describedby="drcLocalContrastHint">
+                <div class="control-group-hint drc-control-hint" id="drcLocalContrastHint" data-i18n="drcLocalContrastHint">How much calm areas gain local contrast after the compression.</div>
+              </div>
+              <div class="slider-control">
+                <div class="slider-header">
+                  <span class="slider-label" id="drcSaturationLabel" data-i18n="drcSaturation">drcSaturation</span>
+                  <button type="button" class="drc-reset" data-drc-reset="drcSaturation" data-i18n-aria-label="drcResetOne" aria-label="Reset">↺</button>
+                  <input type="number" class="slider-number-input" id="drcSaturationValue" min="0" max="100" step="1" value="75" aria-labelledby="drcSaturationLabel">
+                </div>
+                <input type="range" class="slider-input" id="drcSaturation" min="0" max="100" step="1" value="75" aria-labelledby="drcSaturationLabel" aria-describedby="drcSaturationHint">
+                <div class="control-group-hint drc-control-hint" id="drcSaturationHint" data-i18n="drcSaturationHint">Keeps highlights brought down from turning too colourful or cast.</div>
+              </div>
+            </fieldset>
+          </div>
           <div class="control-group">
             <div class="control-group-title"><span data-i18n="groupToneEndpoints">Black and white points</span></div>
             <div class="slider-control">

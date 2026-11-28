@@ -70,6 +70,15 @@ export function deepCopySanitizedSettings(safe, { autoFrameMeta = safe.autoFrame
     expiredUnevenFog: safe.expiredUnevenFog,
     expiredLocalContrast: safe.expiredLocalContrast,
     expiredAnalysis: safe.expiredAnalysis ? structuredClone(safe.expiredAnalysis) : null,
+    // Dynamic range compression (pipeline/dynamicRange.js); a settings object
+    // from before it existed reads as off.
+    drcAmount: safe.drcAmount ?? 0,
+    drcDetail: safe.drcDetail ?? 50,
+    drcShadows: safe.drcShadows ?? 50,
+    drcHighlights: safe.drcHighlights ?? 50,
+    drcLocalContrast: safe.drcLocalContrast ?? 50,
+    drcSaturation: safe.drcSaturation ?? 75,
+    drcHintDismissed: Boolean(safe.drcHintDismissed),
     frameMetadata: safe.frameMetadata ? { ...safe.frameMetadata } : { frameNumber: '', notes: '' },
     coreSaturation: safe.coreSaturation,
     coreGlow: safe.coreGlow,

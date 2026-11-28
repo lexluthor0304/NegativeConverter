@@ -2298,6 +2298,8 @@ body.dodge-burn-active #glCanvas {
   font: inherit; padding: 3px 10px; cursor: pointer; white-space: nowrap;
 }
 .toast-action:hover { background: var(--accent); color: var(--bg-primary); }
+.toast-action-secondary { border-color: rgba(224, 224, 224, 0.45); color: #e0e0e0; }
+.toast-action-secondary:hover { background: rgba(224, 224, 224, 0.16); color: #ffffff; }
 
 .footer-btn.primary {
   background: var(--accent);
@@ -3855,4 +3857,71 @@ input.preset-select {
   line-height: 1.5;
   text-align: center;
   color: var(--text-muted);
+}
+
+/* Dynamic range compression (pipeline/dynamicRange.js): Amount on top, the
+   five fine adjustments greyed while it is 0. */
+.drc-fine {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+
+.drc-fine:disabled {
+  opacity: 0.45;
+}
+
+.drc-group .slider-header {
+  gap: 6px;
+}
+
+.drc-group .slider-header .slider-label {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.drc-reset {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.drc-reset:hover,
+.drc-reset:focus-visible {
+  border-color: var(--border-light);
+  color: var(--text-primary);
+}
+
+.drc-reset:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.drc-title-actions {
+  display: flex;
+  flex: none;
+  gap: 6px;
+}
+
+.drc-auto-btn {
+  flex: none;
+  width: auto;
+  padding: 3px 10px;
+  font-size: 11px;
+}
+
+.drc-control-hint {
+  margin-top: 2px;
 }
