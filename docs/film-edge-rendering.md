@@ -466,6 +466,10 @@ contact sheet lays the roll out as a lab cuts it: strips of six frames
   to a half-frame, whatever the later pictures' own numbers; its name, speed
   and batch number fall every 24 numbers, so about every other strip of a
   roll carries them.
+  Kodak Vision3's 64-perforation cycle runs on unbroken from the first
+  picture's place on the film (its frame number, eight perforations a
+  frame): a six-frame strip shows most of one cycle, the key number, bar
+  codes and manufacturing line where they fall.
 - Style: a strip takes the edge style, text and DX of its first photo; under
   Auto, of the first photo of the strip whose film was recognised (one strip
   is one film).
