@@ -201,7 +201,7 @@ contact sheet of 2004 (Kyppi archive, V.-P. Suhonen) shows the same DX code and 
   the scans; 0.35 drawn), sizes from Kodak colour negative. Elite Chrome
   ("KODAK EBX") rests on one clear image and is not offered.
 
-**Fujicolor colour negative (`fujiColor`)** — Superia 200, Pro 400H
+**Fujicolor colour negative (`fujiColor`)** — Superia 200, Pro 400H, C200, Superia X-TRA 400
 
 - Superia 200: Flickr [8439023084](https://www.flickr.com/photos/il_tubo/8439023084/) (2013),
   [16641180517](https://www.flickr.com/photos/65459764@N03/16641180517/) (2015), c't Digital
@@ -225,10 +225,35 @@ contact sheet of 2004 (Kyppi archive, V.-P. Suhonen) shows the same DX code and 
   per-frame code after "nA" ("CA-6", "H36", "M96") is drawn as "FUJI", which
   the references print there on alternate frames. Stripes follow the text
   switch.
-- Not drawn yet: Superia X-TRA 400 (the second reference is washed out and
-  does not confirm the stripe period), C200 (stripes not measurable on the
-  two scans), Fujifilm 200/400 (made by Kodak: a different, Kodak-like
-  layout with "FUJI 200"/"FUJI 400" and no stripes, not measured).
+- C200 (stock code "200") — Flickr [32503911854](https://www.flickr.com/photos/rwelten/32503911854/)
+  (Ruud Welten; found 2026-11-28, kept locally), [23297380040](https://www.flickr.com/photos/sarajoelsson/23297380040/)
+  (Sara Joelsson, 2015) and [12210026456](https://www.flickr.com/photos/marieloise/12210026456/)
+  (2013, mostly washed out). The same layout: "200" at +2.04 (drawn at
+  the S-200 place, +1.75), "nA", then "FUJI" or a per-frame code ("C74",
+  "C53", "CA24") at +6. Stripes, measured on Welten and Joelsson: a red line
+  through the middle of the row, continuous, 0.3 mm; two green lines 0.69 and
+  0.71 mm either side, 0.25 mm, on four perforations of eight (both rolls;
+  the third shows one end at the same rhythm). Their phase to the numbers
+  differs: on from −3.4 on Welten's roll (drawn), from about −2.2 on
+  Joelsson's, the end at 0.4–0.85 on the third. Comparison:
+  `fujiColor_C200_vs_RuudWelten.png`.
+- Superia X-TRA 400 ("S-400") — Flickr [7849873466](https://www.flickr.com/photos/nicoladonato/7849873466/)
+  (Nicola Donato, 2012), Mark Frey's negatives on [EMULSIVE](https://emulsive.org/reviews/film-reviews/fuji-film-reviews/film-stock-review-three-rolls-with-made-in-usa-fujifilm-400)
+  (2023), [52220527040](https://www.flickr.com/photos/194302511@N04/52220527040/)
+  (2022, washed out). The same layout ("30 S-400 30A H36 31", "1 S-400 1A
+  FUJI 2 S-400 2A M96 3"). Stripes, measured on Donato and Frey: a thin line
+  0.6 mm toward the film edge (0.53 on Frey's), continuous (green in a
+  positive, red on the negative); a band 0.75 mm wide centred 0.27 mm toward
+  the picture (red in a positive, green on the negative), on four
+  perforations of eight on both rolls. Phase: on from −0.97 to +3.03 after
+  the number on Donato's roll (drawn), from −4.0 on Frey's. Comparison:
+  `fujiColor_XTRA400_vs_NicolaDonato2012.png` (the band ends where the
+  reference's does, less the 0.23 of a perforation by which the numbers'
+  phase to the holes differs).
+- Approximate for both: stripe colours (taken from saturated positive
+  scans), widths (blurred on the scans), the phase; the per-frame code is
+  drawn as "FUJI". Not drawn: Superia X-TRA 800 and the older Superia 400,
+  whose prints were not seen.
 
 **Fujifilm reversal (`fujiSlide`)**
 
@@ -422,8 +447,7 @@ was gathered on 2026-11-28; from it Ilford current production, Kodak B&W,
 Kodak E100 and the Kodak colour negative wordings were measured. Still not
 drawn:
 
-- Fujicolor C200, Superia X-TRA 400 and Fujifilm 200/400: see the
-  Fujicolor section.
+- Fujifilm 200/400: see the Fujicolor section.
 - Agfa Vista (discontinued; its last print, "200N"/"400N" with red and
   green stripes, Flickr 51616237359 and 48835939438, both 2019): both scans
   cut the top edge, and the stripes, under light that the camera let onto
