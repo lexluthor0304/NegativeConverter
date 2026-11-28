@@ -29712,8 +29712,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
               updateBatchOverlayProgress((done / selected.length) * 80, lang.loadingBatchFile.replace('{current}', done + 1).replace('{total}', selected.length));
               const settingsForFile = getSettingsForExport(index, item);
               const own = getSprocketFrameComposeOptions(settingsForFile, i);
-              // The strip's film: its first photo's style, text and code.
-              options ??= own;
+              // The strip's film: its first photo's style, text and code;
+              // under Auto the first photo whose film was recognised.
+              if (!options || (state.sprocketEdge.style === EDGE_STYLE_AUTO && options.edgeMarkings.style === EDGE_STYLE_CUSTOM && own.edgeMarkings.style !== EDGE_STYLE_CUSTOM)) options = own;
               const imageData = await renderContactSheetFrame(item, settingsForFile, target, convert);
               // A contact sheet always numbers its frames on the film.
               pictures.push({ imageData, number: typedNumber ? state.sprocketEdge.frameNumber + i : own.edgeMarkings.frameNumber });
