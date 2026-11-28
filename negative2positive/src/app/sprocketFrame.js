@@ -2,6 +2,8 @@ import {
   NATIVE_PIXEL_SIZE, nativePixelFontLocale, nativePixelFontFamily,
   hasNativePixelGlyph, isNativePixelFontReady, ensureNativePixelFont
 } from './nativePixelFont.js';
+import { edgeMarkingStyle, edgeTextForFrame, normalizeEdgeStyleId, EDGE_STYLE_AUTO, EDGE_STYLE_PLAIN } from './edgeMarkingStyles.js';
+import { rasterizeEdgeGlyph, rasterizeEdgeShape, fujiOutlineArrow, hasEdgeGlyphs, edgeGlyphText, edgeGlyphAdvance } from './edgeGlyphs.js';
 
 const DEFAULT_FILM_COLOR = [6, 6, 6, 255];
 const DEFAULT_HOLE_COLOR = [255, 255, 255, 255];
@@ -41,7 +43,9 @@ export const DEFAULT_SPROCKET_EDGE_MARKINGS = Object.freeze({
   fontFamily: '',
   holeColor: '#ffffff',
   letteringColor: '#c47a00',
-  overexposureColor: '#ed9c00'
+  overexposureColor: '#ed9c00',
+  // A setting without a style is drawn as it always was.
+  style: 'custom'
 });
 
 const FONT_STYLE_OPTIONS = new Set(['edgePixel', 'monoBold', 'mono', 'sansBold', 'serif']);
@@ -155,7 +159,8 @@ export function normalizeSprocketEdgeMarkings(options = {}) {
     fontLocale: nativePixelFontLocale(source.fontLocale),
     holeColor: sanitizeColor(source.holeColor ?? defaults.holeColor, DEFAULT_HOLE_COLOR),
     letteringColor: sanitizeColor(source.letteringColor ?? defaults.letteringColor, DEFAULT_MARKING_COLOR),
-    overexposureColor: sanitizeColor(source.overexposureColor ?? defaults.overexposureColor, DEFAULT_OVEREXPOSURE_COLOR)
+    overexposureColor: sanitizeColor(source.overexposureColor ?? defaults.overexposureColor, DEFAULT_OVEREXPOSURE_COLOR),
+    style: normalizeEdgeStyleId(source.style ?? defaults.style)
   };
 }
 
@@ -406,7 +411,7 @@ function hashNoiseAt(x, y, seedTerm) {
 // What depends on the column or on the row alone is computed once per column
 // or row, and the coarse noise's four lattice hashes once per lattice cell
 // instead of once per pixel. One step per row.
-function* fillFilmBaseSteps(data, metrics, filmColor) {
+function* fillFilmBaseSteps(data, metrics, filmColor, interiorSpans = []) {
   const outputWidth = metrics.outputWidth, outputHeight = metrics.outputHeight;
   // The whole frame in the film colour first, as one 32-bit fill where the
   // platform is little-endian (every one the app runs on).
@@ -490,6 +495,8 @@ function* fillFilmBaseSteps(data, metrics, filmColor) {
     yield* paintSpan(0, middleTop, metrics.sideMargin, middleHeight);
     yield* paintSpan(metrics.sideMargin + metrics.sourceWidth, middleTop, metrics.sideMargin, middleHeight);
   }
+  // A strip's film between and around its pictures.
+  for (const span of interiorSpans) yield* paintSpan(span.left, metrics.bandHeight, span.width, metrics.sourceHeight);
 }
 
 // Rows of a plain copy between two steps: about 4 MB.
@@ -793,6 +800,9 @@ function* compositeMarkingMaskSteps(data, metrics, mask, width, height, left, to
   const softened = yield* softenMarkingMaskSteps(mask, width, height, Math.max(0.38, metrics.mm * 0.026));
   const glow = metrics.edgeOverexposed ? metrics.edgeOverexposureStrength : 0;
   const core = mixColor(fill, [255, 232, 125, fill[3]], glow * 0.22);
+  // A brand style may print denser than the custom markings (Ilford's print
+  // is clipped white on the reference scans).
+  const inkDensity = metrics.styleInkDensity ?? 0.88;
   const firstX = Math.max(0, -left), endX = Math.min(width, metrics.outputWidth - left);
   const noiseRow = smoothNoiseRows(left + firstX, left + Math.max(firstX, endX), metrics.mm, 0.27, 4501);
   for (let y = 0; y < height; y++) {
@@ -804,7 +814,7 @@ function* compositeMarkingMaskSteps(data, metrics, mask, width, height, left, to
         const coverage = softened[y * width + x];
         if (coverage < 0.002) continue;
         noise ??= noiseRow(py);
-        const density = 0.88 + (noise[x - firstX] - 0.5) * 0.14;
+        const density = inkDensity + (noise[x - firstX] - 0.5) * 0.14;
         blendChannels(data, (py * metrics.outputWidth + px) * 4, core[0], core[1], core[2], core[3], coverage * density);
       }
     }
@@ -975,6 +985,15 @@ function getFrameNumberAnchorX(metrics, edge) {
 
 function forEachVisibleFrameRepeat(metrics, edge, callback) {
   const framePitch = getEdgeFramePitch(metrics);
+  if (metrics.filmFrames) {
+    // A strip of several photos (composeFilmStrip): each frame by its own
+    // first perforation and number.
+    metrics.filmFrames.forEach((frame, index) => {
+      const mainX = Math.round(frame.x + metrics.holeWidth + (edge.frameNumberHole - 1) * metrics.pitch);
+      callback({ index, frameNumber: clampInt(frame.number, 0, 99), mainX, halfX: mainX + framePitch / 2 });
+    });
+    return;
+  }
   const baseX = getFrameNumberAnchorX(metrics, edge);
   const minIndex = Math.floor((0 - baseX - framePitch) / framePitch);
   const maxIndex = Math.ceil((metrics.outputWidth - baseX + framePitch) / framePitch);
@@ -1177,7 +1196,325 @@ function paintPhotoText(data, metrics, edge) {
   });
 }
 
+// ---- Brand styles (edgeMarkingStyles.js) --------------------------------
+//
+// A style places each marking in perforations along the film from the frame's
+// main number and in millimetres in from the film's outer edge. Along the
+// film one millimetre is imagePxPerMmX pixels (the perforations' scale);
+// across it filmEdgePxPerMmY (the band's). Letters keep their proportions
+// against the perforations: where a small preview widens the band beyond its
+// physical size, they are narrowed by the ratio of the two.
+
+// A marking whose mask is built in steps: run at once outside a stepped compose.
+function deferStyledMarking(build) {
+  if (deferredMarkings) {
+    deferredMarkings.push({ build });
+    return;
+  }
+  const steps = build();
+  let step;
+  do { step = steps.next(); } while (!step.done);
+  if (step.value) for (const s of compositeMarkingMaskSteps(...step.value)) void s;
+}
+
+function markingPad(metrics) {
+  return Math.ceil(Math.max(0.38, metrics.mm * 0.026) * 2.5) + 1;
+}
+
+/**
+ * The frames whose markings a styled border draws: { x, number } with x the
+ * main number's position (pixels from the left of the frame image). One frame
+ * per eight perforations, numbered on from the photo's own number; a film
+ * that numbers itself more often (Fomapan: every four perforations,
+ * `numberEvery`) has a slot per number, counting on by one. `count` is the
+ * number before it is kept to 0-99, for markings printed once every so many
+ * numbers. A caller that composes several photos on one film names its
+ * frames itself (`filmFrames`: each frame's first perforation and number).
+ */
+export function styledFrameSlots(metrics, edge, style) {
+  const perFrame = THIRTY_FIVE_MM_SPROCKET_SPEC.perforationsPerStillFrame;
+  const every = style.numberEvery ?? perFrame;
+  const slotPitch = every * metrics.pitch;
+  let anchor = (metrics.frameStartX ?? metrics.startX) + style.anchorPerf * metrics.pitch;
+  let first0 = edge.frameNumber;
+  if (style.framePosition) {
+    // A film whose printing repeats over several still frames (Vision3:
+    // every 64 perforations): the photo's frame number places it along the
+    // film, eight perforations a frame, so frame after frame shows the
+    // part of the cycle that falls beside it; `count` counts the cycles.
+    const position = perFrame * Math.max(0, Math.round(Number(edge.frameNumber) || 0));
+    anchor -= (position % every) * metrics.pitch;
+    first0 = Math.floor(position / every);
+  }
+  // Far enough on both sides for a marking that starts off the frame and
+  // runs into it; a style whose markings sit further than the next frame
+  // from their number reaches back that much more.
+  const farthest = Math.max(0, ...style.elements.map((element) => element.at ?? 0));
+  const reachBack = (9 + Math.max(0, farthest - 8)) * metrics.pitch, reach = 9 * metrics.pitch;
+  const first = Math.floor((0 - reachBack - anchor) / slotPitch);
+  const last = Math.ceil((metrics.outputWidth + reach - anchor) / slotPitch);
+  const slots = [];
+  for (let k = first; k <= last; k++) slots.push({ x: anchor + k * slotPitch, number: clampInt(first0 + k, 0, 99), count: first0 + k });
+  return slots;
+}
+
+// A marking printed once every `every` numbers, on the numbers that leave
+// `onNumber` (Fomapan's name, speed and batch every 24 numbers).
+function isOnRepeat(element, slot) {
+  if (!element.every) return true;
+  const count = Math.round(slot.count ?? slot.number);
+  return ((count % element.every) + element.every) % element.every === (element.onNumber ?? 0);
+}
+
+// The words `[from, to)` of a text, for a style that prints them apart.
+function textWords(text, element) {
+  if (!element.words) return text;
+  return String(text || '').trim().split(/\s+/).slice(element.words[0], element.words[1]).join(' ');
+}
+
+function styledBand(metrics, element) {
+  const sY = metrics.filmEdgePxPerMmY;
+  const [near, far] = element.from;
+  const height = (far - near) * sY;
+  const top = element.edge === 'top' ? near * sY : metrics.outputHeight - far * sY;
+  return { top, height };
+}
+
+function styledText(data, metrics, edge, element, text, x, fill, cache, brand = '') {
+  const label = String(text || '').trim();
+  if (!label) return;
+  const { top, height: capPx } = styledBand(metrics, element);
+  if (capPx < 1) return;
+  const xScale = Math.min(1, metrics.imagePxPerMmX / Math.max(1e-6, metrics.filmEdgePxPerMmY));
+  if (edge.fontStyle !== 'edgePixel') {
+    // A canvas font chosen in the panel: its capitals are about 0.72 of the font size.
+    if (drawCanvasText(data, metrics, label, x, top - capPx * 0.08, capPx / 0.72, fill, 'left', edge.fontStyle, edge.fontFamily)) return;
+  }
+  const set = element.glyphs;
+  if (!hasEdgeGlyphs(set, label)) {
+    // Letters the style has no shape for (CJK and other scripts): the pixel font.
+    drawBitmapText(data, metrics, label, x, top, capPx / 7, fill, 'left', edge.fontLocale);
+    return;
+  }
+  const chars = Array.from(edgeGlyphText(set, label));
+  const digitScale = element.digitWidth ? element.digitWidth / edgeGlyphAdvance(set, '0') : 1;
+  const tracking = (element.tracking ?? 0.2) * capPx * xScale;
+  const wordGap = (element.wordSpace ?? 0.6) * capPx * xScale;
+  // Kodak sets its name further apart from the stock than the stock's words
+  // from each other ("KODAK  GC 400", "GC 400  KODAK").
+  const brandGap = (element.brandGap ?? element.wordSpace ?? 0.6) * capPx * xScale;
+  const words = chars.join('').split(' ');
+  const firstSpace = brand && words[0] === brand ? chars.indexOf(' ') : -1;
+  const lastSpace = brand && words.length > 1 && words[words.length - 1] === brand ? chars.lastIndexOf(' ') : -1;
+  const pad = markingPad(metrics);
+  // Characters set at a fixed pitch along the film (Fomapan's speed and
+  // batch digits, one every so many perforations), left edge to left edge.
+  const charPitch = element.pitchPerf ? element.pitchPerf * metrics.pitch : 0;
+  deferStyledMarking(function* () {
+    const placed = [];
+    let pen = 0;
+    for (let i = 0; i < chars.length; i++) {
+      const char = chars[i];
+      if (charPitch) pen = i * charPitch;
+      if (char === ' ') { if (!charPitch) pen += (i === firstSpace || i === lastSpace ? brandGap : wordGap) - tracking; continue; }
+      const widthScale = (/[0-9]/.test(char) ? digitScale : (element.letterWidth ?? 1)) * xScale;
+      const key = `${set}\0${char}\0${capPx.toFixed(3)}\0${element.stroke}\0${widthScale.toFixed(4)}`;
+      let glyph = cache.get(key);
+      if (!glyph) {
+        glyph = rasterizeEdgeGlyph(set, char, { capPx, stroke: element.stroke, widthScale });
+        cache.set(key, glyph);
+        yield;
+      }
+      placed.push([Math.round(pen), glyph]);
+      pen += glyph.advance + tracking;
+    }
+    if (!placed.length) return null;
+    const left = Math.round(x) - 1 - pad, maskTop = Math.round(top) - 1 - pad;
+    const width = Math.ceil(pen) + 2 + pad * 2, height = Math.ceil(capPx) + 2 + pad * 2;
+    const mask = new Float32Array(width * height);
+    for (const [offset, glyph] of placed) {
+      for (let y = 0; y < glyph.height; y++) {
+        const row = (y + pad) * width + offset + pad, src = y * glyph.width;
+        for (let gx = 0; gx < glyph.width; gx++) {
+          const v = glyph.mask[src + gx];
+          if (v > mask[row + gx]) mask[row + gx] = v;
+        }
+      }
+    }
+    return [data, metrics, mask, width, height, left, maskTop, fill];
+  });
+}
+
+function styledShape(data, metrics, element, x, fill, draw, widthUnits) {
+  const { top, height } = styledBand(metrics, element);
+  if (height < 1) return;
+  const pad = markingPad(metrics);
+  deferStyledMarking(function* () {
+    const shape = rasterizeEdgeShape(draw, widthUnits, { capPx: height, stroke: element.stroke ?? 0.14 });
+    yield;
+    const width = shape.width + pad * 2, maskHeight = shape.height + pad * 2;
+    const mask = new Float32Array(width * maskHeight);
+    for (let y = 0; y < shape.height; y++) mask.set(shape.mask.subarray(y * shape.width, (y + 1) * shape.width), (y + pad) * width + pad);
+    return [data, metrics, mask, width, maskHeight, Math.round(x) - 1 - pad, Math.round(top) - 1 - pad, fill];
+  });
+}
+
+function styledDx(data, metrics, edge, style, x, frameNumber, half) {
+  const geometry = style.dxGeometry;
+  const modulePitch = Math.max(1, geometry.moduleMm * metrics.imagePxPerMmX);
+  const blockHeight = Math.max(1, geometry.rowMm * metrics.filmEdgePxPerMmY);
+  const top = metrics.outputHeight - blockHeight * 2;
+  // On film the bars of neighbouring modules run together into solid blocks.
+  paintDxSequence(data, metrics, edge, x, top, modulePitch, modulePitch * (geometry.barFill ?? 1.02), blockHeight, blockHeight, half, frameNumber);
+}
+
+function paintStyledEdgeMarkings(data, metrics, edge, style) {
+  const fill = edge.letteringColor;
+  const sX = metrics.imagePxPerMmX, pitch = metrics.pitch;
+  if (style.inkDensity) metrics.styleInkDensity = style.inkDensity;
+  // On a strip each frame carries its own number; a film that numbers
+  // itself more often than once a frame (Fomapan) counts on along the film
+  // from the strip's first picture, whatever the camera's frames.
+  const slots = !metrics.filmFrames
+    ? styledFrameSlots(metrics, edge, style)
+    : style.numberEvery
+      ? styledFrameSlots(metrics, { frameNumber: metrics.filmFrames[1].number }, style)
+      : metrics.filmFrames.map((frame) => ({ x: frame.x + style.anchorPerf * metrics.pitch, number: clampInt(frame.number, 0, 99) }));
+  const cache = new Map();
+  const halfMarks = edge.frameNumberEnabled && edge.halfFrameMarksEnabled;
+  for (const slot of slots) {
+    for (const element of style.elements) {
+      const x = slot.x + element.at * pitch;
+      // Nothing a style prints is longer than 30 mm.
+      if (x > metrics.outputWidth || x < -30 * sX) continue;
+      // A marking printed every other frame.
+      if (element.parity && (Math.abs(slot.number) % 2 === 0) !== (element.parity === 'even')) continue;
+      if (!isOnRepeat(element, slot)) continue;
+      switch (element.kind) {
+        case 'number':
+          if (edge.frameNumberEnabled) styledText(data, metrics, edge, element, String(slot.number), x, fill, cache);
+          break;
+        case 'halfNumber':
+          if (halfMarks) styledText(data, metrics, edge, element, `${slot.number}A`, x, fill, cache);
+          break;
+        case 'code': {
+          // An emulsion code printed with the text, when the style knows it for this text.
+          const code = style.codes?.[String(edge.text).trim().toUpperCase()];
+          if (edge.textEnabled && code) styledText(data, metrics, edge, element, textWords(code, element), x, fill, cache);
+          break;
+        }
+        case 'stripes': {
+          // Coloured lines along the perforation rows (Fujicolor), by stock.
+          // They are brand marks: shown with the text switch.
+          const stripes = edge.textEnabled ? style.stripes?.[String(edge.text).trim().toUpperCase()] || [] : [];
+          const sY = metrics.filmEdgePxPerMmY;
+          for (const stripe of stripes) {
+            const rects = [];
+            for (const row of stripe.rows) {
+              const middle = (row === 'top' ? metrics.topY : metrics.bottomY) + metrics.holeHeight / 2;
+              const centre = middle + (row === 'top' ? 1 : -1) * stripe.offsetMm * sY;
+              const height = Math.max(1, stripe.widthMm * sY);
+              for (let k = 0; k * stripe.period < 8; k++) {
+                const a = slot.x + (stripe.on[0] + k * stripe.period) * pitch, b = slot.x + (stripe.on[1] + k * stripe.period) * pitch;
+                if (b < 0 || a > metrics.outputWidth) continue;
+                rects.push([a, centre - height / 2, b - a, height]);
+              }
+            }
+            paintMarkingRectangles(data, metrics, rects, sanitizeColor(stripe.color, fill));
+          }
+          break;
+        }
+        case 'keyNumber': {
+          // Kodak's KeyKode key number: the roll's prefix (the text), a count
+          // that goes up by one every cycle, then the element's suffix
+          // ("•", "+32 •"). A brand print: shown with the text switch.
+          if (!edge.textEnabled || !String(edge.text || '').trim()) break;
+          const base = style.keyCounts?.[String(edge.text).trim().toUpperCase()] ?? 0;
+          const count = String(((base + (slot.count ?? slot.number)) % 10000 + 10000) % 10000).padStart(4, '0');
+          styledText(data, metrics, edge, element, `${String(edge.text).trim()} ${count}${element.suffix || ''}`, x, fill, cache);
+          break;
+        }
+        case 'barcode': {
+          // A machine-readable bar code beside the key number, drawn with
+          // the DX switch: bars and spaces of one to four modules from a
+          // pattern seeded by the text and count (not a decodable code).
+          if (!edge.dxEnabled) break;
+          const { top, height } = styledBand(metrics, element);
+          const modules = element.modules ?? 123, length = element.lengthPerf * pitch, unit = length / modules;
+          let seed = 2166136261;
+          for (const ch of `${edge.text}|${slot.count ?? slot.number}|${element.at}`) seed = Math.imul(seed ^ ch.charCodeAt(0), 16777619);
+          const rects = [];
+          let m = 0, bar = true;
+          while (m < modules) {
+            seed = Math.imul(seed ^ (seed >>> 15), 2246822519) >>> 0;
+            const width = Math.min(modules - m, 1 + (seed % 4));
+            if (bar) rects.push([x + m * unit, top, width * unit, height]);
+            m += width; bar = !bar;
+          }
+          paintMarkingRectangles(data, metrics, rects, fill);
+          break;
+        }
+        case 'dash': {
+          // Kodak's frame-index hyphen.
+          if (!edge.frameNumberEnabled) break;
+          const { top, height } = styledBand(metrics, element);
+          paintMarkingRectangles(data, metrics, [[x, top, element.lengthMm * sX, Math.max(1, height)]], fill);
+          break;
+        }
+        case 'label':
+          if (element.always ? edge.textEnabled : halfMarks) styledText(data, metrics, edge, element, element.value, x, fill, cache);
+          break;
+        case 'text':
+          if (edge.textEnabled) styledText(data, metrics, edge, element, textWords(edgeTextForFrame(style, edge.text, slot.number), element), x, fill, cache, style.brand);
+          break;
+        case 'dx':
+          if (edge.dxEnabled) styledDx(data, metrics, edge, style, x, slot.number, element.half);
+          break;
+        case 'arrow': {
+          if (!halfMarks) break;
+          // Kodak: a thin shaft and a solid head, pointing to the higher numbers.
+          const { top, height } = styledBand(metrics, element);
+          const length = element.lengthMm * sX, head = Math.min(length, element.headMm * sX);
+          const shaft = Math.max(1, element.shaftMm * metrics.filmEdgePxPerMmY);
+          const middle = top + height / 2;
+          paintMarkingRectangles(data, metrics, [[x, middle - shaft / 2, length - head * 0.9, shaft]], fill);
+          paintExposedTriangle(data, metrics, { x: x + length - head, y: top }, { x: x + length, y: middle }, { x: x + length - head, y: top + height }, fill);
+          break;
+        }
+        case 'triangle': {
+          if (!halfMarks) break;
+          // Ilford: a solid triangle pointing to the higher numbers.
+          const { top, height } = styledBand(metrics, element);
+          const length = element.lengthMm * sX;
+          paintExposedTriangle(data, metrics, { x, y: top }, { x: x + length, y: top + height / 2 }, { x, y: top + height }, fill);
+          // AgfaPhoto APX: a thin needle runs on from the tip.
+          if (element.needleMm) {
+            const needle = Math.max(1, element.needleWidthMm * metrics.filmEdgePxPerMmY);
+            paintMarkingRectangles(data, metrics, [[x + length * 0.8, top + height / 2 - needle / 2, length * 0.2 + element.needleMm * sX, needle]], fill);
+          }
+          break;
+        }
+        case 'outlineArrow': {
+          if (!halfMarks) break;
+          const { height } = styledBand(metrics, element);
+          if (height >= 1) styledShape(data, metrics, element, x, fill, fujiOutlineArrow, element.lengthMm * sX / height);
+          break;
+        }
+        default:
+          break;
+      }
+    }
+  }
+}
+
 function paintEdgeMarkings(data, metrics, edge) {
+  // A brand style draws its own layout; custom (and every setting saved
+  // before styles existed) draws the markings below, unchanged.
+  const style = edgeMarkingStyle(edge.style === EDGE_STYLE_AUTO ? EDGE_STYLE_PLAIN : edge.style);
+  if (style) {
+    paintStyledEdgeMarkings(data, metrics, edge, style);
+    return;
+  }
   if (edge.textEnabled) paintPhotoText(data, metrics, edge);
   if (edge.dxEnabled) paintDxEdgeCode(data, metrics, edge);
   if (edge.frameNumberEnabled) paintFrameNumberMarker(data, metrics, edge);
@@ -1216,7 +1553,13 @@ function* createSprocketFrameSteps(imageData, options = {}, { includePhoto = tru
     deferredMarkings = null;
   }
   for (const marking of markings) {
-    yield* compositeMarkingMaskSteps(...marking);
+    if (Array.isArray(marking)) {
+      yield* compositeMarkingMaskSteps(...marking);
+    } else {
+      // A styled marking builds its mask in steps too (one glyph per step).
+      const args = yield* marking.build();
+      if (args) yield* compositeMarkingMaskSteps(...args);
+    }
     yield;
   }
   // バーコードは孔の外に隔離せず外縁まで印字し、打ち抜き部分を最後に抜く。
@@ -1318,6 +1661,187 @@ export async function composeSprocketFrameAsync(imageData, options = {}, { budge
       sliceStart = performance.now();
     }
   }
+}
+
+// ---- Film strips (contact sheets) ----------------------------------------
+//
+// A cut strip of a 135 roll: several pictures on one continuous film, the
+// perforations running through from end to end, the edge markings repeating
+// with the frames and each frame carrying its own number. Pictures sit in
+// 36 × 24 mm windows eight perforations (38 mm) apart, so 2 mm of film
+// between them and half of that at each cut; half-frame pictures in
+// 18 × 24 mm windows four perforations (19 mm) apart. The film's own
+// printing does not change with the camera: on a half-frame strip the
+// numbers still come every eight perforations, "nA" between them.
+
+/** Window and pitch of a strip whose pictures are `windowHeight` pixels (24 mm) tall. */
+export function filmStripGeometry(count, { windowHeight, halfFrame = false } = {}) {
+  const height = Math.max(8, Math.round(Number(windowHeight) || 0));
+  const pxPerMm = height / THIRTY_FIVE_MM_SPROCKET_SPEC.stillFrameHeightMm;
+  const probe = getSprocketFrameMetrics(Math.round(height * 1.5), height, { edgeMarkings: { textEnabled: true } });
+  const perforations = halfFrame ? 4 : 8;
+  const framePitch = perforations * probe.pitch;
+  const windowWidth = Math.round((halfFrame ? 18 : 36) * pxPerMm);
+  const frames = Math.max(1, Math.round(count) || 1);
+  return { pxPerMm, pitch: probe.pitch, perforations, framePitch, windowWidth, windowHeight: height, frames, interiorWidth: (frames - 1) * framePitch + windowWidth };
+}
+
+function filmStripMetrics(geometry, edge) {
+  const metrics = getSprocketFrameMetrics(geometry.interiorWidth, geometry.windowHeight, { edgeMarkings: edge });
+  // The cut falls in the middle of the film between two frames.
+  metrics.sideMargin = Math.max(1, Math.round((geometry.framePitch - geometry.windowWidth) / 2));
+  metrics.outputWidth = metrics.sourceWidth + metrics.sideMargin * 2;
+  const span = (geometry.perforations - 1) * metrics.pitch + metrics.holeWidth;
+  metrics.frameStartX = metrics.sideMargin + Math.round((geometry.windowWidth - span) / 2 + edge.firstHoleOffsetMm * metrics.imagePxPerMmX);
+  metrics.firstHoleIndex = Math.floor((0 - metrics.frameStartX - metrics.holeWidth) / metrics.pitch);
+  const lastHoleIndex = Math.ceil((metrics.outputWidth - metrics.frameStartX) / metrics.pitch);
+  metrics.holeCount = Math.max(0, lastHoleIndex - metrics.firstHoleIndex + 1);
+  metrics.startX = metrics.frameStartX + metrics.firstHoleIndex * metrics.pitch;
+  return metrics;
+}
+
+// Bilinear resampling of a picture to width × height.
+function* resampleImageDataSteps(source, width, height) {
+  if (source.width === width && source.height === height) return source;
+  const src = source.data, sw = source.width, sh = source.height;
+  const out = new Uint8ClampedArray(width * height * 4);
+  const sx = sw / width, sy = sh / height;
+  for (let y = 0; y < height; y++) {
+    const fy = Math.min(sh - 1, Math.max(0, (y + 0.5) * sy - 0.5));
+    const y0 = Math.floor(fy), y1 = Math.min(sh - 1, y0 + 1), ty = fy - y0;
+    for (let x = 0; x < width; x++) {
+      const fx = Math.min(sw - 1, Math.max(0, (x + 0.5) * sx - 0.5));
+      const x0 = Math.floor(fx), x1 = Math.min(sw - 1, x0 + 1), tx = fx - x0;
+      const a = (y0 * sw + x0) * 4, b = (y0 * sw + x1) * 4, c = (y1 * sw + x0) * 4, d = (y1 * sw + x1) * 4, o = (y * width + x) * 4;
+      for (let k = 0; k < 4; k++) {
+        out[o + k] = (src[a + k] * (1 - tx) + src[b + k] * tx) * (1 - ty) + (src[c + k] * (1 - tx) + src[d + k] * tx) * ty;
+      }
+    }
+    if ((y & 31) === 31) yield;
+  }
+  return new ImageData(out, width, height);
+}
+
+/**
+ * Where each picture goes: turned a quarter clockwise when its orientation
+ * differs from the window's (a portrait photo in a 36 × 24 window, a
+ * landscape one in a half-frame window), then fitted inside the window,
+ * centred, never stretched or cropped. Pure: { rotate, x, y, width, height }
+ * relative to the window.
+ */
+export function fitPictureInWindow(pictureWidth, pictureHeight, windowWidth, windowHeight) {
+  const windowPortrait = windowHeight > windowWidth;
+  const rotate = pictureWidth !== pictureHeight && (pictureHeight > pictureWidth) !== windowPortrait;
+  const w = rotate ? pictureHeight : pictureWidth, h = rotate ? pictureWidth : pictureHeight;
+  const scale = Math.min(windowWidth / w, windowHeight / h);
+  const width = Math.max(1, Math.min(windowWidth, Math.round(w * scale)));
+  const height = Math.max(1, Math.min(windowHeight, Math.round(h * scale)));
+  return { rotate, x: Math.floor((windowWidth - width) / 2), y: Math.floor((windowHeight - height) / 2), width, height };
+}
+
+function* createFilmStripSteps(pictures, options = {}) {
+  if (!Array.isArray(pictures) || !pictures.length) throw new Error('A film strip needs at least one picture.');
+  const edge = getComposeEdgeMarkings(options);
+  const halfFrame = Boolean(options.halfFrame);
+  const geometry = filmStripGeometry(pictures.length, { windowHeight: options.windowHeight, halfFrame });
+  const metrics = filmStripMetrics(geometry, edge);
+  metrics.edgeOverexposureStrength = edge.overexposureStrength;
+  metrics.edgeOverexposed = edge.overexposedSprockets;
+  // The film's frames: one per eight perforations, numbered by the picture
+  // that starts it, plus one beyond each cut so the printing runs on.
+  const step = halfFrame ? 2 : 1;
+  const holeOf = (i) => metrics.frameStartX + i * geometry.framePitch;
+  const frames = [];
+  for (let i = 0; i < pictures.length; i += step) frames.push({ x: holeOf(i), number: clampInt(pictures[i].number, 0, 99) });
+  const filmPitch = 8 * metrics.pitch;
+  frames.unshift({ x: frames[0].x - filmPitch, number: Math.max(0, frames[0].number - 1) });
+  frames.push({ x: frames[frames.length - 1].x + filmPitch, number: Math.min(99, frames[frames.length - 1].number + 1) });
+  metrics.filmFrames = frames;
+
+  const filmColor = sanitizeColor(options.filmColor, DEFAULT_FILM_COLOR);
+  const holeColor = options.transparentHoles === true
+    ? [0, 0, 0, 0]
+    : sanitizeColor(options.holeColor ?? edge.holeColor, DEFAULT_HOLE_COLOR);
+
+  // The pictures, turned and fitted into their windows, on one sheet the size
+  // of the strip's picture band (the smear of overexposed perforations reads it).
+  const band = new Uint8ClampedArray(metrics.sourceWidth * metrics.sourceHeight * 4);
+  const placed = [];
+  for (let i = 0; i < pictures.length; i++) {
+    const source = pictures[i].imageData;
+    if (!source?.data) continue;
+    const fit = fitPictureInWindow(source.width, source.height, geometry.windowWidth, geometry.windowHeight);
+    let picture = source;
+    if (fit.rotate) picture = yield* rotateImageData90Steps(picture);
+    picture = yield* resampleImageDataSteps(picture, fit.width, fit.height);
+    const left = i * geometry.framePitch + fit.x, top = fit.y;
+    for (let y = 0; y < fit.height; y++) band.set(picture.data.subarray(y * fit.width * 4, (y + 1) * fit.width * 4), ((top + y) * metrics.sourceWidth + left) * 4);
+    placed.push({ left, top, width: fit.width, height: fit.height });
+    yield;
+  }
+  const bandImage = new ImageData(band, metrics.sourceWidth, metrics.sourceHeight);
+
+  const output = new Uint8ClampedArray(metrics.outputWidth * metrics.outputHeight * 4);
+  yield* fillFilmBaseSteps(output, metrics, filmColor, [{ left: metrics.sideMargin, width: metrics.sourceWidth }]);
+  if (edge.overexposedSprockets) {
+    yield* paintSprocketTextureSmearSteps(output, metrics, bandImage, edge.overexposureStrength);
+    yield* paintOverexposedSprocketsSteps(output, metrics, edge.overexposureColor);
+  }
+  const markings = [];
+  deferredMarkings = markings;
+  try {
+    paintEdgeMarkings(output, metrics, edge);
+  } finally {
+    deferredMarkings = null;
+  }
+  for (const marking of markings) {
+    if (Array.isArray(marking)) {
+      yield* compositeMarkingMaskSteps(...marking);
+    } else {
+      const args = yield* marking.build();
+      if (args) yield* compositeMarkingMaskSteps(...args);
+    }
+    yield;
+  }
+  yield* paintSprocketRowsSteps(output, metrics, holeColor);
+  // Hard guardrail as for one photo: the pictures go in last, untouched.
+  for (const rect of placed) {
+    for (let y = 0; y < rect.height; y++) {
+      const from = ((rect.top + y) * metrics.sourceWidth + rect.left) * 4;
+      output.set(band.subarray(from, from + rect.width * 4), ((metrics.bandHeight + rect.top + y) * metrics.outputWidth + metrics.sideMargin + rect.left) * 4);
+    }
+    yield;
+  }
+  const strip = new ImageData(output, metrics.outputWidth, metrics.outputHeight);
+  strip.windows = placed.map((rect) => ({ x: metrics.sideMargin + rect.left, y: metrics.bandHeight + rect.top, width: rect.width, height: rect.height }));
+  strip.pitch = metrics.pitch;
+  strip.frameStartX = metrics.frameStartX;
+  return strip;
+}
+
+/**
+ * A strip of `pictures` ([{ imageData, number }]) on one film, with the edge
+ * markings of `options.edgeMarkings` (a brand style or the custom markings),
+ * the perforations continuous and each frame's own number. `windowHeight`
+ * is the pictures' height in pixels (24 mm); `halfFrame` for 18 × 24 mm
+ * pictures four perforations apart. Composed in slices like an export.
+ * The ImageData carries `windows` (each picture's rectangle) and `pitch`.
+ */
+export async function composeFilmStripAsync(pictures, options = {}, { budgetMs = 12, pause = pauseForPage } = {}) {
+  const steps = createFilmStripSteps(pictures, options);
+  let sliceStart = performance.now();
+  for (;;) {
+    const step = steps.next();
+    if (step.done) return step.value;
+    if (performance.now() - sliceStart >= budgetMs) {
+      await pause();
+      sliceStart = performance.now();
+    }
+  }
+}
+
+export function composeFilmStrip(pictures, options = {}) {
+  return runSteps(createFilmStripSteps(pictures, options));
 }
 
 function pauseForPage() {
