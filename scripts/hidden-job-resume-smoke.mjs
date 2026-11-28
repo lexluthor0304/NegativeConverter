@@ -22,6 +22,7 @@ const UTIF = require('utif');
 const ready = `document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy`;
 const MARKER_KEY = 'nc_job_marker_export_v1';
 const EDGE_TEXT = 'SMOKE 400';
+const EDGE_STYLE = 'ilford';
 
 // The small fixtures with dust: dark and bright specks a few pixels wide at
 // fixed places, so the export's dust removal has work to do.
@@ -163,6 +164,10 @@ export async function runHiddenJobResumeSmoke({ send, evaluate, waitFor, wait, f
     if (!/^Detected [1-9][0-9]* dust particles/.test(status)) fail('the dusty fixture must have dust to remove: ' + status);
     await evaluate(`(() => {
       const check = id => { const el = document.getElementById(id); if (!el.checked) el.click(); };
+      // A brand edge style other than the default, which the job must keep.
+      const style = document.getElementById('sprocketStyleSelect');
+      style.value = '${EDGE_STYLE}';
+      style.dispatchEvent(new Event('change', { bubbles: true }));
       check('sprocketTextEnabledInput');
       check('sprocketDxEnabledInput');
       const text = document.getElementById('sprocketTextInput');
@@ -177,7 +182,8 @@ export async function runHiddenJobResumeSmoke({ send, evaluate, waitFor, wait, f
       && document.querySelector('.bitdepth-btn.active')?.dataset.bitdepth === '16'
       && document.getElementById('exportSprocketBtn').classList.contains('active')
       && document.getElementById('dustRemovalEnabled').checked && !document.getElementById('dustAiEnabled').checked
-      && document.getElementById('sprocketTextInput').value === '${EDGE_TEXT}'`, 60_000);
+      && document.getElementById('sprocketTextInput').value === '${EDGE_TEXT}'
+      && document.getElementById('sprocketStyleSelect').value === '${EDGE_STYLE}'`, 60_000);
   };
   // The controls a reload leaves, which a resume must not change.
   const controls = () => evaluate(`({ format: document.querySelector('.format-btn.active')?.dataset.format,
@@ -189,7 +195,7 @@ export async function runHiddenJobResumeSmoke({ send, evaluate, waitFor, wait, f
     if (!marker || marker.v !== 2 || marker.kind !== kind || marker.written?.length !== 1 || marker.files?.length !== 3) fail(`the ${kind} marker did not record its first frame: ${text}`);
     const options = marker.options || {};
     if (options.dustRemoval?.enabled !== true || options.dustRemoval?.ai !== false || options.sprocket !== true
-      || options.sprocketEdge?.text !== EDGE_TEXT || marker.exportInfo?.format !== 'tiff' || marker.exportInfo?.bitDepth !== 16) {
+      || options.sprocketEdge?.text !== EDGE_TEXT || options.sprocketEdge?.style !== EDGE_STYLE || marker.exportInfo?.format !== 'tiff' || marker.exportInfo?.bitDepth !== 16) {
       fail(`the ${kind} marker lacks the job's options: ` + JSON.stringify({ exportInfo: marker.exportInfo, options }));
     }
     return marker;

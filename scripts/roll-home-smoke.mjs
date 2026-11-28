@@ -6,7 +6,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { parseTiff, TIFF_TAGS, EXIF_TAGS } from '../negative2positive/src/workers/tiffWriter.js';
 import { listPngChunks, listJpegSegments } from '../negative2positive/src/app/exportMetadata.js';
-import { layoutContactSheet } from '../negative2positive/src/app/contactSheet.js';
+import { contactSheetFrameTarget } from '../negative2positive/src/app/contactSheet.js';
 
 const ready = `document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy`;
 
@@ -235,9 +235,8 @@ async function watchContactSheetWork(evaluate) {
   })()`);
 }
 
-async function checkContactSheetWork(evaluate, fail, { pageId, layoutId }) {
-  const cell = layoutContactSheet({ pageId, layoutId, count: 1 }).cells[0].frame;
-  const target = Math.max(cell.width, cell.height) * 2;
+async function checkContactSheetWork(evaluate, fail, { pageId, layoutId, strips }) {
+  const { target } = contactSheetFrameTarget({ pageId, layoutId, strips });
   const work = await evaluate(`(() => {
     window.Worker = window.__nativeWorker;
     const marks = performance.getEntriesByType('mark').filter((m) => m.name.startsWith('nc:processFileWithSettings:'));
@@ -273,13 +272,13 @@ async function runContactSheetScenario({ evaluate, waitFor, wait, fail }) {
   if (size.width !== 2480 || size.height !== 3508) fail('contact sheet is not A4 at 300 dpi: ' + JSON.stringify(size));
   const chunks = listPngChunks(sheet.bytes);
   if (!/AnalogExif:Film>[^<]*ULTRA MAX/i.test(new TextDecoder().decode(chunks.find((c) => c.type === 'iTXt')?.data || new Uint8Array()))) fail('contact sheet carries no roll XMP');
-  await checkContactSheetWork(evaluate, fail, { pageId: 'a4', layoutId: '35mm' });
+  await checkContactSheetWork(evaluate, fail, { pageId: 'a4', layoutId: '35mm', strips: true });
   await watchContactSheetWork(evaluate);
   await evaluate(`(() => { document.getElementById('contactSheetPage').value = 'letter'; document.getElementById('contactSheetSprockets').checked = false; document.getElementById('exportContactSheetBtn').click(); })()`);
   const letter = await takeDownload(evaluate, waitFor, 'letter contact sheet captured');
   const letterSize = pngSize(letter.bytes);
   if (letterSize.width !== 2550 || letterSize.height !== 3300) fail('Letter contact sheet has the wrong size: ' + JSON.stringify(letterSize));
-  await checkContactSheetWork(evaluate, fail, { pageId: 'letter', layoutId: '35mm' });
+  await checkContactSheetWork(evaluate, fail, { pageId: 'letter', layoutId: '35mm', strips: false });
   await wait(300);
   console.log('ok: the contact sheet renders the selection at A4 and Letter 300 dpi with the roll header and XMP');
 }

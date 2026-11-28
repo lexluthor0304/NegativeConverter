@@ -215,9 +215,9 @@ export async function runHiddenJobSmoke({ send, evaluate, waitFor, wait, fail, i
     await evaluate(`(() => {
       ${removeDesktopStub.toString()}; removeDesktopStub();
       window.__ncHiddenJobs.forgetFrameSettings(2);
-      const p = window.__hjSheet = { names: [], anchor: HTMLAnchorElement.prototype.click };
+      const p = window.__hjSheet = { names: [], blobs: [], anchor: HTMLAnchorElement.prototype.click };
       HTMLAnchorElement.prototype.click = function (...args) {
-        if (this.download && this.href.startsWith('blob:')) { p.names.push(this.download); return; }
+        if (this.download && this.href.startsWith('blob:')) { p.names.push(this.download); p.blobs.push(fetch(this.href).then(r => r.blob())); return; }
         return p.anchor.apply(this, args);
       };
       document.getElementById('exportContactSheetBtn').click();
@@ -225,7 +225,32 @@ export async function runHiddenJobSmoke({ send, evaluate, waitFor, wait, fail, i
     await waitFor('hidden contact sheet saved', `window.__hjSheet.names.length === 1`, 180_000);
     const sheet = await evaluate(`(() => { const p = window.__hjSheet; HTMLAnchorElement.prototype.click = p.anchor; return p.names; })()`);
     if (!/^contact-sheet-.*\.png$/.test(sheet[0])) fail('contact sheet name wrong: ' + sheet[0]);
-    console.log('ok: a 3-frame contact sheet completes in a hidden page without rAF');
+    // By default a 35 mm sheet is the roll cut into strips: the three frames
+    // lie on one film whose perforations run on, one pitch apart, across the
+    // gaps between the pictures.
+    const strip = await evaluate(`(async () => {
+      const { layoutContactSheetStrips } = await import('/src/app/contactSheet.js');
+      const blob = await window.__hjSheet.blobs[0];
+      const bitmap = await createImageBitmap(blob);
+      const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(bitmap, 0, 0);
+      const sheet = layoutContactSheetStrips({ pageId: 'a4', layoutId: '35mm', count: 3 });
+      const box = sheet.strips[0];
+      const y = Math.round(box.y + 3.4 * sheet.scale);
+      const row = ctx.getImageData(box.x, y, box.width, 1).data;
+      const lefts = [];
+      for (let x = 1; x < box.width; x++) {
+        const bright = row[x * 4] > 200 && row[x * 4 + 1] > 200 && row[x * 4 + 2] > 200;
+        const before = row[x * 4 - 4] > 200 && row[x * 4 - 3] > 200 && row[x * 4 - 2] > 200;
+        if (bright && !before) lefts.push(x);
+      }
+      const gaps = lefts.slice(1).map((x, i) => x - lefts[i]);
+      return { strips: sheet.strips.length, frames: box.indices.length, holes: lefts.length, pitch: 4.75 * sheet.scale, gaps };
+    })()`);
+    console.log('hidden contact sheet strip:', JSON.stringify({ ...strip, gaps: undefined, minGap: Math.min(...strip.gaps), maxGap: Math.max(...strip.gaps) }));
+    if (strip.strips !== 1 || strip.frames !== 3 || strip.holes < 23 || strip.gaps.some(gap => Math.abs(gap - strip.pitch) > 2)) fail('the contact sheet is not one strip with continuous perforations: ' + JSON.stringify(strip));
+    console.log('ok: a 3-frame contact sheet completes in a hidden page without rAF, as one strip of film with continuous perforations');
   } finally {
     await evaluate(`(() => { window.__hjHidden?.restore(); ${removeDesktopStub.toString()}; removeDesktopStub(); })()`);
   }
