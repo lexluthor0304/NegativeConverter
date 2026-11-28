@@ -730,7 +730,8 @@ function exposeCode(v, stops) {
  */
 export function estimateDrcEffect(input, luts, inverted) {
   const { data, width, height } = input;
-  const sample = sampleDrcInput(data, width, height, { longSide: HINT_LONG_SIDE });
+  // Never finer than the frame itself (a tile, a test's small frame).
+  const sample = sampleDrcInput(data, width, height, { longSide: Math.min(HINT_LONG_SIDE, Math.max(width, height)) });
   const n = width * height;
   const stride = Math.max(1, Math.floor(n / HINT_SAMPLES));
   const idx = [];
