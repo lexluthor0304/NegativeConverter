@@ -12,7 +12,7 @@ import { readFileSync } from 'node:fs';
 const { encodeRecipe, decodeRecipe, RECIPE_KEYS } = await import('./recipes.js');
 const { pickStudioColors, STUDIO_COLOR_KEYS } = await import('./studioSettings.js');
 const { deepCopySanitizedSettings } = await import('./settingsSnapshot.js');
-const { createDrcSampler, drcHintWanted, drcAutoSettings, drcPlaneOf } = await import('./dynamicRangeHint.js');
+const { createDrcSampler, drcHintWanted, drcAutoSettings, drcPlaneOf, drcHintGain } = await import('./dynamicRangeHint.js');
 const drc = await import('../pipeline/dynamicRange.js');
 
 const DRC = { drcAmount: 45, drcDetail: 30, drcShadows: 70, drcHighlights: 55, drcLocalContrast: 20, drcSaturation: 80 };
@@ -71,23 +71,21 @@ const DRC = { drcAmount: 45, drcDetail: 30, drcShadows: 70, drcHighlights: 55, d
 }
 
 {
-  // The hint: offered when the compression brings back enough, never when the
-  // photo already uses it or the hint was dismissed there.
-  const estimate = { reduction: drc.DRC_HINT_THRESHOLD + 0.01, suggested: { ...drc.DRC_DEFAULTS, drcAmount: 30 } };
+  // The hint: offered when Auto would bring back enough (its measured
+  // benefit), never when the photo already uses it or it was dismissed there.
+  const estimate = { benefit: drc.DRC_HINT_THRESHOLD + 0.01, ends: { dark: { detail: 0.2 }, bright: { detail: 3 } }, suggested: { ...drc.DRC_DEFAULTS, drcAmount: 30 } };
   assert.equal(drcHintWanted({ drcAmount: 0, drcHintDismissed: false }, estimate), true);
-  assert.equal(drcHintWanted({ drcAmount: 0, drcHintDismissed: false }, { reduction: drc.DRC_HINT_THRESHOLD - 0.001 }), false);
+  assert.equal(drcHintWanted({ drcAmount: 0, drcHintDismissed: false }, { benefit: drc.DRC_HINT_THRESHOLD - 0.001 }), false);
   assert.equal(drcHintWanted({ drcAmount: 0, drcHintDismissed: true }, estimate), false);
   assert.equal(drcHintWanted({ drcAmount: 20, drcHintDismissed: false }, estimate), false);
   assert.equal(drcHintWanted({ drcAmount: 0 }, null), false);
   assert.deepEqual(drcAutoSettings(estimate), estimate.suggested);
   assert.equal(drcAutoSettings(null), null);
-  // Auto leans towards the end that was clipped more, and keeps the fine defaults.
-  const by = { 30: { shadows: 0.01, highlights: 0.02 }, 50: { shadows: 0, highlights: 0.01 }, 70: { shadows: 0, highlights: 0 } };
-  const auto = drc.suggestDrcSettings({ shadows: 0.02, highlights: 0.2 }, by);
-  assert.ok(auto.drcAmount >= 30 && auto.drcHighlights > 50 && auto.drcShadows < 50);
-  assert.equal(auto.drcDetail, 50);
-  assert.equal(auto.drcLocalContrast, 50);
-  assert.equal(auto.drcSaturation, 50);
+  assert.equal(drcAutoSettings({ benefit: 0, suggested: null }), null, 'nothing that helps: Auto leaves it off');
+  // The hint says what the user gains: the end whose detail comes back.
+  assert.equal(drcHintGain(estimate), 'bright');
+  assert.equal(drcHintGain({ ends: { dark: { detail: 4 }, bright: { detail: 0.5 } } }), 'dark');
+  assert.equal(drcHintGain({ ends: { dark: { detail: 2 }, bright: { detail: 1.5 } } }), 'both');
 }
 
 {

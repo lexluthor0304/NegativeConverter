@@ -11,7 +11,38 @@
 //    as the frame on screen;
 // 5. Amount 0 brings the frame back to the uncompressed one exactly.
 
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { crc32, deflateSync } from 'node:zlib';
+
 const ready = `document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy`;
+
+// The photo: three zones of a scene 9 stops apart (deep shadow, midtones, a
+// bright window), textured, as a neutral (B&W) negative.
+function drcNegativePng(width = 1500, height = 1000) {
+  const raw = Buffer.alloc((width * 6 + 1) * height);
+  const mask = [0.85, 0.85, 0.85];
+  for (let y = 0; y < height; y++) {
+    const row = y * (width * 6 + 1);
+    for (let x = 0; x < width; x++) {
+      const base = x < width / 3 ? 0.6 / 300 : x < 2 * width / 3 ? 0.6 / 18 : 0.6;
+      const scene = base * (1 + 0.25 * Math.sin(x / 5.3) * Math.sin(y / 6.1)) * (1 + 0.3 * Math.sin(y / 90));
+      for (let ch = 0; ch < 3; ch++) {
+        const t = mask[ch] * Math.min(1, Math.pow(scene / 0.18, -0.62) * 0.12);
+        raw.writeUInt16BE(Math.round(Math.pow(Math.min(1, t), 1 / 2.2) * 65535), row + 1 + x * 6 + ch * 2);
+      }
+    }
+  }
+  const chunk = (type, data) => {
+    const length = Buffer.alloc(4); length.writeUInt32BE(data.length);
+    const body = Buffer.concat([Buffer.from(type, 'latin1'), data]);
+    const crc = Buffer.alloc(4); crc.writeUInt32BE(crc32(body) >>> 0);
+    return Buffer.concat([length, body, crc]);
+  };
+  const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(width, 0); ihdr.writeUInt32BE(height, 4); ihdr[8] = 16; ihdr[9] = 2;
+  return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', ihdr), chunk('IDAT', deflateSync(raw, { level: 3 })), chunk('IEND', Buffer.alloc(0))]);
+}
 
 export async function runDynamicRangeSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port }) {
   // Without the automatic colour correction: its second, asynchronous
@@ -121,39 +152,31 @@ export async function runDynamicRangeSmoke({ send, evaluate, waitFor, wait, fail
       console.log('ok: the GPU preview draws the compression as the CPU chain does (8-bit display, at most one level):', JSON.stringify(parity.preview.cases));
     }
   }
-  await evaluate(`(async () => {
+  await evaluate(`(() => {
     const autoCrop = document.getElementById('studioImportAutoCrop');
     if (autoCrop.checked) autoCrop.click();
-    // A colour negative of a scene spanning about 9 stops.
-    const w = 1500, h = 1000, c = document.createElement('canvas'); c.width = w; c.height = h;
-    const ctx = c.getContext('2d'); const img = ctx.createImageData(w, h);
-    const mask = [0.92, 0.62, 0.42];
-    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
-      const base = x < 500 ? 0.6 / 300 : x < 1000 ? 0.6 / 18 : 0.6;
-      const scene = base * (1 + 0.25 * Math.sin(x / 5.3) * Math.sin(y / 6.1)) * (1 + 0.3 * Math.sin(y / 90));
-      for (let ch = 0; ch < 3; ch++) {
-        const t = mask[ch] * Math.min(1, Math.pow(scene * [1, 0.95, 0.85][ch] / 0.18, -0.62) * 0.12);
-        img.data[(y * w + x) * 4 + ch] = Math.round(Math.pow(Math.min(1, t), 1 / 2.2) * 255);
-      }
-      img.data[(y * w + x) * 4 + 3] = 255;
-    }
-    ctx.putImageData(img, 0, 0);
-    const blob = await new Promise(r => c.toBlob(r)); const dt = new DataTransfer();
-    dt.items.add(new File([blob], 'drc-contrast.png', { type: 'image/png' }));
-    const input = document.getElementById('fileInput'); input.files = dt.files;
-    input.dispatchEvent(new Event('change', { bubbles: true }));
   })()`);
+  // A negative of a scene spanning about 9 stops, as a 16-bit PNG (a
+  // scan's depth: the hint's measure reads the codes the curves see).
+  const dir = mkdtempSync(join(tmpdir(), 'nc-drc-'));
+  const photo = join(dir, 'drc-contrast.png');
+  writeFileSync(photo, drcNegativePng());
+  const doc = await send('DOM.getDocument');
+  const input = await send('DOM.querySelector', { nodeId: doc.result.root.nodeId, selector: '#fileInput' });
+  await send('DOM.setFileInputFiles', { files: [photo], nodeId: input.result.nodeId });
   await waitFor('drc: photo', `${ready} && document.getElementById('studioFilename').textContent === 'drc-contrast.png' && !!window.__ncDynamicRange.frame()`, 150_000);
 
   // 1. The hint.
   await waitFor('drc: hint', `!!document.querySelector('.toast-message[data-drc-hint]')`, 60_000);
   const offered = await evaluate(`({ estimate: window.__ncDynamicRange.estimate(), settings: window.__ncDynamicRange.settings(),
     fineDisabled: document.getElementById('drcFineControls').disabled, text: document.querySelector('.toast-message[data-drc-hint]').textContent })`);
-  if (!(offered.estimate?.reduction >= 0.08)) fail('the hint appeared without a large enough estimate: ' + JSON.stringify(offered));
+  // DRC_HINT_THRESHOLD is 6; the photo clears it by far (about 33 on this Mac).
+  if (!(offered.estimate?.benefit >= 6)) fail('the hint appeared without a large enough estimate: ' + JSON.stringify(offered));
+  if (!(offered.estimate.benefit >= 15)) console.log('WARN: the hint photo clears the threshold by little: ' + offered.estimate.benefit);
   if (offered.settings.drcAmount !== 0 || !offered.fineDisabled) fail('the compression must stay off and its fine controls greyed until asked for: ' + JSON.stringify(offered));
   await evaluate(`document.querySelector('[data-toast-action="drcHintDismiss"]').click()`);
   await waitFor('drc: dismissed', `window.__ncDynamicRange.settings().drcHintDismissed === true && !document.querySelector('.toast-message[data-drc-hint].toast-visible')`, 10_000);
-  console.log('ok: the hint offers dynamic range compression on a contrasty photo (estimate', offered.estimate.reduction.toFixed(3) + '), and "Not now" keeps it away');
+  console.log('ok: the hint offers dynamic range compression on a contrasty photo (benefit', offered.estimate.benefit.toFixed(2) + '), and "Not now" keeps it away');
 
   // 2. Auto.
   await wait(800);

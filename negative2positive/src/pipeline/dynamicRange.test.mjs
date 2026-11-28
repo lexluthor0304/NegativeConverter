@@ -347,7 +347,7 @@ function negativePlane(width, height, lumAt) {
   // Settings plumbing.
   assert.deepEqual(drc.normalizeDrcSettings({}), drc.DRC_DEFAULTS);
   assert.deepEqual(drc.sanitizeDrcParams({ drcAmount: '140', drcDetail: -3, drcShadows: 'x' }, { drcShadows: 61 }),
-    { drcAmount: 100, drcDetail: 0, drcShadows: 61, drcHighlights: 50, drcLocalContrast: 50, drcSaturation: 50 });
+    { drcAmount: 100, drcDetail: 0, drcShadows: 61, drcHighlights: 50, drcLocalContrast: 50, drcSaturation: 75 });
   assert.equal(drc.DRC_DEFAULTS.drcAmount, 0);
   // A compressed frame converts on the band pool too (its bands sum the sample, worker 0 solves).
   const image = new ImageData(new Uint8ClampedArray(1100 * 720 * 4), 1100, 720);
@@ -452,6 +452,34 @@ const same = (a, b) => Buffer.from(a.buffer, a.byteOffset, a.byteLength).equals(
   const bwOn = await convert(neg, W, H, { drcAmount: 70 }, undefined, 'bw');
   assert.ok(lum(bwOn.__image16.data, 40, 160, 140, 260) > lum(bwOff.__image16.data, 40, 160, 140, 260), 'a B&W negative\'s shadows are lifted');
 
+  // The fallback: without a GPU stage, with one that cannot start, and with
+  // one that fails part-way, the conversion gives the reference's pixels and
+  // says which path ran.
+  {
+    const settings = { drcAmount: 60 };
+    adapter.setDrcExposerFactory(null);
+    const reference = await convert(neg, W, H, settings, { forceFullProcess: true });
+    assert.equal(reference.__drcPath, 'reference', 'no GPU stage: the reference runs');
+    adapter.setDrcExposerFactory(() => ({ supported: false, reason: 'no WebGL2', dispose() {} }));
+    const unsupported = await convert(neg, W, H, settings, { forceFullProcess: true });
+    assert.equal(unsupported.__drcPath, 'reference');
+    assert.ok(same(unsupported.__image16.data, reference.__image16.data), 'an unsupported GPU stage: the reference\'s pixels');
+    adapter.setDrcExposerFactory(() => ({ supported: true, expose() { throw new Error('context lost'); }, dispose() {} }));
+    const thrown = await convert(neg, W, H, settings, { forceFullProcess: true });
+    assert.equal(thrown.__drcPath, 'reference');
+    assert.ok(same(thrown.__image16.data, reference.__image16.data), 'a GPU stage that fails before a band: the reference\'s pixels');
+    // A stage that finishes its bands with the reference itself (what the
+    // real one does after a failed band) reports both.
+    adapter.setDrcExposerFactory(() => ({ supported: true, expose(image16, map, method, options) {
+      drc.exposeDrcReference(image16, drc.buildDrcStage(map), method, options);
+      return { gpuTiles: 1, referenceTiles: 1 };
+    }, dispose() {} }));
+    const partial = await convert(neg, W, H, settings, { forceFullProcess: true });
+    assert.equal(partial.__drcPath, 'gpu+reference');
+    assert.ok(same(partial.__image16.data, reference.__image16.data));
+    adapter.setDrcExposerFactory(null);
+  }
+
   // The band pool (silverBands.convertInBands, the pool's steps in one
   // process) gives the full-resolution conversion's pixels exactly, in colour,
   // B&W and positive, with and without the editor's sample.
@@ -495,15 +523,99 @@ const same = (a, b) => Buffer.from(a.buffer, a.byteOffset, a.byteLength).equals(
     const clipped = (e) => e.base.shadows + e.base.highlights;
     close(clipped(named), clipped(alone), 0.06, 'inside the holder the picture reads as it does alone');
     assert.ok(clipped(whole) > clipped(named) + 0.2, `measured on the whole scan the holder counts as clipped (${clipped(whole)} vs ${clipped(named)})`);
-    assert.ok(named.reduction >= drc.DRC_HINT_THRESHOLD, `the hint is offered for the picture inside the holder (${named.reduction})`);
+    // The hint's measure reads the picture, not the holder, and the map is
+    // solved on the picture alone (on fewer cells than the picture alone has,
+    // so the two maps are not the same one).
+    assert.ok(named.benefit >= 0.5 * alone.benefit, `the benefit inside the holder is of the picture's order (${named.benefit} vs ${alone.benefit})`);
+    assert.equal(named.benefit >= drc.DRC_HINT_THRESHOLD, alone.benefit >= drc.DRC_HINT_THRESHOLD, 'the hint decision is the picture alone\'s');
+  }
+
+  // No crushed shadows or blown highlights: at the defaults (only Amount
+  // moved), a frame never gains near-black (luminance at most 1 %) or
+  // near-white (at least 99 %) area beyond a quarter of a percentage point.
+  // The scenes are the cases the method alone darkens or brightens into the
+  // ends: dark detail inside bright regions over a large dark mass (a backlit
+  // forest), a frame whose middle is already near black (night), and its
+  // mirror near white (snow, a bright sky over a small dark subject).
+  {
+    const SW = 600; const SH = 400;
+    const sceneNegative = (lum) => {
+      const data = new Uint16Array(SW * SH * 4);
+      const mask = [0.92, 0.62, 0.42];
+      for (let y = 0; y < SH; y++) for (let x = 0; x < SW; x++) {
+        const scene = lum(x, y);
+        const i = (y * SW + x) * 4;
+        for (let c = 0; c < 3; c++) data[i + c] = Math.round(Math.min(1, mask[c] * Math.min(1, (scene / 0.18) ** -0.6 * 0.12)) ** (1 / 2.2) * 65535);
+        data[i + 3] = 65535;
+      }
+      return data;
+    };
+    const texture = (x, y) => 1 + 0.35 * Math.sin(x / 3.1) * Math.sin(y / 4.3);
+    const scenes = {
+      'backlit forest': (x, y) => {
+        const bright = (x > 380 && y < 260) || (x > 120 && x < 200 && y > 120 && y < 200);
+        const detail = bright && Math.sin(x / 9) * Math.sin(y / 11) > 0.6;
+        return (bright ? (detail ? 0.25 : 2.5) : 0.015) * texture(x, y);
+      },
+      'night (middle near black)': (x, y) => (x < 360 ? 0.0015 : (y < 200 ? 0.8 : 0.08)) * texture(x, y),
+      'snow (middle near white)': (x, y) => (x < 380 ? 6 : (y < 200 ? 0.02 : 0.3)) * texture(x, y),
+      room: (x, y) => roomLum(x, y)
+    };
+    const ends = (data16) => {
+      let black = 0; let white = 0; const n = data16.length / 4;
+      for (let p = 0; p < n; p++) {
+        const Y = (0.2126 * data16[p * 4] + 0.7152 * data16[p * 4 + 1] + 0.0722 * data16[p * 4 + 2]) / 65535;
+        if (Y <= 0.01) black++; if (Y >= 0.99) white++;
+      }
+      return { black: 100 * black / n, white: 100 * white / n };
+    };
+    for (const [name, lum] of Object.entries(scenes)) {
+      const negative = sceneNegative(lum);
+      const off = ends((await convert(negative, SW, SH, {})).__image16.data);
+      for (const amount of [30, 50, 70, 100]) {
+        const on = ends((await convert(negative, SW, SH, { drcAmount: amount })).__image16.data);
+        assert.ok(on.black <= off.black + 0.25, `${name}, Amount ${amount}: no shadows crushed (${off.black.toFixed(2)} % -> ${on.black.toFixed(2)} %)`);
+        assert.ok(on.white <= off.white + 0.25, `${name}, Amount ${amount}: no highlights blown (${off.white.toFixed(2)} % -> ${on.white.toFixed(2)} %)`);
+      }
+    }
+  }
+  // The limit itself: never past the extreme, order kept, inward moves untouched.
+  {
+    const [low, mid, high] = [-4, -1.5, -0.5];
+    for (const g of [0.1, 0.5, 2, 6]) {
+      let last = -Infinity;
+      for (let h = -5; h <= 0; h += 0.01) {
+        const out = h + drc.drcLimitGain(g, h, low, mid, high);
+        // (A pixel already past the knee's end moves by a trace, under 0.02.)
+        assert.ok(out <= Math.max(high, h + 0.02), `up ${g} from ${h.toFixed(2)} stays below the high extreme`);
+        assert.ok(out >= last - 1e-9, 'pixels keep their order');
+        last = out;
+        const back = h + drc.drcLimitGain(-g, h, low, mid, high);
+        assert.ok(back >= Math.min(low, h - 0.02), `down ${g} from ${h.toFixed(2)} stays above the low extreme`);
+      }
+    }
+    assert.equal(drc.drcLimitGain(0.8, -3, low, mid, high), 0.8, 'towards the middle: unchanged');
+    assert.equal(drc.drcLimitGain(-0.5, -0.8, low, mid, high), -0.5, 'towards the middle from above: unchanged');
+    assert.ok(drc.drcLimitGain(0.3, -0.6, low, mid, high) < 0.05, 'a pixel near the high extreme is hardly moved outwards');
   }
 
   // The hint's estimate: the compression brings this frame's ends back.
   const est = await convert(neg, W, H, {}, { drcEstimate: true });
-  assert.ok(est.__drcEstimate && est.__drcEstimate.byAmount[50], 'the estimate comes with the frame');
+  assert.ok(est.__drcEstimate && Number.isFinite(est.__drcEstimate.benefit), 'the estimate comes with the frame');
   assert.ok(same(est.__image16.data, off.__image16.data), 'asking for the estimate changes no pixel');
   const sug = est.__drcEstimate.suggested;
-  assert.ok(sug.drcAmount > 0 && sug.drcDetail === 50, 'Auto sets an amount and keeps the fine defaults');
+  assert.ok(est.__drcEstimate.benefit >= drc.DRC_HINT_THRESHOLD, `the room scene gets the hint (${est.__drcEstimate.benefit})`);
+  assert.ok(sug && sug.drcAmount > 0 && sug.drcDetail === 50, 'Auto sets an amount and keeps Detail');
+  // Auto never leaves more near-black or near-white than the photo had.
+  const autoFrame = await convert(neg, W, H, sug);
+  const endsOf = (d) => { let b = 0; let w = 0; const n = d.length / 4; for (let p = 0; p < n; p++) { const Y = (0.2126 * d[p * 4] + 0.7152 * d[p * 4 + 1] + 0.0722 * d[p * 4 + 2]) / 65535; if (Y <= 0.01) b++; if (Y >= 0.99) w++; } return { b: 100 * b / n, w: 100 * w / n }; };
+  const e0 = endsOf(off.__image16.data); const e1 = endsOf(autoFrame.__image16.data);
+  assert.ok(e1.b <= e0.b + 0.25 && e1.w <= e0.w + 0.25, `Auto adds no clipped area (${JSON.stringify([e0, e1])})`);
+  // A flat, ordinary frame: no hint, and Auto leaves the compression off.
+  const flatNeg = new Uint16Array(W * H * 4);
+  for (let p = 0; p < W * H; p++) { const v = 0.5 + 0.08 * Math.sin(p / 7) * Math.sin(p / 1300); flatNeg[p * 4] = Math.round(v * 0.9 * 65535); flatNeg[p * 4 + 1] = Math.round(v * 0.7 * 65535); flatNeg[p * 4 + 2] = Math.round(v * 0.55 * 65535); flatNeg[p * 4 + 3] = 65535; }
+  const flatEst = (await convert(flatNeg, W, H, {}, { drcEstimate: true })).__drcEstimate;
+  assert.ok(flatEst.benefit < drc.DRC_HINT_THRESHOLD, `an ordinary frame gets no hint (${flatEst.benefit})`);
 }
 
 console.log('dynamicRange tests passed');

@@ -256,6 +256,8 @@ for (const failConversion of [false, true]) {
     // #248: a small frame is its own level and conversion preview.
     buildDisplayLevelInBands: async image => image, displayLevelFactor: () => 1, conversionTargetFor: image => image,
     maybeAutoWhiteBalance: noop, maybeAnalyzeExpiredRescue: noop,
+    // The dynamic range hint's estimate and warm-up run when the page is idle.
+    scheduleDrcHintEstimate: noop, scheduleDrcWarm: noop,
     extractCurrentSettings: () => ({ ...state }),
     syncBatchUIState: noop, revealBatchFileList: noop,
     updateStudioThumbnail: noop, scheduleFullUpdate: noop,
@@ -721,6 +723,7 @@ function prepareFixture({ itemSettings = null, detectFrame = true, learned = 0 }
     },
     applyProcessedImageToState: image => { state.processedImageData = image; },
     maybeAutoWhiteBalance: () => { item.isDirty = true; }, maybeAnalyzeExpiredRescue: noop,
+    scheduleDrcHintEstimate: noop, scheduleDrcWarm: noop,
     syncBatchUIState: noop, revealBatchFileList: noop, updatePreview: noop, updateStudioThumbnail: noop,
     scheduleFullUpdate: noop, hasFrameRepairs: () => false, scheduleDustDetection: () => log.push('dust'),
     isLargeImage: () => false, startFullResolutionRender: noop,
