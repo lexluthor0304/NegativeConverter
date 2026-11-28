@@ -105,37 +105,6 @@ const GROTESK = {
   ' ': [0.42, () => []]
 };
 
-// Ilford's HP5 Plus edge print (the 2018 scan, 39 px/mm): a heavy, wide
-// sans-serif. Round letters are wider than the bold set's (O 1.12 of the
-// cap height, D and R about 1.0), A is wide with its bar low, the 4 is closed
-// on a diagonal, the 5 has a flat top, a short stem and an open round bowl.
-// Drawn with a stroke of about a third of the cap height.
-const ILFORD = Object.fromEntries(Object.entries(GROTESK).map(([char, [width, draw]]) => [char, [char === ' ' ? width : width * 1.06, draw]]));
-Object.assign(ILFORD, {
-  A: [1.16, (w, t) => {
-    const T = t, B = 1 - t, y = 0.74;
-    const at = (v) => (w / 2 - t) * (v - T) / (B - T);
-    return [line(w / 2, T, t, B), line(w / 2, T, w - t, B), line(w / 2 - at(y), y, w / 2 + at(y), y)];
-  }],
-  D: [1.04, (w, t) => {
-    const l = t, r = w - t, T = t, B = 1 - t, j = w * 0.38;
-    return [line(l, T, l, B), line(l, T, j, T), line(l, B, j, B), arc(j, 0.5, r - j, 0.5 - t, 270, 450)];
-  }],
-  O: [1.12, (w, t) => [arc(w / 2, 0.5, w / 2 - t, 0.5 - t, 0, 360)]],
-  R: [1.0, (w, t) => {
-    const l = t, r = w - t, T = t, m = 0.56, j = w * 0.46;
-    return [line(l, T, l, 1 - t), line(l, T, j, T), line(l, m, j, m), arc(j, (T + m) / 2, r - j - 0.03, (m - T) / 2, 270, 450), line(j + 0.04, m, r, 1 - t)];
-  }],
-  P: [0.95, (w, t) => {
-    const l = t, r = w - t, T = t, m = 0.58, j = w * 0.46;
-    return [line(l, T, l, 1 - t), line(l, T, j, T), line(l, m, j, m), arc(j, (T + m) / 2, r - j, (m - T) / 2, 270, 450)];
-  }],
-  F: [0.84, (w, t) => [line(t, t, t, 1 - t), line(t, t, w - t, t), line(t, 0.52, w - t - 0.08, 0.52)]],
-  4: [0.86, (w, t) => [line(w * 0.66, t, w * 0.66, 1 - t), line(w * 0.66, t, t + 0.05, 0.66), line(t, 0.7, w - t, 0.7)]],
-  5: [0.8, (w, t) => five(w, t, { stemTo: 0.36, cy: 0.655 })],
-  1: [0.56, (w, t) => [line(w - t - 0.04, t, w - t - 0.04, 1 - t), line(w - t - 0.04, t, t, 0.28)]]
-});
-
 // Fujifilm's monoline letters: straight strokes on a grid, corners cut at 45°.
 // Measured on the Provia 100F strips: letters 0.9 of the cap height wide, the
 // pitch 1.1, the I a single stroke; the thin weight is 0.13 of the cap height,
@@ -192,7 +161,7 @@ const GRID = {
   ' ': [0.6, () => []]
 };
 
-export const EDGE_GLYPH_SETS = Object.freeze({ grotesk: GROTESK, ilford: ILFORD, grid: GRID });
+export const EDGE_GLYPH_SETS = Object.freeze({ grotesk: GROTESK, grid: GRID });
 
 // The glyph set's own spelling of a text: Fujichrome writes the "III" of
 // RDPIII as one roman numeral.
