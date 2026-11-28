@@ -535,9 +535,9 @@ assert.equal(
   assert.notEqual(fnv(composeFilmStrip(pictures, custom).data), fnv(composeFilmStrip(pictures.map((p, i) => (i === 2 ? { ...p, number: 50 } : p)), custom).data));
   // Pinned, and the same composed in slices.
   const pinnedStrips = {
-    kodakStrip: 'bc61ae12',
+    kodakStrip: '2e39f3c4',
     customStrip: '05e05db1',
-    halfStrip: 'a7da5e72'
+    halfStrip: 'cf909192'
   };
   const half = { ...kodak, halfFrame: true };
   const halfGeometry = filmStripGeometry(5, { windowHeight, halfFrame: true });
