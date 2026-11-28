@@ -65,8 +65,9 @@ const DRC = { drcAmount: 45, drcDetail: 30, drcShadows: 70, drcHighlights: 55, d
     assert.ok(main.includes(`${key}: Math.round(sanitizeNumeric(source.${key}`) || key === 'drcHintDismissed', `sanitizeSettings reads ${key}`);
   }
   assert.ok(main.includes('drcHintDismissed: Boolean(source === state ? state.drcHintDismissed : source.drcHintDismissed)'));
-  // The GPU preview has no stage for it: a compressed photo's ticks convert in the worker.
-  assert.ok(/function gpuPreviewCanTake\(\) \{[\s\S]{0,300}state\.drcAmount\) > 0\) return false;/.test(main));
+  // The GPU preview draws it once the photo's map for these settings is solved.
+  assert.ok(/Number\(settings\.drcAmount\) > 0 && !gpuDrcInputs\(settings, mode, params, analysis\)\) return false;/.test(main));
+  assert.ok(main.includes('return { mode, params, plan, engine, width: prepared.width, height: prepared.height, drc };'));
 }
 
 {
@@ -108,7 +109,7 @@ const DRC = { drcAmount: 45, drcDetail: 30, drcShadows: 70, drcHighlights: 55, d
   assert.ok(sample && typeof sample.key === 'string', 'the sample is made');
   assert.deepEqual(ready, [frame16]);
   const own = drc.sampleDrcInput(data16, width, height);
-  assert.ok(Buffer.from(sample.lum.buffer).equals(Buffer.from(own.lum.buffer)), 'page sample = adapter sample');
+  assert.ok(Buffer.from(sample.rgb.buffer).equals(Buffer.from(own.rgb.buffer)), 'page sample = adapter sample');
   // An 8-bit frame is read as its x257 promotion.
   const data8 = new Uint8ClampedArray(width * height * 4).map((_, i) => (i * 13) % 256);
   const plane = drcPlaneOf({ width, height, data: data8 });

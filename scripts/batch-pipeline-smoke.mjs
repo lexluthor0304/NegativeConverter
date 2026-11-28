@@ -216,6 +216,39 @@ export async function runBatchPipelineSmoke({ send, evaluate, waitFor, wait, fai
       }
     }
 
+    // Dynamic range compression on every photo (Sync color carries it): the
+    // band pool's frames sum their sample, worker 0 solves, every band runs
+    // the exposure on its own WebGL2 context (or the reference). The files
+    // are the single-worker run's, and the pool says where each band ran.
+    const setDrcAmount = (value) => evaluate(`(async () => {
+      const slider = document.getElementById('drcAmount');
+      slider.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+      slider.value = String(${value});
+      slider.dispatchEvent(new Event('input', { bubbles: true }));
+      slider.dispatchEvent(new Event('change', { bubbles: true }));
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      document.getElementById('studioSync').click();
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      return window.__ncDynamicRange?.settings?.().drcAmount;
+    })()`);
+    if (Number(await setDrcAmount(50)) !== 50) fail('could not switch the compression on');
+    if (String(await setFormat('png', 8)) !== '8') fail('could not select PNG8');
+    await setMode('serial');
+    const drcSerial = await exportAll('serial Export All with the compression');
+    await setMode(null);
+    const drcStaged = await exportAll('staged Export All with the compression');
+    const drcBands = drcStaged.stages.bands?.drcBands || null;
+    console.log('batch pipeline compressed png8:', JSON.stringify({ serial: drcSerial.files, staged: drcStaged.files, bands: drcStaged.stages.bands }));
+    if (drcSerial.files.length !== 3 || drcStaged.files.length !== 3) fail('compressed: expected three files per run');
+    for (let i = 0; i < 3; i++) {
+      if (drcSerial.files[i].sha !== drcStaged.files[i].sha) fail(`compressed: ${drcStaged.files[i].name} differs from the serial run`);
+    }
+    if (!(drcStaged.stages.bands && drcStaged.stages.bands.frames >= 1)) fail('compressed: no frame converted in bands: ' + JSON.stringify(drcStaged.stages.bands));
+    const compressedBands = drcBands ? drcBands.gpu + drcBands['gpu+reference'] + drcBands.reference : 0;
+    if (!(compressedBands >= drcStaged.stages.bands.frames)) fail('compressed: the bands did not run the compression: ' + JSON.stringify(drcBands));
+    if (drcBands.reference > 0) console.log(`WARN: ${drcBands.reference} band(s) compressed on the JavaScript reference (no WebGL2 in the band worker)`);
+    if (Number(await setDrcAmount(0)) !== 0) fail('could not switch the compression off');
+
     // A single export of the open 4.1 MP photo: its Step 3 runs on the band
     // pool (the pool ends with the export), the file is the serial export's.
     const exportSingle = async (label) => {

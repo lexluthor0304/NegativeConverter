@@ -86,6 +86,10 @@ function sampleOf(width, height, lumAt) {
   const flat = sampleOf(240, 160, () => 0.18);
   const map = drc.solveDrcMap(flat, { drcAmount: 100 });
   for (const g of map.logGain) close(g, 0, 1e-6, 'flat frame gain');
+  // The sample of a flat RGB frame prepares to the same luminance everywhere.
+  const rgb = { width: 8, height: 4, rgb: new Float32Array(96).fill(30000) };
+  const lum = drc.drcSampleLuminance(rgb, { gains: { r: 1.2, g: 1, b: 0.8 }, preSaturation: 120 });
+  for (const v of lum) close(v, lum[0], 1e-9, 'prepared flat sample');
   // Amount 0: no map, no stage.
   assert.equal(drc.solveDrcMap(flat, { drcAmount: 0 }), null);
   assert.equal(drc.solveDrcMap(flat, {}), null);
@@ -141,10 +145,11 @@ function measureRoom(sample, logGainAt) {
   return { step: bright - dark, dark, mid, bright, textureDark: texture(40, 160, 100, 300), textureBright: texture(440, 560, 100, 300), halo };
 }
 const roomSample = sampleOf(ROOM.width, ROOM.height, (x, y) => roomLum(x, y));
-const mapGain = (map) => (x, y) => map.logGain[y * map.width + x];
+// The map's gain at a cell after the shares (as exp of natural log), for a positive.
+const mapGain = (map, method) => (x, y) => drc.drcStopsOf(map.logGain[y * map.width + x], method, false) * Math.LN2;
 function roomWith(settings, sample = roomSample) {
   const map = drc.solveDrcMap(sample, settings);
-  return measureRoom(sample, map ? mapGain(map) : () => 0);
+  return measureRoom(sample, map ? mapGain(map, drc.drcMethodParams(settings)) : () => 0);
 }
 
 const before = roomWith({ drcAmount: 0 });
@@ -156,7 +161,10 @@ const before = roomWith({ drcAmount: 0 });
     const r = roomWith({ drcAmount: amount });
     assert.ok(r.step < previous - 0.3, `Amount ${amount} compresses more: ${r.step} after ${previous}`);
     previous = r.step;
-    assert.ok(r.textureDark >= 0.8 * before.textureDark && r.textureBright >= 0.95 * before.textureBright,
+    // (The deep shadow's texture is measured on the log of its luminance, which
+    // the solve sees as log(L + 0.001): there a lifted area's finest texture
+    // keeps about three quarters of its log contrast; its contrast in levels grows.)
+    assert.ok(r.textureDark >= 0.7 * before.textureDark && r.textureBright >= 0.9 * before.textureBright,
       `Amount ${amount} keeps the texture: ${r.textureDark}/${r.textureBright} vs ${before.textureDark}`);
     // Within the solve grid, next to a 4-stop edge: no band brighter or darker than its side.
     assert.ok(r.halo < 0.08, `Amount ${amount}: no halo at the edge (${r.halo} stops)`);
@@ -196,6 +204,8 @@ const before = roomWith({ drcAmount: 0 });
   const b = drc.solveDrcMap(roomSample, { drcAmount: 60, drcSaturation: 100 });
   assert.deepEqual(Array.from(a.logGain.slice(0, 2000)), Array.from(b.logGain.slice(0, 2000)));
   assert.equal(drc.drcMapKey({ drcAmount: 60, drcSaturation: 0 }), drc.drcMapKey({ drcAmount: 60, drcSaturation: 100 }));
+  // Nor do the shares: they act per pixel.
+  assert.equal(drc.drcMapKey({ drcAmount: 60, drcShadows: 0 }), drc.drcMapKey({ drcAmount: 60, drcHighlights: 100 }));
   // At their defaults the shares are the method's own (1 and 1).
   const method = drc.drcMethodParams({ drcAmount: 60 });
   assert.equal(method.shadowShare, 1);
@@ -232,14 +242,14 @@ function negativePlane(width, height, lumAt) {
   const whole = drc.sampleDrcInput(plane.data, plane.width, plane.height);
   const builder = drc.createDrcSampleBuilder(plane.data, plane.width, plane.height);
   while (!builder.step(7));
-  assert.ok(Buffer.from(builder.result().lum.buffer).equals(Buffer.from(whole.lum.buffer)), 'sliced sample = whole sample');
+  assert.ok(Buffer.from(builder.result().rgb.buffer).equals(Buffer.from(whole.rgb.buffer)), 'sliced sample = whole sample');
   const eight = new Uint8ClampedArray(plane.data.length);
   const promoted = new Uint16Array(plane.data.length);
   for (let i = 0; i < eight.length; i++) { eight[i] = plane.data[i] >> 8; promoted[i] = eight[i] * 257; }
   const a = drc.sampleDrcInput(promoted, plane.width, plane.height);
   const b = drc.createDrcSampleBuilder(eight, plane.width, plane.height, { scale: 257 });
   b.step();
-  assert.ok(Buffer.from(b.result().lum.buffer).equals(Buffer.from(a.lum.buffer)), '8-bit sample = its 16-bit promotion');
+  assert.ok(Buffer.from(b.result().rgb.buffer).equals(Buffer.from(a.rgb.buffer)), '8-bit sample = its 16-bit promotion');
   assert.equal(whole.width, 512);
 }
 
@@ -250,13 +260,14 @@ function negativePlane(width, height, lumAt) {
   // half a full pixel away; where an edge falls inside a reduced pixel the
   // difference is larger: those are excluded).
   const full = negativePlane(1600, 1067, (x, y) => roomLum(x * 600 / 1600, y * 400 / 1067));
+  const m60 = drc.drcMethodParams({ drcAmount: 60 });
   const map = drc.solveDrcMap(drc.sampleDrcInput(full.data, full.width, full.height), { drcAmount: 60 });
   const stage = drc.buildDrcStage(map);
-  const stopsFull = drc.computeDrcStops(full.data, full.width, full.height, stage);
+  const stopsFull = drc.computeDrcStops(full.data, full.width, full.height, stage, { method: m60 });
   const k = 4; const sw = Math.floor(full.width / k); const sh = Math.floor(full.height / k);
   const small = { width: sw, height: sh, data: new Uint16Array(sw * sh * 4) };
   for (let y = 0; y < sh; y++) for (let x = 0; x < sw; x++) small.data.set(full.data.subarray(((y * k + 1) * full.width + x * k + 1) * 4, ((y * k + 1) * full.width + x * k + 1) * 4 + 4), (y * sw + x) * 4);
-  const stopsSmall = drc.computeDrcStops(small.data, sw, sh, stage);
+  const stopsSmall = drc.computeDrcStops(small.data, sw, sh, stage, { method: m60 });
   let worst = 0; let compared = 0; let total = 0;
   for (let y = 0; y < sh; y++) for (let x = 0; x < sw; x++) {
     const fxp = x * k + 1; const fyp = y * k + 1;
@@ -272,7 +283,7 @@ function negativePlane(width, height, lumAt) {
   // A map made from a half-size copy of the frame is close to the full one's.
   const half = negativePlane(800, 533, (x, y) => roomLum(x * 600 / 800, y * 400 / 533));
   const mapHalf = drc.solveDrcMap(drc.sampleDrcInput(half.data, half.width, half.height), { drcAmount: 60 });
-  const stopsHalfMap = drc.computeDrcStops(full.data, full.width, full.height, drc.buildDrcStage(mapHalf));
+  const stopsHalfMap = drc.computeDrcStops(full.data, full.width, full.height, drc.buildDrcStage(mapHalf), { method: m60 });
   let sum = 0;
   for (let i = 0; i < stopsFull.length; i++) sum += Math.abs(stopsHalfMap[i] - stopsFull[i]);
   assert.ok(sum / stopsFull.length < 0.05, `a reduced copy's map is close: mean ${sum / stopsFull.length} stops`);
@@ -295,11 +306,12 @@ function negativePlane(width, height, lumAt) {
   const full = negativePlane(900, 600, (x, y) => roomLum(x * 600 / 900, y * 400 / 600));
   const map = drc.solveDrcMap(drc.sampleDrcInput(full.data, 900, 600), { drcAmount: 50 });
   const stage = drc.buildDrcStage(map);
-  const all = drc.computeDrcStops(full.data, 900, 600, stage);
+  const m50 = drc.drcMethodParams({ drcAmount: 50 });
+  const all = drc.computeDrcStops(full.data, 900, 600, stage, { method: m50 });
   const rx = 400; const ry = 150; const rw = 200; const rh = 120;
   const region = new Uint16Array(rw * rh * 4);
   for (let y = 0; y < rh; y++) region.set(full.data.subarray(((ry + y) * 900 + rx) * 4, ((ry + y) * 900 + rx + rw) * 4), y * rw * 4);
-  const part = drc.computeDrcStops(region, rw, rh, stage, { frame: { x: rx, y: ry, frameWidth: 900, frameHeight: 600 } });
+  const part = drc.computeDrcStops(region, rw, rh, stage, { method: m50, frame: { x: rx, y: ry, frameWidth: 900, frameHeight: 600 } });
   for (let y = 0; y < rh; y++) for (let x = 0; x < rw; x++) assert.equal(part[y * rw + x], all[(ry + y) * 900 + rx + x]);
 }
 
@@ -317,14 +329,17 @@ function negativePlane(width, height, lumAt) {
   // loses chroma, a lifted one keeps it, the luminance stays.
   const image = { width: 2, height: 1, data: new Uint16Array([50000, 30000, 20000, 65535, 50000, 30000, 20000, 65535]) };
   const Y = 0.2126 * 50000 + 0.7152 * 30000 + 0.0722 * 20000;
-  drc.applyDrcProtection(image, new Float32Array([1.5, -1.5]), 0.6, true);
+  // Weights as exposeDrcReference makes them: darkened 1.5 stops (a negative's +1.5), and lifted.
+  const weights = Uint8Array.from([drc.drcProtectWeight(1.5, true), drc.drcProtectWeight(-1.5, true)]);
+  assert.deepEqual(Array.from(weights), [255, 0]);
+  drc.applyDrcProtection(image, weights, 0.6);
   const [r, g, b] = image.data;
   close(0.2126 * r + 0.7152 * g + 0.0722 * b, Y, 2, 'protection keeps luminance');
   close(r - Y, (50000 - Y) * 0.4, 2, 'protection takes 60 % of the chroma at 1.5 stops');
   assert.deepEqual(Array.from(image.data.slice(4)), [50000, 30000, 20000, 65535]);
   // Off: untouched.
   const untouched = { width: 1, height: 1, data: new Uint16Array([50000, 30000, 20000, 65535]) };
-  drc.applyDrcProtection(untouched, new Float32Array([3]), 0, true);
+  drc.applyDrcProtection(untouched, Uint8Array.from([255]), 0);
   assert.deepEqual(Array.from(untouched.data), [50000, 30000, 20000, 65535]);
 }
 
@@ -334,11 +349,10 @@ function negativePlane(width, height, lumAt) {
   assert.deepEqual(drc.sanitizeDrcParams({ drcAmount: '140', drcDetail: -3, drcShadows: 'x' }, { drcShadows: 61 }),
     { drcAmount: 100, drcDetail: 0, drcShadows: 61, drcHighlights: 50, drcLocalContrast: 50, drcSaturation: 50 });
   assert.equal(drc.DRC_DEFAULTS.drcAmount, 0);
-  // The band pool keeps a compressed frame in one worker (its map is the frame's).
-  const image = new ImageData(new Uint8ClampedArray(16), 2, 2);
-  image.__image16 = { width: 2, height: 2, data: new Uint16Array(16) };
-  assert.equal(bandsSupported({ imageData: image, settings: {}, options: { forceFullProcess: true } }), true);
-  assert.equal(bandsSupported({ imageData: image, settings: { drcAmount: 10 }, options: { forceFullProcess: true } }), false);
+  // A compressed frame converts on the band pool too (its bands sum the sample, worker 0 solves).
+  const image = new ImageData(new Uint8ClampedArray(1100 * 720 * 4), 1100, 720);
+  image.__image16 = { width: 1100, height: 720, data: new Uint16Array(1100 * 720 * 4) };
+  assert.equal(bandsSupported({ imageData: image, settings: { drcAmount: 10 }, options: { forceFullProcess: true } }), true);
 }
 
 // ---------------------------------------------------------------------------
@@ -409,6 +423,7 @@ const same = (a, b) => Buffer.from(a.buffer, a.byteOffset, a.byteLength).equals(
   // A supplied sample made from the same frame gives the same pixels.
   const sample = drc.sampleDrcInput(neg, W, H);
   const supplied = await convert(neg, W, H, { drcAmount: 70, drcSample: { key: 'k1', ...sample } });
+  assert.ok(sample.rgb instanceof Float32Array);
   assert.ok(same(supplied.__image16.data, on.__image16.data), 'the editor\'s sample = the conversion\'s own');
   // A detail region with the frame's sample equals that window of the frame.
   const rx = 240; const ry = 80; const rw = 160; const rh = 120;
@@ -436,6 +451,52 @@ const same = (a, b) => Buffer.from(a.buffer, a.byteOffset, a.byteLength).equals(
   const bwOff = await convert(neg, W, H, {}, undefined, 'bw');
   const bwOn = await convert(neg, W, H, { drcAmount: 70 }, undefined, 'bw');
   assert.ok(lum(bwOn.__image16.data, 40, 160, 140, 260) > lum(bwOff.__image16.data, 40, 160, 140, 260), 'a B&W negative\'s shadows are lifted');
+
+  // The band pool (silverBands.convertInBands, the pool's steps in one
+  // process) gives the full-resolution conversion's pixels exactly, in colour,
+  // B&W and positive, with and without the editor's sample.
+  const { convertInBands } = await import('./silverBands.js');
+  const BW = 1100; const BH = 720;
+  const big = colourNegative(BW, BH);
+  const bigSample = drc.sampleDrcInput(big, BW, BH);
+  for (const [mode, settings] of [['color', { drcAmount: 70, drcSaturation: 80 }], ['bw', { drcAmount: 60 }], ['positive', { drcAmount: 50, drcShadows: 80 }],
+    ['color', { drcAmount: 70, drcSample: { key: 'k2', ...bigSample } }]]) {
+    const full = await convert(big, BW, BH, settings, { forceFullProcess: true }, mode);
+    const image = new ImageData(new Uint8ClampedArray(big.length), BW, BH);
+    image.__image16 = { width: BW, height: BH, data: big };
+    adapter.invalidateSilverCoreCache();
+    const banded = await convertInBands({ imageData: image, settings: { ...BASE, filmType: mode, ...settings }, options: { forceFullProcess: true } }, 5);
+    assert.ok(same(banded.data16, full.__image16.data), `bands = one worker (${mode}${settings.drcSample ? ', editor sample' : ''})`);
+  }
+  // A frame smaller than the solve grid keeps one worker.
+  const small = new ImageData(new Uint8ClampedArray(16), 2, 2);
+  small.__image16 = { width: 2, height: 2, data: new Uint16Array(16) };
+  assert.equal(bandsSupported({ imageData: small, settings: { drcAmount: 10 }, options: { forceFullProcess: true } }), false);
+
+  // The hint measures inside the picture: the same scene inside a dark holder
+  // (an uncropped camera scan: the holder is thin film base, near black once
+  // converted, and wide) reads as the picture alone does when the conversion
+  // names the picture (the crop, or the detected frame as analysisRegion).
+  {
+    const PW = 600; const PH = 400; const M = 150;
+    const picture = colourNegative(PW, PH);
+    const HWd = PW + 2 * M; const HHt = PH + 2 * M;
+    const held = new Uint16Array(HWd * HHt * 4);
+    for (let y = 0; y < HHt; y++) for (let x = 0; x < HWd; x++) {
+      const i = (y * HWd + x) * 4;
+      const inside = x >= M && x < M + PW && y >= M && y < M + PH;
+      if (inside) held.set(picture.subarray(((y - M) * PW + x - M) * 4, ((y - M) * PW + x - M) * 4 + 4), i);
+      else { held[i] = 62000; held[i + 1] = 56000; held[i + 2] = 50000; held[i + 3] = 65535; }
+    }
+    const region = { left: M / HWd, top: M / HHt, width: PW / HWd, height: PH / HHt };
+    const alone = (await convert(picture, PW, PH, { borderBuffer: 0 }, { drcEstimate: true })).__drcEstimate;
+    const named = (await convert(held, HWd, HHt, { borderBuffer: 0, analysisRegion: region }, { drcEstimate: true })).__drcEstimate;
+    const whole = (await convert(held, HWd, HHt, { borderBuffer: 0 }, { drcEstimate: true })).__drcEstimate;
+    const clipped = (e) => e.base.shadows + e.base.highlights;
+    close(clipped(named), clipped(alone), 0.06, 'inside the holder the picture reads as it does alone');
+    assert.ok(clipped(whole) > clipped(named) + 0.2, `measured on the whole scan the holder counts as clipped (${clipped(whole)} vs ${clipped(named)})`);
+    assert.ok(named.reduction >= drc.DRC_HINT_THRESHOLD, `the hint is offered for the picture inside the holder (${named.reduction})`);
+  }
 
   // The hint's estimate: the compression brings this frame's ends back.
   const est = await convert(neg, W, H, {}, { drcEstimate: true });
