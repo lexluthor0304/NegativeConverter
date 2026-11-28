@@ -10451,7 +10451,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
             const wbRecipe = automatic ? whiteBalanceMeasurementSettings(conversionSettings) : null;
             const wbMeasurement = automatic ? provisionalWhiteBalanceMeasurement(conversionSettings, wbRecipe) || { settings: wbRecipe, live: liveGeometry() } : null;
             processed = await convertFromCurrentSource(conversionSettings, { preview: hasPreviewSource, wbSample: automatic,
-              drcEstimate: automatic && !(state.drcAmount > 0) && !state.drcHintDismissed });
+              // Once per photo and session: the hint's estimate (dynamicRangeHint.js).
+              drcEstimate: automatic && !(state.drcAmount > 0) && !state.drcHintDismissed && Boolean(state.loadedFile) && !state.loadedFile.__ncDrcEstimated });
             if (!isCurrentConversion()) { releaseOwnedPlanes(processed, processed?.__wbSample, processed?.__analysisPreview); return; }
             if (!processed) { showNegativeAfterFailedConversion(); return; }
             if (automatic) {
@@ -28709,6 +28710,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const frame = drcSampleFrame();
       drcLastEstimate = { frame, estimate };
       const file = state.loadedFile;
+      // Not estimated again for this photo in this session (a reopen, a
+      // stored session's hit): the hint is offered once anyway.
+      if (file) file.__ncDrcEstimated = true;
       if (!drcHintWanted(state, estimate) || (file && drcHintOffered.has(file))) return;
       if (file) drcHintOffered.add(file);
       const toast = showToast(getLocalizedText('drcHintMessage', 'This photo has a wide brightness range: some detail in its bright or dark areas is not showing. Try dynamic range compression.'), 0, {

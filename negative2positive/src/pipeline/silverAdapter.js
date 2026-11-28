@@ -1108,8 +1108,7 @@ async function runSilverCore(imageData, settings, mode, options) {
   // The dynamic range hint: what the compression would bring back
   // from near black and white, measured with this conversion's curves.
   if (options?.drcEstimate && !region && engine.lastLuts?.r?.length === 65536) {
-    const sample = _validDrcSample(settings.drcSample) || (slot.drc?.sample) || sampleDrcInput(input16.data, input16.width, input16.height);
-    result.__drcEstimate = estimateDrcEffect(input16, engine.lastLuts, sample, mode !== 'positive');
+    result.__drcEstimate = estimateDrcEffect(input16, engine.lastLuts, mode !== 'positive');
   }
   // 参照の種類・寸法・画素バッファ・解析設定をキーにし、通常画像と混同しない。
   if (!reference || transient) slot.referencePixels = {};

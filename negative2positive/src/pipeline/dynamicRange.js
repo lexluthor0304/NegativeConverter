@@ -704,7 +704,11 @@ export function measureDrcClipping(data, width, height) {
 /** The share of the frame the hint asks to be brought back from near black or white. */
 export const DRC_HINT_THRESHOLD = 0.08;
 const HINT_AMOUNTS = [30, 50, 70];
-const HINT_SAMPLES = 32768;
+const HINT_SAMPLES = 16384;
+// The estimate solves on its own grid of 256 px: it runs with a photo's first
+// conversion and must not delay it much (about 40 ms on one thread); at
+// 160 px it no longer told the frames apart.
+const HINT_LONG_SIDE = 256;
 
 function exposeCode(v, stops) {
   if (stops === 0) return v;
@@ -721,12 +725,12 @@ function exposeCode(v, stops) {
  *
  * @param {object} input - { data: Uint16Array RGBA, width, height } the negative as the engine receives it
  * @param {{ r: Uint16Array, g: Uint16Array, b: Uint16Array }} luts - the conversion's curves (65536 entries)
- * @param {object} sample - sampleDrcInput of the frame
  * @param {boolean} inverted - a negative
  * @returns {{ base: { shadows, highlights }, byAmount: object, reduction: number, suggested: object|null }}
  */
-export function estimateDrcEffect(input, luts, sample, inverted) {
+export function estimateDrcEffect(input, luts, inverted) {
   const { data, width, height } = input;
+  const sample = sampleDrcInput(data, width, height, { longSide: HINT_LONG_SIDE });
   const n = width * height;
   const stride = Math.max(1, Math.floor(n / HINT_SAMPLES));
   const idx = [];
