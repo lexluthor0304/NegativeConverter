@@ -225,8 +225,9 @@ contact sheet lays the roll out as a lab cuts it: strips of six frames
   strip the numbers still come every eight perforations, with "nA" between
   them on the second picture of each pair. One frame beyond each cut is
   numbered too, so printing that runs over a cut is there as on cut film.
-- Style: a strip takes the edge style, text and DX of its first photo (Auto:
-  the film recognised on it).
+- Style: a strip takes the edge style, text and DX of its first photo; under
+  Auto, of the first photo of the strip whose film was recognised (one strip
+  is one film).
 - Pictures: a picture whose orientation differs from the window (a portrait
   photo in a 36 × 24 window, a landscape one in a half-frame window) is turned
   a quarter **clockwise**; every picture is fitted inside its window, centred,
