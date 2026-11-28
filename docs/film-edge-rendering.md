@@ -212,10 +212,11 @@ contact sheet of 2004 (Kyppi archive, V.-P. Suhonen) shows the same DX code and 
   row, continuous, and two thin green lines 0.68 mm outside and 0.64 mm
   inside it, on for four perforations and off for four (both references
   agree on the 8-perforation period and the half duty). Pro 400H a red band
-  about 0.9 mm wide across the middle of the text-edge row, on for two
-  perforations of every four (both references).
+  about 0.9 mm wide across the middle of both perforation rows, under the
+  same holes on each, on for two perforations of every four (both
+  references).
 - Approximate: the stripes' colours (scan casts vary), their phase to the
-  numbers and whether Pro 400H's band is on both rows; the number's phase to
+  numbers; the number's phase to
   the holes (0.13 and 0.57 on two scans; 0.35 drawn); letter sizes; the
   per-frame code after "nA" ("CA-6", "H36", "M96") is drawn as "FUJI", which
   the references print there on alternate frames. Stripes follow the text
