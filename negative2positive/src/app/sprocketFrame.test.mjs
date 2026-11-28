@@ -587,6 +587,12 @@ assert.equal(
   assert.equal(fnv(fomaStrip.data), '971113c5', 'fomapan strip pinned');
   const fomaHalf = composeFilmStrip([1, 2, 3, 4, 5].map((n) => ({ imageData: picture(n, halfGeometry.windowWidth, windowHeight), number: n + 47 })), { ...foma, halfFrame: true });
   assert.equal(fnv(fomaHalf.data), '79a361b8', 'fomapan half-frame strip pinned');
+  // AgfaPhoto APX prints its name after odd numbers and its emulsion code
+  // after even ones: along a strip each frame by its own number.
+  const apx = { edgeMarkings: { ...applyEdgeMarkingStyle(E, 'agfaApx') }, windowHeight };
+  const apxStrip = composeFilmStrip(pictures, apx);
+  assert.notEqual(fnv(composeFilmStrip(pictures.map((p) => ({ ...p, number: p.number + 1 })), apx).data), fnv(apxStrip.data), 'name and code change places with the numbers');
+  assert.equal(fnv(apxStrip.data), '5068ea7e', 'APX strip pinned');
   // A short last strip; a portrait picture turned a quarter clockwise into
   // its window; a square one fitted inside, never stretched.
   assert.deepEqual(fitPictureInWindow(400, 600, 180, 120), { rotate: true, x: 0, y: 0, width: 180, height: 120 });
