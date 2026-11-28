@@ -457,6 +457,7 @@ assert.equal(
     fujiColor: '1269x1167:7b6dcda6',
     fujiSlide: '1269x1167:a84686b5',
     fomapan: '1269x1167:49ad92ee',
+    agfaApx: '1269x1167:3be2e54d',
     plain: '1269x1167:01d5229c'
   };
   const plainFrame = composeSprocketFrame(image, { edgeMarkings: { ...E } });
