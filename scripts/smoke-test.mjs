@@ -66,6 +66,7 @@ import { runExportOwnershipSmoke } from './export-ownership-smoke.mjs';
 import { runRepairReleaseSmoke } from './repair-release-smoke.mjs';
 import { runDustUndoSmoke } from './dust-undo-smoke.mjs';
 import { runFocusRecoverySmoke } from './focus-recovery-smoke.mjs';
+import { runDynamicRangeSmoke } from './dynamic-range-smoke.mjs';
 import { runBatchPipelineSmoke } from './batch-pipeline-smoke.mjs';
 import { runFirstPhotoSmoke } from './first-photo-smoke.mjs';
 import { runImportParitySmoke } from './import-parity-smoke.mjs';
@@ -756,6 +757,12 @@ if (process.argv.includes('--dust-undo-only')) {
 }
 if (process.argv.includes('--focus-only')) {
   await runFocusRecoverySmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS');
+  process.exit(0);
+}
+if (process.argv.includes('--drc-only')) {
+  await runDynamicRangeSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
   if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
   console.log('SMOKE PASS');
   process.exit(0);
@@ -1457,6 +1464,7 @@ if (!process.argv.some(arg => arg.endsWith('-only'))) unit('export ownership', 0
 if (!process.argv.some(arg => arg.endsWith('-only'))) unit('repair release', 1.4, () => runRepairReleaseSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT }));
 if (!process.argv.some(arg => arg.endsWith('-only'))) unit('dust undo', 1.2, () => runDustUndoSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT }));
 if (!process.argv.some(arg => arg.endsWith('-only'))) unit('focus recovery', 0.8, () => runFocusRecoverySmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT }));
+if (!process.argv.some(arg => arg.endsWith('-only'))) unit('dynamic range', 0.6, () => runDynamicRangeSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT }));
 if (!process.argv.some(arg => arg.endsWith('-only'))) unit('batch pipeline', 0.6, () => runBatchPipelineSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT }));
 
 if (!process.argv.some(arg => arg.endsWith('-only'))) unit('simplicity', 0.6, () => runSimplicitySmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT }));
