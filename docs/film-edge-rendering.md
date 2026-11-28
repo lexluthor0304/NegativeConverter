@@ -73,7 +73,7 @@ or the baseline end flat there (feet of A, V, K), not round.
 ### Settings and compatibility
 
 `sprocketEdge.style` is one of `auto`, `kodakColor`, `kodakBw`, `kodakSlide`,
-`ilford`, `agfaApx`, `fomapan`, `fujiColor`, `fujifilmUs`, `fujiSlide`, `kodakVision3`,
+`ilford`, `kentmere`, `agfaApx`, `fomapan`, `fujiColor`, `fujifilmUs`, `fujiSlide`, `kodakVision3`,
 `cineStill`, `plain`, `custom`. A setting without it (a project, photo snapshot, history
 step or interrupted batch job saved before styles) and any unknown id are
 `custom`: the border drawn before, byte for byte (`sprocketFrame.test.mjs`
@@ -171,10 +171,28 @@ contact sheet of 2004 (Kyppi archive, V.-P. Suhonen) shows the same DX code and 
   the letters are the chamfered `grid` set, the film's are stepped.
 - The earlier look of this style (heavy round letters, no DX code, from a
   2008 strip and a 2018 scan) is the older print (also seen on a 1998-expiry
-  roll) and is no longer drawn. Delta and Kentmere wordings are not offered:
-  current Delta 400 ("DELTA 400 PROFESSIONAL") and Delta 100 rest on one
-  readable image each, Kentmere 400 ("K 400", no DX code) on one complete
-  image; Delta films get this layout with their trade name.
+  roll) and is no longer drawn. Delta's own print is not offered (see
+  "Left out"); Delta films get this layout with their trade name, which is
+  not what the film prints. Kentmere 400 has a style of its own, below.
+
+**Kentmere 400 (`kentmere`)**
+
+- References (Flickr, kept locally): [50147214998](https://www.flickr.com/photos/mawphotography/50147214998/)
+  (Meredith, 2020) and [54516734427](https://www.flickr.com/photos/184561795@N02/54516734427/)
+  (Jan de Jong, 2024); the collection's 52139196485 (2022) is likely the
+  same photographer as the first.
+- Measured: Ilford's current layout, as Harman prints it for its own
+  brands: the number on the DX edge only, 0.40 and 0.36 of a pitch past a
+  hole (Ilford 0.41); a wedge at +3.83 and "nA" at +4.21 on both rolls
+  (Ilford 3.83 and 4.21); "K 400" on the other edge every frame at −1.31 and
+  −1.39 (Ilford's text −1.27), 6.5 mm long; no DX code. Print white.
+- Approximate: band heights and letter sizes are Ilford's (both scans cut
+  the edges); the wedge is drawn with a needle as on AgfaPhoto APX, the
+  film's is stepped. Left out: the emulsion code ("4552-11" after 17 on one
+  roll, "5601…" after 26 on the other, nothing after 25): its rhythm was not
+  seen. Kentmere 100 and 200 were not seen and are not mapped; the older
+  "KENTMERE PAN 400" print is not drawn. Comparisons:
+  `kentmere_vs_K400_dejong2024.png`, `kentmere_vs_K400_Meredith2020.png`.
 
 **Kodak black and white (`kodakBw`)** — Tri-X, T-Max
 
@@ -198,8 +216,20 @@ contact sheet of 2004 (Kyppi archive, V.-P. Suhonen) shows the same DX code and 
 - Measured: text 2.0 perforations after the number, "nA" about 4.0 after it
   over an arrow, no DX code, cream print (about 239, 217, 164) on the black
   rebate. Approximate: the number's phase to the holes (0.15–0.35 between
-  the scans; 0.35 drawn), sizes from Kodak colour negative. Elite Chrome
-  ("KODAK EBX") rests on one clear image and is not offered.
+  the scans; 0.35 drawn), sizes from Kodak colour negative.
+- Elite Chrome 100 ("KODAK EB-3", discontinued 2012): Flickr
+  [29871209888](https://www.flickr.com/photos/benbenbenbenben/29871209888/) and
+  [8727226118](https://www.flickr.com/photos/aprilpo/8727226118/) (both Sprocket
+  Rocket rolls, cross-processed, kept locally): the same layout as E100, the
+  text 1.86 and 1.79 perforations after the number (E100 2.0, drawn 1.84),
+  numbers on both edges, "nA" over an arrow, no DX code. Drawn as a stock of
+  this style. Approximate: the number's phase to the holes is 0.0 and 0.68 on
+  the two scans (0.35 drawn, so the comparison
+  `kodakSlide_EB3_vs_EliteChrome100_benben.png` shows the print 0.35 of a
+  perforation late against that roll); the print colour is E100's (both
+  references are cross-processed). Elite Chrome Extra Color ("KODAK EBX")
+  and 200 ("KODAK ED-3") rest on one image each: they get this layout with
+  their trade name.
 
 **Fujicolor colour negative (`fujiColor`)** — Superia 200, Pro 400H, C200, Superia X-TRA 400
 
@@ -476,8 +506,17 @@ drawn:
   cut the top edge, and the stripes, under light that the camera let onto
   the rebate, do not show their on/off period; an earlier print ("AGFA VISTA
   400-C", green triangles between the holes, 2010-2014) differs. Not drawn.
-- Kodak Elite Chrome, Ilford Delta, Kentmere: one readable image of the
-  current print each.
+  A search on 2026-11-28 found many Vista sprocket scans, but those with
+  the later stripes cut the top edge as well; not drawn.
+- Ilford Delta 400 (current print): two independent scans now (Flickr
+  15799451301, aprilpo, 2014; 23233360083, Joel Sax) agree on the wording
+  ("DELTA 400 PROFESSIONAL", then "ILFORD" about 14 perforations after
+  "DELTA") and on the DX edge (Ilford's numbering with DX code and wedge),
+  but not on where the wording falls against the numbers: 0.7 perforations
+  after 24 on one, 0.9 after 12 and after 3 on the other, so the period is
+  not one or two frames, and no scan shows two of the groups. Not drawn
+  until a longer strip shows the period. Delta 100 and 3200: one readable
+  scan each.
 
 ### Adding a style
 
