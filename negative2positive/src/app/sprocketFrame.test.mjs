@@ -456,6 +456,7 @@ assert.equal(
     kodakSlide: '1269x1167:03dc8ccb',
     fujiColor: '1269x1167:7b6dcda6',
     fujiSlide: '1269x1167:a84686b5',
+    fomapan: '1269x1167:49ad92ee',
     plain: '1269x1167:01d5229c'
   };
   const plainFrame = composeSprocketFrame(image, { edgeMarkings: { ...E } });
@@ -487,6 +488,22 @@ assert.equal(
   const own = slots.find((slot) => slot.number === 31);
   assert.ok(Math.abs(own.x - (m.frameStartX + 1.5 * m.pitch)) < 1e-9);
   assert.ok(slots.every((slot, i) => i === 0 || Math.abs(slot.x - slots[i - 1].x - 8 * m.pitch) < 1e-9));
+  // Fomapan numbers every four perforations, counting on by one; its name,
+  // speed and batch number come once every 24 numbers, from the number that
+  // leaves 3 (51, 75): frame 51 shows the name, frame 63 none of the group.
+  const foma = edgeMarkingStyle('fomapan');
+  const fm = getSprocketFrameMetrics(1203, 801, styled('fomapan'));
+  const fomaSlots = styledFrameSlots(fm, { frameNumber: 51 }, foma);
+  assert.ok(fomaSlots.every((slot, i) => i === 0 || (Math.abs(slot.x - fomaSlots[i - 1].x - 4 * fm.pitch) < 1e-9 && slot.count === fomaSlots[i - 1].count + 1)));
+  assert.ok(Math.abs(fomaSlots.find((slot) => slot.number === 51).x - (fm.frameStartX + 1.7 * fm.pitch)) < 1e-9);
+  // The slots reach back far enough for the batch number 26 perforations after its number.
+  assert.ok(fomaSlots[0].x < -26 * fm.pitch);
+  const topRail = (frame) => fnv(frame.data.subarray(0, fm.topY * frame.width * 4));
+  const fomaFrame = (number, extra = {}) => composeSprocketFrame(image, styled('fomapan', { frameNumber: number, ...extra }));
+  assert.notEqual(topRail(fomaFrame(51)), topRail(fomaFrame(51, { textEnabled: false })), 'the name is printed after 51');
+  assert.equal(topRail(fomaFrame(63)), topRail(fomaFrame(63, { textEnabled: false })), 'nothing of the group is near 63');
+  assert.notEqual(topRail(fomaFrame(53)), topRail(fomaFrame(53, { textEnabled: false })), 'the speed is printed after 54');
+
   // A caller composing several photos on one film names each frame itself.
   const given = [{ x: m.frameStartX + 1.5 * m.pitch, number: 5 }];
   const withSlots = composeSprocketFrame(image, { ...styled('kodakColor'), frameSlots: given });
