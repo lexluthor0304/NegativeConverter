@@ -143,7 +143,9 @@ export const EDGE_MARKING_STYLES = Object.freeze([
     // E100" after the number, "nA" over an arrow, no DX code; cream print on
     // the black rebate of a slide.
     text: 'KODAK E100',
-    stocks: ['KODAK E100'],
+    // Elite Chrome 100 (discontinued 2012) prints "KODAK EB-3" in the same
+    // places (Flickr 29871209888, benbenbenbenben; 8727226118, aprilpo).
+    stocks: ['KODAK E100', 'KODAK EB-3'],
     alternates: {},
     letteringColor: '#efd9a4',
     dx: [95, 7],
@@ -274,6 +276,34 @@ export const EDGE_MARKING_STYLES = Object.freeze([
       { kind: 'arrow', edge: 'bottom', at: 3.68, from: [0.85, 1.25], lengthMm: 1.0, shaftMm: 0.12, headMm: 0.4 },
       { kind: 'halfNumber', edge: 'bottom', at: 3.92, from: [0.6, 1.5], glyphs: 'grid', stroke: 0.24, tracking: 0.12, digitWidth: 0.95 },
       { kind: 'dx', edge: 'bottom', at: 4.7, half: true }
+    ])
+  }),
+  Object.freeze({
+    id: 'kentmere',
+    labelKey: 'filmEdgeStyleKentmere',
+    brand: 'K',
+    filmKind: 'bw',
+    // Kentmere 400 as Harman prints it today (Flickr 50147214998, Meredith,
+    // 2020; 54516734427, Jan de Jong, 2024): Ilford's
+    // current layout to a hundredth of a perforation, with "K 400" every
+    // frame and no DX code. The emulsion code ("4552-11", "5601…") comes
+    // after some numbers only, in a rhythm not seen: not drawn.
+    text: 'K 400',
+    stocks: ['K 400'],
+    alternates: {},
+    letteringColor: '#ffffff',
+    inkDensity: 1,
+    dx: [109, 9],
+    dxEnabled: false,
+    // 0.40 and 0.36 of a pitch past a hole's left edge.
+    anchorPerf: 1.38,
+    dxGeometry: { moduleMm: 0.405, rowMm: 1.15, barFill: 0.9 },
+    elements: Object.freeze([
+      { kind: 'text', edge: 'top', at: -1.35, from: [0.66, 1.91], glyphs: 'grid', stroke: 0.17, tracking: 0.35, wordSpace: 0.56 },
+      { kind: 'number', edge: 'bottom', at: 0, from: [0.46, 1.91], glyphs: 'grid', stroke: 0.22, tracking: 0.14, digitWidth: 0.95 },
+      // Harman's longer wedge with a needle, as on AgfaPhoto APX.
+      { kind: 'triangle', edge: 'bottom', at: 3.83, from: [0.72, 1.6], lengthMm: 1.0, needleMm: 0.45, needleWidthMm: 0.1 },
+      { kind: 'halfNumber', edge: 'bottom', at: 4.21, from: [0.68, 1.68], glyphs: 'grid', stroke: 0.2, tracking: 0.14, digitWidth: 0.95 }
     ])
   }),
   Object.freeze({
@@ -443,8 +473,8 @@ export const EDGE_MARKING_STYLES = Object.freeze([
 // Brands whose edge print could not be confirmed from images of real film:
 // not offered. A film of theirs resolves to the unbranded style under "auto".
 export const LEFT_OUT_BRANDS = Object.freeze([
-  'KODAK BW400CN', 'CINESTILL BWXX', 'KODAK ELITE CHROME',
-  'KENTMERE', 'AGFA', 'LOMOGRAPHY'
+  'KODAK BW400CN', 'CINESTILL BWXX',
+  'KENTMERE 100', 'KENTMERE 200', 'AGFA VISTA', 'LOMOGRAPHY'
 ]);
 
 const STYLE_BY_ID = new Map(EDGE_MARKING_STYLES.map((style) => [style.id, style]));
@@ -452,7 +482,7 @@ const STYLE_BY_ID = new Map(EDGE_MARKING_STYLES.map((style) => [style.id, style]
 // Every id a setting may hold.
 export const EDGE_STYLE_IDS = Object.freeze([EDGE_STYLE_AUTO, ...EDGE_MARKING_STYLES.map((style) => style.id), EDGE_STYLE_CUSTOM]);
 // The ids the dropdown lists, in order.
-export const EDGE_STYLE_MENU = Object.freeze([EDGE_STYLE_AUTO, 'kodakColor', 'kodakBw', 'kodakSlide', 'ilford', 'agfaApx', 'fomapan', 'fujiColor', 'fujifilmUs', 'fujiSlide', 'kodakVision3', 'cineStill', EDGE_STYLE_PLAIN, EDGE_STYLE_CUSTOM]);
+export const EDGE_STYLE_MENU = Object.freeze([EDGE_STYLE_AUTO, 'kodakColor', 'kodakBw', 'kodakSlide', 'ilford', 'kentmere', 'agfaApx', 'fomapan', 'fujiColor', 'fujifilmUs', 'fujiSlide', 'kodakVision3', 'cineStill', EDGE_STYLE_PLAIN, EDGE_STYLE_CUSTOM]);
 export const EDGE_STYLE_LABEL_KEYS = Object.freeze({
   [EDGE_STYLE_AUTO]: 'filmEdgeStyleAuto',
   [EDGE_STYLE_CUSTOM]: 'filmEdgeStyleCustom',
@@ -489,6 +519,7 @@ const KNOWN_EDGE_PRINTS = [
   { words: ['T-MAX 100', 'TMAX 100', '100TMX', 'T-MAX 100'], text: 'KODAK 100TMX' },
   { words: ['T-MAX 400', 'TMAX 400', '400TMY', 'T-MAX 400'], text: 'KODAK 400-2TMY' },
   { words: ['E100', 'EKTACHROME 100'], text: 'KODAK E100' },
+  { words: ['ELITE CHROME 100', 'EB-3', 'EB100'], text: 'KODAK EB-3' },
   { words: ['FP4'], text: 'ILFORD FP4 PLUS' },
   { words: ['SUPERIA 200', 'S-200'], text: 'S-200' },
   { words: ['PRO 400H', 'PRO400H'], text: 'PRO400H' },
@@ -496,6 +527,7 @@ const KNOWN_EDGE_PRINTS = [
   { words: ['X-TRA 400', 'XTRA 400', 'X-TRA400', 'XTRA400'], text: 'S-400' },
   { words: ['HP5'], text: 'ILFORD HP5 PLUS' },
   { words: ['PROVIA 100F', 'RDP III', 'RDPIII'], text: 'FUJI RDPIII' },
+  { words: ['KENTMERE 400', 'KENTMERE PAN 400'], text: 'K 400' },
   { words: ['FUJIFILM 200', 'FUJI 200'], text: 'FUJI 200' },
   { words: ['FUJIFILM 400', 'FUJI 400'], text: 'FUJI 400' },
   { words: ['APX 100', 'APX100'], text: 'AGFAPHOTO APX 100' },
@@ -514,9 +546,10 @@ const KNOWN_EDGE_PRINTS = [
 const STYLE_RULES = [
   // Kodak's colour negative films; its B&W, chromogenic B&W, slide and cine films are not confirmed.
   { id: 'kodakBw', words: ['TRI-X', 'TRI X', '400TX', 'T-MAX', 'TMAX', 'TMX', 'TMY'], not: [] },
-  { id: 'kodakSlide', words: ['EKTACHROME E100', 'KODAK E100', 'EKTACHROME 100'], not: ['ELITE'] },
+  { id: 'kodakSlide', words: ['EKTACHROME E100', 'KODAK E100', 'EKTACHROME 100', 'ELITE CHROME'], not: [] },
   { id: 'kodakColor', words: ['ULTRA MAX', 'ULTRAMAX', 'PORTRA', 'EKTAR', 'GOLD', 'COLORPLUS', 'COLOR PLUS', 'PRO IMAGE', 'KODACOLOR', 'VERICOLOR', 'GC400', 'GC 400', 'KODAK 200', 'KODAK 400'], not: ['TRI-X', 'TRI X', 'T-MAX', 'TMAX', 'BW400', 'T400CN', 'VISION', 'CHROME', 'CINESTILL', 'LOMOGRAPHY'] },
   { id: 'ilford', words: ['ILFORD', 'HP5', 'FP4', 'DELTA', 'PAN F', 'XP2', 'SFX', 'ORTHO PLUS'], not: ['KENTMERE'] },
+  { id: 'kentmere', words: ['KENTMERE 400', 'KENTMERE PAN 400'], not: [] },
   { id: 'fujiColor', words: ['SUPERIA 200', 'S-200', 'PRO 400H', 'PRO400H', 'FUJICOLOR C200', 'FUJICOLOR C 200', ' C200 ', ' C200,', 'C200 135', 'X-TRA 400', 'XTRA 400', 'X-TRA400', 'XTRA400'], not: ['X-TRA 800', 'XTRA 800', 'X-TRA800', 'AGFA', 'HDC', 'KODAK'] },
   { id: 'cineStill', words: ['CINESTILL'], not: ['BWXX', 'DOUBLE-X'] },
   { id: 'kodakVision3', words: ['VISION3', 'VISION 3', '5219', '5207', '5203', '5213'], not: ['CINESTILL'] },

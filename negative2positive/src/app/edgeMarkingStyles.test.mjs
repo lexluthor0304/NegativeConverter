@@ -71,7 +71,7 @@ for (const stock of stocks) {
 assert.deepEqual(unbranded.sort(), [
   'KENTMERE', 'LOMOGRAPHY', 'SUPERIA', 'SUPERIA 400', 'EKTACHROME'
 ].sort(), 'stocks without a style are exactly the brands left out');
-assert.ok(LEFT_OUT_BRANDS.includes('KENTMERE') && !LEFT_OUT_BRANDS.includes('KODAK VISION3'));
+assert.ok(LEFT_OUT_BRANDS.includes('LOMOGRAPHY') && !LEFT_OUT_BRANDS.includes('KODAK VISION3'));
 assert.ok(!LEFT_OUT_BRANDS.includes('FOMAPAN'));
 assert.equal(edgeStyleForFilmName('Kodak ULTRA MAX 400 Film GC400'), 'kodakColor');
 assert.equal(edgeStyleForFilmName('Kodak EKTAR 100'), 'kodakColor');
@@ -105,7 +105,16 @@ assert.equal(edgeTextForFrame(edgeMarkingStyle('kodakColor'), 'KODAK GB 200-7', 
 assert.equal(edgeTextForFrame(edgeMarkingStyle('kodakColor'), 'KODAK PORTRA 400', 17), 'KODAK PORTRA 400');
 assert.equal(edgeStyleForFilmName('Kodak Vision3 500T'), 'kodakVision3');
 assert.equal(edgeStyleForFilmName('Ilford HP5 PLUS 400 HP5+ (black box)'), 'ilford');
-assert.equal(edgeStyleForFilmName('Kentmere 400'), null);
+assert.equal(edgeStyleForFilmName('Kentmere 400'), 'kentmere');
+assert.equal(edgeTextForFilmName('Kentmere Pan 400'), 'K 400');
+assert.equal(edgeStyleForFilmName('Kentmere 100'), null, 'Kentmere 100 and 200 were not seen');
+// Kentmere 400 is Ilford's current layout without the DX code.
+const kentmere = edgeMarkingStyle('kentmere');
+assert.equal(kentmere.dxEnabled, false);
+assert.ok(!kentmere.elements.some((e) => e.kind === 'dx'));
+for (const kind of ['triangle', 'halfNumber']) {
+  assert.equal(kentmere.elements.find((e) => e.kind === kind).at, edgeMarkingStyle('ilford').elements.find((e) => e.kind === kind).at, kind);
+}
 assert.equal(edgeStyleForFilmName('FUJICHROME PROVIA 100F RDP III Professional RDPIII'), 'fujiSlide');
 assert.equal(edgeStyleForFilmName(''), null);
 
@@ -190,6 +199,11 @@ for (const kind of ['triangle', 'halfNumber']) {
   assert.ok(Math.abs(apx.elements.find((e) => e.kind === kind).at - ilford.elements.find((e) => e.kind === kind).at) < 0.05, kind);
 }
 
+// Elite Chrome 100 prints "KODAK EB-3" in Ektachrome's places.
+assert.equal(edgeStyleForFilmName('Kodak Elite Chrome 100'), 'kodakSlide');
+assert.equal(edgeTextForFilmName('Kodak Elite Chrome 100'), 'KODAK EB-3');
+assert.ok(edgeMarkingStyle('kodakSlide').stocks.includes('KODAK EB-3'));
+
 // Fujifilm 200/400 (made in the USA): Kodak's numbering, "FUJI 200"/"FUJI 400" in light letters.
 const fujiUs = edgeMarkingStyle('fujifilmUs');
 assert.equal(edgeStyleForFilmName('Fujifilm 400'), 'fujifilmUs');
@@ -246,8 +260,8 @@ assert.equal(before.style, 'custom', 'the input is not changed');
 assert.deepEqual(resolveAutoEdgeStyle({ filmNames: ['Kodak ULTRA MAX 400 Film GC400'], dxNumber: '95-7' }), {
   style: 'kodakColor', text: 'KODAK GC 400', letteringColor: kodak.letteringColor, dx: [95, 7], filmName: 'Kodak ULTRA MAX 400 Film GC400'
 });
-assert.equal(resolveAutoEdgeStyle({ filmNames: ['Kentmere 400', 'Ilford HP5 PLUS'] }).style, 'ilford');
-assert.equal(resolveAutoEdgeStyle({ filmNames: ['Kentmere 400'] }), null, 'a brand without a style draws as before');
+assert.equal(resolveAutoEdgeStyle({ filmNames: ['Lomography 400', 'Ilford HP5 PLUS'] }).style, 'ilford');
+assert.equal(resolveAutoEdgeStyle({ filmNames: ['Lomography 400'] }), null, 'a brand without a style draws as before');
 assert.equal(resolveAutoEdgeStyle({}), null);
 assert.equal(resolveAutoEdgeStyle({ filmNames: ['Kodak Gold 200'], dxNumber: 'garbage' }).dx, null);
 

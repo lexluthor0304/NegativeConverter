@@ -461,6 +461,7 @@ assert.equal(
     kodakVision3: '1269x1167:41960e7f',
     cineStill: '1269x1167:e24d24f0',
     fujifilmUs: '1269x1167:5287127b',
+    kentmere: '1269x1167:eed1e5cb',
     plain: '1269x1167:01d5229c'
   };
   const plainFrame = composeSprocketFrame(image, { edgeMarkings: { ...E } });
