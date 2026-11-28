@@ -155,6 +155,8 @@ const GRID = {
   'Ⅲ': [0.9, (w, t) => { const { l, r, T, B } = chamfered(w, t); return [line(l, T, r, T), line(l, B, r, B), line(l, T, l, B), line(w / 2, T, w / 2, B), line(r, T, r, B)]; }],
   '-': [0.6, (w, t) => [line(t, 0.55, w - t, 0.55)]],
   '.': [0.3, (w, t) => [line(w / 2, 1 - t, w / 2, 1 - t)]],
+  // Kodak's key-number dot (the zero-frame reference mark): a filled disc.
+  '•': [0.6, (w, t) => [0.14, 0.09, 0.04, 0.001].map((r) => arc(w / 2, 0.55, r, r, 0, 360))],
   '/': [0.7, (w, t) => [line(t, 1 - t, w - t, t)]],
   '+': [0.8, (w, t) => [line(t, 0.55, w - t, 0.55), line(w / 2, 0.55 - (w / 2 - t), w / 2, 0.55 + (w / 2 - t))]],
   ':': [0.3, (w, t) => [line(w / 2, 0.32, w / 2, 0.32), line(w / 2, 1 - t, w / 2, 1 - t)]],
