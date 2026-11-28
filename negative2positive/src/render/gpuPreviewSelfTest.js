@@ -8,6 +8,7 @@
 
 import { Engine } from '../silvercore/engine/Engine.js';
 import { resolveSilverCoreParams, toGrayscaleInPlace } from '../pipeline/silverAdapter.js';
+import { solveDrcMap, sampleDrcInput, drcMethodParams } from '../pipeline/dynamicRange.js';
 import { toRGBA8 } from '../silvercore/util/image16.js';
 import { applyPreviewChain, displayStageUniforms } from './previewTables.js';
 import { computeAdjustmentParams } from '../workers/pixelAdjustments.js';
@@ -177,6 +178,28 @@ export function buildSelfTestCases() {
     name: spec.name, mode: spec.mode, settings: spec.settings, image: fixture,
     stops: spec.stops ? stops : null, profile: spec.profile ? profile : null, positive: spec.positive || null,
   }));
+}
+
+/**
+ * The compression's own self-test cases (dynamic range compression's shader
+ * stage against the CPU chain): a colour negative with strong protection and
+ * a positive, on the parity frame. Run after the main self-test; a failure
+ * keeps compressed photos on the preview worker, not the GPU preview as a whole.
+ */
+export function buildDrcSelfTestCases(width = 96, height = 64) {
+  const specs = [
+    { name: 'drc colour', mode: 'color', settings: { colorModel: 'standard', saturation: 140 }, drc: { drcAmount: 100, drcSaturation: 100, drcHighlights: 80 } },
+    { name: 'drc positive', mode: 'positive', settings: { colorModel: 'basic' }, drc: { drcAmount: 70 }, positive: { gain: 1.6, wb: [0.95, 1, 0.9] } },
+  ];
+  return specs.map((spec, k) => {
+    const image = parityFrame(spec.mode, width, height);
+    const inverted = spec.mode !== 'positive';
+    const map = solveDrcMap(sampleDrcInput(image.data, width, height), spec.drc, { inverted });
+    map.key = `selftest:${k}`;
+    const method = drcMethodParams(spec.drc);
+    return buildPreviewCase({ name: spec.name, mode: spec.mode, settings: spec.settings, image, positive: spec.positive || null,
+      drc: { map, method, inverted, protect: spec.mode !== 'bw' ? method.protect : 0 } });
+  });
 }
 
 // A parity frame for the GPU checks: the top half from the edge-case fixture, the

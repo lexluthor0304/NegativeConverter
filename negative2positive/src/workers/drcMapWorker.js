@@ -8,7 +8,7 @@ import { solveDrcMap } from '../pipeline/dynamicRange.js';
 const samples = new Map(); // key -> sample, the last few
 
 self.onmessage = (event) => {
-  const { id, sampleKey, sample, prep, settings, inverted } = event.data || {};
+  const { id, sampleKey, sample, prep, settings, inverted, picture } = event.data || {};
   try {
     if (sample) {
       samples.set(sampleKey, sample);
@@ -16,9 +16,9 @@ self.onmessage = (event) => {
     }
     const known = samples.get(sampleKey);
     if (!known) { self.postMessage({ id, error: 'unknown sample' }); return; }
-    const map = solveDrcMap(known, settings, { prep, inverted: Boolean(inverted) });
+    const map = solveDrcMap(known, settings, { prep, inverted: Boolean(inverted), picture: picture || null });
     if (!map) { self.postMessage({ id, map: null }); return; }
-    self.postMessage({ id, map: { width: map.width, height: map.height, logGain: map.logGain, guide: map.guide } },
+    self.postMessage({ id, map: { width: map.width, height: map.height, logGain: map.logGain, guide: map.guide, limits: map.limits } },
       [map.logGain.buffer, map.guide.buffer]);
   } catch (error) {
     self.postMessage({ id, error: String(error?.message || error) });

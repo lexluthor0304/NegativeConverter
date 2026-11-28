@@ -77,7 +77,7 @@ export function deepCopySanitizedSettings(safe, { autoFrameMeta = safe.autoFrame
     drcShadows: safe.drcShadows ?? 50,
     drcHighlights: safe.drcHighlights ?? 50,
     drcLocalContrast: safe.drcLocalContrast ?? 50,
-    drcSaturation: safe.drcSaturation ?? 50,
+    drcSaturation: safe.drcSaturation ?? 75,
     drcHintDismissed: Boolean(safe.drcHintDismissed),
     frameMetadata: safe.frameMetadata ? { ...safe.frameMetadata } : { frameNumber: '', notes: '' },
     coreSaturation: safe.coreSaturation,

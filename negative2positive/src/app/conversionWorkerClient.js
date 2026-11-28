@@ -25,6 +25,14 @@ export const WORKER_TIMEOUT = 'WORKER_TIMEOUT';
 // convert on the main thread, which would read a detached plane.
 export const INPUT_LOST = 'INPUT_LOST';
 
+// Where the conversion workers' dynamic range compression ran, per frame:
+// 'gpu', 'gpu+reference' (some bands finished by the reference) or
+// 'reference' (no WebGL2 in the worker). For the smoke and support.
+const drcPaths = { gpu: 0, 'gpu+reference': 0, reference: 0 };
+export function drcPathStats() {
+  return { ...drcPaths };
+}
+
 export function isConversionInputLost(err) {
   return Boolean(err) && err.code === INPUT_LOST;
 }
@@ -347,7 +355,10 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
     // The analysis a full-resolution frame was converted with (#254 follow-up).
     if (result.analysis) out.__analysis = result.analysis;
     if (result.drcEstimate) out.__drcEstimate = result.drcEstimate;
-    if (result.drcPath) out.__drcPath = result.drcPath;
+    if (result.drcPath) {
+      out.__drcPath = result.drcPath;
+      if (result.drcPath in drcPaths) drcPaths[result.drcPath] += 1;
+    }
     if (result.histogram) {
       const sample = result.histogram;
       const histogram = new ImageData(new Uint8ClampedArray(sample.rgba), sample.width, sample.height);

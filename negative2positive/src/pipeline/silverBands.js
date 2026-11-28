@@ -58,7 +58,7 @@ import { applyFlatFieldToImage16 } from '../app/flatField.js';
 import { rasterizeExposureStopsTiled, exposureStopsBytes } from '../app/localExposure.js';
 import { applyFilmBaseCompensationToBuffer } from './filmBaseCompensation.js';
 import { resolveConversionMode } from './conversionRouter.js';
-import { drcEnabled, drcSolveSize, solveDrcMap, drcMethodParams, drcPrepKey } from './dynamicRange.js';
+import { drcEnabled, drcSolveSize, solveDrcMap, drcMethodParams, drcPrepKey, drcPictureOf } from './dynamicRange.js';
 import { exposeDrcFrame, drcPrepFor } from './silverAdapter.js';
 import {
   buildSilverCoreParams,
@@ -473,12 +473,12 @@ function drcTablesFor(job, partials) {
     sample = { width: gw, height: gh, rgb };
   }
   const prep = drcPrepFor(job.settings || {}, plan.mode, plan.params, engine.positiveAnalysis);
-  const map = solveDrcMap(sample, drc.settings, { prep, inverted: drc.inverted });
+  const map = solveDrcMap(sample, drc.settings, { prep, inverted: drc.inverted, picture: drcPictureOf(plan.params) });
   if (!map) return null;
   const method = drcMethodParams(drc.settings);
   return {
     // A key of its own per frame: the GPU stage keeps the last map it uploaded by key.
-    map: { width: map.width, height: map.height, logGain: map.logGain, guide: map.guide, key: `bands:${++drcBandMaps}:${Math.random().toString(36).slice(2)}:${drcPrepKey(prep)}` },
+    map: { width: map.width, height: map.height, logGain: map.logGain, guide: map.guide, limits: map.limits, key: `bands:${++drcBandMaps}:${Math.random().toString(36).slice(2)}:${drcPrepKey(prep)}` },
     method,
     inverted: drc.inverted,
     protect: plan.mode !== 'bw' ? method.protect : 0,

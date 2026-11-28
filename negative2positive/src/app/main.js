@@ -61,9 +61,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       describeExpiredAnalysis, EXPIRED_RESCUE_DEFAULTS, EXPIRED_RESCUE_KEYS
     } from '../pipeline/expiredRescue.js';
     import { sampleExpiredSpatialInputSliced, measureExpiredSpatialMapsFromSample, expiredAnalysisFromMaps } from './expiredRescueOpenCv.js';
-    import { DRC_KEYS, DRC_DEFAULTS, drcEnabled, drcMethodParams } from '../pipeline/dynamicRange.js';
-    import { createDrcSampler, createDrcMapService, drcAutoSettings, drcHintWanted } from './dynamicRangeHint.js';
-    import { createDrcExposer } from '../render/dynamicRangeGpu.js';
+    import { DRC_KEYS, DRC_DEFAULTS, drcEnabled, drcMethodParams, drcPictureOf } from '../pipeline/dynamicRange.js';
+    import { createDrcSampler, createDrcMapService, drcAutoSettings, drcHintWanted, drcHintGain } from './dynamicRangeHint.js';
+    import { createDrcExposer, drcGpuParity } from '../render/dynamicRangeGpu.js';
     import { createOpenCvTaskRunner, cropDetectionMessage, expiredSpatialMessage, alignmentMessage, alignAndWarp } from './openCvAnalysisTasks.js';
     import { readFilmEdge, sanitizeFilmEdgeForSettings, formatFilmEdgeFrames } from './filmEdgeReader.js';
     import { loadDxFilmTable, describeDxFilm, shortFilmName } from './dxFilmDatabase.js';
@@ -92,7 +92,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
     import { convertFrameWithRouter, resolveConversionMode } from '../pipeline/conversionRouter.js';
     import { convertAdjustedFrame } from '../pipeline/adjustedFrame.js';
-    import { convertFrameInWorker, convertPreviewFrameInWorker, convertFullResolutionFrameInWorker, createConversionWorkerClient, createConversionWorkerPool, CONVERSION_FAILED, WORKER_CRASHED, WORKER_TIMEOUT, WORKER_UNAVAILABLE, WORKER_ABORTED, isConversionInputLost, createConversionBandPool, planBandPoolSize, planBandCount, BAND_POOL_MIN_PIXELS } from './conversionWorkerClient.js';
+    import { convertFrameInWorker, convertPreviewFrameInWorker, convertFullResolutionFrameInWorker, createConversionWorkerClient, createConversionWorkerPool, CONVERSION_FAILED, WORKER_CRASHED, WORKER_TIMEOUT, WORKER_UNAVAILABLE, WORKER_ABORTED, isConversionInputLost, createConversionBandPool, planBandPoolSize, planBandCount, BAND_POOL_MIN_PIXELS, drcPathStats } from './conversionWorkerClient.js';
     import { createBandedExportBridge } from './bandedExportBridge.js';
     import { bandsSupported } from '../pipeline/silverBands.js';
     import { routeCoreConversion, keepsFullPlaneOnDowngrade, fullResolutionIsStale, restoredFrameFlags, viewportRefreshBranch, repairsNeedSettling } from './fullResolutionRouting.js';
@@ -124,7 +124,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       assertDetailAllocation, assertDetailRoiAllocation, detailSizeAllowed, DETAIL_MAX_NATIVE_PIXELS, DETAIL_MAX_OUTPUT_PIXELS, DETAIL_MAX_DIMENSION, DETAIL_SETTLE_MS,
       DETAIL_STEP_SETTLE_MS, planDetailBands, planDetailBandCount } from './detailLayer.js';
     import { applyPreviewChain, displayStageUniforms, displayModesSupported, regionFrame } from '../render/previewTables.js';
-    import { buildSelfTestCases, buildDisplayModesCases, displayParity } from '../render/gpuPreviewSelfTest.js';
+    import { buildSelfTestCases, buildDisplayModesCases, displayParity, buildDrcSelfTestCases } from '../render/gpuPreviewSelfTest.js';
     import { createBorderUnderlay, photoViewport } from '../render/borderUnderlay.js';
     import { computeAdjustmentParams } from '../workers/pixelAdjustments.js';
     import { createGpuPreviewScheduler, GPU_INPUT_RETRY_MS } from './gpuPreviewScheduler.js';
@@ -2518,7 +2518,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       drcShadows: 50,
       drcHighlights: 50,
       drcLocalContrast: 50,
-      drcSaturation: 50,
+      drcSaturation: 75,
       drcHintDismissed: false,
       // Analog metadata: the roll (session-wide) and this frame (per file).
       rollMetadata: sanitizeRollMetadata({}),
@@ -5035,7 +5035,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         drcShadows: Math.round(sanitizeNumeric(source.drcShadows, fallbackSettings.drcShadows ?? 50, 0, 100)),
         drcHighlights: Math.round(sanitizeNumeric(source.drcHighlights, fallbackSettings.drcHighlights ?? 50, 0, 100)),
         drcLocalContrast: Math.round(sanitizeNumeric(source.drcLocalContrast, fallbackSettings.drcLocalContrast ?? 50, 0, 100)),
-        drcSaturation: Math.round(sanitizeNumeric(source.drcSaturation, fallbackSettings.drcSaturation ?? 50, 0, 100)),
+        drcSaturation: Math.round(sanitizeNumeric(source.drcSaturation, fallbackSettings.drcSaturation ?? 75, 0, 100)),
         // The hint's dismissal is the photo's own (never the fallback frame's).
         drcHintDismissed: Boolean(source === state ? state.drcHintDismissed : source.drcHintDismissed),
         frameMetadata: sanitizeFrameMetadata(source === state ? state.frameMetadata : (Object.hasOwn(source, 'frameMetadata') ? source.frameMetadata : fallbackSettings.frameMetadata)),
@@ -8545,7 +8545,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           preview,
           includeAnalysisPreview,
           // The dynamic range hint's estimate, with this conversion's curves.
-          ...(drcEstimate ? { drcEstimate: true } : {}),
+          ...(drcEstimate ? { drcEstimate } : {}),
           analysisImageData: getColorAnalysisSample(settings),
           forceFullProcess: fullRender,
           // The preview worker keeps this frame's 16-bit plane until it is
@@ -8995,6 +8995,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         gpuPreview.selfTestCases = null;
         gpuPreview.selfTest = result;
         if (!result.ok) return failGpuPreview(`self-test ${JSON.stringify(result)}`);
+        // Dynamic range compression's stage on its own: where it does not draw
+        // as the CPU chain does, compressed photos stay on the preview worker.
+        try {
+          gpuPreview.drcSelfTest = renderer.selfTest(buildDrcSelfTestCases());
+        } catch (error) {
+          gpuPreview.drcSelfTest = { ok: false, error: String(error?.message || error) };
+        }
         gpuPreview.status = 'ready';
       }
       // Inputs only for a frame the GPU may draw: an excluded mode (crop,
@@ -10453,9 +10460,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
             const areaAtDispatch = analysisAreaOf(state.autoFrame?.lastDiagnostics);
             const wbRecipe = automatic ? whiteBalanceMeasurementSettings(conversionSettings) : null;
             const wbMeasurement = automatic ? provisionalWhiteBalanceMeasurement(conversionSettings, wbRecipe) || { settings: wbRecipe, live: liveGeometry() } : null;
-            processed = await convertFromCurrentSource(conversionSettings, { preview: hasPreviewSource, wbSample: automatic,
-              // Once per photo and session: the hint's estimate (dynamicRangeHint.js).
-              drcEstimate: automatic && !(state.drcAmount > 0) && !state.drcHintDismissed && Boolean(state.loadedFile) && !state.loadedFile.__ncDrcEstimated });
+            processed = await convertFromCurrentSource(conversionSettings, { preview: hasPreviewSource, wbSample: automatic });
             if (!isCurrentConversion()) { releaseOwnedPlanes(processed, processed?.__wbSample, processed?.__analysisPreview); return; }
             if (!processed) { showNegativeAfterFailedConversion(); return; }
             if (automatic) {
@@ -10480,11 +10485,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
             outputPixels: getImageDataPixelCount(processed)
           });
           overlay.updateProgress(hasPreviewSource ? 78 : 85, lang.loadingProcessing);
-          if (processed.__drcEstimate) {
-            noteDrcEstimate(processed.__drcEstimate);
-            delete processed.__drcEstimate;
-          }
           applyProcessedImageToState(processed, { previewOnly: hasPreviewSource });
+          // Once per photo and session, when the page is idle: the hint's
+          // estimate (dynamicRangeHint.js), never in the way of opening it.
+          if (automatic) {
+            // Conveniences: nothing about them may stop a photo from opening.
+            try { scheduleDrcHintEstimate(); scheduleDrcWarm(); } catch { /* no hint for this photo */ }
+          }
           if (automatic) {
             maybeAnalyzeExpiredRescue(processed);
             if (cropDetection?.token.hit && state.expiredEnabled && state.expiredAnalysis) {
@@ -20254,7 +20261,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       state.corePaperToningStrength = 100;
       state.look = null;
       resetExpiredStrengthsInState();
-      Object.assign(state, { drcAmount: 0, drcDetail: 50, drcShadows: 50, drcHighlights: 50, drcLocalContrast: 50, drcSaturation: 50 });
+      Object.assign(state, { drcAmount: 0, drcDetail: 50, drcShadows: 50, drcHighlights: 50, drcLocalContrast: 50, drcSaturation: 75 });
       state.coreSaturation = 100;
       state.coreGlow = 0;
       state.coreFade = 0;
@@ -22171,7 +22178,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         expiredBrightnessUserOverride: false,
         expiredContrastUserOverride: false,
         // Off for a new photo; the hint may offer it once the photo is converted.
-        drcAmount: 0, drcDetail: 50, drcShadows: 50, drcHighlights: 50, drcLocalContrast: 50, drcSaturation: 50,
+        drcAmount: 0, drcDetail: 50, drcShadows: 50, drcHighlights: 50, drcLocalContrast: 50, drcSaturation: 75,
         drcHintDismissed: false,
         frameMetadata: sanitizeFrameMetadata({}),
         flatFieldId: state.flatFieldId || null,
@@ -28616,21 +28623,26 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // What the preview shader needs to draw the compression of these settings,
     // or false while the sample or the map is being made.
     function gpuDrcInputs(settings, mode, params, analysis) {
+      if (gpuPreview.drcSelfTest && !gpuPreview.drcSelfTest.ok) return false;
       const sample = drcSampler.sampleFor(drcSampleFrame());
       if (!sample) return false;
       const prep = drcPrepFor(settings, mode, params, analysis?.data?.positiveAnalysis || null);
-      const map = drcMaps.mapFor(sample, prep, settings, { inverted: mode !== 'positive' });
+      const map = drcMaps.mapFor(sample, prep, settings, { inverted: mode !== 'positive', picture: drcPictureOf(params) });
       if (!map) return false;
       const method = drcMethodParams(settings);
       return { map, method, inverted: mode !== 'positive', protect: mode !== 'bw' ? method.protect : 0 };
     }
     // The estimate of the open photo's last automatic conversion: { frame, estimate }.
     let drcLastEstimate = null;
+    // The pause after a photo's automatic conversion before its hint is measured.
+    const DRC_HINT_DELAY_MS = 1200;
     // Photos the hint was offered for in this session (it is not offered twice).
     const drcHintOffered = new WeakSet();
     const drcSampler = createDrcSampler({
       onReady: (frame) => {
-        if (frame === drcSampleFrame() && drcEnabled(state) && state.currentStep >= 3) scheduleCoreReprocess({ full: false, commit: true });
+        if (frame !== drcSampleFrame()) return;
+        if (drcEnabled(state) && state.currentStep >= 3) scheduleCoreReprocess({ full: false, commit: true });
+        else warmDrcPreview();
       }
     });
 
@@ -28699,13 +28711,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     });
 
     // An estimate of the open photo at Amount 0, measured with its curves.
-    async function measureDrcEstimate() {
+    async function measureDrcEstimate({ fresh = false, detail = false } = {}) {
       const frame = drcSampleFrame();
-      if (drcLastEstimate && drcLastEstimate.frame === frame) return drcLastEstimate.estimate;
+      if (!fresh && drcLastEstimate && drcLastEstimate.frame === frame) return drcLastEstimate.estimate;
       if (!usesSilverCoreConversion(state) || (!frame && !state.conversionPreviewImageData)) return null;
       const settings = { ...captureSnapshot('conversion').settings, ...DRC_DEFAULTS };
       const converted = await convertFromCurrentSource(settings, {
-        preview: Boolean(state.conversionPreviewImageData), includeAnalysisPreview: false, drcEstimate: true
+        preview: Boolean(state.conversionPreviewImageData), includeAnalysisPreview: false, drcEstimate: detail ? 'candidates' : true
       });
       const estimate = converted?.__drcEstimate || null;
       if (converted) releaseOwnedPlanes(converted, converted.__wbSample, converted.__analysisPreview);
@@ -28719,7 +28731,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const estimate = await measureDrcEstimate();
       if (file !== state.loadedFile) return;
       const values = drcAutoSettings(estimate);
-      if (!values) return;
+      if (!values) {
+        if (estimate) showToast(getLocalizedText('drcAutoNone', "This photo's brightness range already fits: Auto left dynamic range compression off"));
+        return;
+      }
       pushUndo('drcAuto');
       Object.assign(state, values);
       state.drcHintDismissed = true;
@@ -28731,6 +28746,63 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
     // The hint: offered once per photo when its estimate says the compression
     // brings back enough; Apply sets Auto, "Not now" keeps it away for good.
+    // The hint's estimate for the open photo, measured once the page is idle
+    // after its automatic conversion (a separate conversion of the display
+    // level with its curves, about 0.2 s in the worker), so opening a photo
+    // never waits for it.
+    let drcHintTimer = 0;
+    function scheduleDrcHintEstimate() {
+      clearTimeout(drcHintTimer);
+      const file = state.loadedFile;
+      const wanted = () => file && file === state.loadedFile && !(state.drcAmount > 0) && !state.drcHintDismissed && !file.__ncDrcEstimated
+        && usesSilverCoreConversion(state);
+      if (!wanted()) return;
+      let tries = 0;
+      const later = () => {
+        drcHintTimer = setTimeout(() => {
+          if (typeof requestIdleCallback === 'function') requestIdleCallback(() => void run(), { timeout: 3000 });
+          else void run();
+        }, DRC_HINT_DELAY_MS);
+      };
+      const run = async () => {
+        if (!wanted()) return;
+        // Busy (a conversion, an export): later, a few times.
+        if (document.body.dataset.studioBusy || !state.processedImageData) { if (++tries < 20) later(); return; }
+        file.__ncDrcEstimated = true;
+        const estimate = await measureDrcEstimate().catch(() => null);
+        if (estimate && file === state.loadedFile) noteDrcEstimate(estimate);
+      };
+      later();
+    }
+
+    // The first switch-on draws at once: when the page is idle after a photo
+    // opens, its sample is made and the map at the default settings is solved
+    // (in the map worker), so the GPU preview has the photo's map to stand in
+    // while the one for the chosen Amount is solved.
+    let drcWarmTimer = 0;
+    function scheduleDrcWarm(tries = 0) {
+      clearTimeout(drcWarmTimer);
+      drcWarmTimer = setTimeout(() => {
+        const run = () => {
+          // The GPU preview's analysis comes with its first draw: later, a few times.
+          if (!warmDrcPreview() && tries < 10 && !drcEnabled(state)) scheduleDrcWarm(tries + 1);
+        };
+        if (typeof requestIdleCallback === 'function') requestIdleCallback(run, { timeout: 3000 });
+        else run();
+      }, DRC_HINT_DELAY_MS);
+    }
+    function warmDrcPreview() {
+      if (drcEnabled(state)) return true;
+      if (document.body.dataset.studioBusy || !gpuPreview.analysis || !gpuApplyUsable()) return false;
+      const settings = buildRouterSettings({ ...state, ...DRC_DEFAULTS, drcAmount: 50 });
+      const mode = resolveConversionMode(settings);
+      if (mode === 'positive' && settings.positiveEngine === 'legacy') return true;
+      const params = trySilverCoreParams(mode, settings);
+      // Starts the sample (and, once it is ready, the map: see the sampler's onReady).
+      if (params) gpuDrcInputs(settings, mode, params, gpuPreview.analysis);
+      return true;
+    }
+
     function noteDrcEstimate(estimate) {
       const frame = drcSampleFrame();
       drcLastEstimate = { frame, estimate };
@@ -28740,7 +28812,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (file) file.__ncDrcEstimated = true;
       if (!drcHintWanted(state, estimate) || (file && drcHintOffered.has(file))) return;
       if (file) drcHintOffered.add(file);
-      const toast = showToast(getLocalizedText('drcHintMessage', 'This photo has a wide brightness range: some detail in its bright or dark areas is not showing. Try dynamic range compression.'), 0, {
+      const gain = drcHintGain(estimate);
+      const message = gain === 'bright'
+        ? getLocalizedText('drcHintBright', "Detail in this photo's bright areas (sky, windows, lights) is washed out. Dynamic range compression can bring it back.")
+        : gain === 'dark'
+          ? getLocalizedText('drcHintDark', "Detail in this photo's dark areas is lost in shadow. Dynamic range compression can bring it out.")
+          : getLocalizedText('drcHintMessage', "Detail in this photo's bright and dark areas is not showing. Dynamic range compression can bring it back.");
+      const toast = showToast(message, 0, {
         action: { id: 'drcHintApply', label: getLocalizedText('drcHintApply', 'Apply'), onClick: () => void applyDrcAuto(file) },
         secondaryAction: {
           id: 'drcHintDismiss',
@@ -28809,13 +28887,25 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     if (typeof window !== 'undefined') {
       window.__ncDynamicRange = {
         settings: () => ({ ...Object.fromEntries(DRC_KEYS.map(key => [key, state[key]])), drcHintDismissed: state.drcHintDismissed }),
-        estimate: () => (drcLastEstimate ? { reduction: drcLastEstimate.estimate.reduction, suggested: { ...drcLastEstimate.estimate.suggested } } : null),
+        estimate: () => (drcLastEstimate ? { benefit: drcLastEstimate.estimate.benefit, reduction: drcLastEstimate.estimate.reduction, ends: drcLastEstimate.estimate.ends,
+          suggested: drcLastEstimate.estimate.suggested ? { ...drcLastEstimate.estimate.suggested } : null } : null),
         sampleReady: () => drcSampler.has(drcSampleFrame()),
+        // Where compressed conversions ran (the workers' WebGL2 stage or the reference).
+        paths: () => drcPathStats(),
+        // The settings the hint's estimate converts with (support, the smoke).
+        conversionSettings: () => JSON.parse(JSON.stringify({ ...captureSnapshot('conversion').settings, ...DRC_DEFAULTS })),
+        // The estimate again, with every candidate Auto weighed (support).
+        measure: () => measureDrcEstimate({ fresh: true, detail: true }),
+        // The GPU preview's own check of the compression's shader stage.
+        previewSelfTest: () => (gpuPreview.drcSelfTest ? { ok: gpuPreview.drcSelfTest.ok, maxDiff: gpuPreview.drcSelfTest.maxDiff,
+          cases: (gpuPreview.drcSelfTest.cases || []).map(c => ({ name: c.name, maxDiff: c.maxDiff, identical: c.identical })), error: gpuPreview.drcSelfTest.error } : null),
+        // The full-resolution GPU stage against the reference, in this page's context.
+        gpuParity: (options) => drcGpuParity(options),
         compareHeld: () => drcCompareHeld,
         // Which converted frame is on screen (cheap, for polling).
         frameId: () => gpuObjectId(state.processedImageData),
         // The GPU preview's last frame: its id, what drew it, and whether it drew the compression (and with which map).
-        gpuFrame: () => ({ id: gpuObjectId(gpuPreview.lastFrame), draw: gpuPreview.lastDraw || null,
+        gpuFrame: () => ({ id: gpuObjectId(gpuPreview.lastFrame), draw: gpuPreview.lastDraw || null, status: gpuPreview.status, webgl: isWebGLActive(),
           drc: Boolean(gpuPreview.lastFrame?.drc), mapKey: gpuPreview.lastFrame?.drc?.map?.key || null }),
         // Luminance percentiles (0..1) and a digest of the converted frame on screen.
         frame: () => {

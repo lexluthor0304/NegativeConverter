@@ -8,7 +8,7 @@ import {
   UNITS, TABLE_TEXTURE_SIZE, STEP3_CURVE_SIZE, STEP3_CURVE_ROWS, RESCUE_TONE_SIZE, RESCUE_OFFSET_BINS,
 } from './previewShader.js';
 import { packTableTexture, packHueWeights, packLinearLut, applyUniforms, packCurveRow, wholeFrame, displayModesSupported, TABLE_ENTRIES } from './previewTables.js';
-import { drcRangeTable } from '../pipeline/dynamicRange.js';
+import { drcRangeTable, drcLimitsOf } from '../pipeline/dynamicRange.js';
 import { SELF_TEST_SIZE, compareSelfTest, compareDisplayModes } from './gpuPreviewSelfTest.js';
 
 const QUAD = new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]);
@@ -56,7 +56,7 @@ const APPLY_UNIFORMS = [
   'u_posWb', 'u_stopsOn', 'u_stops', 'u_linearLut', 'u_toneLut', 'u_hslOn', 'u_hueSkip', 'u_bandActive', 'u_hueShift',
   'u_satFactor', 'u_hueWeights', 'u_lut3dOn', 'u_lut3dStr', 'u_lut3dInvStr', 'u_lut3d', 'u_satOn', 'u_sat', 'u_satRamp',
   'u_paperOn', 'u_paperLut', 'u_curve', 'u_wb', 'u_vib', 'u_cmy',
-  'u_drcOn', 'u_drcMap', 'u_drcRange', 'u_drcGrid', 'u_drcShares', 'u_drcRangeScale', 'u_drcRangeSize', 'u_drcProtect',
+  'u_drcOn', 'u_drcMap', 'u_drcRange', 'u_drcGrid', 'u_drcShares', 'u_drcLimits', 'u_drcRangeScale', 'u_drcRangeSize', 'u_drcProtect',
 ];
 // The display modes' uniforms (#253), in both mode variants.
 const MODE_UNIFORMS = [
@@ -360,6 +360,8 @@ export function createGpuPreviewRenderer(gl) {
     gl.uniform1i(loc.u_drcOn, drc ? 1 : 0);
     gl.uniform2i(loc.u_drcGrid, drc ? drc.map.width : 1, drc ? drc.map.height : 1);
     gl.uniform3f(loc.u_drcShares, drc ? drc.method.shadowShare : 1, drc ? drc.method.highlightShare : 1, drc && drc.inverted ? 1 : 0);
+    const drcLimits = drc ? drcLimitsOf(drc.map) : null;
+    gl.uniform4f(loc.u_drcLimits, drcLimits ? drcLimits[0] : 0, drcLimits ? drcLimits[1] : 0, drcLimits ? drcLimits[2] : 0, drcLimits ? 1 : 0);
     gl.uniform1f(loc.u_drcRangeScale, s.drcRangeInfo.scale);
     gl.uniform1i(loc.u_drcRangeSize, s.drcRangeInfo.size);
     gl.uniform1f(loc.u_drcProtect, drc && frame.mode !== 'bw' ? drc.protect : 0);

@@ -14,7 +14,7 @@
 // white (estimateDrcEffect). Above DRC_HINT_THRESHOLD the editor offers it
 // once; nothing is switched on without the user.
 
-import { createDrcSampleBuilder, drcEnabled, drcMapKey, drcPrepKey, DRC_HINT_THRESHOLD } from '../pipeline/dynamicRange.js';
+import { createDrcSampleBuilder, drcEnabled, drcMapKey, drcPrepKey, drcPictureKey, DRC_HINT_THRESHOLD } from '../pipeline/dynamicRange.js';
 
 /** The 16-bit plane of a frame (an ImageData with __image16, an Image16, or an 8-bit ImageData read as 16-bit). */
 export function drcPlaneOf(frame) {
@@ -95,7 +95,20 @@ export function createDrcSampler({
  */
 export function drcHintWanted(settings, estimate) {
   if (!estimate || drcEnabled(settings) || settings?.drcHintDismissed) return false;
-  return Number(estimate.reduction) >= DRC_HINT_THRESHOLD;
+  return Number(estimate.benefit) >= DRC_HINT_THRESHOLD;
+}
+
+/**
+ * What the hint should say the user gains: the bright areas, the dark areas,
+ * or both (the end whose fine detail Auto brings back; one end when it gains
+ * at least twice what the other does).
+ */
+export function drcHintGain(estimate) {
+  const dark = Math.max(0, Number(estimate?.ends?.dark?.detail) || 0);
+  const bright = Math.max(0, Number(estimate?.ends?.bright?.detail) || 0);
+  if (bright >= 2 * dark) return 'bright';
+  if (dark >= 2 * bright) return 'dark';
+  return 'both';
 }
 
 /** Auto: the six controls from a photo's estimate (estimateDrcEffect().suggested). */
@@ -124,7 +137,7 @@ export function createDrcMapService({ createWorker, onReady = () => {} }) {
   let next = null; // the newest request waiting for the one in flight
 
   function post(request) {
-    const message = { id: request.id, sampleKey: request.sample.key, prep: request.prep, settings: request.settings, inverted: request.inverted };
+    const message = { id: request.id, sampleKey: request.sample.key, prep: request.prep, settings: request.settings, inverted: request.inverted, picture: request.picture };
     if (!sent.has(request.sample.key)) {
       message.sample = { width: request.sample.width, height: request.sample.height, rgb: new Float32Array(request.sample.rgb) };
       sent.add(request.sample.key);
@@ -162,22 +175,22 @@ export function createDrcMapService({ createWorker, onReady = () => {} }) {
   }
 
   return {
-    keyOf(sample, prep, settings, inverted) {
-      return `${sample.key}|${drcPrepKey(prep)}|${drcMapKey(settings)}|${inverted ? 'neg' : 'pos'}`;
+    keyOf(sample, prep, settings, inverted, picture = null) {
+      return `${sample.key}|${drcPrepKey(prep)}|${drcMapKey(settings)}|${inverted ? 'neg' : 'pos'}|${drcPictureKey(picture)}`;
     },
     /**
      * The map, or (`standIn`) the newest map of the same sample and
      * preparation while the exact one is solved, or null. A request for it
      * goes out; while one is in flight only the newest waits.
      */
-    mapFor(sample, prep, settings, { standIn = true, inverted = true } = {}) {
-      const key = this.keyOf(sample, prep, settings, inverted);
+    mapFor(sample, prep, settings, { standIn = true, inverted = true, picture = null } = {}) {
+      const key = this.keyOf(sample, prep, settings, inverted, picture);
       const known = maps.get(key);
       if (known) return known;
-      const family = `${sample.key}|${drcPrepKey(prep)}|${inverted ? 'neg' : 'pos'}`;
+      const family = `${sample.key}|${drcPrepKey(prep)}|${inverted ? 'neg' : 'pos'}|${drcPictureKey(picture)}`;
       const w = ensureWorker();
       if (w && !(inFlight && inFlight.key === key) && !(next && next.key === key)) {
-        const request = { id: ++seq, key, family, sample, prep, inverted, settings: { ...settings, drcSample: undefined } };
+        const request = { id: ++seq, key, family, sample, prep, inverted, picture, settings: { ...settings, drcSample: undefined } };
         if (inFlight) next = request;
         else post(request);
       }

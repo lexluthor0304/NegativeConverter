@@ -30,7 +30,7 @@ import { LINEAR_STEPS } from '../silvercore/util/localExposure.js';
 import { LUT_SIZE as PROFILE_LUT_SIZE } from '../silvercore/engine/EnhancedProfiles.js';
 import { IMAGE16_MAX } from '../silvercore/util/image16.js';
 import { OFFSET_BINS, RESCUE_LUMA } from '../pipeline/expiredRescue.js';
-import { DRC_EPSILON, DRC_LUMA, DRC_MAX_LOG_GAIN, DRC_PROTECT_STOPS } from '../pipeline/dynamicRange.js';
+import { DRC_EPSILON, DRC_LUMA, DRC_MAX_LOG_GAIN, DRC_PROTECT_STOPS, DRC_LIMIT_SOFT, DRC_LIMIT_MARGIN } from '../pipeline/dynamicRange.js';
 
 // 65536-entry tables (tone curves, paper, the B&W grey table, the pre-saturation
 // ramp) are 256 × 256 textures: entry v is texel (v & 255, v >> 8).
@@ -405,6 +405,7 @@ uniform sampler2D u_drcMap;
 uniform sampler2D u_drcRange;
 uniform ivec2 u_drcGrid;
 uniform vec3 u_drcShares;
+uniform vec4 u_drcLimits;
 uniform float u_drcRangeScale;
 uniform int u_drcRangeSize;
 uniform float u_drcProtect;
@@ -480,6 +481,33 @@ float drcRangeWeight(float d) {
   return lo + (hi - lo) * (pos - float(i));
 }
 
+// drcLimitGain (pipeline/dynamicRange.js): the gain held inside the frame
+// (u_drcLimits: low extreme, middle, high extreme, on).
+float drcLimitGain(float g, float h) {
+  if (u_drcLimits.w < 0.5) return g;
+  if (g > 0.0) {
+    float c = min(u_drcLimits.y, u_drcLimits.z - ${f(DRC_LIMIT_MARGIN)});
+    float w = (u_drcLimits.z - c) * ${f(DRC_LIMIT_SOFT)};
+    float t = h + g;
+    if (t <= c) return g;
+    if (w <= 1e-6) return h >= c ? 0.0 : c - h;
+    float ft = c + w * (1.0 - exp(-(t - c) / w));
+    float fh = h <= c ? h : c + w * (1.0 - exp(-(h - c) / w));
+    return ft - fh;
+  }
+  if (g < 0.0) {
+    float c = max(u_drcLimits.y, u_drcLimits.x + ${f(DRC_LIMIT_MARGIN)});
+    float w = (c - u_drcLimits.x) * ${f(DRC_LIMIT_SOFT)};
+    float t = h + g;
+    if (t >= c) return g;
+    if (w <= 1e-6) return h <= c ? 0.0 : c - h;
+    float ft = c - w * (1.0 - exp(-(c - t) / w));
+    float fh = h >= c ? h : c - w * (1.0 - exp(-(c - h) / w));
+    return ft - fh;
+  }
+  return g;
+}
+
 // Dynamic range compression's stops at texel p of a frame of the given size
 // (exposeDrcReference / render/dynamicRangeGpu.js): the map's four cells
 // weighted by distance and by how close their luminance is to the pixel's.
@@ -504,7 +532,8 @@ float drcStops(float L, ivec2 p, ivec2 size) {
     : (1.0 - wy) * ((1.0 - wx) * m00.r + wx * m01.r) + wy * ((1.0 - wx) * m10.r + wx * m11.r);
   bool brightens = u_drcShares.z > 0.5 ? g < 0.0 : g > 0.0;
   g *= brightens ? u_drcShares.x : u_drcShares.y;
-  return clamp(g, ${f(-DRC_MAX_LOG_GAIN)}, ${f(DRC_MAX_LOG_GAIN)}) * ${f(Math.LOG2E)};
+  g = clamp(g, ${f(-DRC_MAX_LOG_GAIN)}, ${f(DRC_MAX_LOG_GAIN)});
+  return drcLimitGain(g, h) * ${f(Math.LOG2E)};
 }
 
 // applyHSLAdjustments, including its exact strict-maximum skip.

@@ -23,7 +23,7 @@ import { rasterizeExposureStopsTiled, updateExposureStopsMap, exposureMapKey, ex
 import { applyFlatFieldToImage16 } from '../app/flatField.js';
 import { analysisPixelBounds } from '../app/analysisRegion.js';
 import { LARGE_IMAGE_PIXELS } from '../app/imageMemoryBudget.js';
-import { drcEnabled, sampleDrcInput, solveDrcMap, buildDrcStage, exposeDrcReference, drcMapKey, drcMethodParams, drcPrepKey, estimateDrcEffect } from './dynamicRange.js';
+import { drcEnabled, sampleDrcInput, solveDrcMap, buildDrcStage, exposeDrcReference, drcMapKey, drcMethodParams, drcPrepKey, estimateDrcEffect, drcPictureOf, drcPictureKey } from './dynamicRange.js';
 import { computeFilmBaseGains } from './filmBaseCompensation.js';
 
 // EnhancedProfiles.js owns the list of shipped 3D-LUT profiles and their .bin URLs;
@@ -225,11 +225,11 @@ function _validDrcSample(sample) {
     && sample.rgb.length === sample.width * sample.height * 3 && sample.width > 0 ? sample : null;
 }
 
-function _drcMap(sample, sampleKey, prep, settings, inverted) {
-  const key = `${sampleKey}|${drcPrepKey(prep)}|${drcMapKey(settings)}|${inverted ? 'neg' : 'pos'}`;
+function _drcMap(sample, sampleKey, prep, settings, inverted, picture) {
+  const key = `${sampleKey}|${drcPrepKey(prep)}|${drcMapKey(settings)}|${inverted ? 'neg' : 'pos'}|${drcPictureKey(picture)}`;
   let map = _drcMaps.get(key);
   if (!map) {
-    map = solveDrcMap(sample, settings, { prep, inverted });
+    map = solveDrcMap(sample, settings, { prep, inverted, picture });
     if (!map) return null;
     map.key = key;
     _drcMaps.set(key, map);
@@ -267,7 +267,7 @@ function _planDrc(slot, settings, mode, input16, params, region) {
     seq,
     expose(image16, engine) {
       const prep = drcPrepFor(settings, mode, params, engine.positiveAnalysis);
-      const map = _drcMap(sample, sampleKey, prep, settings, inverted);
+      const map = _drcMap(sample, sampleKey, prep, settings, inverted, drcPictureOf(params));
       if (!map) return;
       const n = image16.width * image16.height;
       const weights = protect > 0 ? new Uint8Array(n) : null;
@@ -1214,7 +1214,7 @@ async function runSilverCore(imageData, settings, mode, options) {
     // scan): a holder or rebate around it is not clipped picture.
     const box = analysisPixelBounds(input16.width, input16.height, params.analysisRegion, (params.borderBuffer ?? 10) / 100);
     result.__drcEstimate = estimateDrcEffect(input16, engine.lastLuts, mode !== 'positive',
-      { bounds: { x0: box.left, y0: box.top, x1: box.left + box.width, y1: box.top + box.height } });
+      { bounds: { x0: box.left, y0: box.top, x1: box.left + box.width, y1: box.top + box.height }, picture: drcPictureOf(params), candidates: options.drcEstimate === 'candidates' });
   }
   // 参照の種類・寸法・画素バッファ・解析設定をキーにし、通常画像と混同しない。
   if (!reference || transient) slot.referencePixels = {};

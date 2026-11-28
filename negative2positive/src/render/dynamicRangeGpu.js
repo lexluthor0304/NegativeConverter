@@ -21,7 +21,7 @@
  */
 
 import { LINEAR_LUT, LINEAR_STEPS } from '../silvercore/util/localExposure.js';
-import { DRC_EPSILON, DRC_LUMA, DRC_MAX_LOG_GAIN, DRC_PROTECT_STOPS, drcRangeTable, exposeDrcReference, buildDrcStage } from '../pipeline/dynamicRange.js';
+import { DRC_EPSILON, DRC_LUMA, DRC_MAX_LOG_GAIN, DRC_PROTECT_STOPS, DRC_LIMIT_SOFT, DRC_LIMIT_MARGIN, drcLimitsOf, drcRangeTable, exposeDrcReference, buildDrcStage, solveDrcMap, sampleDrcInput, drcMethodParams } from '../pipeline/dynamicRange.js';
 
 // Bands of whole rows of at most this many pixels: a band is contiguous in
 // the plane, so it goes up in one texSubImage2D and comes back through a
@@ -55,6 +55,7 @@ uniform ivec2 u_origin;
 uniform vec4 u_frame;
 uniform ivec2 u_grid;
 uniform vec3 u_shares;
+uniform vec4 u_limits;
 uniform float u_rangeScale;
 uniform int u_rangeSize;
 layout(location = 0) out uvec4 outPixel;
@@ -85,6 +86,33 @@ uint encode(float lin, float gain) {
   return uint(floor((v > 0.0 ? pow(v, ${f(1 / 2.2)}) : 0.0) * 65535.0 + 0.5));
 }
 
+// drcLimitGain (pipeline/dynamicRange.js): the gain held inside the frame
+// (u_limits: low extreme, middle, high extreme, on).
+float limitGain(float g, float h) {
+  if (u_limits.w < 0.5) return g;
+  if (g > 0.0) {
+    float c = min(u_limits.y, u_limits.z - ${f(DRC_LIMIT_MARGIN)});
+    float w = (u_limits.z - c) * ${f(DRC_LIMIT_SOFT)};
+    float t = h + g;
+    if (t <= c) return g;
+    if (w <= 1e-6) return h >= c ? 0.0 : c - h;
+    float ft = c + w * (1.0 - exp(-(t - c) / w));
+    float fh = h <= c ? h : c + w * (1.0 - exp(-(h - c) / w));
+    return ft - fh;
+  }
+  if (g < 0.0) {
+    float c = max(u_limits.y, u_limits.x + ${f(DRC_LIMIT_MARGIN)});
+    float w = (c - u_limits.x) * ${f(DRC_LIMIT_SOFT)};
+    float t = h + g;
+    if (t >= c) return g;
+    if (w <= 1e-6) return h <= c ? 0.0 : c - h;
+    float ft = c - w * (1.0 - exp(-(c - t) / w));
+    float fh = h >= c ? h : c - w * (1.0 - exp(-(c - h) / w));
+    return ft - fh;
+  }
+  return g;
+}
+
 void main() {
   ivec2 p = ivec2(gl_FragCoord.xy);
   uvec4 src = texelFetch(u_src, p, 0);
@@ -113,6 +141,7 @@ void main() {
   bool brightens = inverted ? g < 0.0 : g > 0.0;
   g *= brightens ? u_shares.x : u_shares.y;
   g = clamp(g, ${f(-DRC_MAX_LOG_GAIN)}, ${f(DRC_MAX_LOG_GAIN)});
+  g = limitGain(g, h);
   float drcStops = g * ${f(Math.LOG2E)};
   uint weight = 0u;
   if (u_weightsOn != 0) {
@@ -300,6 +329,8 @@ export function createDrcExposer({ canvas = null } = {}) {
     gl.uniform4f(u.u_frame, f.x, f.y, f.frameWidth, f.frameHeight);
     gl.uniform2i(u.u_grid, map.width, map.height);
     gl.uniform3f(u.u_shares, method.shadowShare, method.highlightShare, inverted ? 1 : 0);
+    const limits = drcLimitsOf(map);
+    gl.uniform4f(u.u_limits, limits ? limits[0] : 0, limits ? limits[1] : 0, limits ? limits[2] : 0, limits ? 1 : 0);
     gl.uniform1f(u.u_rangeScale, range.scale);
     gl.uniform1i(u.u_rangeSize, range.size);
     gl.uniform1i(u.u_weightsOn, weights ? 1 : 0);
@@ -400,4 +431,51 @@ export function createDrcExposer({ canvas = null } = {}) {
     get lastError() { return lastError; },
     info: { renderer: (() => { try { return gl.getParameter(gl.RENDERER); } catch { return ''; } })() }
   };
+}
+
+/**
+ * The GPU stage against the reference on a synthetic frame of more rows than
+ * one band (for support and the WebKit check: it runs in whatever context
+ * calls it). Returns the largest difference in 16-bit codes and in weights.
+ */
+export function drcGpuParity({ width = DRC_GPU_TILE + 300, height = Math.floor(DRC_GPU_BAND_PIXELS / (DRC_GPU_TILE + 300)) + 211, canvas = null } = {}) {
+  const exposer = createDrcExposer({ canvas });
+  if (!exposer.supported) return { supported: false, reason: exposer.reason || exposer.lastError || 'no WebGL2' };
+  let seed = 11;
+  const random = () => (seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0) / 4294967296;
+  const plane = new Uint16Array(width * height * 4);
+  for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+    const zone = x < width / 3 ? 0.9 : x < 2 * width / 3 ? 0.35 : 0.04;
+    for (let c = 0; c < 3; c++) {
+      const v = Math.min(1, zone * [1, 0.8, 0.6][c] * (1 + 0.2 * Math.sin(x / 7 + c) * Math.sin(y / 9)) + (random() - 0.5) * 0.02);
+      plane[(y * width + x) * 4 + c] = Math.round(Math.max(0, v) ** (1 / 2.2) * 65535);
+    }
+    plane[(y * width + x) * 4 + 3] = 65535;
+  }
+  const settings = { drcAmount: 70, drcShadows: 60, drcHighlights: 45 };
+  const cases = [];
+  try {
+    for (const inverted of [true, false]) {
+      const map = solveDrcMap(sampleDrcInput(plane, width, height), settings, { inverted });
+      map.key = `parity:${inverted}`;
+      const method = drcMethodParams(settings);
+      const a = { width, height, data: new Uint16Array(plane) };
+      const b = { width, height, data: new Uint16Array(plane) };
+      const wa = new Uint8Array(width * height);
+      const wb = new Uint8Array(width * height);
+      const t0 = performance.now();
+      const outcome = exposer.expose(a, map, method, { inverted, weights: wa });
+      const gpuMs = performance.now() - t0;
+      const t1 = performance.now();
+      exposeDrcReference(b, buildDrcStage(map), method, { inverted, weights: wb });
+      const referenceMs = performance.now() - t1;
+      let max = 0; let differ = 0; let weightMax = 0;
+      for (let i = 0; i < a.data.length; i++) { const d = Math.abs(a.data[i] - b.data[i]); if (d > max) max = d; if (d) differ++; }
+      for (let i = 0; i < wa.length; i++) weightMax = Math.max(weightMax, Math.abs(wa[i] - wb[i]));
+      cases.push({ inverted, max, differPct: +(100 * differ / a.data.length).toFixed(3), weightMax, gpuBands: outcome.gpuTiles, referenceBands: outcome.referenceTiles, gpuMs: Math.round(gpuMs), referenceMs: Math.round(referenceMs) });
+    }
+  } finally {
+    exposer.dispose();
+  }
+  return { supported: true, renderer: exposer.info.renderer, width, height, cases };
 }

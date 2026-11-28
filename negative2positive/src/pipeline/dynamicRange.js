@@ -35,8 +35,9 @@
 
 import { nearestSmoothLength, solvePoissonNeumann } from './dynamicRangeSolver.js';
 import { LINEAR_LUT, LINEAR_STEPS } from '../silvercore/util/localExposure.js';
+import { analysisPixelBounds } from '../app/analysisRegion.js';
 
-export const DRC_VERSION = 1;
+export const DRC_VERSION = 2;
 
 export const DRC_KEYS = Object.freeze([
   'drcAmount', 'drcDetail', 'drcShadows', 'drcHighlights', 'drcLocalContrast', 'drcSaturation'
@@ -51,7 +52,7 @@ export const DRC_DEFAULTS = Object.freeze({
   drcShadows: 50,
   drcHighlights: 50,
   drcLocalContrast: 50,
-  drcSaturation: 50
+  drcSaturation: 75
 });
 
 /** Solve grid: the long side of the reduced frame the equation is solved on. */
@@ -80,6 +81,17 @@ const FIRST_ATTENUATED_LEVEL = 1;
 const RANGE_SIGMA = 0.5;
 // The log gain the map may hold (about 4.5 stops either way).
 const MAX_LOG_GAIN = 3.1;
+// Where a pixel may be moved (drcLimitGain): the frame's extremes are the
+// 0.5 % and 99.5 % quantiles of the solve grid's log luminance; a pixel moves
+// freely up to the middle (the anchor) and at least LIMIT_MARGIN (natural
+// log, half a stop) inside an extreme, then through a soft knee a quarter of
+// the remaining way wide. Measured on 66 real negatives and 32 public frames
+// (docs/dynamic-range-compression.md).
+const LIMIT_QUANTILE = 0.005;
+const LIMIT_SOFT = 0.25;
+const LIMIT_MARGIN = 0.35;
+export const DRC_LIMIT_SOFT = LIMIT_SOFT;
+export const DRC_LIMIT_MARGIN = LIMIT_MARGIN;
 // Saturation protection at 100: the most a darkened pixel's chroma is reduced,
 // reached at PROTECT_STOPS of darkening.
 const PROTECT_AT_FULL = 0.6;
@@ -368,12 +380,17 @@ function gradientMagnitude(level, scale) {
 // The q-quantile of a level's gradient magnitudes, from a fixed stride of
 // samples (exact on small levels).
 function quantile(values, q) {
+  return quantiles(values, [q])[0];
+}
+
+// Several quantiles of one array from a single sort (the same values as quantile).
+function quantiles(values, qs) {
   const stride = Math.max(1, Math.floor(values.length / 65536));
   const n = Math.floor((values.length - 1) / stride) + 1;
   const sample = new Float64Array(n);
   for (let i = 0, j = 0; j < n; i += stride, j++) sample[j] = values[i];
   sample.sort();
-  return sample[Math.min(n - 1, Math.max(0, Math.round(q * (n - 1))))];
+  return qs.map((q) => sample[Math.min(n - 1, Math.max(0, Math.round(q * (n - 1))))]);
 }
 
 // Bilinear upsampling of a coarse level's field to the next finer level's grid.
@@ -427,11 +444,12 @@ export function attenuationField(H, width, height, method) {
     const localRaise = new Float64Array(n);
     if (k >= FIRST_ATTENUATED_LEVEL) {
       const mag = gradientMagnitude(level, 2 ** k);
-      const alpha = Math.max(quantile(mag, method.detailShare), 1e-6);
+      const [detailQ, raiseQ] = quantiles(mag, [method.detailShare, RAISE_QUANTILE]);
+      const alpha = Math.max(detailQ, 1e-6);
       // Local contrast raises the gradients below the level's median (or
       // below the detail threshold, if that is lower): what is raised does
       // not grow with what Detail protects.
-      const raiseBelow = Math.min(alpha, Math.max(quantile(mag, RAISE_QUANTILE), 1e-6));
+      const raiseBelow = Math.min(alpha, Math.max(raiseQ, 1e-6));
       for (let i = 0; i < n; i++) {
         const g = Math.max(mag[i], 1e-9);
         const ratio = g / alpha;
@@ -513,10 +531,40 @@ export function solveDrcMap(sample, settings, options = {}) {
   const eps = DRC_EPSILON;
   const H = new Float64Array(n);
   for (let i = 0; i < n; i++) H[i] = Math.log(lum[i] + eps);
-  const I = compressLogLuminance(H, width, height, method);
+  // The picture alone is solved (the analysis region, drcPictureOf, when the
+  // conversion names one): a film holder or rebate around it is no part of the
+  // scene, and its edge with the picture would be compressed like any other
+  // and shift the picture beside it. The picture's cells, padded with their
+  // own edge (no gradient, as the reflected border) to a size the DCT takes;
+  // outside the picture the gain of its nearest cell carries on.
+  // (Only a picture the conversion names: without a region the whole frame is the picture.)
+  const box = options.picture?.region ? analysisPixelBounds(width, height, options.picture.region, 0) : null;
+  let I;
+  if (box && (box.width < width || box.height < height) && box.width >= 16 && box.height >= 16) {
+    const sw = smoothAtLeast(box.width); const sh = smoothAtLeast(box.height);
+    const Hc = new Float64Array(sw * sh);
+    for (let y = 0; y < sh; y++) for (let x = 0; x < sw; x++) {
+      Hc[y * sw + x] = H[(box.top + Math.min(y, box.height - 1)) * width + box.left + Math.min(x, box.width - 1)];
+    }
+    const Ic = compressLogLuminance(Hc, sw, sh, method);
+    I = new Float64Array(n);
+    for (let y = 0; y < height; y++) {
+      const cy = clamp(y - box.top, 0, box.height - 1);
+      for (let x = 0; x < width; x++) {
+        const cx = clamp(x - box.left, 0, box.width - 1);
+        const c = cy * sw + cx;
+        I[y * width + x] = H[y * width + x] + (Ic[c] - Hc[c]);
+      }
+    }
+  } else {
+    I = compressLogLuminance(H, width, height, method);
+  }
   // (On a negative the order is the other way round; the median is its own mirror.)
   const q = options.inverted ? 1 - ANCHOR_QUANTILE : ANCHOR_QUANTILE;
-  const offset = quantile(H, q) - quantile(I, q);
+  // The anchor and the extremes are the picture's too.
+  const [Hp, Ip] = pictureCells(H, I, width, height, options.picture);
+  const [anchorH, limitLow, middle, limitHigh] = quantiles(Hp, [q, LIMIT_QUANTILE, ANCHOR_QUANTILE, 1 - LIMIT_QUANTILE]);
+  const offset = anchorH - quantile(Ip, q);
   const logGain = new Float32Array(n);
   const guide = new Float32Array(n);
   for (let i = 0; i < n; i++) {
@@ -525,7 +573,10 @@ export function solveDrcMap(sample, settings, options = {}) {
     logGain[i] = lum[i] > 0 ? clamp(Math.log(out / lum[i]), -2 * MAX_LOG_GAIN, 2 * MAX_LOG_GAIN) : 0;
     guide[i] = H[i];
   }
-  return { version: DRC_VERSION, width, height, logGain, guide };
+  // The frame's own extremes (log luminance of its 0.5 % and 99.5 % cells):
+  // no pixel is pushed past them (drcLimitGain).
+  const limits = [limitLow, middle, limitHigh];
+  return { version: DRC_VERSION, width, height, logGain, guide, limits };
 }
 
 /**
@@ -534,10 +585,51 @@ export function solveDrcMap(sample, settings, options = {}) {
  * compression (on a negative the signs are the other way round), limited to
  * about 4.5 stops, as log2.
  */
-export function drcStopsOf(logGain, method, inverted) {
+export function drcStopsOf(logGain, method, inverted, h = null, limits = null) {
   const brightens = inverted ? logGain < 0 : logGain > 0;
-  const g = logGain * (brightens ? method.shadowShare : method.highlightShare);
-  return (g > MAX_LOG_GAIN ? MAX_LOG_GAIN : g < -MAX_LOG_GAIN ? -MAX_LOG_GAIN : g) * Math.LOG2E;
+  let g = logGain * (brightens ? method.shadowShare : method.highlightShare);
+  g = g > MAX_LOG_GAIN ? MAX_LOG_GAIN : g < -MAX_LOG_GAIN ? -MAX_LOG_GAIN : g;
+  if (limits && h !== null) g = drcLimitGain(g, h, limits[0], limits[1], limits[2]);
+  return g * Math.LOG2E;
+}
+
+/**
+ * The gain of a pixel of log luminance h, held inside the frame. The gain is
+ * regional: detail darker (or brighter) than its region gets the region's
+ * gain and, without this, would be pushed past the frame's own black (or
+ * white) and clipped by the curves; a frame whose middle sits near an
+ * extreme would be pulled into it. So, in the direction a pixel moves, it
+ * moves freely up to a ceiling c (the middle, and at least LIMIT_MARGIN
+ * inside the extreme); past c its level goes through a soft knee,
+ * g' = f(h + g) - f(h), f(t) = c + w (1 - exp(-(t - c) / w)), w a quarter of
+ * the way from c to the extreme: it approaches that point and never passes
+ * it, and two pixels keep their order. Moving towards the middle (lifting
+ * shadows, lowering highlights) is untouched up to the middle.
+ */
+export function drcLimitGain(g, h, low, mid, high) {
+  if (g > 0) {
+    // Upwards: freely up to the ceiling (the middle, and at least LIMIT_MARGIN
+    // inside the high extreme), then a soft knee that never reaches the extreme.
+    const c = Math.min(mid, high - LIMIT_MARGIN);
+    const w = (high - c) * LIMIT_SOFT;
+    const t = h + g;
+    if (t <= c) return g;
+    if (!(w > 1e-6)) return h >= c ? 0 : c - h;
+    const ft = c + w * (1 - Math.exp(-(t - c) / w));
+    const fh = h <= c ? h : c + w * (1 - Math.exp(-(h - c) / w));
+    return ft - fh;
+  }
+  if (g < 0) {
+    const c = Math.max(mid, low + LIMIT_MARGIN);
+    const w = (c - low) * LIMIT_SOFT;
+    const t = h + g;
+    if (t >= c) return g;
+    if (!(w > 1e-6)) return h <= c ? 0 : c - h;
+    const ft = c - w * (1 - Math.exp(-(c - t) / w));
+    const fh = h >= c ? h : c - w * (1 - Math.exp(-(c - h) / w));
+    return ft - fh;
+  }
+  return g;
 }
 
 /** Saturation protection's weight of a pixel (0-255): how far the compression darkened it, up to PROTECT_STOPS. */
@@ -582,9 +674,54 @@ export function drcRangeTable() {
 }
 
 /** The stage of a map: what the per-pixel functions read. */
+/**
+ * The picture inside a frame, for the map's anchor and extremes: the
+ * conversion's analysis region (the crop, or the detected frame of an
+ * uncropped scan) less its border buffer, as the engine's analysis sees it.
+ */
+export function drcPictureOf(params) {
+  const r = params?.analysisRegion;
+  const region = r && ['left', 'top', 'width', 'height'].every((k) => Number.isFinite(r[k])) && r.width > 0 && r.height > 0
+    ? { left: r.left, top: r.top, width: r.width, height: r.height } : null;
+  return { region, border: (Number.isFinite(params?.borderBuffer) ? params.borderBuffer : 10) / 100 };
+}
+
+/** The picture's part of a map key. */
+export function drcPictureKey(picture) {
+  if (!picture) return 'p:all';
+  const r = picture.region;
+  const f = (v) => (+v).toFixed(4);
+  return `p:${r ? [r.left, r.top, r.width, r.height].map(f).join(',') : 'full'}:${f(picture.border)}`;
+}
+
+// The smallest length of 2, 3 and 5 factors at least n.
+function smoothAtLeast(n) {
+  for (let m = Math.max(1, n); ; m++) if (nearestSmoothLength(m) === m) return m;
+}
+
+// The log luminance of the solve grid's cells inside the picture (and of the
+// solved result there); the whole grid without a picture.
+function pictureCells(H, I, width, height, picture) {
+  if (!picture) return [H, I];
+  const box = analysisPixelBounds(width, height, picture.region, picture.border);
+  const Hp = new Float64Array(box.width * box.height);
+  const Ip = new Float64Array(box.width * box.height);
+  for (let y = 0, k = 0; y < box.height; y++) for (let x = 0; x < box.width; x++, k++) {
+    const i = (box.top + y) * width + box.left + x;
+    Hp[k] = H[i]; Ip[k] = I[i];
+  }
+  return [Hp, Ip];
+}
+
+/** A map's extremes, or none (a map from before they were kept: no limit). */
+export function drcLimitsOf(map) {
+  const l = map && map.limits;
+  return l && l.length === 3 && l.every(Number.isFinite) && l[0] <= l[1] && l[1] <= l[2] ? [l[0], l[1], l[2]] : null;
+}
+
 export function buildDrcStage(map) {
   if (!map || !(map.logGain?.length === map.width * map.height) || !(map.guide?.length === map.logGain.length)) return null;
-  return { width: map.width, height: map.height, logGain: map.logGain, guide: map.guide, range: rangeWeights() };
+  return { width: map.width, height: map.height, logGain: map.logGain, guide: map.guide, limits: drcLimitsOf(map), range: rangeWeights() };
 }
 
 /**
@@ -613,11 +750,14 @@ export function drcLogGainAt(stage, u, v, h) {
 
 // The joint bilateral lookup of computeDrcStops / exposeDrcReference for one
 // pixel, from its linear luminance L (shared so both read the same numbers).
-function lookupLogGain(stage, cx0, cx1, cwx, row0, row1, wy, L, logTable) {
-  const { logGain, guide, range } = stage;
+function logOfLuminance(L, logTable) {
   const pos = (L < 1 ? (L > 0 ? L : 0) : 1) * LOG_TABLE_STEPS;
   const t = pos | 0;
-  const h = logTable[t] + (logTable[t < LOG_TABLE_STEPS ? t + 1 : t] - logTable[t]) * (pos - t);
+  return logTable[t] + (logTable[t < LOG_TABLE_STEPS ? t + 1 : t] - logTable[t]) * (pos - t);
+}
+
+function lookupLogGain(stage, cx0, cx1, cwx, row0, row1, wy, h) {
+  const { logGain, guide, range } = stage;
   const i00 = row0 + cx0; const i01 = row0 + cx1; const i10 = row1 + cx0; const i11 = row1 + cx1;
   const rt = range.table; const rs = range.scale;
   let d; let r;
@@ -692,7 +832,8 @@ export function computeDrcStops(data, width, height, stage, options = {}) {
     for (let x = 0; x < width; x++) {
       const i = (y * width + x) * 4;
       const L = DRC_LUMA[0] * lin(data[i]) + DRC_LUMA[1] * lin(data[i + 1]) + DRC_LUMA[2] * lin(data[i + 2]);
-      out[y * width + x] = drcStopsOf(lookupLogGain(stage, cx0[x], cx1[x], cwx[x], row0, row1, wy, L, logTable), method, inverted);
+      const h = logOfLuminance(L, logTable);
+      out[y * width + x] = drcStopsOf(lookupLogGain(stage, cx0[x], cx1[x], cwx[x], row0, row1, wy, h), method, inverted, h, stage.limits);
     }
   }
   return out;
@@ -733,7 +874,8 @@ export function exposeDrcReference(image16, stage, method, options = {}) {
       const i = p * 4;
       const lr = lin(data[i]); const lg = lin(data[i + 1]); const lb = lin(data[i + 2]);
       const L = DRC_LUMA[0] * lr + DRC_LUMA[1] * lg + DRC_LUMA[2] * lb;
-      const drcStops = drcStopsOf(lookupLogGain(stage, cx0[x], cx1[x], cwx[x], row0, row1, wy, L, logTable), method, inverted);
+      const h = logOfLuminance(L, logTable);
+      const drcStops = drcStopsOf(lookupLogGain(stage, cx0[x], cx1[x], cwx[x], row0, row1, wy, h), method, inverted, h, stage.limits);
       if (weights) weights[p] = drcProtectWeight(drcStops, inverted);
       const s = drcStops + (stroke ? stroke(x, y) : 0);
       if (s === 0) continue;
@@ -842,26 +984,75 @@ export function measureDrcClipping(data, width, height) {
 // The hint and Auto: what the compression would do to a photo
 
 /** The share of the frame the hint asks to be brought back from near black or white. */
-export const DRC_HINT_THRESHOLD = 0.08;
-const HINT_AMOUNTS = [30, 50, 70];
+// The hint is offered when Auto would bring back at least this much local
+// contrast in the picture's ends (display levels per grid step, the darkest
+// and brightest tenth together; see estimateDrcEffect). Chosen on 66 real
+// negatives and 32 public frames by eye (docs/dynamic-range-compression.md).
+export const DRC_HINT_THRESHOLD = 6;
+const HINT_AMOUNTS = [15, 30, 50, 70];
+const HINT_SHARES = [25, 50, 75];
 const HINT_SAMPLES = 16384;
 // The estimate solves on its own grid of 256 px: it runs with a photo's first
-// conversion and must not delay it much (about 40 ms on one thread); at
-// 160 px it no longer told the frames apart.
+// conversion and must not delay it much; at 160 px it no longer told the
+// frames apart.
 const HINT_LONG_SIDE = 256;
+// The share of the picture's cells that makes each end (darkest, brightest).
+const END_SHARE = 0.1;
+// What the midtones may lose of their local contrast before it counts
+// against a setting (the flat, grey look), and how much it counts.
+const MID_LOSS_WEIGHT = 1.5;
+// How far the bright end may be dimmed and the dark end lifted (mean display
+// levels) before it counts as the flat look, and how much that and a colour
+// shift in the ends count against a setting.
+const FREE_DIM = 25;
+const FREE_LIFT = 25;
+const FLAT_WEIGHT = 0.4;
+const SHIFT_WEIGHT = 0.3;
+const FREE_SHIFT = 5;
+// Display levels added to the brightness a chroma is measured against (near
+// black, chroma is noise).
+const CHROMA_FLOOR = 16;
+// The near-black or near-white share a setting may add (a quarter of a
+// percentage point of the sampled pixels).
+const ADD_TOLERANCE = 0.0025;
+// The screen's flare, as a share of white, that hides detail in deep shadow.
+const DETAIL_FLARE = 0.02;
+// The texture whose visibility measures fine detail (stops on the negative).
+const TEXTURE_STOPS = 0.1;
 
-function exposeCode(v, stops) {
-  if (stops === 0) return v;
-  const linear = linear16(v) * Math.pow(2, stops);
-  return Math.round(Math.pow(linear < 1 ? linear : 1, 1 / 2.2) * 65535);
+// Linear light of a display-encoded 16-bit code (gamma 2.2), by table.
+let linearTableCache = null;
+function displayLinear() {
+  if (!linearTableCache) {
+    linearTableCache = new Float32Array(65536);
+    for (let i = 0; i < 65536; i++) linearTableCache[i] = Math.pow(i / 65535, 2.2);
+  }
+  return linearTableCache;
 }
 
 /**
- * Estimates, on a strided subsample of the negative, how much of the frame
- * sits near black or white after the conversion's curves, without the
- * compression and with it at a few amounts. Only the curves are evaluated
- * (not the colour stages after them), which is enough to tell a frame whose
- * ends the compression brings back from one that is dark or bright by design.
+ * What the compression would do for a photo, measured cheaply with the
+ * conversion's own curves (only the curves; the colour stages after them do
+ * not change where detail is):
+ *
+ * - on a 256 px grid of the negative (cell means), the picture's darkest and
+ *   brightest tenth (by the converted luminance without the compression) and
+ *   its middle; in each, the local contrast (mean difference between
+ *   neighbouring cells, in 8-bit display levels) and the number of distinct
+ *   display levels, without the compression and with each candidate;
+ * - on a strided subsample of 16k pixels, the share near black or white
+ *   (within 3 %), so that no candidate that adds clipped area is chosen.
+ *
+ * The candidates are Amount 15, 30, 50 and 70 with Shadow recovery and
+ * Highlight compression at 25, 50 and 75 (only Amount needs a solve). A
+ * candidate that adds near-black or near-white pixels (ADD_TOLERANCE) is
+ * never chosen. The score is the fine detail gained in the two ends, less
+ * what the middle loses of its local contrast (the flat look), an end moved
+ * further than FREE_DIM / FREE_LIFT display levels (a bright end dimmed to
+ * grey, a dark end lifted to grey) and a hue that moves (colour shift).
+ * Auto is the gentlest candidate within 90 % of the best score, or nothing
+ * when no candidate scores above 0; the hint is offered when the score is at
+ * least DRC_HINT_THRESHOLD.
  *
  * @param {object} input - { data: Uint16Array RGBA, width, height } the negative as the engine receives it
  * @param {{ r: Uint16Array, g: Uint16Array, b: Uint16Array }} luts - the conversion's curves (65536 entries)
@@ -869,77 +1060,206 @@ function exposeCode(v, stops) {
  * @param {object} [options]
  * @param {{ x0, y0, x1, y1 }} [options.bounds] - the picture inside the scan (the crop or the
  *   detected frame), in pixels: only it is measured, so a holder or rebate around it does not
- *   count as clipped area (the compression itself still sees the whole frame)
- * @returns {{ base: { shadows, highlights }, byAmount: object, reduction: number, suggested: object|null }}
+ *   count (the compression itself still sees the whole frame)
+ * @returns {{ base, benefit, ends, reduction, suggested }}
  */
 export function estimateDrcEffect(input, luts, inverted, options = {}) {
   const { data, width, height } = input;
   // Never finer than the frame itself (a tile, a test's small frame).
   const sample = sampleDrcInput(data, width, height, { longSide: Math.min(HINT_LONG_SIDE, Math.max(width, height)) });
+  const gw = sample.width; const gh = sample.height;
   const b = options.bounds;
   const x0 = b ? clamp(Math.floor(b.x0), 0, width - 1) : 0;
   const y0 = b ? clamp(Math.floor(b.y0), 0, height - 1) : 0;
   const x1 = b ? clamp(Math.ceil(b.x1), x0 + 1, width) : width;
   const y1 = b ? clamp(Math.ceil(b.y1), y0 + 1, height) : height;
+
+  // The points measured: sampled pixels of the picture (the ends, the
+  // clipped share) and the grid's cells inside it (the middle's local
+  // contrast). Each keeps its channels gamma-encoded (exposure by s stops is
+  // then a factor 2^(s/2.2)), its log luminance and its position.
+  const points = (count) => ({ q: new Float64Array(count * 3), h: new Float64Array(count), u: new Float64Array(count), v: new Float64Array(count) });
+  const fill = (pts, k, r, g, bl, u, v) => {
+    const lr = linear16(r); const lg = linear16(g); const lb = linear16(bl);
+    pts.q[k * 3] = Math.pow(lr, 1 / 2.2); pts.q[k * 3 + 1] = Math.pow(lg, 1 / 2.2); pts.q[k * 3 + 2] = Math.pow(lb, 1 / 2.2);
+    pts.h[k] = Math.log(DRC_LUMA[0] * lr + DRC_LUMA[1] * lg + DRC_LUMA[2] * lb + DRC_EPSILON);
+    pts.u[k] = u; pts.v[k] = v;
+  };
   const bw = x1 - x0;
   const area = bw * (y1 - y0);
   const stride = Math.max(1, Math.floor(area / HINT_SAMPLES));
-  const idx = [];
-  for (let k = 0; k < area; k += stride) idx.push((y0 + Math.floor(k / bw)) * width + x0 + (k % bw));
-  const lowLimit = 0.03 * 65535;
-  const highLimit = 0.97 * 65535;
-  const shares = (stopsAt) => {
-    let low = 0; let high = 0;
-    for (let k = 0; k < idx.length; k++) {
-      const p = idx[k];
-      const i = p * 4;
-      const s = stopsAt ? stopsAt(p, i) : 0;
-      const r = luts.r[exposeCode(data[i], s)];
-      const g = luts.g[exposeCode(data[i + 1], s)];
-      const b = luts.b[exposeCode(data[i + 2], s)];
-      const Y = DRC_LUMA[0] * r + DRC_LUMA[1] * g + DRC_LUMA[2] * b;
-      if (Y <= lowLimit) low++; else if (Y >= highLimit) high++;
-    }
-    return { shadows: low / idx.length, highlights: high / idx.length };
-  };
-  const base = shares(null);
-  const byAmount = {};
-  for (const amount of HINT_AMOUNTS) {
-    const settings = { drcAmount: amount };
-    const map = solveDrcMap(sample, settings, { inverted });
-    const stage = buildDrcStage(map);
-    const method = drcMethodParams(settings);
-    byAmount[amount] = shares((p, i) => {
-      const x = p % width; const y = (p - x) / width;
-      const L = DRC_LUMA[0] * linear16(data[i]) + DRC_LUMA[1] * linear16(data[i + 1]) + DRC_LUMA[2] * linear16(data[i + 2]);
-      return drcStopsOf(drcLogGainAt(stage, (x + 0.5) / width, (y + 0.5) / height, Math.log(L + DRC_EPSILON)), method, inverted);
-    });
+  const pixelCount = Math.ceil(area / stride);
+  const px = points(pixelCount);
+  for (let k = 0, a = 0; a < area; a += stride, k++) {
+    const x = x0 + (a % bw); const y = y0 + Math.floor(a / bw);
+    const i = (y * width + x) * 4;
+    fill(px, k, data[i], data[i + 1], data[i + 2], (x + 0.5) / width, (y + 0.5) / height);
   }
-  const clipped = (s) => s.shadows + s.highlights;
-  const reduction = clipped(base) - clipped(byAmount[50]);
-  return { base, byAmount, reduction, suggested: suggestDrcSettings(base, byAmount) };
-}
+  const cx0 = clamp(Math.floor(x0 * gw / width), 0, gw - 1);
+  const cx1 = clamp(Math.ceil(x1 * gw / width), cx0 + 1, gw);
+  const cy0 = clamp(Math.floor(y0 * gh / height), 0, gh - 1);
+  const cy1 = clamp(Math.ceil(y1 * gh / height), cy0 + 1, gh);
+  const cw = cx1 - cx0; const ch = cy1 - cy0;
+  const cells = points(cw * ch);
+  for (let cy = cy0; cy < cy1; cy++) for (let cx = cx0; cx < cx1; cx++) {
+    const c = (cy * gw + cx) * 3;
+    const code = (k) => Math.round(clamp(sample.rgb[c + k], 0, 65535));
+    fill(cells, (cy - cy0) * cw + (cx - cx0), code(0), code(1), code(2), (cx + 0.5) / gw, (cy + 0.5) / gh);
+  }
 
-/**
- * Auto: the six controls for a photo from estimateDrcEffect's numbers. The
- * smallest amount that brings back most of what 70 would; the end that was
- * clipped more gets the larger share. Detail, local contrast and saturation
- * protection stay at their defaults.
- */
-export function suggestDrcSettings(base, byAmount) {
-  const clipped = (s) => s.shadows + s.highlights;
-  const before = clipped(base);
-  const best = before - clipped(byAmount[70]);
-  let amount = 70;
-  for (const candidate of [30, 50]) {
-    if (before - clipped(byAmount[candidate]) >= 0.8 * best) { amount = candidate; break; }
+  // A point's converted channels with s stops: the curves of the exposed codes.
+  const rgbOf = (pts, k, s, out) => {
+    const m = s === 0 ? 1 : Math.pow(2, s / 2.2);
+    for (let c = 0; c < 3; c++) {
+      const e = pts.q[k * 3 + c] * m;
+      out[c] = (c === 0 ? luts.r : c === 1 ? luts.g : luts.b)[e < 1 ? Math.round(e * 65535) : 65535];
+    }
+    return out;
+  };
+  const tmp = [0, 0, 0];
+  const lumOf = (pts, k, s) => { rgbOf(pts, k, s, tmp); return DRC_LUMA[0] * tmp[0] + DRC_LUMA[1] * tmp[1] + DRC_LUMA[2] * tmp[2]; };
+  // The curves give display-encoded codes: 8-bit display levels are the
+  // codes / 257, linear light their decoding (gamma 2.2).
+  const toDisplay = (Y) => (Y > 0 ? (Y < 65535 ? Y : 65535) : 0) / 257;
+  const linearTable = displayLinear();
+  const toLinear = (Y) => linearTable[Y > 0 ? (Y < 65535 ? Math.round(Y) : 65535) : 0];
+  // Fine detail a pixel shows: the contrast a texture of +/- TEXTURE_STOPS on
+  // the negative makes there on screen, as a viewer sees it (Weber contrast
+  // with the screen's flare: a difference in deep shadow is lost in it), in
+  // percent. The curves' shoulder and toe flatten it; the compression moves
+  // an end back to where the curve shows it.
+  const detailAt = (k, s) => {
+    const a = toLinear(lumOf(px, k, s + TEXTURE_STOPS)); const c = toLinear(lumOf(px, k, s - TEXTURE_STOPS));
+    return 100 * Math.abs(a - c) / ((a + c) / 2 + DETAIL_FLARE);
+  };
+
+  // Without the compression: the ends and the middle.
+  const offY = new Float64Array(pixelCount);
+  for (let k = 0; k < pixelCount; k++) offY[k] = lumOf(px, k, 0);
+  const order = Array.from({ length: pixelCount }, (_, k) => k).sort((p, q) => offY[p] - offY[q]);
+  const endCount = Math.max(1, Math.floor(pixelCount * END_SHARE));
+  const pixelEnds = { dark: order.slice(0, endCount), bright: order.slice(pixelCount - endCount) };
+  const blackLimit = 0.01 * 65535; const whiteLimit = 0.99 * 65535;
+  const lowLimit = 0.03 * 65535; const highLimit = 0.97 * 65535;
+  const clipOf = (stops) => {
+    let low = 0; let high = 0; let black = 0; let white = 0;
+    for (let k = 0; k < pixelCount; k++) {
+      const Y = stops ? lumOf(px, k, stops[k]) : offY[k];
+      if (Y <= lowLimit) low++; else if (Y >= highLimit) high++;
+      if (Y <= blackLimit) black++; else if (Y >= whiteLimit) white++;
+    }
+    return { shadows: low / pixelCount, highlights: high / pixelCount, black: black / pixelCount, white: white / pixelCount };
+  };
+  const fineOf = (ks, stops) => { let sum = 0; for (const k of ks) sum += detailAt(k, stops ? stops[k] : 0); return sum / ks.length; };
+  // How far an end moves (mean display levels) and how much its colour
+  // changes (red and blue against green, relative to the brightness, in
+  // percent).
+  // Each end pixel without the compression: display luminance, chroma size and hue.
+  const offLook = new Float64Array(pixelCount * 3);
+  const b3 = [0, 0, 0];
+  for (const k of [...pixelEnds.dark, ...pixelEnds.bright]) {
+    rgbOf(px, k, 0, b3);
+    const r = toDisplay(b3[0]); const g = toDisplay(b3[1]); const bl = toDisplay(b3[2]);
+    offLook[k * 3] = DRC_LUMA[0] * r + DRC_LUMA[1] * g + DRC_LUMA[2] * bl;
+    const y = DRC_LUMA[0] * r + DRC_LUMA[1] * g + DRC_LUMA[2] * bl;
+    offLook[k * 3 + 1] = (r - g) / (y + CHROMA_FLOOR);
+    offLook[k * 3 + 2] = (bl - g) / (y + CHROMA_FLOOR);
   }
-  if (!(best > 0.005)) amount = 30;
-  const lean = base.shadows + base.highlights > 0 ? (base.highlights - base.shadows) / (base.shadows + base.highlights) : 0;
+  const moveOf = (ks, stops) => {
+    let move = 0; let shift = 0;
+    for (const k of ks) {
+      rgbOf(px, k, stops[k], b3);
+      const r = toDisplay(b3[0]); const g = toDisplay(b3[1]); const bl = toDisplay(b3[2]);
+      const y = DRC_LUMA[0] * r + DRC_LUMA[1] * g + DRC_LUMA[2] * bl;
+      move += y - offLook[k * 3];
+      // Chroma relative to brightness: an exposure change that keeps the
+      // saturation does not count, a neutral black turning blue does.
+      shift += 100 * Math.hypot((r - g) / (y + CHROMA_FLOOR) - offLook[k * 3 + 1], (bl - g) / (y + CHROMA_FLOOR) - offLook[k * 3 + 2]);
+    }
+    return { move: move / ks.length, shift: shift / ks.length };
+  };
+  // The middle's local contrast on the grid: neighbouring cells, in display levels.
+  const cellOff = new Float64Array(cw * ch);
+  for (let k = 0; k < cw * ch; k++) cellOff[k] = toDisplay(lumOf(cells, k, 0));
+  const sortedCells = Array.from(cellOff).sort((p, q) => p - q);
+  const midLow = sortedCells[Math.floor(0.3 * (sortedCells.length - 1))];
+  const midHigh = sortedCells[Math.floor(0.7 * (sortedCells.length - 1))];
+  const midPairs = [];
+  const involved = new Uint8Array(cw * ch);
+  for (let y = 0; y < ch; y++) for (let x = 0; x < cw; x++) {
+    const k = y * cw + x;
+    if (cellOff[k] < midLow || cellOff[k] > midHigh) continue;
+    involved[k] = 1;
+    if (x + 1 < cw) { midPairs.push(k, k + 1); involved[k + 1] = 1; }
+    if (y + 1 < ch) { midPairs.push(k, k + cw); involved[k + cw] = 1; }
+  }
+  const involvedCells = [];
+  for (let k = 0; k < cw * ch; k++) if (involved[k]) involvedCells.push(k);
+  const cellOn = new Float64Array(cw * ch);
+  const midContrast = (stops) => {
+    if (!midPairs.length) return 0;
+    const disp = stops ? cellOn : cellOff;
+    if (stops) for (const k of involvedCells) cellOn[k] = toDisplay(lumOf(cells, k, stops[k]));
+    let sum = 0;
+    for (let j = 0; j < midPairs.length; j += 2) sum += Math.abs(disp[midPairs[j]] - disp[midPairs[j + 1]]);
+    return sum / (midPairs.length / 2);
+  };
+  const base = clipOf(null);
+  const fineBefore = { dark: fineOf(pixelEnds.dark, null), bright: fineOf(pixelEnds.bright, null) };
+  const midBefore = midContrast(null);
+
+  const candidates = [];
+  let best = null;
+  const pixelStops = new Float64Array(pixelCount);
+  const cellStops = new Float64Array(cw * ch);
+  for (const amount of HINT_AMOUNTS) {
+    const map = solveDrcMap(sample, { drcAmount: amount }, { inverted, picture: options.picture || null });
+    const stage = buildDrcStage(map);
+    if (!stage) continue;
+    // The raw gain of every point, once per amount; the shares per candidate.
+    const pixelGain = new Float64Array(pixelCount);
+    for (let k = 0; k < pixelCount; k++) pixelGain[k] = drcLogGainAt(stage, px.u[k], px.v[k], px.h[k]);
+    const cellGain = new Float64Array(cw * ch);
+    for (const k of involvedCells) cellGain[k] = drcLogGainAt(stage, cells.u[k], cells.v[k], cells.h[k]);
+    for (const drcShadows of HINT_SHARES) for (const drcHighlights of HINT_SHARES) {
+      const settings = { drcAmount: amount, drcShadows, drcHighlights };
+      const method = drcMethodParams(settings);
+      for (let k = 0; k < pixelCount; k++) pixelStops[k] = drcStopsOf(pixelGain[k], method, inverted, px.h[k], stage.limits);
+      for (const k of involvedCells) cellStops[k] = drcStopsOf(cellGain[k], method, inverted, cells.h[k], stage.limits);
+      const clip = clipOf(pixelStops);
+      // Never more near-black or near-white (within 1 %) than the photo had.
+      const adds = clip.black > base.black + ADD_TOLERANCE || clip.white > base.white + ADD_TOLERANCE;
+      const fine = { dark: fineOf(pixelEnds.dark, pixelStops), bright: fineOf(pixelEnds.bright, pixelStops) };
+      const moves = { dark: moveOf(pixelEnds.dark, pixelStops), bright: moveOf(pixelEnds.bright, pixelStops) };
+      const midAfter = midContrast(cellStops);
+      const gain = (fine.dark - fineBefore.dark) + (fine.bright - fineBefore.bright);
+      const midLoss = Math.max(0, midBefore - midAfter);
+      const flat = Math.max(0, -moves.bright.move - FREE_DIM) + Math.max(0, moves.dark.move - FREE_LIFT);
+      const shift = Math.max(0, moves.dark.shift - FREE_SHIFT) + Math.max(0, moves.bright.shift - FREE_SHIFT);
+      const score = gain - MID_LOSS_WEIGHT * midLoss - FLAT_WEIGHT * flat - SHIFT_WEIGHT * shift;
+      const candidate = { settings, clip, fine, moves, midAfter, gain, midLoss, score, adds };
+      candidates.push(candidate);
+      if (!adds && (!best || score > best.score)) best = candidate;
+    }
+  }
+  // The gentlest setting within 90 % of the best: the smallest amount, then
+  // shares nearest 50.
+  let chosen = best;
+  if (best && best.score > 0) {
+    const gentle = (c) => c.settings.drcAmount * 10 + Math.abs(c.settings.drcShadows - 50) + Math.abs(c.settings.drcHighlights - 50);
+    for (const c of candidates) if (!c.adds && c.score >= 0.9 * best.score && gentle(c) < gentle(chosen)) chosen = c;
+  }
+  const clipped = (sh) => sh.shadows + sh.highlights;
+  const end = (k) => (chosen ? { detail: +(chosen.fine[k] - fineBefore[k]).toFixed(3), detailBefore: +fineBefore[k].toFixed(3) } : { detail: 0, detailBefore: +fineBefore[k].toFixed(3) });
   return {
-    ...DRC_DEFAULTS,
-    drcAmount: amount,
-    drcShadows: clamp(Math.round(50 - 15 * lean), 0, 100),
-    drcHighlights: clamp(Math.round(50 + 15 * lean), 0, 100)
+    base,
+    benefit: chosen ? Math.max(0, chosen.score) : 0,
+    ends: { dark: end('dark'), bright: end('bright'), mid: { contrast: chosen ? +(chosen.midAfter - midBefore).toFixed(3) : 0 } },
+    moves: chosen ? chosen.moves : null,
+    reduction: chosen ? clipped(base) - clipped(chosen.clip) : 0,
+    // Nothing that helps (or nothing that keeps the ends): Auto leaves it off.
+    suggested: chosen && chosen.score > 0 ? { ...DRC_DEFAULTS, ...chosen.settings } : null,
+    ...(options.candidates ? { candidates: candidates.map((c) => ({ ...c.settings, score: +c.score.toFixed(2), gain: +c.gain.toFixed(2), midLoss: +c.midLoss.toFixed(2),
+      dim: +c.moves.bright.move.toFixed(1), lift: +c.moves.dark.move.toFixed(1), shift: +(c.moves.dark.shift + c.moves.bright.shift).toFixed(2), adds: c.adds })) } : {})
   };
 }
