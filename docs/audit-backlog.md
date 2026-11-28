@@ -69,6 +69,18 @@ proof does not establish the unmeasured performance targets.
   The recovered frame is derived, so a snapshot keeps the slider's value and the stage recovers again after an undo or redo (about two seconds at 60 MP). The display shows the repaired frame until it lands.  
   _Suggested fix:_ Keep the last two recovered frames by `(source, revision, strength)` when memory allows.
 
+## Dynamic range compression
+
+- **medium/memory** — The compression's stops plane is not counted (2026-11-28)  
+  `negative2positive/src/pipeline/silverAdapter.js` (`_applyDrc`), `docs/dynamic-range-compression.md`, `docs/memory-budget.md`  
+  While a compressed frame converts, its stops are a dense Float32 plane (4 B/px: 96 MB at 24 MP, 241 MB at 60 MP; a second one when dodge-and-burn strokes are merged in). The interactive slot keeps the display level's. Neither the ledger nor the 50 B/px lane figure knows.  
+  _Suggested fix:_ Add 4 B/px (8 with strokes) to a lane's reservation when its recipe has `drcAmount > 0`, or compute the stops row by row inside the exposure pass instead of as a plane.
+
+- **low/performance** — Compressed photos drag SilverCore controls through the preview worker (2026-11-28)  
+  `negative2positive/src/app/main.js` (`gpuPreviewCanTake`), `render/previewShader.js`  
+  The GPU preview has no stage for the compression, so with Amount above 0 every SilverCore tick converts in the preview worker (about 0.4 s for a 3.8 MP display frame when the map changes, less when only the curves do), and a compressed frame does not use the conversion band pool.  
+  _Suggested fix:_ The map (log gain and guide, 512 px) as a texture and the joint bilateral upsampling in applyProgram's exposure stage; band workers given the frame's sample.
+
 ## Dust removal
 
 - **low/bug** — A short thin line alone on a calm background, on dust's side of the tones, is taken for a fibre and inpainted: on a negative a bright one (a sunlit antenna tip, a short light streak), on a positive a dark one (a twig end or a short wire against the sky)  
