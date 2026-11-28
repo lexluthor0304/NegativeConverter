@@ -161,6 +161,23 @@ assert.deepEqual(foma.elements.filter((e) => e.pitchPerf).map((e) => e.pitchPerf
 assert.equal(foma.codes['FOMAPAN 100'], '0216');
 assert.equal(applyEdgeMarkingStyle({}, 'fomapan').dxEnabled, false);
 
+// AgfaPhoto APX (Harman's print): the number on both edges, the name and
+// the emulsion code taking turns, a wedge with a needle before "nA", no DX.
+const apx = edgeMarkingStyle('agfaApx');
+assert.equal(edgeStyleForFilmName('AgfaPhoto APX 100 (New)'), 'agfaApx');
+assert.equal(edgeTextForFilmName('AgfaPhoto APX 400 (New Emulsion on box)'), 'AGFAPHOTO APX 400');
+assert.equal(edgeStyleForFilmName('AGFA APX 100 Professional AGFAPAN'), null, 'the old Agfa APX print is not this one');
+assert.equal(apx.dxEnabled, false);
+assert.ok(!apx.elements.some((element) => element.kind === 'dx'));
+assert.deepEqual(apx.elements.filter((e) => e.kind === 'number').map((e) => e.edge).sort(), ['bottom', 'top']);
+assert.equal(apx.elements.find((e) => e.kind === 'text').parity, 'odd');
+assert.equal(apx.elements.find((e) => e.kind === 'code').parity, 'even');
+assert.ok(apx.elements.find((e) => e.kind === 'triangle').needleMm > 0);
+// The same printer as Ilford's: the same wedge and "nA" places.
+for (const kind of ['triangle', 'halfNumber']) {
+  assert.ok(Math.abs(apx.elements.find((e) => e.kind === kind).at - ilford.elements.find((e) => e.kind === kind).at) < 0.05, kind);
+}
+
 // Choosing a style fills its values; custom keeps them.
 const before = { text: 'MY ROLL', letteringColor: '#123456', textEnabled: false, frameNumberEnabled: false, dxEnabled: false, dx1: 1, dx2: 2, style: 'custom' };
 const kodakSettings = applyEdgeMarkingStyle(before, 'kodakColor');

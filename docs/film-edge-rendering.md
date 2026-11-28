@@ -73,7 +73,7 @@ or the baseline end flat there (feet of A, V, K), not round.
 ### Settings and compatibility
 
 `sprocketEdge.style` is one of `auto`, `kodakColor`, `kodakBw`, `kodakSlide`,
-`ilford`, `fomapan`, `fujiColor`, `fujiSlide`, `plain`, `custom`. A setting without it (a project, photo snapshot, history
+`ilford`, `agfaApx`, `fomapan`, `fujiColor`, `fujiSlide`, `plain`, `custom`. A setting without it (a project, photo snapshot, history
 step or interrupted batch job saved before styles) and any unknown id are
 `custom`: the border drawn before, byte for byte (`sprocketFrame.test.mjs`
 pins it). A new session starts on `auto`. The layout, letters and marks come
@@ -253,6 +253,38 @@ contact sheet of 2004 (Kyppi archive, V.-P. Suhonen) shows the same DX code and 
   roll-end marks ("E", "264PF5") are not drawn; Velvia's and Astia's own edge
   prints were not seen (they get this style with their trade name).
 
+**AgfaPhoto APX (`agfaApx`)** — APX 100 and APX 400 as made today
+
+- References (Flickr; kept locally): APX 400 [52687485020](https://www.flickr.com/photos/197635781@N05/52687485020/)
+  (Moritz Kartheuser, 2023), APX 100 [54469758980](https://www.flickr.com/photos/184561795@N02/54469758980/)
+  (Jan de Jong, 2025; the film reads "APX 100", not 400 as the collection's
+  index says), [51333182629](https://www.flickr.com/photos/senpatientulo/51333182629/)
+  (2021) and [55490017825](https://www.flickr.com/photos/97423979@N00/55490017825/)
+  (2026, letterforms).
+- Measured: Harman's layout, the one on Ilford's current print. The number
+  on both edges at the same place, 0.43 of a pitch past a hole's left edge
+  (0.34 on the 2023 roll; Ilford 0.41), digits 1.36 mm wide; the wedge at
+  +3.83 and "nA" at +4.20 (Ilford 3.83 and 4.21), "nA" 0.99 mm tall between
+  0.42 and 1.41 mm from the edge, the wedge as tall, 1.2 mm long, with a
+  thin needle on to 1.41 mm; the top edge "AGFAPHOTO APX 100" from +1.80 to
+  +6.75 (both rolls), its letters ending 0.2 mm above the holes, a gap of
+  about 1.9 cap heights after the name and 0.8 before the speed; the
+  emulsion code ("5518-11", "4135-11") at +3.65 (Ilford 3.66). The name and
+  the code take turns: after 27 the name and after 26 the code (2025), the
+  name after 27 (2023), the other way round on the 2021 roll; drawn: name
+  after odd numbers. No DX code on any of the four. Square, stepped, thin
+  capitals (the `grid` set, thinner than Ilford's). Print white.
+- Approximate: every scan cuts the film's top edge, so the heights of the
+  top number and of the name are inferred (name 1.25 mm, number as on the
+  bottom edge, 1.46 mm); the bottom number's lower end is cut on the 2025
+  scan as well; the wedge is drawn as a triangle with a needle, the film's
+  is stepped and blockier; the "-11" of the code is printed smaller on the
+  film. The code is drawn for APX 100 only ("5518-11", the newest roll); no
+  APX 400 code was readable. Old Agfa APX (Agfa-Gevaert, before 2005:
+  "AGFA APX 100", codes such as "827", "669-30") and the 2009 AgfaPhoto
+  print ("U D 0 7 1") are a different layout and are not drawn; films named
+  "AGFA APX … Professional" are not mapped to this style.
+
 **Fomapan (`fomapan`)** — current print (from 2021), Fomapan 100 and 400
 
 - References (kept locally, not in the repository): Fomapan 100 negatives on
@@ -315,8 +347,11 @@ drawn:
 
 - Fujicolor C200, Superia X-TRA 400 and Fujifilm 200/400: see the
   Fujicolor section.
-- Agfa Vista (two print generations, discontinued) and AgfaPhoto APX (wedge
-  before "nA", no DX): not measured in this round.
+- Agfa Vista (discontinued; its last print, "200N"/"400N" with red and
+  green stripes, Flickr 51616237359 and 48835939438, both 2019): both scans
+  cut the top edge, and the stripes, under light that the camera let onto
+  the rebate, do not show their on/off period; an earlier print ("AGFA VISTA
+  400-C", green triangles between the holes, 2010-2014) differs. Not drawn.
 - Kodak Vision3 (KeyKode every 64 perforations, one edge only) and CineStill
   (its own still numbering and wordmark on later rolls): not measured in this
   round; they need a layout of their own.

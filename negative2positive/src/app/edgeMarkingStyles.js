@@ -230,6 +230,42 @@ export const EDGE_MARKING_STYLES = Object.freeze([
     ])
   }),
   Object.freeze({
+    id: 'agfaApx',
+    labelKey: 'filmEdgeStyleAgfaApx',
+    brand: 'AGFAPHOTO',
+    filmKind: 'bw',
+    // AgfaPhoto APX 100 and 400 as made today (Flickr: APX 400 2023, Moritz
+    // Kartheuser; APX 100 2025, Jan de Jong; APX 100 2021, senpatientulo;
+    // APX 100 2026, Neal Wellons). Harman's layout, as on Ilford's current
+    // print: the same phase to the holes, wedge and "nA" at the same places,
+    // the emulsion code 3.65 perforations on; but the number on both edges,
+    // the name after the top one on every other frame, and no DX code.
+    text: 'AGFAPHOTO APX 100',
+    stocks: ['AGFAPHOTO APX 100', 'AGFAPHOTO APX 400'],
+    alternates: {},
+    // The emulsion code of the 2025 APX 100 roll ("5518-11"; the 2021 roll
+    // reads "4135-11"); no APX 400 code was readable.
+    codes: { 'AGFAPHOTO APX 100': '5518-11' },
+    letteringColor: '#ffffff',
+    inkDensity: 1,
+    dx: [110, 11],
+    dxEnabled: false,
+    // The numbers start 0.43 of a pitch past a hole's left edge (0.34 on the 2023 roll).
+    anchorPerf: 1.43,
+    dxGeometry: { moduleMm: 0.405, rowMm: 1.08 },
+    elements: Object.freeze([
+      { kind: 'number', edge: 'top', at: 0, from: [0.40, 1.86], glyphs: 'grid', stroke: 0.16, tracking: 0.14, digitWidth: 0.93 },
+      // The name and the emulsion code take turns: the name after odd
+      // numbers, the code after even ones (27 and 26 on the 2025 roll, 27 on
+      // the 2023 one; the 2021 roll has them the other way round).
+      { kind: 'text', edge: 'top', at: 1.80, parity: 'odd', from: [0.53, 1.78], glyphs: 'grid', stroke: 0.14, letterWidth: 0.89, tracking: 0.34, wordSpace: 0.8, brandGap: 1.9, digitWidth: 0.8 },
+      { kind: 'code', edge: 'top', at: 3.65, parity: 'even', from: [0.82, 1.78], glyphs: 'grid', stroke: 0.15, tracking: 0.18, digitWidth: 0.8 },
+      { kind: 'number', edge: 'bottom', at: 0, from: [0.40, 1.86], glyphs: 'grid', stroke: 0.16, tracking: 0.14, digitWidth: 0.93 },
+      { kind: 'triangle', edge: 'bottom', at: 3.83, from: [0.42, 1.41], lengthMm: 1.0, needleMm: 0.35, needleWidthMm: 0.1 },
+      { kind: 'halfNumber', edge: 'bottom', at: 4.20, from: [0.42, 1.41], glyphs: 'grid', stroke: 0.18, tracking: 0.12, digitWidth: 0.79 }
+    ])
+  }),
+  Object.freeze({
     id: 'fomapan',
     labelKey: 'filmEdgeStyleFomapan',
     brand: 'FOMAPAN',
@@ -295,7 +331,7 @@ const STYLE_BY_ID = new Map(EDGE_MARKING_STYLES.map((style) => [style.id, style]
 // Every id a setting may hold.
 export const EDGE_STYLE_IDS = Object.freeze([EDGE_STYLE_AUTO, ...EDGE_MARKING_STYLES.map((style) => style.id), EDGE_STYLE_CUSTOM]);
 // The ids the dropdown lists, in order.
-export const EDGE_STYLE_MENU = Object.freeze([EDGE_STYLE_AUTO, 'kodakColor', 'kodakBw', 'kodakSlide', 'ilford', 'fomapan', 'fujiColor', 'fujiSlide', EDGE_STYLE_PLAIN, EDGE_STYLE_CUSTOM]);
+export const EDGE_STYLE_MENU = Object.freeze([EDGE_STYLE_AUTO, 'kodakColor', 'kodakBw', 'kodakSlide', 'ilford', 'agfaApx', 'fomapan', 'fujiColor', 'fujiSlide', EDGE_STYLE_PLAIN, EDGE_STYLE_CUSTOM]);
 export const EDGE_STYLE_LABEL_KEYS = Object.freeze({
   [EDGE_STYLE_AUTO]: 'filmEdgeStyleAuto',
   [EDGE_STYLE_CUSTOM]: 'filmEdgeStyleCustom',
@@ -337,6 +373,8 @@ const KNOWN_EDGE_PRINTS = [
   { words: ['PRO 400H', 'PRO400H'], text: 'PRO400H' },
   { words: ['HP5'], text: 'ILFORD HP5 PLUS' },
   { words: ['PROVIA 100F', 'RDP III', 'RDPIII'], text: 'FUJI RDPIII' },
+  { words: ['APX 100', 'APX100'], text: 'AGFAPHOTO APX 100' },
+  { words: ['APX 400', 'APX400'], text: 'AGFAPHOTO APX 400' },
   { words: ['FOMAPAN 100'], text: 'FOMAPAN 100' },
   { words: ['FOMAPAN 200'], text: 'FOMAPAN 200' },
   { words: ['FOMAPAN 400', 'ACTION 400'], text: 'FOMAPAN 400' }
@@ -349,6 +387,7 @@ const STYLE_RULES = [
   { id: 'kodakColor', words: ['ULTRA MAX', 'ULTRAMAX', 'PORTRA', 'EKTAR', 'GOLD', 'COLORPLUS', 'COLOR PLUS', 'PRO IMAGE', 'KODACOLOR', 'VERICOLOR', 'GC400', 'GC 400', 'KODAK 200', 'KODAK 400'], not: ['TRI-X', 'TRI X', 'T-MAX', 'TMAX', 'BW400', 'T400CN', 'VISION', 'CHROME', 'CINESTILL', 'LOMOGRAPHY'] },
   { id: 'ilford', words: ['ILFORD', 'HP5', 'FP4', 'DELTA', 'PAN F', 'XP2', 'SFX', 'ORTHO PLUS'], not: ['KENTMERE'] },
   { id: 'fujiColor', words: ['SUPERIA 200', 'S-200', 'PRO 400H', 'PRO400H'], not: ['X-TRA', 'XTRA'] },
+  { id: 'agfaApx', words: ['APX 100', 'APX 400', 'APX100', 'APX400', 'AGFAPHOTO APX', 'AGFA APX'], not: ['PROFESSIONAL'] },
   { id: 'fomapan', words: ['FOMAPAN', 'FOMA '], not: ['RETROPAN', 'ORTHO'] },
   { id: 'fujiSlide', words: ['FUJICHROME', 'VELVIA', 'PROVIA', 'ASTIA', 'SENSIA', 'RDP', 'RVP', 'RXP'], not: [] }
 ];
