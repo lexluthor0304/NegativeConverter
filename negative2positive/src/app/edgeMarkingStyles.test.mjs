@@ -81,9 +81,21 @@ assert.equal(edgeStyleForFilmName('Kodak T-Max 400'), 'kodakBw');
 assert.equal(edgeStyleForFilmName('Kodak Ektachrome E100'), 'kodakSlide');
 assert.equal(edgeStyleForFilmName('Fujicolor Superia 200'), 'fujiColor');
 assert.equal(edgeStyleForFilmName('Fujicolor Pro 400H'), 'fujiColor');
-assert.equal(edgeStyleForFilmName('Fujifilm Superia X-TRA 400'), null);
+// C200 prints "200", Superia X-TRA 400 "S-400", each with its own stripes.
+assert.equal(edgeStyleForFilmName('Fujifilm Superia X-TRA 400'), 'fujiColor');
+assert.equal(edgeTextForFilmName('FUJICOLOR SUPERIA X-TRA 400 CH 4th color layer X-TRA400'), 'S-400');
+assert.equal(edgeTextForFilmName('Fujicolor C200 135'), '200');
+assert.equal(edgeStyleForFilmName('Fujicolor Superia X-tra 800'), null, 'X-TRA 800 was not seen');
+assert.equal(edgeStyleForFilmName('AGFA AGFACOLOR HDC200'), null);
+assert.equal(edgeStyleForFilmName('Kodak C200'), null);
+for (const stock of ['200', 'S-400']) {
+  const stripes = edgeMarkingStyle('fujiColor').stripes[stock];
+  // One continuous line and lines on for four perforations of eight.
+  assert.ok(stripes.some((stripe) => stripe.on[1] - stripe.on[0] === stripe.period), stock);
+  assert.ok(stripes.some((stripe) => stripe.period === 8 && Math.abs(stripe.on[1] - stripe.on[0] - 4) < 1e-9), stock);
+}
 assert.equal(edgeTextForFilmName('Fujicolor Pro 400H'), 'PRO400H');
-assert.deepEqual(Object.keys(edgeMarkingStyle('fujiColor').stripes).sort(), ['PRO400H', 'S-200']);
+assert.deepEqual(Object.keys(edgeMarkingStyle('fujiColor').stripes).sort(), ['200', 'PRO400H', 'S-200', 'S-400']);
 assert.equal(edgeTextForFilmName('Kodak Tri-X 400'), 'KODAK 400TX');
 assert.equal(edgeTextForFilmName('Kodak T-Max 400'), 'KODAK 400-2TMY');
 assert.equal(edgeTextForFilmName('Kodak Portra 800'), 'KODAK PORTRA 800-3');

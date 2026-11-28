@@ -513,6 +513,11 @@ assert.equal(
   const withNumber = composeSprocketFrame(image, styled('kodakColor', { frameNumber: 5 }));
   assert.notEqual(fnv(withSlots.data), fnv(withNumber.data), 'only the named frame is drawn');
 
+  // Fujicolor's stripes follow the stock: C200 and Superia X-TRA 400 draw their own.
+  const fujiStock = (text) => fnv(composeSprocketFrame(image, styled('fujiColor', { text })).data);
+  assert.equal(new Set(['S-200', '200', 'S-400', 'PRO400H'].map(fujiStock)).size, 4);
+  assert.equal(fujiStock('S-400'), '38d93c90', 'X-TRA 400 frame pinned');
+
   // Vision3: the 64-perforation cycle sits along the film by the frame
   // number, eight perforations a frame; the count goes up once a cycle.
   const vis = edgeMarkingStyle('kodakVision3');
