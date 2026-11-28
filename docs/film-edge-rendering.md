@@ -197,6 +197,34 @@ contact sheet of 2004 (Kyppi archive, V.-P. Suhonen) shows the same DX code and 
   the scans; 0.35 drawn), sizes from Kodak colour negative. Elite Chrome
   ("KODAK EBX") rests on one clear image and is not offered.
 
+**Fujicolor colour negative (`fujiColor`)** — Superia 200, Pro 400H
+
+- Superia 200: Flickr [8439023084](https://www.flickr.com/photos/il_tubo/8439023084/) (2013),
+  [16641180517](https://www.flickr.com/photos/65459764@N03/16641180517/) (2015), c't Digital
+  Photography 22/2016 p. 132. Pro 400H: Flickr [9283150390](https://www.flickr.com/photos/28509987@N06/9283150390/)
+  (2013), [49692716807](https://www.flickr.com/photos/17025161@N07/49692716807/) (2020).
+- Measured: one edge prints the bold number, the stock code ("S-200",
+  "PRO400H") 1.63–1.87 perforations after it, a bold "nA" at +4.06 and
+  "FUJI" at +6.0; the other edge a DX code from +0.59, "→nA" at +3.68 to
+  +3.92, the half-frame code from +4.7, the number at 0. Print gold (about
+  240, 215, 90). Stripes along the perforation rows, drawn as style data per
+  stock (`stripes`): Superia 200 a thin pink line through the middle of the
+  row, continuous, and two thin green lines 0.68 mm outside and 0.64 mm
+  inside it, on for four perforations and off for four (both references
+  agree on the 8-perforation period and the half duty). Pro 400H a red band
+  about 0.9 mm wide across the middle of the text-edge row, on for two
+  perforations of every four (both references).
+- Approximate: the stripes' colours (scan casts vary), their phase to the
+  numbers and whether Pro 400H's band is on both rows; the number's phase to
+  the holes (0.13 and 0.57 on two scans; 0.35 drawn); letter sizes; the
+  per-frame code after "nA" ("CA-6", "H36", "M96") is drawn as "FUJI", which
+  the references print there on alternate frames. Stripes follow the text
+  switch.
+- Not drawn yet: Superia X-TRA 400 (the second reference is washed out and
+  does not confirm the stripe period), C200 (stripes not measurable on the
+  two scans), Fujifilm 200/400 (made by Kodak: a different, Kodak-like
+  layout with "FUJI 200"/"FUJI 400" and no stripes, not measured).
+
 **Fujifilm reversal (`fujiSlide`)**
 
 - [Kodakcamsrip1](https://commons.wikimedia.org/wiki/File:Kodakcamsrip1.jpg),
@@ -231,10 +259,8 @@ was gathered on 2026-11-28; from it Ilford current production, Kodak B&W,
 Kodak E100 and the Kodak colour negative wordings were measured. Still not
 drawn:
 
-- Fujifilm colour negative (C200, Superia, Fujifilm 200/400, Pro 400H): the
-  coloured stripes between the perforations differ per stock (Superia and
-  C200 red/green, Pro 400H red, Fujifilm 200/400 none) and the renderer has
-  no stripe marking yet.
+- Fujicolor C200, Superia X-TRA 400 and Fujifilm 200/400: see the
+  Fujicolor section.
 - Fomapan: numbers every four perforations without "A", widely spaced
   letters, and an old/new print whose changeover is not dated.
 - Agfa Vista (two print generations, discontinued) and AgfaPhoto APX (wedge

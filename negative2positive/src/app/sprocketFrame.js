@@ -1360,8 +1360,29 @@ function paintStyledEdgeMarkings(data, metrics, edge, style) {
           if (edge.textEnabled && code) styledText(data, metrics, edge, element, code, x, fill, cache);
           break;
         }
+        case 'stripes': {
+          // Coloured lines along the perforation rows (Fujicolor), by stock.
+          // They are brand marks: shown with the text switch.
+          const stripes = edge.textEnabled ? style.stripes?.[String(edge.text).trim().toUpperCase()] || [] : [];
+          const sY = metrics.filmEdgePxPerMmY;
+          for (const stripe of stripes) {
+            const rects = [];
+            for (const row of stripe.rows) {
+              const middle = (row === 'top' ? metrics.topY : metrics.bottomY) + metrics.holeHeight / 2;
+              const centre = middle + (row === 'top' ? 1 : -1) * stripe.offsetMm * sY;
+              const height = Math.max(1, stripe.widthMm * sY);
+              for (let k = 0; k * stripe.period < 8; k++) {
+                const a = slot.x + (stripe.on[0] + k * stripe.period) * pitch, b = slot.x + (stripe.on[1] + k * stripe.period) * pitch;
+                if (b < 0 || a > metrics.outputWidth) continue;
+                rects.push([a, centre - height / 2, b - a, height]);
+              }
+            }
+            paintMarkingRectangles(data, metrics, rects, sanitizeColor(stripe.color, fill));
+          }
+          break;
+        }
         case 'label':
-          if (halfMarks) styledText(data, metrics, edge, element, element.value, x, fill, cache);
+          if (element.always ? edge.textEnabled : halfMarks) styledText(data, metrics, edge, element, element.value, x, fill, cache);
           break;
         case 'text':
           if (edge.textEnabled) styledText(data, metrics, edge, element, edgeTextForFrame(style, edge.text, slot.number), x, fill, cache, style.brand);

@@ -454,6 +454,7 @@ assert.equal(
     ilford: '1269x1167:53220b65',
     kodakBw: '1269x1167:1fa8557e',
     kodakSlide: '1269x1167:03dc8ccb',
+    fujiColor: '1269x1167:7b6dcda6',
     fujiSlide: '1269x1167:a84686b5',
     plain: '1269x1167:01d5229c'
   };
