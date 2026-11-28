@@ -73,7 +73,7 @@ or the baseline end flat there (feet of A, V, K), not round.
 ### Settings and compatibility
 
 `sprocketEdge.style` is one of `auto`, `kodakColor`, `kodakBw`, `kodakSlide`,
-`ilford`, `agfaApx`, `fomapan`, `fujiColor`, `fujiSlide`, `kodakVision3`,
+`ilford`, `agfaApx`, `fomapan`, `fujiColor`, `fujifilmUs`, `fujiSlide`, `kodakVision3`,
 `cineStill`, `plain`, `custom`. A setting without it (a project, photo snapshot, history
 step or interrupted batch job saved before styles) and any unknown id are
 `custom`: the border drawn before, byte for byte (`sprocketFrame.test.mjs`
@@ -254,6 +254,30 @@ contact sheet of 2004 (Kyppi archive, V.-P. Suhonen) shows the same DX code and 
   scans), widths (blurred on the scans), the phase; the per-frame code is
   drawn as "FUJI". Not drawn: Superia X-TRA 800 and the older Superia 400,
   whose prints were not seen.
+
+**Fujifilm 200 / 400, made in the USA (`fujifilmUs`)**
+
+- References: Mark Frey's negatives on [EMULSIVE](https://emulsive.org/reviews/film-reviews/fuji-film-reviews/film-stock-review-three-rolls-with-made-in-usa-fujifilm-400)
+  (2023: a Fujifilm 400 strip above a Kodak GC 400 strip and a Superia
+  X-TRA strip, one light table), Fujifilm 200 on Flickr [55666870630](https://www.flickr.com/photos/rohlinpin/55666870630/)
+  (2026) and Fujifilm 400 on Flickr [54095652528](https://www.flickr.com/photos/201715081@N08/54095652528/)
+  (2024); kept locally.
+- Why its own style: the layout is Kodak's (Frey's strips side by side:
+  the number and the text on one edge, the number, DX code and "nA" over an
+  arrow on the other, at the same places; measured: text 1.68 and 1.65
+  perforations after the number, Kodak 1.78), but the letters are not:
+  "FUJI 200" is 5.4 mm long against 6.3 for Kodak's letters at that size,
+  and every number has narrow (0.6 of the cap height), light digits where
+  Kodak's are as wide as tall and bold. No stripes, no alternating text
+  ("FUJI 200" after 31 and 32, "FUJI 400" after frames 2–6 and 25–26).
+  Putting them under the Kodak style would draw Kodak's bold letters.
+- Approximate: cap heights and bands are Kodak's (both scans cut the film's
+  edges); the number's phase to the holes (0.13 and 0.45 on the two scans,
+  0.3 drawn); "FUJI" is a little heavier than "200" on the film, drawn at
+  one weight; the DX number is the database's for FUJICOLOR 200 (8-1),
+  not read off these bars. Comparisons:
+  `fujifilmUs_vs_Fujifilm200_RohlinPin2026.png`,
+  `fujifilmUs_vs_Fujifilm400_2024.png`.
 
 **Fujifilm reversal (`fujiSlide`)**
 
@@ -447,7 +471,6 @@ was gathered on 2026-11-28; from it Ilford current production, Kodak B&W,
 Kodak E100 and the Kodak colour negative wordings were measured. Still not
 drawn:
 
-- Fujifilm 200/400: see the Fujicolor section.
 - Agfa Vista (discontinued; its last print, "200N"/"400N" with red and
   green stripes, Flickr 51616237359 and 48835939438, both 2019): both scans
   cut the top edge, and the stripes, under light that the camera let onto
