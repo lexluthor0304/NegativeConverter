@@ -23,7 +23,7 @@ for (const style of EDGE_MARKING_STYLES) {
   assert.ok(style.dx[0] >= 0 && style.dx[0] <= 126 && style.dx[1] >= 0 && style.dx[1] <= 15);
   assert.ok(style.elements.length > 0);
   for (const element of style.elements) {
-    assert.ok(['number', 'halfNumber', 'label', 'code', 'text', 'dx', 'arrow', 'triangle', 'outlineArrow', 'stripes'].includes(element.kind), element.kind);
+    assert.ok(['number', 'halfNumber', 'label', 'code', 'text', 'dx', 'arrow', 'triangle', 'outlineArrow', 'stripes', 'keyNumber', 'barcode', 'dash'].includes(element.kind), element.kind);
     if (element.kind === 'stripes') {
       // Stripes are per stock: each listed stock has one, with sane geometry.
       for (const stripe of Object.values(style.stripes).flat()) {
@@ -41,7 +41,7 @@ for (const style of EDGE_MARKING_STYLES) {
     if (element.glyphs) assert.ok(EDGE_GLYPH_SETS[element.glyphs], element.glyphs);
   }
   // The style's own texts and suggestions are drawable in its letters.
-  const textElement = style.elements.find((element) => element.kind === 'text');
+  const textElement = style.elements.find((element) => element.kind === 'text' || element.kind === 'keyNumber');
   for (const text of [style.text, ...style.stocks, ...Object.values(style.alternates)].filter(Boolean)) {
     assert.ok(hasEdgeGlyphs(textElement.glyphs, text), `${style.id}: "${text}"`);
   }
@@ -71,7 +71,7 @@ for (const stock of stocks) {
 assert.deepEqual(unbranded.sort(), [
   'CINESTILL', 'KENTMERE', 'LOMOGRAPHY', 'SUPERIA', 'SUPERIA 400', 'EKTACHROME'
 ].sort(), 'stocks without a style are exactly the brands left out');
-assert.ok(LEFT_OUT_BRANDS.includes('KODAK VISION3') && LEFT_OUT_BRANDS.includes('KENTMERE'));
+assert.ok(LEFT_OUT_BRANDS.includes('KENTMERE') && !LEFT_OUT_BRANDS.includes('KODAK VISION3'));
 assert.ok(!LEFT_OUT_BRANDS.includes('FOMAPAN'));
 assert.equal(edgeStyleForFilmName('Kodak ULTRA MAX 400 Film GC400'), 'kodakColor');
 assert.equal(edgeStyleForFilmName('Kodak EKTAR 100'), 'kodakColor');
@@ -91,7 +91,7 @@ assert.equal(edgeTextForFilmName('Kodak Gold 200'), 'KODAK GB 200-7');
 assert.equal(edgeTextForFilmName('Kodak ColorPlus 200'), 'KODAK 200-8');
 assert.equal(edgeTextForFrame(edgeMarkingStyle('kodakColor'), 'KODAK GB 200-7', 17), 'GB 200-7 KODAK');
 assert.equal(edgeTextForFrame(edgeMarkingStyle('kodakColor'), 'KODAK PORTRA 400', 17), 'KODAK PORTRA 400');
-assert.equal(edgeStyleForFilmName('Kodak Vision3 500T'), null);
+assert.equal(edgeStyleForFilmName('Kodak Vision3 500T'), 'kodakVision3');
 assert.equal(edgeStyleForFilmName('Ilford HP5 PLUS 400 HP5+ (black box)'), 'ilford');
 assert.equal(edgeStyleForFilmName('Kentmere 400'), null);
 assert.equal(edgeStyleForFilmName('FUJICHROME PROVIA 100F RDP III Professional RDPIII'), 'fujiSlide');
@@ -177,6 +177,25 @@ assert.ok(apx.elements.find((e) => e.kind === 'triangle').needleMm > 0);
 for (const kind of ['triangle', 'halfNumber']) {
   assert.ok(Math.abs(apx.elements.find((e) => e.kind === kind).at - ilford.elements.find((e) => e.kind === kind).at) < 0.05, kind);
 }
+
+// Kodak Vision3: one edge, a 64-perforation KeyKode cycle placed by the
+// frame number, the key number with its count, the mid-foot "+32", the
+// manufacturing line, bar codes and hyphens; no still-frame numbers.
+const vision = edgeMarkingStyle('kodakVision3');
+assert.equal(vision.numberEvery, 64);
+assert.equal(vision.framePosition, true);
+assert.ok(vision.elements.every((element) => element.edge === 'bottom'));
+assert.ok(!vision.elements.some((element) => ['number', 'halfNumber', 'dx'].includes(element.kind)));
+assert.deepEqual(vision.elements.filter((e) => e.kind === 'keyNumber').map((e) => [e.at, e.suffix]), [[0, '•'], [34.28, '+32 •']]);
+// The two bar codes are 32 perforations apart, as Kodak's diagram has them.
+assert.deepEqual(vision.elements.filter((e) => e.kind === 'barcode').map((e) => e.at), [6.04, 38.04]);
+// The hyphens keep a four-perforation pitch.
+for (const dash of vision.elements.filter((e) => e.kind === 'dash')) assert.ok(Math.abs(((dash.at - 1.35) % 4)) < 1e-9, dash.at);
+assert.equal(edgeTextForFilmName('Kodak Vision3 500T 5219'), 'EJ 07 7020');
+assert.equal(edgeTextForFilmName('Kodak Vision3 250D'), 'EN 18 1402');
+assert.equal(edgeTextForFilmName('Kodak Vision3 50D'), 'ER 04 8812');
+assert.equal(edgeStyleForFilmName('CineStill 800T'), null, 'CineStill prints its own edge');
+assert.ok(hasEdgeGlyphs('grid', 'EJ 07 7020 4499+32 •'));
 
 // Choosing a style fills its values; custom keeps them.
 const before = { text: 'MY ROLL', letteringColor: '#123456', textEnabled: false, frameNumberEnabled: false, dxEnabled: false, dx1: 1, dx2: 2, style: 'custom' };

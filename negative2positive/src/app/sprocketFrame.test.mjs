@@ -458,6 +458,7 @@ assert.equal(
     fujiSlide: '1269x1167:a84686b5',
     fomapan: '1269x1167:49ad92ee',
     agfaApx: '1269x1167:3be2e54d',
+    kodakVision3: '1269x1167:41960e7f',
     plain: '1269x1167:01d5229c'
   };
   const plainFrame = composeSprocketFrame(image, { edgeMarkings: { ...E } });
@@ -510,6 +511,22 @@ assert.equal(
   const withSlots = composeSprocketFrame(image, { ...styled('kodakColor'), frameSlots: given });
   const withNumber = composeSprocketFrame(image, styled('kodakColor', { frameNumber: 5 }));
   assert.notEqual(fnv(withSlots.data), fnv(withNumber.data), 'only the named frame is drawn');
+
+  // Vision3: the 64-perforation cycle sits along the film by the frame
+  // number, eight perforations a frame; the count goes up once a cycle.
+  const vis = edgeMarkingStyle('kodakVision3');
+  const vm = getSprocketFrameMetrics(1203, 801, styled('kodakVision3'));
+  const at32 = styledFrameSlots(vm, { frameNumber: 32 }, vis), at33 = styledFrameSlots(vm, { frameNumber: 33 }, vis);
+  const own32 = at32.find((slot) => Math.abs(slot.x - (vm.frameStartX + 0.2 * vm.pitch)) < 1e-9);
+  assert.ok(own32 && own32.count === 4, 'frame 32 starts the fifth cycle');
+  assert.ok(at33.some((slot) => Math.abs(slot.x - (vm.frameStartX + (0.2 - 8) * vm.pitch)) < 1e-9 && slot.count === 4), 'frame 33 is eight perforations further on');
+  assert.ok(at32.every((slot, i) => i === 0 || Math.abs(slot.x - at32[i - 1].x - 64 * vm.pitch) < 1e-9));
+  const bottomRail = (frame) => fnv(frame.data.subarray((frame.height - vm.bandHeight) * frame.width * 4));
+  const visFrame = (number, extra = {}) => composeSprocketFrame(image, styled('kodakVision3', { frameNumber: number, ...extra }));
+  assert.notEqual(bottomRail(visFrame(32)), bottomRail(visFrame(33)), 'each frame shows its own part of the cycle');
+  assert.notEqual(bottomRail(visFrame(32)), bottomRail(visFrame(40)), 'a cycle later the count has gone up');
+  // Frame 31 shows two of the hyphens before the next key number; they follow the frame-number switch.
+  assert.notEqual(fnv(visFrame(31, { textEnabled: false, dxEnabled: false }).data), fnv(visFrame(31, { textEnabled: false, dxEnabled: false, frameNumberEnabled: false }).data));
 
   // Letters the style has no shape for fall back to the pixel font.
   const cjk = composeSprocketFrame(image, styled('kodakColor', { text: 'KODAK 中文' }));
