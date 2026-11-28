@@ -572,6 +572,20 @@ assert.equal(
   const sliced = await composeFilmStripAsync(pictures, kodak, { budgetMs: 0, pause: () => { pauses++; return Promise.resolve(); } });
   assert.equal(fnv(sliced.data), fnv(strip.data), 'sliced and whole agree');
   assert.ok(pauses > 10);
+  // Fomapan numbers every four perforations: along a strip the numbers count
+  // on along the film from the first picture (two per full frame, one per
+  // half-frame), whatever the later pictures' own numbers, and its name,
+  // speed and batch number come where the film prints them (every 24 numbers).
+  const foma = { edgeMarkings: { ...applyEdgeMarkingStyle(E, 'fomapan') }, windowHeight };
+  const fomaPictures = [1, 2, 3, 4, 5, 6].map((n) => ({ imageData: picture(n), number: 2 * n + 22 }));
+  const fomaStrip = composeFilmStrip(fomaPictures, foma);
+  assert.equal(fnv(composeFilmStrip(fomaPictures.map((p, i) => (i === 3 ? { ...p, number: 7 } : p)), foma).data), fnv(fomaStrip.data), 'the film counts on from the first picture');
+  assert.notEqual(fnv(composeFilmStrip(fomaPictures.map((p, i) => (i === 0 ? { ...p, number: 25 } : p)), foma).data), fnv(fomaStrip.data));
+  const fomaOff = composeFilmStrip(fomaPictures, { ...foma, edgeMarkings: { ...foma.edgeMarkings, textEnabled: false } });
+  assert.notEqual(fnv(fomaOff.data), fnv(fomaStrip.data), 'the strip from 24 carries the group after 27');
+  assert.equal(fnv(fomaStrip.data), '971113c5', 'fomapan strip pinned');
+  const fomaHalf = composeFilmStrip([1, 2, 3, 4, 5].map((n) => ({ imageData: picture(n, halfGeometry.windowWidth, windowHeight), number: n + 47 })), { ...foma, halfFrame: true });
+  assert.equal(fnv(fomaHalf.data), '79a361b8', 'fomapan half-frame strip pinned');
   // A short last strip; a portrait picture turned a quarter clockwise into
   // its window; a square one fitted inside, never stretched.
   assert.deepEqual(fitPictureInWindow(400, 600, 180, 120), { rotate: true, x: 0, y: 0, width: 180, height: 120 });
