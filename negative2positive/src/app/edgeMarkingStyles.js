@@ -213,7 +213,7 @@ export const EDGE_MARKING_STYLES = Object.freeze([
         { rows: ['top', 'bottom'], offsetMm: 0.64, widthMm: 0.14, color: '#5fd27e', period: 8, on: [-0.6, 3.4] }
       ],
       'PRO400H': [
-        { rows: ['top'], offsetMm: -0.1, widthMm: 0.9, color: '#dc5a55', period: 4, on: [0.45, 2.45] }
+        { rows: ['top', 'bottom'], offsetMm: -0.1, widthMm: 0.9, color: '#dc5a55', period: 4, on: [0.45, 2.45] }
       ]
     },
     elements: Object.freeze([
