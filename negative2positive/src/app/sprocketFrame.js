@@ -1420,6 +1420,11 @@ function paintStyledEdgeMarkings(data, metrics, edge, style, frameSlots) {
           const { top, height } = styledBand(metrics, element);
           const length = element.lengthMm * sX;
           paintExposedTriangle(data, metrics, { x, y: top }, { x: x + length, y: top + height / 2 }, { x, y: top + height }, fill);
+          // AgfaPhoto APX: a thin needle runs on from the tip.
+          if (element.needleMm) {
+            const needle = Math.max(1, element.needleWidthMm * metrics.filmEdgePxPerMmY);
+            paintMarkingRectangles(data, metrics, [[x + length * 0.8, top + height / 2 - needle / 2, length * 0.2 + element.needleMm * sX, needle]], fill);
+          }
           break;
         }
         case 'outlineArrow': {
