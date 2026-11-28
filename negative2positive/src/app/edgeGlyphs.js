@@ -23,6 +23,17 @@ const line = (x1, y1, x2, y2) => ['L', x1, y1, x2, y2];
 const arc = (cx, cy, rx, ry, a0, a1) => ['A', cx, cy, Math.max(0.001, rx), Math.max(0.001, ry), a0, a1];
 const path = (...points) => points.slice(1).map((point, i) => line(points[i][0], points[i][1], point[0], point[1]));
 
+// A five: a flat top, a short stem down the left, and a bowl that starts at
+// its top and ends low on the left, open between: the open left side is what
+// keeps it from reading as a 6 when it is a dozen pixels tall.
+function five(w, t, { stemTo = 0.38, cy = 0.665 } = {}) {
+  const rx = w / 2 - t, ry = 1 - t - cy, l = t + 0.02;
+  const start = 262, end = 490;
+  const a = start * Math.PI / 180;
+  const sx = w / 2 + rx * Math.cos(a), sy = cy + ry * Math.sin(a);
+  return [line(w - t, t, l, t), line(l, t, l, stemTo), line(l, stemTo, sx, sy), arc(w / 2, cy, rx, ry, start, end)];
+}
+
 // Bold grotesque. Measured on DSC_8800 (Kodak Ultra Max 400): cap height
 // 1.16 mm, G/C/K 0.90-0.93 of the cap height wide, O 1.03, A 1.09, the
 // digits of "400" 0.72 and the frame-number digits 1.0; stroke about 0.2.
@@ -81,7 +92,7 @@ const GROTESK = {
   }],
   3: [0.72, (w, t) => [arc(w / 2, 0.27, w / 2 - t - 0.02, 0.27 - t / 2, 200, 450), arc(w / 2, 0.735, w / 2 - t, 0.265 - t / 2, 270, 520)]],
   4: [0.76, (w, t) => [line(w * 0.68, t, w * 0.68, 1 - t), line(w * 0.68, t, t, 0.7), line(t, 0.7, w - t, 0.7)]],
-  5: [0.72, (w, t) => [line(w - t, t, t + 0.04, t), line(t + 0.04, t, t + 0.02, 0.47), arc(w / 2, 0.66, w / 2 - t, 0.34 - t, 208, 520)]],
+  5: [0.72, (w, t) => five(w, t)],
   6: [0.72, (w, t) => [arc(w / 2, 0.66, w / 2 - t, 0.34 - t, 0, 360), arc(w / 2, 0.52, w / 2 - t, 0.52 - t, 180, 318)]],
   7: [0.7, (w, t) => [line(t, t, w - t, t), line(w - t, t, w * 0.36, 1 - t)]],
   8: [0.72, (w, t) => [arc(w / 2, 0.27, w / 2 - t - 0.03, 0.27 - t / 2, 0, 360), arc(w / 2, 0.735, w / 2 - t, 0.265 - t / 2, 0, 360)]],
@@ -93,6 +104,37 @@ const GROTESK = {
   ':': [0.3, (w, t) => [line(w / 2, 0.36, w / 2, 0.36), line(w / 2, 1 - t, w / 2, 1 - t)]],
   ' ': [0.42, () => []]
 };
+
+// Ilford's HP5 Plus edge print (the 2018 scan, 39 px/mm): a heavy, wide
+// sans-serif. Round letters are wider than the bold set's (O 1.12 of the
+// cap height, D and R about 1.0), A is wide with its bar low, the 4 is closed
+// on a diagonal, the 5 has a flat top, a short stem and an open round bowl.
+// Drawn with a stroke of about a third of the cap height.
+const ILFORD = Object.fromEntries(Object.entries(GROTESK).map(([char, [width, draw]]) => [char, [char === ' ' ? width : width * 1.06, draw]]));
+Object.assign(ILFORD, {
+  A: [1.16, (w, t) => {
+    const T = t, B = 1 - t, y = 0.74;
+    const at = (v) => (w / 2 - t) * (v - T) / (B - T);
+    return [line(w / 2, T, t, B), line(w / 2, T, w - t, B), line(w / 2 - at(y), y, w / 2 + at(y), y)];
+  }],
+  D: [1.04, (w, t) => {
+    const l = t, r = w - t, T = t, B = 1 - t, j = w * 0.38;
+    return [line(l, T, l, B), line(l, T, j, T), line(l, B, j, B), arc(j, 0.5, r - j, 0.5 - t, 270, 450)];
+  }],
+  O: [1.12, (w, t) => [arc(w / 2, 0.5, w / 2 - t, 0.5 - t, 0, 360)]],
+  R: [1.0, (w, t) => {
+    const l = t, r = w - t, T = t, m = 0.56, j = w * 0.46;
+    return [line(l, T, l, 1 - t), line(l, T, j, T), line(l, m, j, m), arc(j, (T + m) / 2, r - j - 0.03, (m - T) / 2, 270, 450), line(j + 0.04, m, r, 1 - t)];
+  }],
+  P: [0.95, (w, t) => {
+    const l = t, r = w - t, T = t, m = 0.58, j = w * 0.46;
+    return [line(l, T, l, 1 - t), line(l, T, j, T), line(l, m, j, m), arc(j, (T + m) / 2, r - j, (m - T) / 2, 270, 450)];
+  }],
+  F: [0.84, (w, t) => [line(t, t, t, 1 - t), line(t, t, w - t, t), line(t, 0.52, w - t - 0.08, 0.52)]],
+  4: [0.86, (w, t) => [line(w * 0.66, t, w * 0.66, 1 - t), line(w * 0.66, t, t + 0.05, 0.66), line(t, 0.7, w - t, 0.7)]],
+  5: [0.8, (w, t) => five(w, t, { stemTo: 0.36, cy: 0.655 })],
+  1: [0.56, (w, t) => [line(w - t - 0.04, t, w - t - 0.04, 1 - t), line(w - t - 0.04, t, t, 0.28)]]
+});
 
 // Fujifilm's monoline letters: straight strokes on a grid, corners cut at 45°.
 // Measured on the Provia 100F strips: letters 0.9 of the cap height wide, the
@@ -134,7 +176,8 @@ const GRID = {
   2: [0.9, (w, t) => { const { l, r, T, B, c } = chamfered(w, t); return path([l, T + c], [l + c, T], [r - c, T], [r, T + c], [r, 0.42], [l, B], [r, B]); }],
   3: [0.9, (w, t) => { const { l, r, T, B, M, c } = chamfered(w, t, 0.18); return [...path([l, T + c * 0.7], [l + c, T], [r - c, T], [r, T + c], [r, M - c * 0.6], [r - c * 0.6, M], [r, M + c * 0.6], [r, B - c], [r - c, B], [l + c, B], [l, B - c * 0.7]), line(w * 0.36, M, r - c * 0.6, M)]; }],
   4: [0.9, (w, t) => { const { l, r, T, B } = chamfered(w, t); const x = w * 0.68; return [line(x, T, x, B), ...path([x, T], [l, 0.68], [r, 0.68])]; }],
-  5: [0.9, (w, t) => { const { l, r, T, B, c } = chamfered(w, t, 0.18); return path([r, T], [l, T], [l, 0.46], [r - c, 0.46], [r, 0.46 + c], [r, B - c], [r - c, B], [l + c, B], [l, B - c * 0.7]); }],
+  // The 5's left side stays open below its middle bar (a 6 is closed there).
+  5: [0.9, (w, t) => { const { l, r, T, B, c } = chamfered(w, t, 0.18); return path([r, T], [l, T], [l, 0.42], [r - c, 0.42], [r, 0.42 + c], [r, B - c], [r - c, B], [l + c * 0.4, B]); }],
   6: [0.9, (w, t) => { const { l, r, T, B, c } = chamfered(w, t, 0.18); return path([r - c * 0.4, T], [l + c, T], [l, T + c], [l, B - c], [l + c, B], [r - c, B], [r, B - c], [r, 0.48 + c], [r - c, 0.48], [l, 0.48]); }],
   7: [0.9, (w, t) => { const { l, r, T, B } = chamfered(w, t); return path([l, T + 0.12], [l, T], [r, T], [r, 0.34], [w * 0.45, B]); }],
   8: [0.9, (w, t) => { const { l, r, T, B, M, c } = chamfered(w, t, 0.16); return [...path([l + c, T], [r - c, T], [r, T + c], [r, M - c], [r - c, M], [l + c, M], [l, M - c], [l, T + c], [l + c, T]), ...path([l + c, M], [l, M + c], [l, B - c], [l + c, B], [r - c, B], [r, B - c], [r, M + c], [r - c, M])]; }],
@@ -149,7 +192,7 @@ const GRID = {
   ' ': [0.6, () => []]
 };
 
-export const EDGE_GLYPH_SETS = Object.freeze({ grotesk: GROTESK, grid: GRID });
+export const EDGE_GLYPH_SETS = Object.freeze({ grotesk: GROTESK, ilford: ILFORD, grid: GRID });
 
 // The glyph set's own spelling of a text: Fujichrome writes the "III" of
 // RDPIII as one roman numeral.
@@ -181,7 +224,12 @@ function strokeDistance(prims, u, v, t) {
           d = along > 0 && across > 0 ? Math.hypot(along, across) : Math.max(along, across);
         } else {
           // Diagonals end round: a square end would poke out of the joint.
-          const s = Math.min(len, Math.max(0, px * ux + py * uy));
+          // An end on the cap line or the baseline runs on past it instead,
+          // so the clip to the cap height cuts it flat (feet of A, V, K).
+          const edge = (y) => y <= t + 0.02 || y >= 1 - t - 0.02;
+          const reach = 1.5 * t / Math.max(0.2, Math.abs(uy));
+          const from = edge(y1) ? -reach : 0, to = edge(p[4]) ? len + reach : len;
+          const s = Math.min(to, Math.max(from, px * ux + py * uy));
           d = Math.hypot(px - ux * s, py - uy * s) - t;
         }
       }

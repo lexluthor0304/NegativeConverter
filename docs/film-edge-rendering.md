@@ -61,6 +61,12 @@ below it stay as fine adjustments.
   60 MP export keeps its slices short (Node, M5 Pro: longest slice 24–45 ms,
   the custom border 46 ms; whole border 0.6–0.8 s).
 
+Legibility: at a contact sheet's real size (cap heights of about 13 px) a
+5 must not read as a 6. In every set the 5's left side is open between its
+stem and the end of its bowl, where the 6 is closed; `edgeMarkingStyles.test.mjs`
+checks it on the rasterised glyphs. Diagonal strokes that reach the cap line
+or the baseline end flat there (feet of A, V, K), not round.
+
 ### Settings and compatibility
 
 `sprocketEdge.style` is one of `auto`, `kodakColor`, `ilford`, `fujiSlide`,
@@ -146,8 +152,13 @@ rendering below, same scale, perforations aligned) are under
   line before an odd number (5), so its parity to the numbers is not fixed;
   even was taken from the 2008 strip. The number's phase to the holes differs
   (0.66 of a pitch on the 2018 scan, 0.19–0.33 on the 2008 one; 0.66 used).
-  The letters are the bold set at the references' weight and 8 % wider; the
-  references' print is bloomed, so their counters look smaller. Both
+  The letters are a set of their own (`ilford` in `edgeGlyphs.js`), drawn
+  from the 2018 scan: heavy (stroke 0.3 of the cap), round letters wide (O
+  1.12, D 1.04, R 1.0 of the cap height), A wide with its bar low, a closed 4
+  on a diagonal, the 5 with a flat top, a short stem and an open bowl; the
+  reference's print is bloomed, so its counters still look smaller than
+  ours. The print is pure white at full density (the scan clips it at 255;
+  the 2008 strip, a small JPEG, reaches 209). Both
   references show the holes black (inverted scans); the hole colour stays the
   panel's.
 - DX code: neither HP5 Plus reference shows a barcode on either edge. No image

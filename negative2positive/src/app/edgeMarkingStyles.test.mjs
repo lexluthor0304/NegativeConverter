@@ -89,6 +89,23 @@ const ilford = edgeMarkingStyle('ilford');
 assert.equal(ilford.dxEnabled, false);
 assert.ok(!ilford.elements.some((element) => ['dx', 'triangle', 'arrow'].includes(element.kind)));
 assert.equal(ilford.elements.find((element) => element.kind === 'text').parity, 'even');
+// Its own letters, printed white at full density as on the scans.
+assert.ok(ilford.elements.filter((element) => element.glyphs).every((element) => element.glyphs === 'ilford'));
+assert.equal(ilford.letteringColor, '#ffffff');
+assert.equal(ilford.inkDensity, 1);
+// A 5 is open on its left between the stem and the bowl (it must not read as
+// a 6 at a dozen pixels): somewhere in the left column between 0.45 and 0.75
+// of the height a 5 shows film where a 6 is solid ink, in every set.
+for (const set of ['grotesk', 'ilford', 'grid']) {
+  const leftColumnMin = (char) => {
+    const g = rasterizeEdgeGlyph(set, char, { capPx: 40, stroke: 0.28 });
+    const x = g.originX + Math.round(g.advance * 0.1);
+    let min = 1;
+    for (let y = Math.round(40 * 0.45); y <= Math.round(40 * 0.75); y++) min = Math.min(min, g.mask[(g.originY + y) * g.width + x]);
+    return min;
+  };
+  assert.ok(leftColumnMin('6') > 0.5 && leftColumnMin('5') < 0.2, `${set}: 5 and 6 differ on the left (${leftColumnMin('5')} vs ${leftColumnMin('6')})`);
+}
 assert.equal(edgeTextForFilmName('Kodak Portra 400'), 'KODAK PORTRA 400');
 assert.equal(edgeTextForFilmName('Kodak Gold Ultra 400 Film, GC135-36C-5'), 'KODAK GOLD ULTRA 400');
 
