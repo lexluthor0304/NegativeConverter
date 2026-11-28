@@ -451,7 +451,9 @@ assert.equal(
   const styled = (id, extra = {}) => ({ edgeMarkings: { ...applyEdgeMarkingStyle(E, id), frameNumber: 31, ...extra } });
   const pinnedStyles = {
     kodakColor: '1269x1167:eced2f14',
-    ilford: '1269x1167:79151b7d',
+    ilford: '1269x1167:53220b65',
+    kodakBw: '1269x1167:1fa8557e',
+    kodakSlide: '1269x1167:03dc8ccb',
     fujiSlide: '1269x1167:a84686b5',
     plain: '1269x1167:01d5229c'
   };

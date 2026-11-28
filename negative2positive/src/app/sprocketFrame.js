@@ -1328,7 +1328,7 @@ function styledDx(data, metrics, edge, style, x, frameNumber, half) {
   const blockHeight = Math.max(1, geometry.rowMm * metrics.filmEdgePxPerMmY);
   const top = metrics.outputHeight - blockHeight * 2;
   // On film the bars of neighbouring modules run together into solid blocks.
-  paintDxSequence(data, metrics, edge, x, top, modulePitch, modulePitch * 1.02, blockHeight, blockHeight, half, frameNumber);
+  paintDxSequence(data, metrics, edge, x, top, modulePitch, modulePitch * (geometry.barFill ?? 1.02), blockHeight, blockHeight, half, frameNumber);
 }
 
 function paintStyledEdgeMarkings(data, metrics, edge, style) {
@@ -1354,6 +1354,12 @@ function paintStyledEdgeMarkings(data, metrics, edge, style) {
         case 'halfNumber':
           if (halfMarks) styledText(data, metrics, edge, element, `${slot.number}A`, x, fill, cache);
           break;
+        case 'code': {
+          // An emulsion code printed with the text, when the style knows it for this text.
+          const code = style.codes?.[String(edge.text).trim().toUpperCase()];
+          if (edge.textEnabled && code) styledText(data, metrics, edge, element, code, x, fill, cache);
+          break;
+        }
         case 'label':
           if (halfMarks) styledText(data, metrics, edge, element, element.value, x, fill, cache);
           break;

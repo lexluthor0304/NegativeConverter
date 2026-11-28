@@ -51,11 +51,14 @@ export const EDGE_MARKING_STYLES = Object.freeze([
     // Verified edge prints: Ultra Max 400 prints "GC 400" (DSC_8800/8798/8806),
     // Ektar 100 "KODAK EKTAR 100" (Commons, LoMit 2018).
     text: 'KODAK GC 400',
-    stocks: ['KODAK GC 400', 'KODAK EKTAR 100'],
-    // Ultra Max turns its text round on every other frame: "KODAK GC 400"
-    // after an even number, "GC 400 KODAK" after an odd one (frames 21, 30,
-    // 31, 35, 36 of the reference strips). Ektar does not.
-    alternates: { 'KODAK GC 400': 'GC 400 KODAK' },
+    // Read on the rebates: Portra prints its name (800 with "-3"), Gold 200
+    // "GB 200-7", ColorPlus "200-8" (two references each, Flickr).
+    stocks: ['KODAK GC 400', 'KODAK PORTRA 160', 'KODAK PORTRA 400', 'KODAK PORTRA 800-3', 'KODAK GB 200-7', 'KODAK 200-8', 'KODAK EKTAR 100'],
+    // Ultra Max, Gold 200 and ColorPlus turn their text round on every other
+    // frame: "KODAK GC 400" after an even number, "GC 400 KODAK" after an
+    // odd one (frames 21, 30, 31, 35, 36 of the Ultra Max strips; 17/18 of
+    // Gold 200, 5/12 of ColorPlus). Ektar and Portra do not.
+    alternates: { 'KODAK GC 400': 'GC 400 KODAK', 'KODAK GB 200-7': 'GB 200-7 KODAK', 'KODAK 200-8': '200-8 KODAK' },
     alternateOn: 'odd',
     // A corrected positive of Kodak colour negative rebate shows the print
     // pale gold on black (Ektar 100, Commons "Color print film strip 03").
@@ -75,31 +78,81 @@ export const EDGE_MARKING_STYLES = Object.freeze([
     labelKey: 'filmEdgeStyleIlford',
     brand: 'ILFORD',
     filmKind: 'bw',
-    // HP5 Plus, from two references that agree: a 2008 strip (Commons,
-    // "ILFORD HP5 PLUS SAFETY FILM") and a 2018 scan (Fil Nenna). The text
-    // edge carries "ILFORD HP5 PLUS" once a frame and no numbers; the other
-    // edge the frame number and "nA", both large and heavy, and nothing else:
-    // no DX code, no triangle.
+    // Current production, measured on HP5 Plus scans of 2021 and 2026 (Flickr,
+    // Mi Wo; Jack Landau) and read on FP4 Plus (2016, 2022): the text edge
+    // carries "ILFORD HP5 PLUS" once every eight perforations, starting 1.27
+    // perforations before the frame number on the other edge, with an
+    // emulsion code ("5051-11") 3.66 perforations after the number; the
+    // other edge a two-row DX code, the frame number, a small wedge and the
+    // smaller "nA". Square, stepped capitals. Older rolls (a 1998 expiry,
+    // 2004, 2008 and 2018 scans) print heavier round letters and no DX code;
+    // that print is not drawn.
     text: 'ILFORD HP5 PLUS',
-    stocks: ['ILFORD HP5 PLUS'],
+    stocks: ['ILFORD HP5 PLUS', 'ILFORD FP4 PLUS'],
     alternates: {},
-    // A black-and-white negative's print is dense silver: in a positive it is
-    // as white as the scan gets (255 on the 2018 scan, clipped).
+    // The emulsion code printed after the text (read on the references).
+    codes: { 'ILFORD HP5 PLUS': '5051-11', 'ILFORD FP4 PLUS': '3803-11' },
+    // A black-and-white negative's print is dense silver: white in a positive.
     letteringColor: '#ffffff',
     inkDensity: 1,
     dx: [109, 9],
+    dxEnabled: true,
+    // The number sits 0.41 of a pitch past a hole's left edge.
+    anchorPerf: 1.41,
+    // HP5's bars stand apart (thin bars with gaps), unlike Kodak's solid blocks.
+    dxGeometry: { moduleMm: 0.405, rowMm: 1.15, barFill: 0.9 },
+    elements: Object.freeze([
+      { kind: 'text', edge: 'top', at: -1.27, from: [0.66, 1.91], glyphs: 'grid', stroke: 0.17, tracking: 0.22, wordSpace: 1.0 },
+      { kind: 'code', edge: 'top', at: 3.66, from: [0.95, 1.91], glyphs: 'grid', stroke: 0.17, tracking: 0.18 },
+      { kind: 'number', edge: 'bottom', at: 0, from: [0.46, 1.91], glyphs: 'grid', stroke: 0.22, tracking: 0.14, digitWidth: 0.95 },
+      { kind: 'dx', edge: 'bottom', at: 0.84, half: false },
+      { kind: 'triangle', edge: 'bottom', at: 3.83, from: [0.72, 1.6], lengthMm: 0.65 },
+      { kind: 'halfNumber', edge: 'bottom', at: 4.21, from: [0.68, 1.68], glyphs: 'grid', stroke: 0.2, tracking: 0.14, digitWidth: 0.95 },
+      { kind: 'dx', edge: 'bottom', at: 4.94, half: true }
+    ])
+  }),
+  Object.freeze({
+    id: 'kodakBw',
+    labelKey: 'filmEdgeStyleKodakBw',
+    brand: 'KODAK',
+    filmKind: 'bw',
+    // Tri-X (Flickr, Vtumane 2017; Johan 2021) and T-Max (100TMX, Flickr
+    // mark_snaps 2018; 400-2TMY, Flickr 2021): Kodak's numbering, text 1.76
+    // perforations after the number, "nA" over an arrow, and no DX code.
+    text: 'KODAK 400TX',
+    stocks: ['KODAK 400TX', 'KODAK 100TMX', 'KODAK 400-2TMY'],
+    alternates: {},
+    letteringColor: '#ffffff',
+    inkDensity: 1,
+    dx: [95, 7],
     dxEnabled: false,
-    anchorPerf: 0.66,
+    // On the Tri-X strip the number starts at a hole's left edge.
+    anchorPerf: 2.0,
     dxGeometry: { moduleMm: 0.405, rowMm: 1.08 },
     elements: Object.freeze([
-      // The line starts two perforations before a number (1.93 and 2.05 on the
-      // references) and comes every other frame: the 2008 strip prints it
-      // before frame 8 and not before 9 (where it prints "SAFETY" past the
-      // number instead, seen on that strip only and not drawn).
-      { kind: 'text', edge: 'top', at: -2.0, from: [0.55, 1.75], glyphs: 'ilford', stroke: 0.3, tracking: 0.12, wordSpace: 0.62, parity: 'even' },
-      { kind: 'number', edge: 'bottom', at: 0, from: [0.28, 1.72], glyphs: 'ilford', stroke: 0.3, tracking: 0.1 },
-      // "nA" as large as the number, 2.79 and 2.88 perforations after it.
-      { kind: 'halfNumber', edge: 'bottom', at: 2.83, from: [0.28, 1.72], glyphs: 'ilford', stroke: 0.3, tracking: 0.1 }
+      ...KODAK_NUMBERING.filter((element) => element.kind !== 'dx'),
+      { kind: 'text', edge: 'top', at: 1.76, from: [0.42, 1.58], glyphs: 'grotesk', stroke: 0.24, tracking: 0.21, wordSpace: 0.65, brandGap: 1.1, digitWidth: 0.72 }
+    ])
+  }),
+  Object.freeze({
+    id: 'kodakSlide',
+    labelKey: 'filmEdgeStyleKodakSlide',
+    brand: 'KODAK',
+    filmKind: 'positive',
+    // Ektachrome E100 (Flickr, eddi_monsoon 2021; Tony Webster 2023): "KODAK
+    // E100" after the number, "nA" over an arrow, no DX code; cream print on
+    // the black rebate of a slide.
+    text: 'KODAK E100',
+    stocks: ['KODAK E100'],
+    alternates: {},
+    letteringColor: '#efd9a4',
+    dx: [95, 7],
+    dxEnabled: false,
+    anchorPerf: 1.35,
+    dxGeometry: { moduleMm: 0.405, rowMm: 1.08 },
+    elements: Object.freeze([
+      ...KODAK_NUMBERING.filter((element) => element.kind !== 'dx'),
+      { kind: 'text', edge: 'top', at: 1.84, from: [0.42, 1.58], glyphs: 'grotesk', stroke: 0.24, tracking: 0.21, wordSpace: 0.65, brandGap: 1.1, digitWidth: 0.72 }
     ])
   }),
   Object.freeze({
@@ -153,7 +206,7 @@ export const EDGE_MARKING_STYLES = Object.freeze([
 // Brands whose edge print could not be confirmed from images of real film:
 // not offered. A film of theirs resolves to the unbranded style under "auto".
 export const LEFT_OUT_BRANDS = Object.freeze([
-  'KODAK TRI-X', 'KODAK T-MAX', 'KODAK BW400CN', 'KODAK VISION3', 'CINESTILL', 'KODAK EKTACHROME',
+  'KODAK BW400CN', 'KODAK VISION3', 'CINESTILL', 'KODAK ELITE CHROME',
   'FUJICOLOR', 'FUJIFILM SUPERIA', 'KENTMERE', 'FOMAPAN', 'AGFA', 'LOMOGRAPHY'
 ]);
 
@@ -162,7 +215,7 @@ const STYLE_BY_ID = new Map(EDGE_MARKING_STYLES.map((style) => [style.id, style]
 // Every id a setting may hold.
 export const EDGE_STYLE_IDS = Object.freeze([EDGE_STYLE_AUTO, ...EDGE_MARKING_STYLES.map((style) => style.id), EDGE_STYLE_CUSTOM]);
 // The ids the dropdown lists, in order.
-export const EDGE_STYLE_MENU = Object.freeze([EDGE_STYLE_AUTO, 'kodakColor', 'ilford', 'fujiSlide', EDGE_STYLE_PLAIN, EDGE_STYLE_CUSTOM]);
+export const EDGE_STYLE_MENU = Object.freeze([EDGE_STYLE_AUTO, 'kodakColor', 'kodakBw', 'kodakSlide', 'ilford', 'fujiSlide', EDGE_STYLE_PLAIN, EDGE_STYLE_CUSTOM]);
 export const EDGE_STYLE_LABEL_KEYS = Object.freeze({
   [EDGE_STYLE_AUTO]: 'filmEdgeStyleAuto',
   [EDGE_STYLE_CUSTOM]: 'filmEdgeStyleCustom',
@@ -190,12 +243,24 @@ export function edgeTextForFrame(style, text, frameNumber) {
 const KNOWN_EDGE_PRINTS = [
   { words: ['ULTRA MAX', 'ULTRAMAX', 'GC400', 'GC 400'], text: 'KODAK GC 400' },
   { words: ['EKTAR'], text: 'KODAK EKTAR 100' },
+  { words: ['PORTRA 160'], text: 'KODAK PORTRA 160' },
+  { words: ['PORTRA 400'], text: 'KODAK PORTRA 400' },
+  { words: ['PORTRA 800'], text: 'KODAK PORTRA 800-3' },
+  { words: ['GOLD 200', 'GB 200', 'GB200'], text: 'KODAK GB 200-7' },
+  { words: ['COLORPLUS', 'COLOR PLUS'], text: 'KODAK 200-8' },
+  { words: ['TRI-X', 'TRI X', '400TX'], text: 'KODAK 400TX' },
+  { words: ['T-MAX 100', 'TMAX 100', '100TMX', 'T-MAX 100'], text: 'KODAK 100TMX' },
+  { words: ['T-MAX 400', 'TMAX 400', '400TMY', 'T-MAX 400'], text: 'KODAK 400-2TMY' },
+  { words: ['E100', 'EKTACHROME 100'], text: 'KODAK E100' },
+  { words: ['FP4'], text: 'ILFORD FP4 PLUS' },
   { words: ['HP5'], text: 'ILFORD HP5 PLUS' },
   { words: ['PROVIA 100F', 'RDP III', 'RDPIII'], text: 'FUJI RDPIII' }
 ];
 
 const STYLE_RULES = [
   // Kodak's colour negative films; its B&W, chromogenic B&W, slide and cine films are not confirmed.
+  { id: 'kodakBw', words: ['TRI-X', 'TRI X', '400TX', 'T-MAX', 'TMAX', 'TMX', 'TMY'], not: [] },
+  { id: 'kodakSlide', words: ['EKTACHROME E100', 'KODAK E100', 'EKTACHROME 100'], not: ['ELITE'] },
   { id: 'kodakColor', words: ['ULTRA MAX', 'ULTRAMAX', 'PORTRA', 'EKTAR', 'GOLD', 'COLORPLUS', 'COLOR PLUS', 'PRO IMAGE', 'KODACOLOR', 'VERICOLOR', 'GC400', 'GC 400', 'KODAK 200', 'KODAK 400'], not: ['TRI-X', 'TRI X', 'T-MAX', 'TMAX', 'BW400', 'T400CN', 'VISION', 'CHROME', 'CINESTILL', 'LOMOGRAPHY'] },
   { id: 'ilford', words: ['ILFORD', 'HP5', 'FP4', 'DELTA', 'PAN F', 'XP2', 'SFX', 'ORTHO PLUS'], not: ['KENTMERE'] },
   { id: 'fujiSlide', words: ['FUJICHROME', 'VELVIA', 'PROVIA', 'ASTIA', 'SENSIA', 'RDP', 'RVP', 'RXP'], not: [] }

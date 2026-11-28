@@ -99,6 +99,13 @@ relative to the frame's main number. The comparison images (reference above,
 rendering below, same scale, perforations aligned) are under
 `.cache/edge-styles/compare/` of the working copy that made them.
 
+**Kodak colour negative (`kodakColor`)** — wording read on the rebates
+(two Flickr scans each): Portra 160 "KODAK PORTRA 160", Portra 400 "KODAK
+PORTRA 400", Portra 800 "KODAK PORTRA 800-3", Gold 200 "KODAK GB 200-7",
+ColorPlus "KODAK 200-8". Gold 200 and ColorPlus turn their text round on odd
+frames like Ultra Max; Portra does not. Their text sits 1.76–1.97
+perforations after the number, as measured on Ultra Max (1.78).
+
 **Kodak colour negative (`kodakColor`)**
 
 - Local: `DSC_8800.NEF`, `DSC_8798.NEF`, `DSC_8806.NEF` (Kodak Ultra Max 400,
@@ -134,45 +141,61 @@ rendering below, same scale, perforations aligned) are under
   perforation past a hole (a hand-held photograph at an angle, so less sure
   than the flat Ultra Max scans' 0.50).
 
-**Ilford (`ilford`)** — HP5 Plus
+**Ilford (`ilford`)** — current production (HP5 Plus, FP4 Plus)
 
-- [ILFORD HP5 PLUS SAFETY FILM](https://commons.wikimedia.org/wiki/File:ILFORD_HP5_PLUS_SAFETY_FILM.JPG) (Commons, 2008, 448 px, frames 7A–9A).
-- Fil Nenna, ["The luxury of scanned sprocket holes"](https://filnenna.squarespace.com/blog/2018/12/29/the-luxury-of-scanned-sprocket-holes) (2018, a positive scan at 39 px/mm, frames 4A–5).
-- Measured (both agree): the text edge carries "ILFORD HP5 PLUS" and no
-  numbers; the line starts 2.0 perforations before a frame number (1.93 and
-  2.05), cap 1.2 mm, 0.55–1.75 mm from the edge, letters heavy (stroke about
-  0.28 of the cap) and round. The other edge carries only the frame number
-  and "nA", the same size (cap 1.43 mm, 0.28–1.72 mm from the edge), "nA"
-  2.79–2.88 perforations after the number: **no DX code and no triangle on
-  either strip**. The 2008 strip prints the line before frame 8 and not
-  before 9, so it comes every other frame (drawn on even numbers). Print white
-  in a positive.
-- Not drawn / approximate: "SAFETY", which the 2008 strip prints 2
-  perforations after frame 9, is on that strip only. The 2018 scan shows the
-  line before an odd number (5), so its parity to the numbers is not fixed;
-  even was taken from the 2008 strip. The number's phase to the holes differs
-  (0.66 of a pitch on the 2018 scan, 0.19–0.33 on the 2008 one; 0.66 used).
-  The letters are a set of their own (`ilford` in `edgeGlyphs.js`), drawn
-  from the 2018 scan: heavy (stroke 0.3 of the cap), round letters wide (O
-  1.12, D 1.04, R 1.0 of the cap height), A wide with its bar low, a closed 4
-  on a diagonal, the 5 with a flat top, a short stem and an open bowl; the
-  reference's print is bloomed, so its counters still look smaller than
-  ours. The print is pure white at full density (the scan clips it at 255;
-  the 2008 strip, a small JPEG, reaches 209). Both
-  references show the holes black (inverted scans); the hole colour stays the
-  panel's.
-- DX code: neither HP5 Plus reference shows a barcode on either edge. No image
-  of current-production HP5 Plus with a DX edge code was found (Commons,
-  Ilford's site and blogs searched; Ilford's data sheet speaks of DX-coded
-  cassettes, and a forum thread quoting Ilford on an edge barcode for frame
-  detection could not be read). The style draws none; the DX switch has no
-  place to print it in this style.
-- Delta 400 Pro ([SWNegativ](https://commons.wikimedia.org/wiki/File:SWNegativ.jpg), 2009) prints a different layout (DX code, a solid triangle
-  before "nA", "ILFORD" and "DELTA 400 PRO" far apart), on that one image
-  only, so it is not drawn as its own look and its wording is not offered;
-  a Delta film under Auto gets this HP5 Plus layout with its trade name.
-  Kentmere, made by the same company, prints a different thin letter
-  ([Ilford Photo, "Shooting Sprockets"](https://ilfordphoto.com/shooting-sprockets), 2022) and is not drawn in this style.
+References (Flickr unless noted; images kept locally, not in the repository):
+HP5 Plus [55344157940](https://www.flickr.com/photos/jacklandau/55344157940/) (2026) and
+[51717341141](https://www.flickr.com/photos/188462897@N03/51717341141/) (2021);
+FP4 Plus [52193807748](https://www.flickr.com/photos/sergiorosy/52193807748/) (2022) and
+[29791258114](https://www.flickr.com/photos/placid_casual/29791258114/) (2016); an HP5 Plus
+contact sheet of 2004 (Kyppi archive, V.-P. Suhonen) shows the same DX code and wedge.
+
+- Measured (2026 scan, 21.7 px/mm, perforation units from the frame number):
+  text edge "ILFORD HP5 PLUS" from −1.27, once every 8 perforations (8.0 on
+  the 2021 scan, 8.1 on the 2026 one), 19.1 mm long, bottom of the letters
+  1.91 mm from the film edge; emulsion code "5051-11" at +3.66 (FP4 Plus:
+  "3803-11"). DX edge: the number 0.41 of a pitch past a hole's left edge, top
+  1.91 mm from the edge, digits 1.4 mm wide; a DX code from +0.84 to +3.35;
+  a small filled wedge at +3.83 (0.65 mm long); "nA" at +4.21, its top 1.68
+  mm from the edge; the half-frame DX code from +4.94 to +7.75. The bars
+  reach from the edge to the perforations and stand apart (thin bars).
+  Square, stepped capitals (drawn with the `grid` set). Print white.
+- Approximate: both modern scans cut the film edge off, so cap heights and
+  the lower ends of numbers, wedge and bars are inferred (text cap 1.25 mm
+  from its length; number cap about 1.45 mm); the wedge's height; the DX
+  number drawn is HP5 Plus's database code (109-9), not read off the bars;
+  the letters are the chamfered `grid` set, the film's are stepped.
+- The earlier look of this style (heavy round letters, no DX code, from a
+  2008 strip and a 2018 scan) is the older print (also seen on a 1998-expiry
+  roll) and is no longer drawn. Delta and Kentmere wordings are not offered:
+  current Delta 400 ("DELTA 400 PROFESSIONAL") and Delta 100 rest on one
+  readable image each, Kentmere 400 ("K 400", no DX code) on one complete
+  image; Delta films get this layout with their trade name.
+
+**Kodak black and white (`kodakBw`)** — Tri-X, T-Max
+
+- Tri-X [50787267562](https://www.flickr.com/photos/rotabaga/50787267562/) (2020) and
+  [31607007404](https://www.flickr.com/photos/145901000@N05/31607007404/) (2017): "KODAK 400TX";
+  T-Max 100 [41914972164](https://www.flickr.com/photos/40814057@N00/41914972164/): "KODAK 100TMX";
+  T-Max 400 [51318381513](https://www.flickr.com/photos/senpatientulo/51318381513/) and
+  [51104105113](https://www.flickr.com/photos/62089820@N03/51104105113/) (2021): "KODAK 400-2TMY"
+  (2008 rolls read "KODAK 400TMY", 1998 "KODAK 5053 TMY"; the current one is drawn).
+- Measured (Tri-X): Kodak's colour-negative numbering — the number on both
+  edges, the text 1.76 perforations after it, "nA" 3.89 after the number over
+  an arrow starting at 3.68 — and no DX code; the number starts at a hole's
+  left edge (phase 0). Print white.
+- Approximate: letter sizes and bands are Kodak colour negative's (measured
+  on Ultra Max), not measured on these scans.
+
+**Kodak slide (`kodakSlide`)** — Ektachrome E100
+
+- [51657970731](https://www.flickr.com/photos/melodiedawn/51657970731/) (2021) and
+  [54759621693](https://www.flickr.com/photos/diversey/54759621693/) (2023): "KODAK E100".
+- Measured: text 2.0 perforations after the number, "nA" about 4.0 after it
+  over an arrow, no DX code, cream print (about 239, 217, 164) on the black
+  rebate. Approximate: the number's phase to the holes (0.15–0.35 between
+  the scans; 0.35 drawn), sizes from Kodak colour negative. Elite Chrome
+  ("KODAK EBX") rests on one clear image and is not offered.
 
 **Fujifilm reversal (`fujiSlide`)**
 
@@ -203,21 +226,24 @@ above) without text or DX code, for re-spooled and rebranded rolls.
 
 ### Left out
 
-No image of the real rebate could be confirmed for these, so they are not in
-the dropdown; "auto" draws their films the old way. `LEFT_OUT_BRANDS` keeps
-the list; a style can be added later as one more record.
+A second collection of 85 rebate images (37 stocks, two credited sources each)
+was gathered on 2026-11-28; from it Ilford current production, Kodak B&W,
+Kodak E100 and the Kodak colour negative wordings were measured. Still not
+drawn:
 
-- Kodak Tri-X / T-Max: no rebate image found (Commons has boxes and prints
-  only; the Kodak data sheet gives the wording "KODAK 400TX" but not the look).
-- Kodak Vision3 and CineStill: no image; cine stock also carries KeyKode,
-  which would need its own layout.
-- Fujicolor negative (C200, Superia): one image ([Part of developed Fujicolor C200 film](https://commons.wikimedia.org/wiki/File:Part_of_developed_Fujicolor_C200_film.jpg),
-  thin monoline text, coloured lines along the perforations, DX code) and one
-  unbranded strip of the same make ([Farbnegativ](https://commons.wikimedia.org/wiki/File:Farbnegativ.jpg), "S-200"); not enough to measure,
-  and Fujifilm's current 200/400 are made by Kodak.
-- Fomapan, Agfa: no rebate image readable (Commons shows boxes and one strip
-  too small to read, [AGFA Vista 200 35 mm film strip](https://commons.wikimedia.org/wiki/File:AGFA_Vista_200_35_mm_film_strip.jpg)).
-- Kodak Ektachrome / Elite Chrome: one strip ([FarbDia](https://commons.wikimedia.org/wiki/File:FarbDia.jpg), "KODAK EBX"), not enough.
+- Fujifilm colour negative (C200, Superia, Fujifilm 200/400, Pro 400H): the
+  coloured stripes between the perforations differ per stock (Superia and
+  C200 red/green, Pro 400H red, Fujifilm 200/400 none) and the renderer has
+  no stripe marking yet.
+- Fomapan: numbers every four perforations without "A", widely spaced
+  letters, and an old/new print whose changeover is not dated.
+- Agfa Vista (two print generations, discontinued) and AgfaPhoto APX (wedge
+  before "nA", no DX): not measured in this round.
+- Kodak Vision3 (KeyKode every 64 perforations, one edge only) and CineStill
+  (its own still numbering and wordmark on later rolls): not measured in this
+  round; they need a layout of their own.
+- Kodak Elite Chrome, Ilford Delta, Kentmere: one readable image of the
+  current print each.
 
 ### Adding a style
 
