@@ -1277,7 +1277,7 @@ function styledText(data, metrics, edge, element, text, x, fill, cache, brand = 
     for (let i = 0; i < chars.length; i++) {
       const char = chars[i];
       if (char === ' ') { pen += (i === firstSpace || i === lastSpace ? brandGap : wordGap) - tracking; continue; }
-      const widthScale = (/[0-9]/.test(char) ? digitScale : 1) * xScale;
+      const widthScale = (/[0-9]/.test(char) ? digitScale : (element.letterWidth ?? 1)) * xScale;
       const key = `${set}\0${char}\0${capPx.toFixed(3)}\0${element.stroke}\0${widthScale.toFixed(4)}`;
       let glyph = cache.get(key);
       if (!glyph) {
@@ -1341,6 +1341,8 @@ function paintStyledEdgeMarkings(data, metrics, edge, style) {
       const x = slot.x + element.at * pitch;
       // Nothing a style prints is longer than 30 mm.
       if (x > metrics.outputWidth || x < -30 * sX) continue;
+      // A marking printed every other frame.
+      if (element.parity && (Math.abs(slot.number) % 2 === 0) !== (element.parity === 'even')) continue;
       switch (element.kind) {
         case 'number':
           if (edge.frameNumberEnabled) styledText(data, metrics, edge, element, String(slot.number), x, fill, cache);

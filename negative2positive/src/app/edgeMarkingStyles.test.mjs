@@ -80,6 +80,15 @@ assert.equal(edgeTextForFilmName('Kodak ULTRA MAX 400 Film GC400'), 'KODAK GC 40
 assert.equal(edgeTextForFilmName('Kodak EKTAR 100'), 'KODAK EKTAR 100');
 assert.equal(edgeTextForFilmName('FUJICHROME PROVIA 100F RDP III Professional RDPIII'), 'FUJI RDPIII');
 assert.equal(edgeTextForFilmName('Ilford HP5 PLUS 400 HP5+ (white box)'), 'ILFORD HP5 PLUS');
+// Delta 400 Pro's own layout rests on one image: not a verified edge print,
+// so a Delta film gets the HP5 Plus layout with its trade name.
+assert.equal(edgeTextForFilmName('Ilford Delta 400 Pro D400'), 'ILFORD DELTA 400 PRO D400');
+assert.ok(!edgeMarkingStyle('ilford').stocks.some((stock) => stock.includes('DELTA')));
+// HP5 Plus: no DX code and no triangle on either reference; the line every other frame.
+const ilford = edgeMarkingStyle('ilford');
+assert.equal(ilford.dxEnabled, false);
+assert.ok(!ilford.elements.some((element) => ['dx', 'triangle', 'arrow'].includes(element.kind)));
+assert.equal(ilford.elements.find((element) => element.kind === 'text').parity, 'even');
 assert.equal(edgeTextForFilmName('Kodak Portra 400'), 'KODAK PORTRA 400');
 assert.equal(edgeTextForFilmName('Kodak Gold Ultra 400 Film, GC135-36C-5'), 'KODAK GOLD ULTRA 400');
 
