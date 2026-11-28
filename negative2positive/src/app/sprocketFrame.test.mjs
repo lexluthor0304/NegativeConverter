@@ -611,6 +611,15 @@ assert.equal(
   const apxStrip = composeFilmStrip(pictures, apx);
   assert.notEqual(fnv(composeFilmStrip(pictures.map((p) => ({ ...p, number: p.number + 1 })), apx).data), fnv(apxStrip.data), 'name and code change places with the numbers');
   assert.equal(fnv(apxStrip.data), '5068ea7e', 'APX strip pinned');
+  // Kodak Vision3's cycle is 64 perforations: along a strip it runs on
+  // unbroken from the first picture's place on the film (its frame number,
+  // eight perforations a frame), whatever the later pictures' numbers.
+  const vision = { edgeMarkings: { ...applyEdgeMarkingStyle(E, 'kodakVision3') }, windowHeight };
+  const visionPictures = [1, 2, 3, 4, 5, 6].map((n) => ({ imageData: picture(n), number: n + 29 }));
+  const visionStrip = composeFilmStrip(visionPictures, vision);
+  assert.equal(fnv(composeFilmStrip(visionPictures.map((p, i) => (i === 4 ? { ...p, number: 2 } : p)), vision).data), fnv(visionStrip.data), 'the cycle follows the film, not the later numbers');
+  assert.notEqual(fnv(composeFilmStrip(visionPictures.map((p, i) => (i === 0 ? { ...p, number: 31 } : p)), vision).data), fnv(visionStrip.data), 'the first picture places the cycle');
+  assert.equal(fnv(visionStrip.data), '785e0bac', 'Vision3 strip pinned');
   // A short last strip; a portrait picture turned a quarter clockwise into
   // its window; a square one fitted inside, never stretched.
   assert.deepEqual(fitPictureInWindow(400, 600, 180, 120), { rotate: true, x: 0, y: 0, width: 180, height: 120 });
