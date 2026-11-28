@@ -85,7 +85,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     import { createMobileRecovery } from './mobileRecovery.js';
     import { encodeRecipe, decodeRecipe, recipeDiff, describeRecipeChange, RECIPE_KEYS } from './recipes.js';
     import qrcode from 'qrcode-generator';
-    import { layoutContactSheet, pagesFor, renderContactSheetPage, contactSheetHeader, normalizeLayoutId, normalizePageId } from './contactSheet.js';
+    import { layoutContactSheet, pagesFor, renderContactSheetPage, contactSheetHeader, normalizeLayoutId, normalizePageId, hasStripLayout, layoutContactSheetStrips, renderContactSheetStripsPage, contactSheetFrameTarget } from './contactSheet.js';
 
     import { convertFrameWithRouter, resolveConversionMode } from '../pipeline/conversionRouter.js';
     import { convertAdjustedFrame } from '../pipeline/adjustedFrame.js';
@@ -151,6 +151,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       DEFAULT_SPROCKET_EDGE_MARKINGS,
       composeSprocketFrame,
       composeSprocketFrameAsync,
+      composeFilmStripAsync,
       composeSprocketFrameBackground,
       areSprocketFrameFontsReady,
       ensureSprocketFrameFonts,
@@ -29648,6 +29649,99 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // a flagged proof-sheet approximation: spatial effects and measurements
     // are evaluated at cell scale, and dust is not removed). TIFF when that is
     // the export format, otherwise PNG.
+    // One contact-sheet frame through the export pipeline, `target` pixels on
+    // its long side, as a copy the caller owns (its full-size planes are
+    // released before it returns, #250). Null when the frame failed.
+    async function renderContactSheetFrame(item, settingsForFile, target, convert, { sprocketOptions = null } = {}) {
+      const ownedPlanes = [];
+      let memoryClaim = null;
+      try {
+        // Each full-resolution frame is one gated item (#241). A frame
+        // whose base is already decoded (a cached photo session, or the
+        // open photo when its full-resolution base is loaded) is not
+        // decoded again. The sheet never writes a recipe: a cell-scale
+        // measurement must not become a frame's saved settings.
+        const sourceImageData = photoSessions.peek(item)?.base
+          || (item === getCurrentQueueItem() && !state.rawDecodePending && canReuseLoadedRollSource(item)
+            ? state.loadedBaseImageData || state.originalImageData : null)
+          || undefined;
+        return await runHiddenJobItem([item.file], async () => {
+          // A decoded frame's memory until its picture exists (#258).
+          if (!sourceImageData) memoryClaim = createFrameClaim(item.file, { priority: 'user', label: `contact sheet ${item.file.name}` });
+          let adjusted = await processFileWithSettings(item.file, settingsForFile, {
+            ownedPlanes, tileMaxDimension: target, updateItemSettings: false, convert, sourceImageData, memoryClaim
+          });
+          if (Math.max(adjusted.width, adjusted.height) > target) {
+            adjusted = markOwnedPlanes(downsampleImageDataForMaxDim(adjusted, target));
+            ownedPlanes.push(adjusted);
+          }
+          if (sprocketOptions) {
+            await ensureSprocketFrameFonts(sprocketOptions);
+            adjusted = markOwnedPlanes(await composeSprocketFrameAsync(adjusted, sprocketOptions));
+            ownedPlanes.push(adjusted);
+          }
+          return new ImageData(new Uint8ClampedArray(adjusted.data), adjusted.width, adjusted.height);
+        });
+      } catch (error) {
+        console.warn('Contact sheet frame failed:', item.file.name, error);
+        return null;
+      } finally {
+        releaseOwnedPlanes(...ownedPlanes);
+        memoryClaim?.release();
+      }
+    }
+
+    // A 135 contact sheet as strips: page by page, strip by strip; a strip's
+    // frames are rendered, composed on one film (composeFilmStripAsync, the
+    // edge markings of the strip's first photo, every frame's own number) and
+    // dropped before the next strip, so a page holds only its strips.
+    async function exportContactSheetStrips({ selected, pageId, layoutId, target, windowHeight, convert, exportInfo, pages, lang, overlay }) {
+      const header = contactSheetHeader(state.rollMetadata, { fallbackTitle: getLocalizedText('contactSheetTitle', 'Contact sheet') });
+      const first = layoutContactSheetStrips({ pageId, layoutId, count: selected.length });
+      const typedNumber = state.sprocketEdge.frameNumber !== DEFAULT_SPROCKET_EDGE_MARKINGS.frameNumber;
+      let done = 0;
+      for (let pageIndex = 0; pageIndex < first.pageCount; pageIndex++) {
+        const sheet = layoutContactSheetStrips({ pageId, layoutId, count: selected.length, pageIndex });
+        const images = [];
+        try {
+          for (const box of sheet.strips) {
+            const pictures = [];
+            let options = null;
+            for (const i of box.indices) {
+              const { item, index } = selected[i];
+              updateBatchOverlayProgress((done / selected.length) * 80, lang.loadingBatchFile.replace('{current}', done + 1).replace('{total}', selected.length));
+              const settingsForFile = getSettingsForExport(index, item);
+              const own = getSprocketFrameComposeOptions(settingsForFile, i);
+              // The strip's film: its first photo's style, text and code;
+              // under Auto the first photo whose film was recognised.
+              if (!options || (state.sprocketEdge.style === EDGE_STYLE_AUTO && options.edgeMarkings.style === EDGE_STYLE_CUSTOM && own.edgeMarkings.style !== EDGE_STYLE_CUSTOM)) options = own;
+              const imageData = await renderContactSheetFrame(item, settingsForFile, target, convert);
+              // A contact sheet always numbers its frames on the film.
+              pictures.push({ imageData, number: typedNumber ? state.sprocketEdge.frameNumber + i : own.edgeMarkings.frameNumber });
+              done++;
+              await yieldForJob();
+            }
+            const stripOptions = { ...options, edgeMarkings: { ...options.edgeMarkings, frameNumberEnabled: true }, windowHeight, halfFrame: sheet.layout.halfFrame };
+            await ensureSprocketFrameFonts(stripOptions);
+            const strip = await composeFilmStripAsync(pictures, stripOptions);
+            images.push({ image: await createImageBitmap(strip), width: strip.width, height: strip.height });
+          }
+          const surface = document.createElement('canvas');
+          surface.width = sheet.page.width;
+          surface.height = sheet.page.height;
+          const ctx = surface.getContext('2d');
+          renderContactSheetStripsPage(ctx, sheet, images, { header, footer: 'NeoAnalogLab Negative Converter', fontFamily: CONTACT_SHEET_FONT });
+          overlay.updateProgress(80 + ((pageIndex + 1) / first.pageCount) * 18, lang.loadingEncoding);
+          const imageData = ctx.getImageData(0, 0, surface.width, surface.height);
+          const blob = await imageDataToBlob(imageData, exportInfo.format, null, 8, null, buildExportMetadata({ roll: state.rollMetadata, frame: {}, index: -1 }));
+          pages.push({ blob, name: contactSheetFileName(pageIndex, first.pageCount, exportInfo) });
+        } finally {
+          for (const image of images) image.image?.close?.();
+        }
+        await yieldForJob();
+      }
+    }
+
     async function exportContactSheet() {
       if (isDesktopBatchExportLocked()) return;
       await settlePendingCropDetection();
@@ -29657,6 +29751,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const layoutId = normalizeLayoutId(document.getElementById('contactSheetLayout')?.value);
       const pageId = normalizePageId(document.getElementById('contactSheetPage')?.value);
       const sprockets = Boolean(document.getElementById('contactSheetSprockets')?.checked);
+      // 135 rolls are laid out as cut strips of film (six frames, twelve
+      // half-frames) with the border panel's edge markings; 120 and
+      // panoramic layouts keep the grid, with or without a border per frame.
+      const strips = sprockets && hasStripLayout(layoutId);
       const exportInfo = getExportInfo(state.exportFormat === 'tiff' ? 'tiff' : 'png', 8);
       const lang = i18n[currentLang];
       const overlay = getLoadingOverlay();
@@ -29669,76 +29767,42 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       try {
         persistCurrentFileSettings({ silent: true, force: true });
         convert = createTileConverter();
-        const probe = layoutContactSheet({ pageId, layoutId, count: selected.length });
-        const cell = probe.cells[0].frame;
-        const target = Math.max(cell.width, cell.height) * 2;
-        for (let i = 0; i < selected.length; i++) {
-          const { item, index } = selected[i];
-          updateBatchOverlayProgress((i / selected.length) * 80, lang.loadingBatchFile.replace('{current}', i + 1).replace('{total}', selected.length));
-          const settingsForFile = getSettingsForExport(index, item);
-          const label = frameNumberFor(settingsForFile?.frameMetadata, i);
-          // The frame's full-resolution planes live only until its bitmap
-          // exists (#250): released then, not at the next major GC.
-          const ownedPlanes = [];
-          let memoryClaim = null;
-          try {
-            // Each full-resolution frame is one gated item (#241). A frame
-            // whose base is already decoded (a cached photo session, or the
-            // open photo when its full-resolution base is loaded) is not
-            // decoded again. The sheet never writes a recipe: a cell-scale
-            // measurement must not become a frame's saved settings.
-            const sourceImageData = photoSessions.peek(item)?.base
-              || (item === getCurrentQueueItem() && !state.rawDecodePending && canReuseLoadedRollSource(item)
-                ? state.loadedBaseImageData || state.originalImageData : null)
-              || undefined;
-            const bitmap = await runHiddenJobItem([item.file], async () => {
-              // A decoded frame's memory until its bitmap exists (#258).
-              if (!sourceImageData) memoryClaim = createFrameClaim(item.file, { priority: 'user', label: `contact sheet ${item.file.name}` });
-              let adjusted = await processFileWithSettings(item.file, settingsForFile, {
-                ownedPlanes, tileMaxDimension: target, updateItemSettings: false, convert, sourceImageData, memoryClaim
-              });
-              if (Math.max(adjusted.width, adjusted.height) > target) {
-                adjusted = markOwnedPlanes(downsampleImageDataForMaxDim(adjusted, target));
-                ownedPlanes.push(adjusted);
-              }
-              if (sprockets) {
-                const options = getSprocketFrameComposeOptions(settingsForFile, i);
-                await ensureSprocketFrameFonts(options);
-                adjusted = markOwnedPlanes(await composeSprocketFrameAsync(adjusted, options));
-                ownedPlanes.push(adjusted);
-              }
-              return createImageBitmap(adjusted);
-            });
-            thumbs.push({ image: bitmap, width: bitmap.width, height: bitmap.height, label });
-          } catch (error) {
-            console.warn('Contact sheet frame failed:', item.file.name, error);
-            thumbs.push({ image: null, width: 1, height: 1, label });
-          } finally {
-            releaseOwnedPlanes(...ownedPlanes);
-            memoryClaim?.release();
+        const { target, windowHeight } = contactSheetFrameTarget({ pageId, layoutId, strips });
+        if (strips) {
+          await exportContactSheetStrips({ selected, pageId, layoutId, target, windowHeight, convert, exportInfo, pages, lang, overlay });
+        } else {
+          for (let i = 0; i < selected.length; i++) {
+            const { item, index } = selected[i];
+            updateBatchOverlayProgress((i / selected.length) * 80, lang.loadingBatchFile.replace('{current}', i + 1).replace('{total}', selected.length));
+            const settingsForFile = getSettingsForExport(index, item);
+            const label = frameNumberFor(settingsForFile?.frameMetadata, i);
+            const sprocketOptions = sprockets ? getSprocketFrameComposeOptions(settingsForFile, i) : null;
+            const imageData = await renderContactSheetFrame(item, settingsForFile, target, convert, { sprocketOptions });
+            const image = imageData ? await createImageBitmap(imageData) : null;
+            thumbs.push(image ? { image, width: image.width, height: image.height, label } : { image: null, width: 1, height: 1, label });
+            await yieldForJob();
           }
-          await yieldForJob();
-        }
-        batchOverlayProgress = null;
-        const header = contactSheetHeader(state.rollMetadata, { fallbackTitle: getLocalizedText('contactSheetTitle', 'Contact sheet') });
-        const pageCount = pagesFor(selected.length, layoutId);
-        for (let pageIndex = 0; pageIndex < pageCount; pageIndex++) {
-          const sheet = layoutContactSheet({ pageId, layoutId, count: selected.length, pageIndex });
-          const perPage = sheet.layout.columns * sheet.layout.rows;
-          const surface = document.createElement('canvas');
-          surface.width = sheet.page.width;
-          surface.height = sheet.page.height;
-          const ctx = surface.getContext('2d');
-          renderContactSheetPage(ctx, sheet, thumbs.slice(pageIndex * perPage, (pageIndex + 1) * perPage), {
-            header,
-            footer: 'NeoAnalogLab Negative Converter',
-            fontFamily: CONTACT_SHEET_FONT
-          });
-          overlay.updateProgress(80 + ((pageIndex + 1) / pageCount) * 18, lang.loadingEncoding);
-          const imageData = ctx.getImageData(0, 0, surface.width, surface.height);
-          const blob = await imageDataToBlob(imageData, exportInfo.format, null, 8, null, buildExportMetadata({ roll: state.rollMetadata, frame: {}, index: -1 }));
-          pages.push({ blob, name: contactSheetFileName(pageIndex, pageCount, exportInfo) });
-          await yieldForJob();
+          batchOverlayProgress = null;
+          const header = contactSheetHeader(state.rollMetadata, { fallbackTitle: getLocalizedText('contactSheetTitle', 'Contact sheet') });
+          const pageCount = pagesFor(selected.length, layoutId);
+          for (let pageIndex = 0; pageIndex < pageCount; pageIndex++) {
+            const sheet = layoutContactSheet({ pageId, layoutId, count: selected.length, pageIndex });
+            const perPage = sheet.layout.columns * sheet.layout.rows;
+            const surface = document.createElement('canvas');
+            surface.width = sheet.page.width;
+            surface.height = sheet.page.height;
+            const ctx = surface.getContext('2d');
+            renderContactSheetPage(ctx, sheet, thumbs.slice(pageIndex * perPage, (pageIndex + 1) * perPage), {
+              header,
+              footer: 'NeoAnalogLab Negative Converter',
+              fontFamily: CONTACT_SHEET_FONT
+            });
+            overlay.updateProgress(80 + ((pageIndex + 1) / pageCount) * 18, lang.loadingEncoding);
+            const imageData = ctx.getImageData(0, 0, surface.width, surface.height);
+            const blob = await imageDataToBlob(imageData, exportInfo.format, null, 8, null, buildExportMetadata({ roll: state.rollMetadata, frame: {}, index: -1 }));
+            pages.push({ blob, name: contactSheetFileName(pageIndex, pageCount, exportInfo) });
+            await yieldForJob();
+          }
         }
         overlay.updateProgress(100, lang.loadingComplete);
       } finally {

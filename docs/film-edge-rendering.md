@@ -526,3 +526,52 @@ words in `STYLE_RULES`, its verified edge prints in `KNOWN_EDGE_PRINTS`; new
 letters go into a set in `edgeGlyphs.js`. Measure on images of real film
 first and list them here; pin the new style's frame in
 `sprocketFrame.test.mjs`.
+
+## Film strips on the contact sheet (2026-11-28)
+
+With **Film edge and markings** ticked (the default), a 35 mm or half-frame
+contact sheet lays the roll out as a lab cuts it: strips of six frames
+(twelve half-frames), each strip one length of film, one under the other.
+120 and panoramic layouts keep the grid (with a border per frame when ticked).
+
+- Geometry (`sprocketFrame.js`, `filmStripGeometry` / `composeFilmStripAsync`):
+  pictures in 36 × 24 mm windows eight perforations (38 mm) apart, so 2 mm of
+  film between frames and the cut half-way between two frames; half-frame
+  pictures 18 × 24 mm, four perforations (19 mm) apart. The perforations run
+  through the whole strip at one pitch; the film base, the holes, the edge
+  markings, DX and overexposed perforations are drawn once over the whole
+  strip with the border panel's settings, never by joining single borders.
+- Numbers: every frame carries its own number (the photo's number, the
+  number read from its film edge under Auto, or the panel's number counted
+  on). The film's printing does not change with the camera: on a half-frame
+  strip the numbers still come every eight perforations, with "nA" between
+  them on the second picture of each pair. One frame beyond each cut is
+  numbered too, so printing that runs over a cut is there as on cut film.
+  A film that numbers every four perforations (Fomapan) counts on along the
+  strip from its first picture's number, two numbers to a full frame and one
+  to a half-frame, whatever the later pictures' own numbers; its name, speed
+  and batch number fall every 24 numbers, so about every other strip of a
+  roll carries them.
+  Kodak Vision3's 64-perforation cycle runs on unbroken from the first
+  picture's place on the film (its frame number, eight perforations a
+  frame): a six-frame strip shows most of one cycle, the key number, bar
+  codes and manufacturing line where they fall.
+- Style: a strip takes the edge style, text and DX of its first photo; under
+  Auto, of the first photo of the strip whose film was recognised (one strip
+  is one film).
+- Pictures: a picture whose orientation differs from the window (a portrait
+  photo in a 36 × 24 window, a landscape one in a half-frame window) is turned
+  a quarter **clockwise**; every picture is fitted inside its window, centred,
+  never stretched or cropped; the rest of the window is film. A frame that
+  failed leaves film in its window. The pictures are copied in last.
+- Page (`contactSheet.js`, `layoutContactSheetStrips`): strips at one scale
+  that fits a six-frame strip to the text width, left-aligned, 12 % of a
+  strip's height apart; A4 holds seven strips (42 frames, a 36- or 38-frame
+  roll on one page), Letter six. The last strip is as long as its frames. The
+  frames are rendered at twice their printed size
+  (`contactSheetFrameTarget`), each strip composed at that size and scaled
+  onto the page. Header, footer and page numbers as before; no caption row
+  (the numbers are on the film). The perforations take the border panel's
+  hole colour (white by default), as the single-photo border does.
+- Memory: a page is built strip by strip; a strip's frames are dropped once
+  it is composed and a page's strips once it is encoded.

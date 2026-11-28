@@ -90,6 +90,140 @@ export function layoutContactSheet({ pageId = 'a4', layoutId = '35mm', count, pa
   };
 }
 
+// ---- Film strips --------------------------------------------------------
+//
+// The roll cut into strips as a lab cuts it: six frames a strip (twelve
+// half-frames), each strip one length of 135 film (frames 38 mm apart, a
+// 34.98 mm wide film, the cuts half-way between frames), laid out top to
+// bottom at one scale that fits a strip to the page's width, left-aligned.
+// A page holds as many strips as fit; the last strip of a roll is as long as
+// its frames. Only 135 layouts have strips.
+
+export const STRIP_LAYOUTS = Object.freeze({
+  '35mm': { perStrip: 6, frameMm: 36, pitchMm: 38, halfFrame: false },
+  'half-frame': { perStrip: 12, frameMm: 18, pitchMm: 19, halfFrame: true }
+});
+const FILM_WIDTH_MM = 34.98;
+const PICTURE_HEIGHT_MM = 24;
+
+export function hasStripLayout(layoutId) {
+  return Object.hasOwn(STRIP_LAYOUTS, layoutId);
+}
+
+/**
+ * Strips for one page: { page, header, footer, pageIndex, pageCount, scale
+ * (page px per mm), perStrip, stripsPerPage, strips: [{ x, y, width, height,
+ * indices }] } where each strip's box is the whole film (cuts included).
+ */
+export function layoutContactSheetStrips({ pageId = 'a4', layoutId = '35mm', count, pageIndex = 0, marginRatio = 0.06, headerRatio = 0.08, footerRatio = 0.035, stripGapRatio = 0.12 } = {}) {
+  const page = CONTACT_SHEET_PAGES[normalizePageId(pageId)];
+  const strip = STRIP_LAYOUTS[hasStripLayout(layoutId) ? layoutId : '35mm'];
+  const margin = Math.round(page.width * marginRatio);
+  const headerHeight = Math.round(page.height * headerRatio);
+  const footerHeight = Math.round(page.height * footerRatio);
+  const areaX = margin, areaY = margin + headerHeight;
+  const areaWidth = page.width - margin * 2;
+  const areaHeight = page.height - margin * 2 - headerHeight - footerHeight;
+  const scale = areaWidth / (strip.perStrip * strip.pitchMm);
+  const stripHeight = FILM_WIDTH_MM * scale;
+  const gap = stripHeight * stripGapRatio;
+  const stripsPerPage = Math.max(1, Math.floor((areaHeight + gap) / (stripHeight + gap)));
+  const perPage = stripsPerPage * strip.perStrip;
+  const total = Math.max(0, Math.floor(count) || 0);
+  const pageCount = Math.max(1, Math.ceil(total / perPage));
+  const strips = [];
+  for (let s = 0; s < stripsPerPage; s++) {
+    const first = pageIndex * perPage + s * strip.perStrip;
+    if (first >= total) break;
+    const indices = [];
+    for (let i = first; i < Math.min(total, first + strip.perStrip); i++) indices.push(i);
+    strips.push({
+      x: areaX, y: Math.round(areaY + s * (stripHeight + gap)),
+      width: Math.round(indices.length * strip.pitchMm * scale), height: Math.round(stripHeight),
+      indices
+    });
+  }
+  return {
+    page: { ...page },
+    layout: { id: hasStripLayout(layoutId) ? layoutId : '35mm', ...strip },
+    pageIndex,
+    pageCount,
+    scale,
+    perStrip: strip.perStrip,
+    stripsPerPage,
+    header: { x: margin, y: margin, width: areaWidth, height: headerHeight },
+    footer: { x: margin, y: page.height - margin - footerHeight, width: areaWidth, height: footerHeight },
+    strips
+  };
+}
+
+/**
+ * The size frames are rendered at for a sheet: twice their size on the page
+ * (a strip is composed at twice its printed size and scaled down, so the
+ * markings and perforations come out clean). For strips, the picture height
+ * in pixels (24 mm) is `windowHeight`; `target` is the long side to render.
+ */
+export function contactSheetFrameTarget({ pageId = 'a4', layoutId = '35mm', strips = false } = {}) {
+  if (strips && hasStripLayout(layoutId)) {
+    const sheet = layoutContactSheetStrips({ pageId, layoutId, count: 1 });
+    const windowHeight = Math.round(PICTURE_HEIGHT_MM * sheet.scale * 2);
+    const windowWidth = Math.round(sheet.layout.frameMm * sheet.scale * 2);
+    return { windowHeight, target: Math.max(windowHeight, windowWidth) };
+  }
+  const cell = layoutContactSheet({ pageId, layoutId, count: 1 }).cells[0].frame;
+  return { windowHeight: null, target: Math.max(cell.width, cell.height) * 2 };
+}
+
+function drawSheetHeader(ctx, sheet, header, fontFamily, ink) {
+  ctx.fillStyle = ink;
+  ctx.textBaseline = 'alphabetic';
+  const titleSize = Math.round(sheet.header.height * 0.42);
+  const detailSize = Math.round(sheet.header.height * 0.22);
+  ctx.font = `700 ${titleSize}px ${fontFamily}`;
+  ctx.textAlign = 'left';
+  ctx.fillText(header.title || '', sheet.header.x, sheet.header.y + titleSize);
+  if (header.detail) {
+    ctx.font = `400 ${detailSize}px ${fontFamily}`;
+    ctx.fillText(header.detail, sheet.header.x, sheet.header.y + titleSize + Math.round(detailSize * 1.6));
+  }
+  if (sheet.pageCount > 1) {
+    ctx.font = `400 ${detailSize}px ${fontFamily}`;
+    ctx.textAlign = 'right';
+    ctx.fillText(`${sheet.pageIndex + 1} / ${sheet.pageCount}`, sheet.header.x + sheet.header.width, sheet.header.y + titleSize);
+  }
+}
+
+function drawSheetFooter(ctx, sheet, footer, fontFamily, ink) {
+  if (!footer) return;
+  const footerSize = Math.round(sheet.footer.height * 0.45);
+  ctx.font = `400 ${footerSize}px ${fontFamily}`;
+  ctx.textAlign = 'left';
+  ctx.fillStyle = ink;
+  ctx.fillText(footer, sheet.footer.x, sheet.footer.y + Math.round(sheet.footer.height * 0.8));
+}
+
+/**
+ * Draws one page of strips. `strips` are this page's strip images in order:
+ * { image: CanvasImageSource, width, height } (a whole strip, composed by
+ * sprocketFrame's composeFilmStripAsync), or null for a strip that failed.
+ */
+export function renderContactSheetStripsPage(ctx, sheet, strips, { header = { title: '', detail: '' }, footer = '', fontFamily = 'sans-serif', background = '#f3f0e8', ink = '#1c1a17' } = {}) {
+  const { page } = sheet;
+  ctx.save();
+  ctx.fillStyle = background;
+  ctx.fillRect(0, 0, page.width, page.height);
+  drawSheetHeader(ctx, sheet, header, fontFamily, ink);
+  ctx.imageSmoothingEnabled = true;
+  if ('imageSmoothingQuality' in ctx) ctx.imageSmoothingQuality = 'high';
+  sheet.strips.forEach((box, i) => {
+    const strip = strips[i];
+    // One scale for the whole strip: the box's width, the strip's own proportions.
+    if (strip?.image) ctx.drawImage(strip.image, box.x, box.y, box.width, Math.round(strip.height * box.width / strip.width));
+  });
+  drawSheetFooter(ctx, sheet, footer, fontFamily, ink);
+  ctx.restore();
+}
+
 /** Fits an image of `width × height` into `box`, centred, preserving aspect. */
 export function fitInto(width, height, box) {
   const scale = Math.min(box.width / width, box.height / height);

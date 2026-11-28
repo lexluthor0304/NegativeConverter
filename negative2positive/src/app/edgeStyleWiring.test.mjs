@@ -63,7 +63,8 @@ assert.equal(exportJobOptionsFor({ options: { sprocketEdge: { text: 'OLD JOB' } 
 assert.equal(getSprocketFrameComposeOptions(state, 0, chosen).edgeMarkings.style, 'fujiSlide');
 assert.match(source, /JSON\.stringify\(\[width, height, composeOptions\.edgeMarkings,/);
 // The contact sheet and the export compose through the same options.
-assert.match(source, /const options = getSprocketFrameComposeOptions\(settingsForFile, i\);/);
+assert.match(source, /const sprocketOptions = sprockets \? getSprocketFrameComposeOptions\(settingsForFile, i\) : null;/);
+assert.match(source, /const own = getSprocketFrameComposeOptions\(settingsForFile, i\);/, 'contact-sheet strips');
 assert.match(source, /const options = getSprocketFrameComposeOptions\(settings, position, job\?\.sprocketEdge\);/);
 
 // Auto: an unrecognised film draws the border as before.
