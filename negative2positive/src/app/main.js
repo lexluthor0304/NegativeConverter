@@ -158,6 +158,15 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       getSprocketFrameLayout,
       normalizeSprocketEdgeMarkings
     } from './sprocketFrame.js';
+    import {
+      EDGE_STYLE_AUTO,
+      EDGE_STYLE_CUSTOM,
+      EDGE_STYLE_COLORS,
+      EDGE_STYLE_LABEL_KEYS,
+      applyEdgeMarkingStyle,
+      edgeMarkingStyle,
+      resolveAutoEdgeStyle
+    } from './edgeMarkingStyles.js';
     import { renderFileList, setFileListRowDirty } from './fileListView.js';
     import { normalizeFileListSort, orderedFileIndices, selectionRangeIndices } from './fileListOrder.js';
     import { createSprocketFrameCache } from './sprocketFrameCache.js';
@@ -334,6 +343,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     const CORE_COLOR_MODEL_OPTIONS = new Set(['frontier', 'standard', 'warm', 'mono', 'noritsu', 'cine-log', 'cine-rich', 'cine-flat', 'neutral']);
     const CORE_COLOR_MODEL_MIGRATION_MAP = Object.freeze({});
     const SPROCKET_EDGE_CONTROL_IDS = Object.freeze({
+      style: 'sprocketStyleSelect',
       textEnabled: 'sprocketTextEnabledInput',
       frameNumberEnabled: 'sprocketFrameNumberEnabledInput',
       dxEnabled: 'sprocketDxEnabledInput',
@@ -413,7 +423,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         fontFamily: normalized.fontFamily,
         holeColor: rgbaToHex(normalized.holeColor, DEFAULT_SPROCKET_EDGE_MARKINGS.holeColor),
         letteringColor: rgbaToHex(normalized.letteringColor, DEFAULT_SPROCKET_EDGE_MARKINGS.letteringColor),
-        overexposureColor: rgbaToHex(normalized.overexposureColor, DEFAULT_SPROCKET_EDGE_MARKINGS.overexposureColor)
+        overexposureColor: rgbaToHex(normalized.overexposureColor, DEFAULT_SPROCKET_EDGE_MARKINGS.overexposureColor),
+        // A setting saved before the edge styles has none: drawn as before (custom).
+        style: normalized.style
       };
     }
 
@@ -2667,7 +2679,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       jpegQuality: 92,      // 1-100
       sprocketPreviewEnabled: false,
       exportSprocketHolesEnabled: false,
-      sprocketEdge: createSprocketEdgeSettings(),
+      // A new session follows the film it recognises; until it recognises
+      // one the border looks as it always did.
+      sprocketEdge: createSprocketEdgeSettings({ style: EDGE_STYLE_AUTO }),
 
       // Render state
       processedImageDataIsPreview: false,
@@ -4476,14 +4490,81 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const edge = { ...sprocketEdge, fontLocale: currentLang };
       const roll = state.rollMetadata || {};
       const frame = settings === state || !settings ? state.frameMetadata : settings.frameMetadata;
+      if (edge.style === EDGE_STYLE_AUTO) Object.assign(edge, resolveAutoEdgeMarkings(edge, settings));
       if (roll.stock && (!edge.text || edge.text === DEFAULT_SPROCKET_EDGE_MARKINGS.text)) edge.text = roll.stock.toUpperCase();
       const number = parseInt(frameNumberFor(frame, position), 10);
       if (Number.isFinite(number) && edge.frameNumber === DEFAULT_SPROCKET_EDGE_MARKINGS.frameNumber) edge.frameNumber = Math.max(0, Math.min(99, number));
       return { edgeMarkings: edge };
     }
 
+    // "Auto": the film this photo was found to be (its film edge, then the
+    // roll's stock), drawn in that brand's style with the film's own edge
+    // text, colour and DX number unless the user changed them. A film of a
+    // brand without a style, or no film at all, draws the border as before.
+    // Each photo of a batch resolves on its own settings.
+    function autoEdgeResolution(settings = state) {
+      const filmEdge = (settings && settings !== state ? settings.filmEdge : state.filmEdge) || null;
+      // A clear code on a dense rebate on a colour negative is a border drawn
+      // on a positive (this app's own, say): the film edge reader does not
+      // apply it, and neither does the style.
+      const read = filmEdge?.found && !(filmEdge.polarity === 'light' && filmEdge.filmKind !== 'positive') ? filmEdge : null;
+      const names = [];
+      if (read?.filmName) names.push(read.filmName);
+      if (state.rollMetadata?.stock) names.push(state.rollMetadata.stock);
+      const resolved = resolveAutoEdgeStyle({ filmNames: names, dxNumber: read ? read.dxNumber : null });
+      // The frame number printed beside this photo on the film, when the
+      // reader saw it (the whole frame's code, not a half-frame "A").
+      const printed = (read?.frames || []).filter((f) => !f.halfFrame).map((f) => f.frameNumber).sort((a, b) => a - b);
+      if (resolved && printed.length) resolved.frameNumber = printed[Math.floor(printed.length / 2)];
+      return resolved;
+    }
+
+    function resolveAutoEdgeMarkings(edge, settings = state) {
+      const resolved = autoEdgeResolution(settings);
+      if (!resolved) return { style: EDGE_STYLE_CUSTOM };
+      const style = edgeMarkingStyle(resolved.style);
+      const textUntouched = !edge.text || edge.text === DEFAULT_SPROCKET_EDGE_MARKINGS.text;
+      const colorUntouched = [DEFAULT_SPROCKET_EDGE_MARKINGS.letteringColor, ...EDGE_STYLE_COLORS].includes(String(edge.letteringColor).toLowerCase());
+      const dxUntouched = edge.dx1 === DEFAULT_SPROCKET_EDGE_MARKINGS.dx1 && edge.dx2 === DEFAULT_SPROCKET_EDGE_MARKINGS.dx2;
+      const next = { style: resolved.style };
+      if (textUntouched) next.text = resolved.text;
+      if (colorUntouched) next.letteringColor = resolved.letteringColor;
+      if (resolved.dx) [next.dx1, next.dx2] = resolved.dx;
+      else if (dxUntouched) [next.dx1, next.dx2] = style.dx;
+      if (Number.isInteger(resolved.frameNumber) && edge.frameNumber === DEFAULT_SPROCKET_EDGE_MARKINGS.frameNumber) next.frameNumber = resolved.frameNumber;
+      return next;
+    }
+
+    function edgeStyleLabel(id) {
+      return getLocalizedText(EDGE_STYLE_LABEL_KEYS[id] || 'filmEdgeStyleCustom', id);
+    }
+
+    // The style list with "Auto" naming what it draws for the current photo,
+    // and the text field's suggestions for the chosen style.
+    function syncSprocketStyleUI(settings) {
+      const select = document.getElementById('sprocketStyleSelect');
+      if (select) {
+        const auto = select.querySelector(`option[value="${EDGE_STYLE_AUTO}"]`);
+        if (auto) {
+          const resolved = autoEdgeResolution();
+          const target = resolved ? edgeStyleLabel(resolved.style) : getLocalizedText('filmEdgeStyleAutoNone', 'standard');
+          auto.textContent = `${edgeStyleLabel(EDGE_STYLE_AUTO)} · ${target}`;
+        }
+      }
+      const list = document.getElementById('sprocketTextSuggestions');
+      if (list) {
+        const resolvedId = settings.style === EDGE_STYLE_AUTO ? autoEdgeResolution()?.style : settings.style;
+        const stocks = edgeMarkingStyle(resolvedId)?.stocks || [];
+        if (list.dataset.style !== String(resolvedId)) {
+          list.replaceChildren(...stocks.map((stock) => Object.assign(document.createElement('option'), { value: stock })));
+          list.dataset.style = String(resolvedId);
+        }
+      }
+    }
+
     function syncSprocketEdgeSettingsUI() {
       const settings = createSprocketEdgeSettings(state.sprocketEdge);
+      syncSprocketStyleUI(settings);
       const setChecked = (key, value) => {
         const el = document.getElementById(SPROCKET_EDGE_CONTROL_IDS[key]);
         if (el) el.checked = Boolean(value);
@@ -4510,6 +4591,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       setValue('holeColor', settings.holeColor);
       setValue('letteringColor', settings.letteringColor);
       setValue('overexposureColor', settings.overexposureColor);
+      setValue('style', settings.style);
     }
 
     function readSprocketEdgeSettingsFromUI() {
@@ -4520,6 +4602,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         return el ? el.value : fallback;
       };
       return createSprocketEdgeSettings({
+        style: getValue('style', state.sprocketEdge?.style || EDGE_STYLE_CUSTOM),
         textEnabled: getChecked('textEnabled'),
         frameNumberEnabled: getChecked('frameNumberEnabled'),
         dxEnabled: getChecked('dxEnabled'),
@@ -4558,8 +4641,24 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       }
     }
 
-    function handleSprocketEdgeSettingsChange() {
-      state.sprocketEdge = readSprocketEdgeSettingsFromUI();
+    function handleSprocketEdgeSettingsChange(event) {
+      const styleSelect = document.getElementById(SPROCKET_EDGE_CONTROL_IDS.style);
+      if (event?.target && event.target === styleSelect) {
+        // Choosing a style puts its text, colour, DX number and switches in
+        // the controls; changing one of them afterwards keeps the style.
+        const current = createSprocketEdgeSettings(state.sprocketEdge);
+        const next = applyEdgeMarkingStyle(current, styleSelect.value);
+        if (next.style === EDGE_STYLE_AUTO) {
+          next.text = DEFAULT_SPROCKET_EDGE_MARKINGS.text;
+          next.letteringColor = DEFAULT_SPROCKET_EDGE_MARKINGS.letteringColor;
+          next.dx1 = DEFAULT_SPROCKET_EDGE_MARKINGS.dx1;
+          next.dx2 = DEFAULT_SPROCKET_EDGE_MARKINGS.dx2;
+        }
+        state.sprocketEdge = createSprocketEdgeSettings(next);
+        syncSprocketEdgeSettingsUI();
+      } else {
+        state.sprocketEdge = readSprocketEdgeSettingsFromUI();
+      }
       // 枠の設定を触ったら、その結果をすぐ見せる。書き出し指定は変更しない。
       if (canPreviewSprocketFrame() && !state.sprocketPreviewEnabled) {
         setSprocketPreviewEnabled(true);
@@ -26880,6 +26979,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     function updateFilmEdgeUI() {
+      // "Auto" in the edge-style list names the film this photo was found to be.
+      syncSprocketEdgeSettingsUI();
       if (!stateReady) return;
       const group = document.getElementById('filmEdgeGroup');
       const status = document.getElementById('filmEdgeStatus');

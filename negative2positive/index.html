@@ -446,6 +446,17 @@
           <span class="section-toggle" aria-hidden="true">▼</span>
         </div>
         <div class="section-content" id="sprocketEdgeSectionContent">
+          <div class="control-group is-primary film-edge-style-group">
+            <div class="control-group-title"><span id="sprocketStyleSelectLabel" data-i18n="filmEdgeStyle">Edge marking style</span></div>
+            <select class="preset-select" id="sprocketStyleSelect" aria-labelledby="sprocketStyleSelectLabel">
+              <option value="auto">Auto</option>
+              <option value="kodakColor" data-i18n="filmEdgeStyleKodakColor">Kodak colour negative</option>
+              <option value="ilford" data-i18n="filmEdgeStyleIlford">Ilford black &amp; white</option>
+              <option value="fujiSlide" data-i18n="filmEdgeStyleFujiSlide">Fujifilm slide</option>
+              <option value="plain" data-i18n="filmEdgeStylePlain">Unbranded</option>
+              <option value="custom" data-i18n="filmEdgeStyleCustom">Custom</option>
+            </select>
+          </div>
           <div class="control-group is-primary">
             <div class="control-group-title"><span data-i18n="filmEdgeVisibility">Visible markings</span></div>
             <label class="roll-reference-option">
@@ -471,7 +482,8 @@
           </div>
           <div class="control-group">
             <div class="control-group-title"><span id="filmEdgeTextLabel" data-i18n="filmEdgeText">Edge text</span></div>
-            <input type="text" class="preset-select film-edge-text-input" id="sprocketTextInput" value="KODAK PORTRA 160" maxlength="48" aria-labelledby="filmEdgeTextLabel">
+            <input type="text" class="preset-select film-edge-text-input" id="sprocketTextInput" value="KODAK PORTRA 160" maxlength="48" aria-labelledby="filmEdgeTextLabel" list="sprocketTextSuggestions">
+            <datalist id="sprocketTextSuggestions"></datalist>
           </div>
           <div class="control-group">
             <div class="control-group-title"><span data-i18n="filmEdgeFont">Font</span></div>
@@ -481,7 +493,7 @@
                   <span class="slider-label" id="sprocketFontStyleSelectLabel" data-i18n="filmEdgeFontStyle">Style</span>
                 </div>
                 <select class="preset-select" id="sprocketFontStyleSelect" aria-labelledby="sprocketFontStyleSelectLabel">
-                  <option value="edgePixel" data-i18n="filmEdgeFontEdgePixel">Film Edge Pixel</option>
+                  <option value="edgePixel" data-i18n="filmEdgeFontEdgePixel">Style letters</option>
                   <option value="monoBold" data-i18n="filmEdgeFontMonoBold">Mono Bold</option>
                   <option value="mono" data-i18n="filmEdgeFontMono">Mono</option>
                   <option value="sansBold" data-i18n="filmEdgeFontSansBold">Sans Bold</option>
