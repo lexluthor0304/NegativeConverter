@@ -1360,9 +1360,14 @@ function paintStyledEdgeMarkings(data, metrics, edge, style) {
   const fill = edge.letteringColor;
   const sX = metrics.imagePxPerMmX, pitch = metrics.pitch;
   if (style.inkDensity) metrics.styleInkDensity = style.inkDensity;
-  const slots = metrics.filmFrames
-    ? metrics.filmFrames.map((frame) => ({ x: frame.x + style.anchorPerf * metrics.pitch, number: clampInt(frame.number, 0, 99) }))
-    : styledFrameSlots(metrics, edge, style);
+  // On a strip each frame carries its own number; a film that numbers
+  // itself more often than once a frame (Fomapan) counts on along the film
+  // from the strip's first picture, whatever the camera's frames.
+  const slots = !metrics.filmFrames
+    ? styledFrameSlots(metrics, edge, style)
+    : style.numberEvery
+      ? styledFrameSlots(metrics, { frameNumber: metrics.filmFrames[1].number }, style)
+      : metrics.filmFrames.map((frame) => ({ x: frame.x + style.anchorPerf * metrics.pitch, number: clampInt(frame.number, 0, 99) }));
   const cache = new Map();
   const halfMarks = edge.frameNumberEnabled && edge.halfFrameMarksEnabled;
   for (const slot of slots) {
