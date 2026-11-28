@@ -146,7 +146,7 @@ function clonePlane(image) {
  * resolved params, the seeded engine and its plan (what the renderer uploads), and
  * `expected`, the engine's 8-bit RGBA. `filmPresets` resolves a named preset.
  */
-export function buildPreviewCase({ name, mode, settings, image, stops = null, profile = null, positive = null, filmPresets = null }) {
+export function buildPreviewCase({ name, mode, settings, image, stops = null, profile = null, positive = null, filmPresets = null, drc = null }) {
   const params = resolveSilverCoreParams(mode, settings, filmPresets);
   const engine = new Engine(image.width, image.height);
   engine.enhancedLut = profile;
@@ -156,10 +156,10 @@ export function buildPreviewCase({ name, mode, settings, image, stops = null, pr
   engine.analyze(sample, params);
   if (positive) engine.positiveAnalysis = { gain: positive.gain, wb: [...positive.wb] };
   const plan = engine.previewPlan(params, { grey: mode === 'bw' });
-  const output = applyPreviewChain(engine, clonePlane(image), params, mode, stops);
+  const output = applyPreviewChain(engine, clonePlane(image), params, mode, stops, drc);
   return {
     name, mode, width: image.width, height: image.height,
-    prepared: image, stops, params, engine, plan,
+    prepared: image, stops, params, engine, plan, drc,
     profile: engine.enhancedLut, positive: engine.positiveAnalysis,
     expected: toRGBA8(output).data,
   };

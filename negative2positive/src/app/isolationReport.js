@@ -32,6 +32,8 @@ export const WORKER_PROBES = Object.freeze({
   rollFrame: () => new Worker(new URL('../workers/rollFrameWorker.js', import.meta.url), { type: 'module' }),
   autoFrameHelper: () => new Worker(new URL('../workers/autoFrameHelperWorker.js', import.meta.url), { type: 'module' }),
   displayProxy: () => new Worker(new URL('../workers/displayProxyWorker.js', import.meta.url), { type: 'module' }),
+  // Dynamic range compression's maps for the GPU preview.
+  drcMap: () => new Worker(new URL('../workers/drcMapWorker.js', import.meta.url), { type: 'module' }),
   // The desktop's native RAW plane transfer (nativeRawTransfer.js).
   nativeRawFetch: () => new Worker(new URL('../workers/nativeRawFetchWorker.js', import.meta.url), { type: 'module' }),
   // A classic worker from public/codecs (it answers the probe inline).

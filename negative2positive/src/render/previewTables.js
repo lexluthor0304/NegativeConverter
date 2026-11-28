@@ -3,6 +3,7 @@
 
 import { hueWeightTables, HUE_TABLE_SIZE, HUE_BANDS_STRICT } from '../silvercore/engine/ImageProcessor.js';
 import { LINEAR_LUT, LINEAR_STEPS, applyExposureStopsToImage16 } from '../silvercore/util/localExposure.js';
+import { exposeDrcReference, buildDrcStage } from '../pipeline/dynamicRange.js';
 import { bwMixWeights } from '../silvercore/engine/Presets.js';
 import { toGrayscaleInPlace } from '../pipeline/silverAdapter.js';
 import { TABLE_TEXTURE_SIZE, PACKED_ROW_TEXELS, RESCUE_OFFSET_BINS, STEP3_CURVE_SIZE } from './previewShader.js';
@@ -111,11 +112,21 @@ export function applyUniforms({ mode, params, plan, positive, hasStops, prepared
  * prepared plane (and of its stops) this gives the exact frame's pixels at those
  * points: the histogram during a GPU drag, and the self-test's reference.
  */
-export function applyPreviewChain(engine, image16, params, mode, stops = null) {
+export function applyPreviewChain(engine, image16, params, mode, stops = null, drc = null) {
   if (mode === 'bw') toGrayscaleInPlace(image16, params.bwMix);
   engine._applyPreSaturation(image16, params);
   engine._applyPositiveAnalysis(image16);
-  if (stops && stops.length === image16.width * image16.height) applyExposureStopsToImage16(image16, stops);
+  const n = image16.width * image16.height;
+  const ownStops = stops && stops.length === n ? stops : null;
+  if (drc && drc.map) {
+    // Dynamic range compression at the exposure stage, the strokes with it; the
+    // samples stand for the frame at their own positions.
+    const weights = mode !== 'bw' && drc.protect > 0 ? new Uint8Array(n) : null;
+    exposeDrcReference(image16, buildDrcStage(drc.map), drc.method, { inverted: drc.inverted, strokes: ownStops, weights });
+    if (weights) params = { ...params, drcProtection: { weights, width: image16.width, height: image16.height, protect: drc.protect } };
+  } else if (ownStops) {
+    applyExposureStopsToImage16(image16, ownStops);
+  }
   return engine._applyLuts(image16, engine.lastLuts, params);
 }
 

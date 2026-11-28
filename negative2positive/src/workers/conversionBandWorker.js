@@ -13,10 +13,15 @@
  * Messages are handled one at a time, in arrival order.
  */
 import './isolationProbe.js'; // first: answers the page's isolation probe (#264)
+import { setDrcExposerFactory } from '../pipeline/silverAdapter.js';
+import { createDrcExposer } from '../render/dynamicRangeGpu.js';
 import {
   planSilverCoreBands, prepareSilverCoreBand, buildBandTables, applySilverCoreBand, sharpenSilverCoreBand,
   bandOutput8, adjustBand, copyBandRows
 } from '../pipeline/silverBands.js';
+
+// Dynamic range compression's exposure stage on this worker's WebGL2 context.
+if (typeof OffscreenCanvas === 'function') setDrcExposerFactory(() => createDrcExposer());
 
 // job -> { planned, bands: Map(index -> band) }
 const jobs = new Map();
@@ -128,17 +133,18 @@ async function handle(message) {
       const band = bandOf(job, message.index);
       band.tables = message.tables;
       applySilverCoreBand(band.plan, message.tables, band, band.y0);
+      const drcPath = band.drcPath || undefined;
       const halo = message.halo || 0;
       if (halo) {
         // The unsharpened edge rows its neighbours need: copies, taken
         // before any band sharpens.
         const top = copyBandRows(band.data, band.width, band.y0, band.y0, Math.min(band.y1, band.y0 + halo));
         const bottom = copyBandRows(band.data, band.width, band.y0, Math.max(band.y0, band.y1 - halo), band.y1);
-        return { reply: { id, index: message.index, top, bottom }, transfers: [top.buffer, bottom.buffer] };
+        return { reply: { id, index: message.index, top, bottom, drcPath }, transfers: [top.buffer, bottom.buffer] };
       }
-      if (message.keep) return { reply: { id, index: message.index, kept: true } };
+      if (message.keep) return { reply: { id, index: message.index, kept: true, drcPath } };
       const { payload, transfers } = outputs(state, band, message.index);
-      return { reply: { id, ...payload }, transfers };
+      return { reply: { id, ...payload, drcPath }, transfers };
     }
     case 'sharpen': {
       const state = jobs.get(job);

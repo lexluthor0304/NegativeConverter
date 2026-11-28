@@ -30,6 +30,7 @@ import { LINEAR_STEPS } from '../silvercore/util/localExposure.js';
 import { LUT_SIZE as PROFILE_LUT_SIZE } from '../silvercore/engine/EnhancedProfiles.js';
 import { IMAGE16_MAX } from '../silvercore/util/image16.js';
 import { OFFSET_BINS, RESCUE_LUMA } from '../pipeline/expiredRescue.js';
+import { DRC_EPSILON, DRC_LUMA, DRC_MAX_LOG_GAIN, DRC_PROTECT_STOPS } from '../pipeline/dynamicRange.js';
 
 // 65536-entry tables (tone curves, paper, the B&W grey table, the pre-saturation
 // ramp) are 256 × 256 textures: entry v is texel (v & 255, v >> 8).
@@ -64,6 +65,8 @@ export const UNITS = Object.freeze({
   rescueMean: 10, // R32F local-mean grid, values × 255
   rescueOffsets: 11, // RGBA32F, one texel per luminance bin
   rescueTone: 12, // R32F, the 256-entry tone curve
+  drcMap: 13, // RG32F, dynamic range compression's map: log gain, guide
+  drcRange: 14, // R32F, its range weights, 64 texels per row
 });
 
 export const GLSL_CONSTANTS = Object.freeze({
@@ -397,6 +400,14 @@ uniform float u_sat;
 uniform usampler2D u_satRamp;
 uniform int u_paperOn;
 uniform usampler2D u_paperLut;
+uniform int u_drcOn;
+uniform sampler2D u_drcMap;
+uniform sampler2D u_drcRange;
+uniform ivec2 u_drcGrid;
+uniform vec3 u_drcShares;
+uniform float u_drcRangeScale;
+uniform int u_drcRangeSize;
+uniform float u_drcProtect;
 ${STEP3_DECLARATIONS}${display.declarations}
 ${HUE2RGB}
 ${STEP3_FUNCTIONS}${display.functions}
@@ -448,6 +459,52 @@ uint expose(uint value, float stops) {
   float x = min(1.0, linear * gain);
   float o = x > 0.0 ? pow(x, 1.0 / 2.2) : 0.0;
   return uint(floor(o * MAX16 + 0.5));
+}
+
+// The LINEAR_LUT read of expose(), for dynamic range compression's guide.
+float linearOf(uint value) {
+  float idx = (float(value) / MAX16) * ${f(LINEAR_STEPS)};
+  float base = floor(idx);
+  int i0 = int(base);
+  float lo = texelFetch(u_linearLut, packedTexel(i0), 0).r;
+  float hi = texelFetch(u_linearLut, packedTexel(min(${LINEAR_STEPS}, i0 + 1)), 0).r;
+  return lo * (1.0 - (idx - base)) + hi * (idx - base);
+}
+
+float drcRangeWeight(float d) {
+  float pos = d * u_drcRangeScale;
+  if (pos >= float(u_drcRangeSize)) return texelFetch(u_drcRange, packedTexel(u_drcRangeSize), 0).r;
+  int i = int(pos);
+  float lo = texelFetch(u_drcRange, packedTexel(i), 0).r;
+  float hi = texelFetch(u_drcRange, packedTexel(i + 1), 0).r;
+  return lo + (hi - lo) * (pos - float(i));
+}
+
+// Dynamic range compression's stops at texel p of a frame of the given size
+// (exposeDrcReference / render/dynamicRangeGpu.js): the map's four cells
+// weighted by distance and by how close their luminance is to the pixel's.
+float drcStops(float L, ivec2 p, ivec2 size) {
+  float h = log(clamp(L, 0.0, 1.0) + ${f(DRC_EPSILON)});
+  float fx = clamp((float(p.x) + 0.5) / float(size.x) * float(u_drcGrid.x) - 0.5, 0.0, float(u_drcGrid.x - 1));
+  float fy = clamp((float(p.y) + 0.5) / float(size.y) * float(u_drcGrid.y) - 0.5, 0.0, float(u_drcGrid.y - 1));
+  int x0 = int(fx), y0 = int(fy);
+  int x1 = min(x0 + 1, u_drcGrid.x - 1), y1 = min(y0 + 1, u_drcGrid.y - 1);
+  float wx = fx - float(x0), wy = fy - float(y0);
+  vec2 m00 = texelFetch(u_drcMap, ivec2(x0, y0), 0).rg;
+  vec2 m01 = texelFetch(u_drcMap, ivec2(x1, y0), 0).rg;
+  vec2 m10 = texelFetch(u_drcMap, ivec2(x0, y1), 0).rg;
+  vec2 m11 = texelFetch(u_drcMap, ivec2(x1, y1), 0).rg;
+  float w00 = (1.0 - wx) * (1.0 - wy) * drcRangeWeight(abs(h - m00.g));
+  float w01 = wx * (1.0 - wy) * drcRangeWeight(abs(h - m01.g));
+  float w10 = (1.0 - wx) * wy * drcRangeWeight(abs(h - m10.g));
+  float w11 = wx * wy * drcRangeWeight(abs(h - m11.g));
+  float sum = w00 + w01 + w10 + w11;
+  float g = sum > 1e-9
+    ? (w00 * m00.r + w01 * m01.r + w10 * m10.r + w11 * m11.r) / sum
+    : (1.0 - wy) * ((1.0 - wx) * m00.r + wx * m01.r) + wy * ((1.0 - wx) * m10.r + wx * m11.r);
+  bool brightens = u_drcShares.z > 0.5 ? g < 0.0 : g > 0.0;
+  g *= brightens ? u_drcShares.x : u_drcShares.y;
+  return clamp(g, ${f(-DRC_MAX_LOG_GAIN)}, ${f(DRC_MAX_LOG_GAIN)}) * ${f(Math.LOG2E)};
 }
 
 // applyHSLAdjustments, including its exact strict-maximum skip.
@@ -524,20 +581,36 @@ void main() {
   if (u_prepared8 != 0) src *= 257u;
   uvec3 c = src.rgb;
   float stops = u_stopsOn != 0 ? texelFetch(u_stops, p, 0).r : 0.0;
+  ivec2 frameSize = textureSize(u_prepared, 0);
   if (u_mode == 1) {
     float y = float(c.r) * u_mix.r + float(c.g) * u_mix.g + float(c.b) * u_mix.b;
     uint grey = uint(int(floor(y + 0.5)) & 0xFFFF);
     if (u_preSatOn != 0) grey = texelFetch(u_preSatRamp, tableTexel(grey), 0).r;
+    if (u_drcOn != 0) stops += drcStops(linearOf(grey) * ${f(DRC_LUMA[0] + DRC_LUMA[1] + DRC_LUMA[2])}, p, frameSize);
     if (stops != 0.0) grey = expose(grey, stops);
     c = texelFetch(u_toneLut, tableTexel(grey), 0).rgb;
   } else {
     if (u_preSatOn != 0) c = saturate16(c, u_preSat, u_preSatRamp);
     if (u_positiveOn != 0 && src.a != 0u) c = positiveStage(c);
+    float protectWeight = 0.0;
+    if (u_drcOn != 0) {
+      float s = drcStops(${f(DRC_LUMA[0])} * linearOf(c.r) + ${f(DRC_LUMA[1])} * linearOf(c.g) + ${f(DRC_LUMA[2])} * linearOf(c.b), p, frameSize);
+      float darkening = u_drcShares.z > 0.5 ? s : -s;
+      if (u_drcProtect > 0.0 && darkening > 0.0) protectWeight = floor(min(darkening / ${f(DRC_PROTECT_STOPS)}, 1.0) * 255.0 + 0.5);
+      stops += s;
+    }
     if (stops != 0.0) c = uvec3(expose(c.r, stops), expose(c.g, stops), expose(c.b, stops));
     c = lookup3(u_toneLut, c);
     if (u_hslOn != 0) c = hslStage(c);
     if (u_lut3dOn != 0) c = lut3dStage(c);
     if (u_satOn != 0) c = saturate16(c, u_sat, u_satRamp);
+    if (protectWeight > 0.0) {
+      // applyDrcProtection: chroma towards the Rec. 709 luminance.
+      vec3 v = vec3(c);
+      float Y = ${f(DRC_LUMA[0])} * v.r + ${f(DRC_LUMA[1])} * v.g + ${f(DRC_LUMA[2])} * v.b;
+      float keep = 1.0 - protectWeight * (u_drcProtect / 255.0);
+      c = uvec3(clamp(floor(Y + (v - Y) * keep + 0.5), 0.0, MAX16));
+    }
     if (u_paperOn != 0) c = lookup3(u_paperLut, c);
   }
   outColor = vec4(displayStep3(vec3(c >> 8u) / 255.0, p), 1.0);

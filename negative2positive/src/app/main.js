@@ -61,8 +61,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       describeExpiredAnalysis, EXPIRED_RESCUE_DEFAULTS, EXPIRED_RESCUE_KEYS
     } from '../pipeline/expiredRescue.js';
     import { sampleExpiredSpatialInputSliced, measureExpiredSpatialMapsFromSample, expiredAnalysisFromMaps } from './expiredRescueOpenCv.js';
-    import { DRC_KEYS, DRC_DEFAULTS, drcEnabled } from '../pipeline/dynamicRange.js';
-    import { createDrcSampler, drcAutoSettings, drcHintWanted } from './dynamicRangeHint.js';
+    import { DRC_KEYS, DRC_DEFAULTS, drcEnabled, drcMethodParams } from '../pipeline/dynamicRange.js';
+    import { createDrcSampler, createDrcMapService, drcAutoSettings, drcHintWanted } from './dynamicRangeHint.js';
+    import { createDrcExposer } from '../render/dynamicRangeGpu.js';
     import { createOpenCvTaskRunner, cropDetectionMessage, expiredSpatialMessage, alignmentMessage, alignAndWarp } from './openCvAnalysisTasks.js';
     import { readFilmEdge, sanitizeFilmEdgeForSettings, formatFilmEdgeFrames } from './filmEdgeReader.js';
     import { loadDxFilmTable, describeDxFilm, shortFilmName } from './dxFilmDatabase.js';
@@ -97,7 +98,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     import { routeCoreConversion, keepsFullPlaneOnDowngrade, fullResolutionIsStale, restoredFrameFlags, viewportRefreshBranch, repairsNeedSettling } from './fullResolutionRouting.js';
     import { poolRepairMask, repoolRepairMaskRect, countPooledCells } from './repairedPreview.js';
     import {
-      planBatchParallelism, planPng16BandWorkers, runBatchPipeline, planGeometryBandsInFlight, LANE_BYTES_PER_PIXEL,
+      planBatchParallelism, planPng16BandWorkers, runBatchPipeline, planGeometryBandsInFlight, LANE_BYTES_PER_PIXEL, DRC_BYTES_PER_PIXEL,
       createLearningBarrier, planDecodeAhead, EXPORT_MAX_UNWRITTEN_BYTES, planRollAnalysis, createDecodeSlots, ROLL_ANALYSIS_MIN_RAM_BYTES,
       rollAnalysisFootprint, ROLL_OPENCV_REALM_BYTES
     } from './batchExportScheduler.js';
@@ -111,8 +112,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     import { createPreviewTierController, previewTierMaxPixels, capBackingSize, parsePreviewTierOverride } from './previewTier.js';
     import { describeWebglRenderer, startsReducedReason, formatRenderEnvironmentLine, formatPreviewSessionLine } from './renderEnvironment.js';
     import {
-      invalidateSilverCoreCache, analyzeSilverCoreFrame, trySilverCoreParams, silverCoreAnalysisKey, silverCorePreparedKey
-    } from '../pipeline/silverAdapter.js';
+      invalidateSilverCoreCache, analyzeSilverCoreFrame, trySilverCoreParams, silverCoreAnalysisKey, silverCorePreparedKey, setDrcExposerFactory, drcPrepFor } from '../pipeline/silverAdapter.js';
     import { Engine } from '../silvercore/engine/Engine.js';
     import { loadProfile } from '../silvercore/engine/EnhancedProfiles.js';
     import { toImageData8 } from '../silvercore/util/image16.js';
@@ -8673,7 +8673,6 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (GPU_PREVIEW_MODE === 'off' || !gpuApplyUsable()) return false;
       // Dynamic range compression has no shader stage: its frames convert in
       // the preview worker (docs/dynamic-range-compression.md).
-      if (Number(state.drcAmount) > 0) return false;
       const preview = state.conversionPreviewImageData;
       const { prepared, analysis } = gpuPreview;
       // A display preview that no longer serves the display's size (outside
@@ -8702,6 +8701,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         requestGpuAnalyze();
         return false;
       }
+      // Dynamic range compression draws once its map for these settings is solved.
+      if (Number(settings.drcAmount) > 0 && !gpuDrcInputs(settings, mode, params, analysis)) return false;
       return gpuProfileLoaded(params.enhancedProfile);
     }
 
@@ -8748,7 +8749,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       }
       const plan = engine.previewPlan(params, { grey: mode === 'bw' });
       if (!plan.pointwise) return null;
-      return { mode, params, plan, engine, width: prepared.width, height: prepared.height };
+      const drc = Number(settings.drcAmount) > 0 ? gpuDrcInputs(settings, mode, params, analysis) : null;
+      if (drc === false) return null;
+      return { mode, params, plan, engine, width: prepared.width, height: prepared.height, drc };
     }
 
     // The scheduler's draw at the animation frame: false settles with the exact frame.
@@ -8775,7 +8778,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const now = performance.now();
       if (!force && (now - lastHistogramUpdateTime) < HISTOGRAM_UPDATE_INTERVAL_MS) return;
       const work = { width: sample.width, height: sample.height, data: new Uint16Array(sample.data) };
-      applyPreviewChain(frame.engine, work, frame.params, frame.mode, sample.stops);
+      applyPreviewChain(frame.engine, work, frame.params, frame.mode, sample.stops, frame.drc);
       const converted = toImageData8(work);
       histogramAdjustedBuffer = ensureImageDataBuffer(histogramAdjustedBuffer, converted.width, converted.height);
       applyAdjustmentsToBuffer(converted, state, histogramAdjustedBuffer, 'preview');
@@ -12940,8 +12943,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     function frameReservationBytes(size) {
       return decodePeakBytes(size) + size.pixels * DECODED_BYTES_PER_PIXEL;
     }
-    function laneReservationBytes({ pixels }) {
-      return pixels * LANE_BYTES_PER_PIXEL;
+    // A recipe that compresses the dynamic range adds its weight plane.
+    function laneReservationBytes({ pixels, compressing = false }) {
+      return pixels * (LANE_BYTES_PER_PIXEL + (compressing ? DRC_BYTES_PER_PIXEL : 0));
     }
     // A frame of #252's roll pass, which decodes into its lane's roll-frame
     // worker: that plan's footprint instead of the export lane's constant,
@@ -23273,7 +23277,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // opened, ensureBase) is out. A decoded frame waiting for its lane is
     // counted by the ledger (heldJobFrames) until a lane takes it or the
     // batch drops it.
-    function batchDecodeAhead(mode, { pixelsPerFile, convertsInBands = () => false, ownReservedBytes = () => 0, reservationCredit = () => 0 }) {
+    function batchDecodeAhead(mode, { pixelsPerFile, compressing = false, convertsInBands = () => false, ownReservedBytes = () => 0, reservationCredit = () => 0 }) {
       if (mode === 'serial') return null;
       const decodesOffThread = (file) => isRawLikeFileName(String(file?.name || '').toLowerCase()) || isPngFile(file);
       const subStages = mode === 'substages';
@@ -23303,6 +23307,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
             decodingPixels,
             processingPixels: Array.from({ length: processing }, () => pixelsPerFile),
             processingInBands: convertsInBands(),
+            compressing,
             unwrittenBytes,
             residentBytes: hiddenResidentBytes(),
             reservedBytes: Math.max(0, memoryBudget.reserved - ownReservedBytes()),
@@ -23452,7 +23457,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // Each lane reserves the lane constant over the batch's largest frame
       // (#258): the index is not claimed yet when it asks. A lane that goes
       // on before its payload's write keeps the payload's bytes only.
-      const laneBytes = laneReservationBytes({ pixels: pixelsPerFile });
+      const compressing = jobs.some(job => Number(job.settings?.drcAmount) > 0);
+      const laneBytes = laneReservationBytes({ pixels: pixelsPerFile, compressing });
       // The lanes' own reservations: decode-ahead counts the budget's other
       // holders, and these lanes' frames and payloads apart.
       const laneHandles = new Set();
@@ -23467,14 +23473,14 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const mode = batchPipelineMode();
       // `workers` (below) is read at each admission, once the batch runs.
       const decodeAhead = batchDecodeAhead(mode, {
-        pixelsPerFile, ownReservedBytes, convertsInBands: () => Boolean(workers.bandPool?.available),
+        pixelsPerFile, ownReservedBytes, compressing, convertsInBands: () => Boolean(workers.bandPool?.available),
         // Only slack in full processing-lane reservations can be credited;
         // early payload reservations still count in full. Use live handles
         // at dispatch, since lanes can change during the idle/read waits.
         reservationCredit: () => {
           let credit = 0;
           const processingBytes = planDecodeAhead({ candidatePixels: 0, processingPixels: [pixelsPerFile],
-            processingInBands: Boolean(workers.bandPool?.available) }).bytes - estimateRawDecodeBytes(0, 1);
+            processingInBands: Boolean(workers.bandPool?.available), compressing }).bytes - estimateRawDecodeBytes(0, 1);
           for (const handle of laneHandles) {
             if (!handle.released && handle.bytes === laneBytes) credit += Math.max(0, laneBytes - processingBytes);
           }
@@ -28599,6 +28605,25 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // the open photo, so the preview, the detail layer and the exports apply
     // one map; a full-resolution conversion without it makes the same sample.
     let drcCompareHeld = false;
+    // The exposure stage of conversions that run on the page (the worker's
+    // fallback) on a WebGL2 context of their own; the workers make theirs.
+    setDrcExposerFactory(() => createDrcExposer());
+    // The GPU preview's maps, solved in a worker (dynamicRangeHint.js).
+    const drcMaps = createDrcMapService({
+      createWorker: () => new Worker(new URL('../workers/drcMapWorker.js', import.meta.url), { type: 'module' }),
+      onReady: () => { if (Number(state.drcAmount) > 0) gpuPreviewScheduler.redraw(); }
+    });
+    // What the preview shader needs to draw the compression of these settings,
+    // or false while the sample or the map is being made.
+    function gpuDrcInputs(settings, mode, params, analysis) {
+      const sample = drcSampler.sampleFor(drcSampleFrame());
+      if (!sample) return false;
+      const prep = drcPrepFor(settings, mode, params, analysis?.data?.positiveAnalysis || null);
+      const map = drcMaps.mapFor(sample, prep, settings, { inverted: mode !== 'positive' });
+      if (!map) return false;
+      const method = drcMethodParams(settings);
+      return { map, method, inverted: mode !== 'positive', protect: mode !== 'bw' ? method.protect : 0 };
+    }
     // The estimate of the open photo's last automatic conversion: { frame, estimate }.
     let drcLastEstimate = null;
     // Photos the hint was offered for in this session (it is not offered twice).
@@ -28789,6 +28814,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         compareHeld: () => drcCompareHeld,
         // Which converted frame is on screen (cheap, for polling).
         frameId: () => gpuObjectId(state.processedImageData),
+        // The GPU preview's last frame: its id, what drew it, and whether it drew the compression (and with which map).
+        gpuFrame: () => ({ id: gpuObjectId(gpuPreview.lastFrame), draw: gpuPreview.lastDraw || null,
+          drc: Boolean(gpuPreview.lastFrame?.drc), mapKey: gpuPreview.lastFrame?.drc?.map?.key || null }),
         // Luminance percentiles (0..1) and a digest of the converted frame on screen.
         frame: () => {
           const frame = state.processedImageData;

@@ -23,7 +23,8 @@ import { rasterizeExposureStopsTiled, updateExposureStopsMap, exposureMapKey, ex
 import { applyFlatFieldToImage16 } from '../app/flatField.js';
 import { analysisPixelBounds } from '../app/analysisRegion.js';
 import { LARGE_IMAGE_PIXELS } from '../app/imageMemoryBudget.js';
-import { drcEnabled, sampleDrcInput, solveDrcMap, buildDrcStage, computeDrcStops, addStops, drcMapKey, drcMethodParams, estimateDrcEffect } from './dynamicRange.js';
+import { drcEnabled, sampleDrcInput, solveDrcMap, buildDrcStage, exposeDrcReference, drcMapKey, drcMethodParams, drcPrepKey, estimateDrcEffect } from './dynamicRange.js';
+import { computeFilmBaseGains } from './filmBaseCompensation.js';
 
 // EnhancedProfiles.js owns the list of shipped 3D-LUT profiles and their .bin URLs;
 // deriving the whitelist from it keeps the two in step. A hand-copied list here is
@@ -132,21 +133,113 @@ function localExposureStopsForSlot(slot, settings, width, height, region = null,
 }
 
 // Dynamic range compression (dynamicRange.js, docs/dynamic-range-compression.md):
-// stops of exposure on the negative after the analysis and before the curves,
-// added to the dodge-and-burn stops so every path that exposes (the levels,
-// the grey and transient paths, the engine) applies them alike.
+// an exposure of the negative after the analysis and before the curves, at
+// the engine's exposure stage (Engine._applyLocalExposure calls
+// params.drc.expose), fused with the dodge-and-burn strokes: the stage reads
+// the plane as it enters that stage and writes the exposed pixels back into
+// it, on the GPU (setDrcExposerFactory; render/dynamicRangeGpu.js) or in
+// JavaScript (exposeDrcReference, the same arithmetic). No stops plane: what
+// stays is one byte per pixel of saturation protection's weight, read after
+// the curves.
 //
 // The map comes from `settings.drcSample`, the photo's sample the editor made
-// from its full-resolution frame, or else from this buffer (a full-resolution
-// conversion makes the same sample from the same pixels). A detail region
-// needs the frame's sample: alone it would solve another map.
+// from its full-resolution frame, or else from this conversion's input (a
+// full-resolution conversion makes the same sample from the same pixels),
+// prepared per cell with the engine's preprocessing once the analysis is
+// known. A detail region needs the frame's sample: alone it would solve
+// another map.
 let _drcSeq = 0;
-function _validDrcSample(sample) {
-  return sample && typeof sample.key === 'string' && sample.lum instanceof Float32Array
-    && sample.lum.length === sample.width * sample.height && sample.width > 0 ? sample : null;
+let _drcExposerFactory = null;
+let _drcExposer = null;
+const _drcMaps = new Map(); // key -> map, the last few
+const _drcStats = { gpu: 0, reference: 0, gpuFailures: 0, lastError: '' };
+
+/**
+ * The GPU stage for this realm: `factory()` returns { supported, expose(image16, map, method, options), dispose, lost }.
+ * Without one (Node, a browser without WebGL2 float targets) the JavaScript reference runs.
+ */
+export function setDrcExposerFactory(factory) {
+  try { _drcExposer?.dispose?.(); } catch { /* a lost context has nothing to free */ }
+  _drcExposer = null;
+  _drcExposerFactory = typeof factory === 'function' ? factory : null;
 }
 
-function _applyDrc(slot, settings, mode, input16, params, region, transient) {
+export function getDrcStats() {
+  return { ..._drcStats, exposer: _drcExposer ? (_drcExposer.supported ? 'gpu' : 'unsupported') : _drcExposerFactory ? 'pending' : 'none' };
+}
+
+function _gpuExposer() {
+  if (!_drcExposerFactory) return null;
+  if (!_drcExposer || _drcExposer.lost?.()) {
+    try { _drcExposer?.dispose?.(); } catch { /* lost */ }
+    try { _drcExposer = _drcExposerFactory(); } catch (error) { _drcExposer = { supported: false, error }; }
+  }
+  return _drcExposer.supported ? _drcExposer : null;
+}
+
+/**
+ * The engine's preprocessing before its exposure stage, for the map's sample
+ * (dynamicRange.js drcSampleLuminance): film-base gains (colour), the B&W mix,
+ * the pre-tone saturation, the positive's gain and white balance. The GPU
+ * preview (main.js) solves its maps with the same, so they are this
+ * conversion's maps.
+ */
+export function drcPrepFor(settings, mode, params, positiveAnalysis = null) {
+  const compensation = filmBaseCompensationFor(settings, mode);
+  const gains = compensation?.base ? computeFilmBaseGains(compensation.base, compensation.options) : null;
+  const w = mode === 'bw' ? (bwMixWeights[params.bwMix] || bwMixWeights.standard) : null;
+  return {
+    gains: gains ? { r: gains.r, g: gains.g, b: gains.b } : null,
+    mix: w ? [w.r, w.g, w.b] : null,
+    preSaturation: params.preSaturation ?? 100,
+    positive: mode === 'positive' && positiveAnalysis ? { gain: positiveAnalysis.gain, wb: [...positiveAnalysis.wb] } : null
+  };
+}
+
+/**
+ * The compression's exposure stage on a plane (in place), on this realm's GPU
+ * when it has one, else in JavaScript. Returns which ran.
+ */
+export function exposeDrcFrame(image16, map, method, options) {
+  const gpu = _gpuExposer();
+  if (gpu) {
+    try {
+      // Bands the GPU could not do are finished by the reference inside.
+      const outcome = gpu.expose(image16, map, method, options);
+      _drcStats.gpu++;
+      if (outcome?.referenceTiles) { _drcStats.gpuFailures++; _drcStats.lastError = gpu.lastError || ''; return 'gpu+reference'; }
+      return 'gpu';
+    } catch (error) {
+      // Thrown before any band was written (the map, the framebuffer).
+      _drcStats.gpuFailures++;
+      _drcStats.lastError = String(error?.message || error);
+    }
+  }
+  exposeDrcReference(image16, buildDrcStage(map), method, options);
+  _drcStats.reference++;
+  return 'reference';
+}
+
+function _validDrcSample(sample) {
+  return sample && typeof sample.key === 'string' && sample.rgb instanceof Float32Array
+    && sample.rgb.length === sample.width * sample.height * 3 && sample.width > 0 ? sample : null;
+}
+
+function _drcMap(sample, sampleKey, prep, settings, inverted) {
+  const key = `${sampleKey}|${drcPrepKey(prep)}|${drcMapKey(settings)}|${inverted ? 'neg' : 'pos'}`;
+  let map = _drcMaps.get(key);
+  if (!map) {
+    map = solveDrcMap(sample, settings, { prep, inverted });
+    if (!map) return null;
+    map.key = key;
+    _drcMaps.set(key, map);
+    while (_drcMaps.size > 4) _drcMaps.delete(_drcMaps.keys().next().value);
+  }
+  return map;
+}
+
+function _planDrc(slot, settings, mode, input16, params, region) {
+  params.drc = null;
   params.drcProtection = null;
   slot.drcExposure = null;
   if (!drcEnabled(settings)) {
@@ -158,30 +251,35 @@ function _applyDrc(slot, settings, mode, input16, params, region, transient) {
   const width = input16.width;
   const height = input16.height;
   const bufferId = _bufferId(input16.data);
-  const cache = slot.drc || null;
   const sampleKey = supplied ? `s:${supplied.key}` : `own:${bufferId}:${width}x${height}`;
-  const sample = supplied || (cache && cache.sampleKey === sampleKey ? cache.sample : sampleDrcInput(input16.data, width, height));
-  const mapKey = `${sampleKey}|${drcMapKey(settings)}|${mode === 'positive' ? 'pos' : 'neg'}`;
-  const map = cache && cache.mapKey === mapKey ? cache.map : solveDrcMap(sample, settings, { inverted: mode !== 'positive' });
-  if (!map) return false;
+  const cached = slot.drc && slot.drc.sampleKey === sampleKey ? slot.drc.sample : null;
+  // The input as the conversion received it, before anything writes the work buffer.
+  const sample = supplied || cached || sampleDrcInput(input16.data, width, height);
+  slot.drc = { sampleKey, sample };
+  const inverted = mode !== 'positive';
+  const method = drcMethodParams(settings);
   const frame = region ? { x: region.originX, y: region.originY, frameWidth: region.frameWidth, frameHeight: region.frameHeight } : null;
-  const stopsKey = `${mapKey}|${bufferId}:${width}x${height}|${frame ? `${frame.x},${frame.y},${frame.frameWidth},${frame.frameHeight}` : ''}`;
-  const stops = cache && cache.stopsKey === stopsKey ? cache.stops : computeDrcStops(input16.data, width, height, buildDrcStage(map), { frame });
-  const strokes = params.localExposureStops;
-  const strokesKey = strokes ? (slot.exposureMap?.key || 'strokes') : '';
-  const merged = !strokes ? stops
-    : cache && cache.stopsKey === stopsKey && cache.strokesKey === strokesKey && !transient ? cache.merged
-    : addStops(stops, strokes, width, height);
-  const key = cache && cache.stopsKey === stopsKey ? cache.key : ++_drcSeq;
-  // Full-resolution requests keep nothing in the slot (#250's transient rule).
-  slot.drc = transient ? null : { sampleKey, sample, mapKey, map, stopsKey, stops, strokesKey, merged, key };
-  params.localExposureStops = merged;
+  const protect = mode !== 'bw' ? method.protect : 0;
+  const seq = ++_drcSeq;
+  params.drc = {
+    // The exposed level's key: the sample, the solve settings and shares.
+    key: `${sampleKey}|${drcMapKey(settings)}|${method.shadowShare}|${method.highlightShare}|${protect}|${mode}`,
+    seq,
+    expose(image16, engine) {
+      const prep = drcPrepFor(settings, mode, params, engine.positiveAnalysis);
+      const map = _drcMap(sample, sampleKey, prep, settings, inverted);
+      if (!map) return;
+      const n = image16.width * image16.height;
+      const weights = protect > 0 ? new Uint8Array(n) : null;
+      const strokes = params.localExposureStops && params.localExposureStops !== true ? params.localExposureStops : null;
+      const options = { inverted, strokes, frame, weights };
+      params.drcPath = exposeDrcFrame(image16, map, method, options);
+      params.drcProtection = weights ? { weights, width: image16.width, height: image16.height, protect } : null;
+    }
+  };
   // The stops changed as a whole: no stroke box to follow in place.
   slot.exposureChange = null;
-  slot.drcExposure = { key: `drc${key}:${strokesKey}` };
-  const protect = drcMethodParams(settings).protect;
-  params.drcProtection = mode !== 'bw' && protect > 0
-    ? { stops, width, height, protect, inverted: mode !== 'positive' } : null;
+  slot.drcExposure = { key: params.drc.key };
   return true;
 }
 
@@ -400,7 +498,7 @@ function _createSlot() {
     promotedSource: null,
     exposureMap: null,
     // Dynamic range compression: the sample, map and stops of the last
-    // interactive conversion (_applyDrc), and the key it adds to the exposed level.
+    // interactive conversion (_planDrc), and the key it adds to the exposed level.
     drc: null,
     drcExposure: null,
     // What the last map update changed in place: { fromKey, rect } or null (#254).
@@ -834,7 +932,7 @@ function _prepareRgba(ctx) {
   ctx.preLevel = pre;
   ctx.preparedKey = key;
   const stops = params.localExposureStops;
-  if (!(stops && stops.length === len / 4)) {
+  if (!params.drc && !(stops && stops.length === len / 4)) {
     slot.exposed = null;
     return pre;
   }
@@ -1010,11 +1108,13 @@ async function runSilverCore(imageData, settings, mode, options) {
   // applies them after the analysis and before the curves; the analysis
   // sample (reference) is never dodged, like the base exposure in a darkroom.
   params.localExposureStops = localExposureStopsForSlot(slot, settings, input16.width, input16.height, region, transient);
-  const drcActive = _applyDrc(slot, settings, mode, input16, params, region, transient);
+  const drcActive = _planDrc(slot, settings, mode, input16, params, region);
 
   // B&W: every stage after the mix depends on the grey value alone, so unless a
   // spatial stage is active the output comes from one grey plane and a grey → RGB table.
-  const greyPath = mode === 'bw' && engine.greyTableAvailable(params);
+  // With the compression a B&W frame takes the RGBA path: the exposure stage
+  // is the compression's, on the mixed grey plane.
+  const greyPath = mode === 'bw' && !drcActive && engine.greyTableAvailable(params);
 
   // 解析用の撮影窓は出力範囲とは独立。プレビュー・書き出しとも同じ標本で LUT を作る。
   // The sample keeps the RGBA path in every mode.
@@ -1105,10 +1205,16 @@ async function runSilverCore(imageData, settings, mode, options) {
 
   if (needsFullProcess) slot.analysis = analysisState;
   if (analysisPreview) result.__analysisPreview = analysisPreview;
+  // Which implementation exposed the frame (the smoke and the benchmark read it).
+  if (params.drcPath) result.__drcPath = params.drcPath;
   // The dynamic range hint: what the compression would bring back
   // from near black and white, measured with this conversion's curves.
   if (options?.drcEstimate && !region && engine.lastLuts?.r?.length === 65536) {
-    result.__drcEstimate = estimateDrcEffect(input16, engine.lastLuts, mode !== 'positive');
+    // Inside the picture (the crop, or the detected frame of an uncropped
+    // scan): a holder or rebate around it is not clipped picture.
+    const box = analysisPixelBounds(input16.width, input16.height, params.analysisRegion, (params.borderBuffer ?? 10) / 100);
+    result.__drcEstimate = estimateDrcEffect(input16, engine.lastLuts, mode !== 'positive',
+      { bounds: { x0: box.left, y0: box.top, x1: box.left + box.width, y1: box.top + box.height } });
   }
   // 参照の種類・寸法・画素バッファ・解析設定をキーにし、通常画像と混同しない。
   if (!reference || transient) slot.referencePixels = {};

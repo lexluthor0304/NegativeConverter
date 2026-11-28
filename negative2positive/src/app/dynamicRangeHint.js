@@ -14,7 +14,7 @@
 // white (estimateDrcEffect). Above DRC_HINT_THRESHOLD the editor offers it
 // once; nothing is switched on without the user.
 
-import { createDrcSampleBuilder, drcEnabled, DRC_HINT_THRESHOLD } from '../pipeline/dynamicRange.js';
+import { createDrcSampleBuilder, drcEnabled, drcMapKey, drcPrepKey, DRC_HINT_THRESHOLD } from '../pipeline/dynamicRange.js';
 
 /** The 16-bit plane of a frame (an ImageData with __image16, an Image16, or an 8-bit ImageData read as 16-bit). */
 export function drcPlaneOf(frame) {
@@ -65,7 +65,7 @@ export function createDrcSampler({
     if (job !== mine) return;
     job = null;
     const sample = builder.result();
-    samples.set(frame, { key: `drc-${++seq}`, width: sample.width, height: sample.height, lum: sample.lum });
+    samples.set(frame, { key: `drc-${++seq}`, width: sample.width, height: sample.height, rgb: sample.rgb });
     onReady(frame);
   }
 
@@ -101,4 +101,89 @@ export function drcHintWanted(settings, estimate) {
 /** Auto: the six controls from a photo's estimate (estimateDrcEffect().suggested). */
 export function drcAutoSettings(estimate) {
   return estimate?.suggested ? { ...estimate.suggested } : null;
+}
+
+/**
+ * The GPU preview's maps (main.js): solved in a worker of their own from the
+ * photo's sample and the conversion's preparation, so a slider of the group
+ * that changes the map (Amount, Detail, Local contrast) costs one solve off the
+ * page's thread, and the shares and saturation protection cost none.
+ *
+ * @param {object} deps
+ * @param {() => Worker} deps.createWorker
+ * @param {(key: string) => void} [deps.onReady] - a requested map arrived
+ */
+export function createDrcMapService({ createWorker, onReady = () => {} }) {
+  const maps = new Map(); // key -> map
+  const latest = new Map(); // sample + prep key -> the newest map for them
+  const sent = new Set(); // sample keys the worker holds
+  let worker = null;
+  let broken = false;
+  let seq = 0;
+  let inFlight = null; // { id, key }
+  let next = null; // the newest request waiting for the one in flight
+
+  function post(request) {
+    const message = { id: request.id, sampleKey: request.sample.key, prep: request.prep, settings: request.settings, inverted: request.inverted };
+    if (!sent.has(request.sample.key)) {
+      message.sample = { width: request.sample.width, height: request.sample.height, rgb: new Float32Array(request.sample.rgb) };
+      sent.add(request.sample.key);
+    }
+    inFlight = request;
+    worker.postMessage(message);
+  }
+
+  function ensureWorker() {
+    if (worker || broken) return worker;
+    try {
+      worker = createWorker();
+    } catch {
+      broken = true;
+      return null;
+    }
+    worker.onmessage = (event) => {
+      const { id, map, error } = event.data || {};
+      const done = inFlight && inFlight.id === id ? inFlight : null;
+      inFlight = null;
+      if (done) {
+        if (error === 'unknown sample') sent.delete(done.sample.key);
+        else if (map) {
+          map.key = done.key;
+          maps.set(done.key, map);
+          latest.set(done.family, map);
+          while (maps.size > 6) maps.delete(maps.keys().next().value);
+        }
+      }
+      if (next) { const request = next; next = null; post(request); }
+      if (done && map) onReady(done.key);
+    };
+    worker.onerror = () => { broken = true; worker = null; inFlight = null; next = null; };
+    return worker;
+  }
+
+  return {
+    keyOf(sample, prep, settings, inverted) {
+      return `${sample.key}|${drcPrepKey(prep)}|${drcMapKey(settings)}|${inverted ? 'neg' : 'pos'}`;
+    },
+    /**
+     * The map, or (`standIn`) the newest map of the same sample and
+     * preparation while the exact one is solved, or null. A request for it
+     * goes out; while one is in flight only the newest waits.
+     */
+    mapFor(sample, prep, settings, { standIn = true, inverted = true } = {}) {
+      const key = this.keyOf(sample, prep, settings, inverted);
+      const known = maps.get(key);
+      if (known) return known;
+      const family = `${sample.key}|${drcPrepKey(prep)}|${inverted ? 'neg' : 'pos'}`;
+      const w = ensureWorker();
+      if (w && !(inFlight && inFlight.key === key) && !(next && next.key === key)) {
+        const request = { id: ++seq, key, family, sample, prep, inverted, settings: { ...settings, drcSample: undefined } };
+        if (inFlight) next = request;
+        else post(request);
+      }
+      return standIn ? latest.get(family) || null : null;
+    },
+    get available() { return !broken; },
+    dispose() { if (worker) worker.terminate(); worker = null; maps.clear(); latest.clear(); sent.clear(); inFlight = null; next = null; }
+  };
 }

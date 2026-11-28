@@ -10,7 +10,8 @@
  */
 import './isolationProbe.js'; // first: answers the page's isolation probe (#264)
 import { convertFrameWithRouter, resolveConversionMode } from '../pipeline/conversionRouter.js';
-import { releaseSlotBuffers, prepareSilverCorePreview, analyzeSilverCorePreview, renderLiveExposureRect, liveExposureGeometry } from '../pipeline/silverAdapter.js';
+import { releaseSlotBuffers, prepareSilverCorePreview, analyzeSilverCorePreview, renderLiveExposureRect, liveExposureGeometry, setDrcExposerFactory } from '../pipeline/silverAdapter.js';
+import { createDrcExposer } from '../render/dynamicRangeGpu.js';
 import { createLiveStrokeCoverage, addLiveStrokePoints, unionRect } from '../app/localExposure.js';
 import { convertAdjustedFrame } from '../pipeline/adjustedFrame.js';
 import { createAdjustmentLutScratch } from '../app/adjustmentPipeline.js';
@@ -19,6 +20,11 @@ import { downsampleImageDataForMaxPixels } from '../app/imageDataOps.js';
 import { resampleDisplayLevel, filterDisplayImage, buildDisplayLevel, displayLevelFactor, displayLevelRows, resampleDisplayLevelRows,
   displayFootprint, filterDisplayRegion } from '../app/displayPreview.js';
 import { assertDetailAllocation, assertDetailRoiAllocation, assertDetailGeometry, DETAIL_MAX_OUTPUT_PIXELS, DETAIL_MAX_DIMENSION } from '../app/detailLayer.js';
+
+// Dynamic range compression's exposure stage on this worker's own WebGL2
+// context (OffscreenCanvas), made the first time a compressed frame needs it;
+// where the context cannot be made the JavaScript reference runs.
+if (typeof OffscreenCanvas === 'function') setDrcExposerFactory(() => createDrcExposer());
 
 let cachedSource = null;
 // The client's number for the cached source (#254 follow-up: exposureExact).
@@ -223,6 +229,7 @@ async function convert(msg) {
     if (result.__analysis) payload.analysis = result.__analysis;
     // What dynamic range compression would bring back (the editor's hint).
     if (result.__drcEstimate) payload.drcEstimate = result.__drcEstimate;
+    if (result.__drcPath) payload.drcPath = result.__drcPath;
     const transfers = [result.data.buffer];
     if (result.__analysisPreview) {
       const sample = result.__analysisPreview;

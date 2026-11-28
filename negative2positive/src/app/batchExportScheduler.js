@@ -350,6 +350,12 @@ export const PROCESSING_SLOT_BYTES_PER_PIXEL = 25;
 // the pool's shared planes next to that copy. The larger, 12 bytes per
 // converted pixel, is about 10 B/px of the frame at the reference 81 % crop.
 export const BAND_POOL_BYTES_PER_PIXEL = 10;
+// A lane whose recipe compresses the dynamic range (drcAmount > 0) also holds
+// the saturation-protection weights, one byte per converted pixel, from the
+// exposure stage to the curves. (The stops are not a plane: the exposure
+// computes them pixel by pixel; the GPU stage's bands live in GPU memory, and
+// a shared plane's private band copy is one 4 MP band, not per pixel.)
+export const DRC_BYTES_PER_PIXEL = 1;
 
 /**
  * Whether one more frame may be decoded ahead of the lanes.
@@ -361,6 +367,8 @@ export const BAND_POOL_BYTES_PER_PIXEL = 10;
  * @param {number[]} [options.processingPixels] frames the lanes are processing
  * @param {boolean} [options.processingInBands] the lanes convert in the band
  *   pool (BAND_POOL_BYTES_PER_PIXEL more each)
+ * @param {boolean} [options.compressing] a lane's recipe compresses the
+ *   dynamic range (DRC_BYTES_PER_PIXEL more each)
  * @param {number} [options.unwrittenBytes] encoded payloads waiting for their write
  * @param {number} [options.residentBytes] the editor's planes and photo caches
  * @param {number} [options.reservedBytes] the memory budget's outstanding
@@ -380,6 +388,7 @@ export function planDecodeAhead({
   waitingPixels = [],
   processingPixels = [],
   processingInBands = false,
+  compressing = false,
   unwrittenBytes = 0,
   residentBytes = 0,
   reservedBytes = 0,
@@ -406,7 +415,8 @@ export function planDecodeAhead({
   if (Number(foregroundOutstanding) > 0) return { admit: false, bytes: 0, reason: 'foreground' };
   const count = (value) => Math.max(0, Number(value) || 0);
   const decode = (pixels) => estimateRawDecodeBytes(count(pixels), 1);
-  const slotBytes = PROCESSING_SLOT_BYTES_PER_PIXEL + (processingInBands ? BAND_POOL_BYTES_PER_PIXEL : 0);
+  const slotBytes = PROCESSING_SLOT_BYTES_PER_PIXEL + (processingInBands ? BAND_POOL_BYTES_PER_PIXEL : 0)
+    + (compressing ? DRC_BYTES_PER_PIXEL : 0);
   let bytes = decode(candidatePixels);
   for (const pixels of decodingPixels) bytes += decode(pixels);
   for (const pixels of waitingPixels) bytes += count(pixels) * DECODED_BASE_BYTES_PER_PIXEL;

@@ -125,25 +125,26 @@ export function drcMethodParams(settings) {
   const s = normalizeDrcSettings(settings);
   const amount = s.drcAmount / 100;
   const beta = 1 - (1 - BETA_AT_FULL) * amount;
-  const local = s.drcLocalContrast / 100;
+  // Local contrast: -1 at 0, 0 at 50 (small gradients as they are), 1 at 100.
+  const local = (s.drcLocalContrast - 50) / 50;
   return {
     amount,
     beta,
     detailShare: DETAIL_SHARE_LOW + (DETAIL_SHARE_HIGH - DETAIL_SHARE_LOW) * (s.drcDetail / 100),
-    // Below the threshold: no change at 0, the attenuation's own exponent
-    // mirrored at 50 (the paper's single power law), twice that at 100.
+    // Below the raise threshold: flattened towards 0, as they are at 50,
+    // raised towards 100 (at 100 twice the attenuation's exponent, mirrored).
     betaLow: 1 - (1 - beta) * 2 * local,
-    boostCap: 1 + (BOOST_AT_FULL - 1) * local,
+    boostCap: local > 0 ? 1 + (BOOST_AT_FULL - 1) * local : 1,
     shadowShare: s.drcShadows / 50,
     highlightShare: s.drcHighlights / 50,
     protect: (s.drcSaturation / 100) * PROTECT_AT_FULL
   };
 }
 
-/** The settings a map depends on (all but Saturation protection), as a cache key. */
+/** The settings a map depends on (Amount, Detail, Local contrast), as a cache key. */
 export function drcMapKey(settings) {
   const s = normalizeDrcSettings(settings);
-  return `${DRC_VERSION}:${s.drcAmount}:${s.drcDetail}:${s.drcShadows}:${s.drcHighlights}:${s.drcLocalContrast}`;
+  return `${DRC_VERSION}:${s.drcAmount}:${s.drcDetail}:${s.drcLocalContrast}`;
 }
 
 /** The solve grid of a frame: about SOLVE_LONG_SIDE on its long side, both sides of 2, 3 and 5 only. */
@@ -168,32 +169,33 @@ function linear16(v) {
 }
 
 /**
- * The sample a map is solved from: the frame's linear luminance on the solve
- * grid. Each cell averages the 16-bit codes it covers (integer sums, so the
- * order the rows are read in cannot change a value) and is then made linear;
- * a frame smaller than the grid is sampled bilinearly.
+ * The sample a map is solved from: the frame's mean 16-bit codes per cell of
+ * the solve grid (R, G, B; integer sums, so the order the rows are read in
+ * cannot change a value), a frame smaller than the grid sampled bilinearly.
+ * It is taken from the frame as the conversion receives it (geometry
+ * applied, before film-base compensation), which the editor and every
+ * conversion of a photo have alike; the preprocessing the engine does before
+ * the exposure stage is applied to each cell when the map is solved
+ * (drcSampleLuminance).
  *
  * The builder does one grid row per step, so the page can spread the work
- * over short slices (createDrcSampler) and get the same numbers as
+ * over short slices (app/dynamicRangeHint.js) and get the numbers of
  * sampleDrcInput, which runs it to the end.
  *
- * @param {Uint16Array} data - RGBA, the negative (or positive) as the engine receives it
+ * @param {Uint16Array|Uint8Array|Uint8ClampedArray} data - RGBA
  * @param {number} width
  * @param {number} height
  * @param {object} [options]
  * @param {number} [options.longSide]
- * @param {number} [options.scale] - 257 for an 8-bit plane
+ * @param {number} [options.scale] - 257 for an 8-bit plane (read as the adapter's 16-bit promotion)
  */
 export function createDrcSampleBuilder(data, width, height, options = {}) {
-  const w3 = DRC_LUMA;
   const grid = drcSolveSize(width, height, options.longSide);
   const gw = grid.width;
   const gh = grid.height;
-  const lum = new Float32Array(gw * gh);
-  const cellLum = (r, g, b) => w3[0] * linear16(r) + w3[1] * linear16(g) + w3[2] * linear16(b);
+  const rgb = new Float32Array(gw * gh * 3);
   const reduce = width >= gw && height >= gh;
-  // An 8-bit plane read as the 16-bit one the adapter promotes it to (x 257):
-  // integer sums times 257 are the 16-bit sums exactly.
+  // Integer sums times 257 are the 16-bit promotion's sums exactly.
   const scale = options.scale || 1;
   const acc = new Float64Array(gw * 3);
   const count = new Float64Array(gw);
@@ -221,7 +223,10 @@ export function createDrcSampleBuilder(data, width, height, options = {}) {
       }
       for (let gx = 0; gx < gw; gx++) {
         const n = count[gx] || 1;
-        lum[gy * gw + gx] = cellLum((acc[gx * 3] * scale) / n, (acc[gx * 3 + 1] * scale) / n, (acc[gx * 3 + 2] * scale) / n);
+        const o = (gy * gw + gx) * 3;
+        rgb[o] = (acc[gx * 3] * scale) / n;
+        rgb[o + 1] = (acc[gx * 3 + 1] * scale) / n;
+        rgb[o + 2] = (acc[gx * 3 + 2] * scale) / n;
       }
     } else {
       const fy = clamp(((gy + 0.5) * height) / gh - 0.5, 0, height - 1);
@@ -229,12 +234,12 @@ export function createDrcSampleBuilder(data, width, height, options = {}) {
       for (let gx = 0; gx < gw; gx++) {
         const fx = clamp(((gx + 0.5) * width) / gw - 0.5, 0, width - 1);
         const x0 = Math.floor(fx); const x1 = Math.min(width - 1, x0 + 1); const wx = fx - x0;
-        const at = (c) => {
+        const o = (gy * gw + gx) * 3;
+        for (let c = 0; c < 3; c++) {
           const a = data[(y0 * width + x0) * 4 + c] * scale * (1 - wx) + data[(y0 * width + x1) * 4 + c] * scale * wx;
           const b = data[(y1 * width + x0) * 4 + c] * scale * (1 - wx) + data[(y1 * width + x1) * 4 + c] * scale * wx;
-          return a * (1 - wy) + b * wy;
-        };
-        lum[gy * gw + gx] = cellLum(at(0), at(1), at(2));
+          rgb[o + c] = a * (1 - wy) + b * wy;
+        }
       }
     }
     gy++;
@@ -248,11 +253,9 @@ export function createDrcSampleBuilder(data, width, height, options = {}) {
       return gy >= gh;
     },
     get done() { return gy >= gh; },
-    /** Source pixels one step reads (for slicing by time). */
-    get pixelsPerRow() { return reduce ? Math.ceil(height / gh) * width : gw * 4; },
     result() {
       if (gy < gh) throw new Error('The sample is not complete');
-      return { width: gw, height: gh, lum };
+      return { width: gw, height: gh, rgb };
     }
   };
 }
@@ -262,6 +265,59 @@ export function sampleDrcInput(data, width, height, options = {}) {
   const builder = createDrcSampleBuilder(data, width, height, options);
   builder.step();
   return builder.result();
+}
+
+/**
+ * The engine's preprocessing before its exposure stage, applied to one cell's
+ * mean (16-bit codes, in place in `c`): film-base gains, the B&W mix, the
+ * pre-tone saturation, the positive's gain and white balance. The same
+ * arithmetic as the pixel stages, without their rounding (a mean has none).
+ * The flat field is not applied to the sample.
+ */
+function prepareCell(c, prep) {
+  if (prep.gains) {
+    c[0] = Math.min(65535, c[0] * prep.gains.r);
+    c[1] = Math.min(65535, c[1] * prep.gains.g);
+    c[2] = Math.min(65535, c[2] * prep.gains.b);
+  }
+  if (prep.mix) {
+    const y = c[0] * prep.mix[0] + c[1] * prep.mix[1] + c[2] * prep.mix[2];
+    c[0] = c[1] = c[2] = y;
+  }
+  const preSat = prep.preSaturation ?? 100;
+  if (preSat !== 100) {
+    const f = preSat / 100;
+    const lum = 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
+    for (let k = 0; k < 3; k++) c[k] = clamp(lum + f * (c[k] - lum), 0, 65535);
+  }
+  const pos = prep.positive;
+  if (pos && !(pos.gain === 1 && pos.wb.every((w) => w === 1))) {
+    const r = c[0] * pos.wb[0]; const g = c[1] * pos.wb[1]; const b = c[2] * pos.wb[2];
+    const peak = Math.max(r, g, b) / 65535;
+    const k = pos.gain / (1 + (pos.gain - 1) * peak);
+    c[0] = Math.min(65535, r * k); c[1] = Math.min(65535, g * k); c[2] = Math.min(65535, b * k);
+  }
+}
+
+/** A key for a preparation (what drcSampleLuminance depends on). */
+export function drcPrepKey(prep = {}) {
+  const g = prep.gains;
+  const pos = prep.positive;
+  return [g ? `${g.r},${g.g},${g.b}` : '', prep.mix ? prep.mix.join(',') : '', prep.preSaturation ?? 100,
+    pos ? `${pos.gain},${pos.wb.join(',')}` : ''].join('|');
+}
+
+/** The linear Rec. 709 luminance of each cell after the preparation. */
+export function drcSampleLuminance(sample, prep = {}) {
+  const n = sample.width * sample.height;
+  const lum = new Float32Array(n);
+  const c = new Float64Array(3);
+  for (let i = 0; i < n; i++) {
+    c[0] = sample.rgb[i * 3]; c[1] = sample.rgb[i * 3 + 1]; c[2] = sample.rgb[i * 3 + 2];
+    prepareCell(c, prep);
+    lum[i] = DRC_LUMA[0] * linear16(c[0]) + DRC_LUMA[1] * linear16(c[1]) + DRC_LUMA[2] * linear16(c[2]);
+  }
+  return lum;
 }
 
 // 5-tap binomial reduce by two (reflected borders).
@@ -381,7 +437,7 @@ export function attenuationField(H, width, height, method) {
         const ratio = g / alpha;
         local[i] = ratio > 1 ? Math.pow(ratio, eHigh) : 1;
         const below = g / raiseBelow;
-        localRaise[i] = below < 1 && eLow < 0 ? Math.pow(Math.max(below, 0.05), eLow) : 1;
+        localRaise[i] = below < 1 && eLow !== 0 ? Math.pow(Math.max(below, 0.05), eLow) : 1;
       }
     } else {
       local.fill(1);
@@ -431,56 +487,68 @@ export function compressLogLuminance(H, width, height, method, phi = attenuation
 }
 
 /**
- * The map of one photo: the log gain on the solve grid, and the grid's log
- * luminance that guides its upsampling.
+ * The map of one photo: the log gain of the method on the solve grid (before
+ * the Shadows and Highlights shares, which act per pixel, so moving them
+ * needs no new solve), and the grid's log luminance that guides its
+ * upsampling.
  *
  * The solved luminance is anchored so that the frame's median log luminance
  * keeps its level (a frame that is mostly a dark void keeps it dark; the
- * middle of the range would lift it to an empty grey), then the parts of the
- * gain that brighten and darken the picture are scaled by the Shadows and
- * Highlights shares (1 and 1: the method as published).
+ * middle of the range would lift it to an empty grey).
  *
- * @param {{ width: number, height: number, lum: Float32Array }} sample - sampleDrcInput
+ * @param {{ width: number, height: number, rgb?: Float32Array, lum?: Float32Array }} sample -
+ *   sampleDrcInput (rgb, prepared here with `options.prep`), or a luminance grid
  * @param {object} settings - the drc* settings
  * @param {object} [options]
- * @param {boolean} [options.inverted] - the sample is a negative's: its bright areas are the picture's shadows
- * @returns {{ version, width, height, logGain: Float32Array, guide: Float32Array, stats: object }|null}
- *   null when Amount is 0
+ * @param {object} [options.prep] - the engine's preprocessing (drcSampleLuminance)
+ * @returns {{ version, width, height, logGain: Float32Array, guide: Float32Array }|null} null when Amount is 0
  */
 export function solveDrcMap(sample, settings, options = {}) {
-  if (!drcEnabled(settings) || !sample?.lum || sample.lum.length !== sample.width * sample.height) return null;
+  if (!drcEnabled(settings) || !sample) return null;
+  const n = sample.width * sample.height;
+  const lum = sample.lum || (sample.rgb?.length === n * 3 ? drcSampleLuminance(sample, options.prep || {}) : null);
+  if (!lum || lum.length !== n) return null;
   const method = drcMethodParams(settings);
-  const inverted = Boolean(options.inverted);
+  const { width, height } = sample;
   const eps = DRC_EPSILON;
-  const { width, height, lum } = sample;
-  const n = width * height;
   const H = new Float64Array(n);
   for (let i = 0; i < n; i++) H[i] = Math.log(lum[i] + eps);
   const I = compressLogLuminance(H, width, height, method);
-  const offset = quantile(H, ANCHOR_QUANTILE) - quantile(I, ANCHOR_QUANTILE);
+  // (On a negative the order is the other way round; the median is its own mirror.)
+  const q = options.inverted ? 1 - ANCHOR_QUANTILE : ANCHOR_QUANTILE;
+  const offset = quantile(H, q) - quantile(I, q);
   const logGain = new Float32Array(n);
   const guide = new Float32Array(n);
-  let lifted = 0; let lowered = 0;
   for (let i = 0; i < n; i++) {
     // The gain of the luminance itself: exp(I) is L + eps.
     const out = Math.max(1e-12, Math.exp(I[i] + offset) - eps);
-    let g = lum[i] > 0 ? Math.log(out / lum[i]) : 0;
-    const brightens = inverted ? g < 0 : g > 0;
-    g *= brightens ? method.shadowShare : method.highlightShare;
-    g = clamp(g, -MAX_LOG_GAIN, MAX_LOG_GAIN);
-    logGain[i] = g;
+    logGain[i] = lum[i] > 0 ? clamp(Math.log(out / lum[i]), -2 * MAX_LOG_GAIN, 2 * MAX_LOG_GAIN) : 0;
     guide[i] = H[i];
-    if (brightens) lifted += Math.abs(g); else lowered += Math.abs(g);
   }
-  return {
-    version: DRC_VERSION,
-    width,
-    height,
-    logGain,
-    guide,
-    stats: { meanBrightenStops: (lifted / n) * Math.LOG2E, meanDarkenStops: (lowered / n) * Math.LOG2E }
-  };
+  return { version: DRC_VERSION, width, height, logGain, guide };
 }
+
+/**
+ * A pixel's stops from the map's log gain at it: the part that brightens the
+ * picture scaled by Shadow recovery, the part that darkens it by Highlight
+ * compression (on a negative the signs are the other way round), limited to
+ * about 4.5 stops, as log2.
+ */
+export function drcStopsOf(logGain, method, inverted) {
+  const brightens = inverted ? logGain < 0 : logGain > 0;
+  const g = logGain * (brightens ? method.shadowShare : method.highlightShare);
+  return (g > MAX_LOG_GAIN ? MAX_LOG_GAIN : g < -MAX_LOG_GAIN ? -MAX_LOG_GAIN : g) * Math.LOG2E;
+}
+
+/** Saturation protection's weight of a pixel (0-255): how far the compression darkened it, up to PROTECT_STOPS. */
+export function drcProtectWeight(stops, inverted) {
+  const darkening = inverted ? stops : -stops;
+  if (!(darkening > 0)) return 0;
+  return Math.round((darkening >= PROTECT_STOPS ? 1 : darkening / PROTECT_STOPS) * 255);
+}
+
+export const DRC_MAX_LOG_GAIN = MAX_LOG_GAIN;
+export const DRC_PROTECT_STOPS = PROTECT_STOPS;
 
 // ---------------------------------------------------------------------------
 // The per-pixel stage: stops of exposure on the negative
@@ -505,6 +573,12 @@ function rangeWeight(t, d) {
   const i = pos | 0;
   const f = pos - i;
   return t.table[i] + (t.table[i + 1] - t.table[i]) * f;
+}
+
+/** The range weight table (for the GPU stage, which reads the same numbers). */
+export function drcRangeTable() {
+  const t = rangeWeights();
+  return { table: t.table, scale: t.scale, size: RANGE_TABLE_SIZE };
 }
 
 /** The stage of a map: what the per-pixel functions read. */
@@ -537,83 +611,142 @@ export function drcLogGainAt(stage, u, v, h) {
   return (1 - wy) * ((1 - wx) * logGain[i00] + wx * logGain[i01]) + wy * ((1 - wx) * logGain[i10] + wx * logGain[i11]);
 }
 
-/**
- * The compression's stops (log2 of the linear gain) for every pixel of a
- * 16-bit RGBA plane, guided by each pixel's own linear luminance.
- *
- * @param {Uint16Array} data
- * @param {number} width
- * @param {number} height
- * @param {object} stage - buildDrcStage
- * @param {object} [options]
- * @param {number[]} [options.weights]
- * @param {{ x: number, y: number, frameWidth: number, frameHeight: number }} [options.frame] - the
- *   plane is a window of a larger frame (a detail region): its origin and the frame's size
- * @param {Float32Array} [options.out]
- * @returns {Float32Array}
- */
-export function computeDrcStops(data, width, height, stage, options = {}) {
-  const w3 = options.weights || DRC_LUMA;
-  const frame = options.frame || { x: 0, y: 0, frameWidth: width, frameHeight: height };
-  const n = width * height;
-  const out = options.out && options.out.length === n ? options.out : new Float32Array(n);
-  const { width: gw, height: gh, logGain, guide, range } = stage;
-  // The bilinear part of drcLogGainAt, per column and per row.
+// The joint bilateral lookup of computeDrcStops / exposeDrcReference for one
+// pixel, from its linear luminance L (shared so both read the same numbers).
+function lookupLogGain(stage, cx0, cx1, cwx, row0, row1, wy, L, logTable) {
+  const { logGain, guide, range } = stage;
+  const pos = (L < 1 ? (L > 0 ? L : 0) : 1) * LOG_TABLE_STEPS;
+  const t = pos | 0;
+  const h = logTable[t] + (logTable[t < LOG_TABLE_STEPS ? t + 1 : t] - logTable[t]) * (pos - t);
+  const i00 = row0 + cx0; const i01 = row0 + cx1; const i10 = row1 + cx0; const i11 = row1 + cx1;
+  const rt = range.table; const rs = range.scale;
+  let d; let r;
+  d = (h > guide[i00] ? h - guide[i00] : guide[i00] - h) * rs;
+  r = d >= RANGE_TABLE_SIZE ? rt[RANGE_TABLE_SIZE] : rt[d | 0] + (rt[(d | 0) + 1] - rt[d | 0]) * (d - (d | 0));
+  const w00 = (1 - cwx) * (1 - wy) * r;
+  d = (h > guide[i01] ? h - guide[i01] : guide[i01] - h) * rs;
+  r = d >= RANGE_TABLE_SIZE ? rt[RANGE_TABLE_SIZE] : rt[d | 0] + (rt[(d | 0) + 1] - rt[d | 0]) * (d - (d | 0));
+  const w01 = cwx * (1 - wy) * r;
+  d = (h > guide[i10] ? h - guide[i10] : guide[i10] - h) * rs;
+  r = d >= RANGE_TABLE_SIZE ? rt[RANGE_TABLE_SIZE] : rt[d | 0] + (rt[(d | 0) + 1] - rt[d | 0]) * (d - (d | 0));
+  const w10 = (1 - cwx) * wy * r;
+  d = (h > guide[i11] ? h - guide[i11] : guide[i11] - h) * rs;
+  r = d >= RANGE_TABLE_SIZE ? rt[RANGE_TABLE_SIZE] : rt[d | 0] + (rt[(d | 0) + 1] - rt[d | 0]) * (d - (d | 0));
+  const w11 = cwx * wy * r;
+  const sum = w00 + w01 + w10 + w11;
+  return sum > 1e-9
+    ? (w00 * logGain[i00] + w01 * logGain[i01] + w10 * logGain[i10] + w11 * logGain[i11]) / sum
+    : (1 - wy) * ((1 - cwx) * logGain[i00] + cwx * logGain[i01]) + wy * ((1 - cwx) * logGain[i10] + cwx * logGain[i11]);
+}
+
+function columnTables(width, frame, gw) {
   const cx0 = new Int32Array(width); const cx1 = new Int32Array(width); const cwx = new Float64Array(width);
   for (let x = 0; x < width; x++) {
     const fx = clamp(((frame.x + x + 0.5) / frame.frameWidth) * gw - 0.5, 0, gw - 1);
     cx0[x] = fx | 0; cx1[x] = cx0[x] + 1 < gw ? cx0[x] + 1 : cx0[x]; cwx[x] = fx - cx0[x];
   }
+  return { cx0, cx1, cwx };
+}
+
+function rowOf(y, frame, gh) {
+  const fy = clamp(((frame.y + y + 0.5) / frame.frameHeight) * gh - 0.5, 0, gh - 1);
+  const y0 = fy | 0;
+  return { y0, y1: y0 + 1 < gh ? y0 + 1 : y0, wy: fy - y0 };
+}
+
+// linear16 inlined: the LINEAR_LUT read exposeRgbaRun does.
+const TO_INDEX = LINEAR_STEPS / 65535;
+function lin(v) {
+  const idx = v * TO_INDEX; const k = idx | 0; const f = idx - k;
+  return LINEAR_LUT[k] + (LINEAR_LUT[k < LINEAR_STEPS ? k + 1 : k] - LINEAR_LUT[k]) * f;
+}
+
+/** The stops of dodge-and-burn strokes at a pixel: a dense map, a tiled one, or none. */
+function strokeReader(strokes, width) {
+  if (!strokes) return null;
+  if (strokes.tiled === true && Array.isArray(strokes.tiles)) {
+    const { tileSize, columns, tiles } = strokes;
+    return (x, y) => {
+      const tile = tiles[((y / tileSize) | 0) * columns + ((x / tileSize) | 0)];
+      return tile ? tile[(y % tileSize) * tileSize + (x % tileSize)] : 0;
+    };
+  }
+  return (x, y) => strokes[y * width + x];
+}
+
+/**
+ * The compression's stops for every pixel of a 16-bit RGBA plane (as it
+ * enters the exposure stage), guided by each pixel's own linear luminance.
+ * For tests and the hint; the conversion uses exposeDrcReference (or the GPU).
+ */
+export function computeDrcStops(data, width, height, stage, options = {}) {
+  const method = options.method || drcMethodParams({ drcAmount: 1 });
+  const inverted = Boolean(options.inverted);
+  const frame = options.frame || { x: 0, y: 0, frameWidth: width, frameHeight: height };
+  const out = new Float32Array(width * height);
+  const { cx0, cx1, cwx } = columnTables(width, frame, stage.width);
   const logTable = logLuminanceTable();
-  const rangeTable = range.table;
-  const rangeScale = range.scale;
-  const lut = LINEAR_LUT;
-  const toIndex = LINEAR_STEPS / 65535;
   for (let y = 0; y < height; y++) {
-    const fy = clamp(((frame.y + y + 0.5) / frame.frameHeight) * gh - 0.5, 0, gh - 1);
-    const y0 = fy | 0; const y1 = y0 + 1 < gh ? y0 + 1 : y0; const wy = fy - y0;
-    const row0 = y0 * gw; const row1 = y1 * gw;
+    const { y0, y1, wy } = rowOf(y, frame, stage.height);
+    const row0 = y0 * stage.width; const row1 = y1 * stage.width;
     for (let x = 0; x < width; x++) {
-      const p = y * width + x;
-      const i = p * 4;
-      // linear16 of each channel, inlined.
-      let idx = data[i] * toIndex; let k = idx | 0; let f = idx - k;
-      const lr = lut[k] + (lut[k < LINEAR_STEPS ? k + 1 : k] - lut[k]) * f;
-      idx = data[i + 1] * toIndex; k = idx | 0; f = idx - k;
-      const lg = lut[k] + (lut[k < LINEAR_STEPS ? k + 1 : k] - lut[k]) * f;
-      idx = data[i + 2] * toIndex; k = idx | 0; f = idx - k;
-      const lb = lut[k] + (lut[k < LINEAR_STEPS ? k + 1 : k] - lut[k]) * f;
-      const L = w3[0] * lr + w3[1] * lg + w3[2] * lb;
-      // log(L + eps) from the table.
-      const pos = (L < 1 ? (L > 0 ? L : 0) : 1) * LOG_TABLE_STEPS;
-      const t = pos | 0;
-      const h = logTable[t] + (logTable[t < LOG_TABLE_STEPS ? t + 1 : t] - logTable[t]) * (pos - t);
-      const a = cx0[x]; const b = cx1[x]; const wx = cwx[x];
-      const i00 = row0 + a; const i01 = row0 + b; const i10 = row1 + a; const i11 = row1 + b;
-      let d; let r;
-      d = (h > guide[i00] ? h - guide[i00] : guide[i00] - h) * rangeScale;
-      r = d >= RANGE_TABLE_SIZE ? rangeTable[RANGE_TABLE_SIZE] : rangeTable[d | 0] + (rangeTable[(d | 0) + 1] - rangeTable[d | 0]) * (d - (d | 0));
-      const w00 = (1 - wx) * (1 - wy) * r;
-      d = (h > guide[i01] ? h - guide[i01] : guide[i01] - h) * rangeScale;
-      r = d >= RANGE_TABLE_SIZE ? rangeTable[RANGE_TABLE_SIZE] : rangeTable[d | 0] + (rangeTable[(d | 0) + 1] - rangeTable[d | 0]) * (d - (d | 0));
-      const w01 = wx * (1 - wy) * r;
-      d = (h > guide[i10] ? h - guide[i10] : guide[i10] - h) * rangeScale;
-      r = d >= RANGE_TABLE_SIZE ? rangeTable[RANGE_TABLE_SIZE] : rangeTable[d | 0] + (rangeTable[(d | 0) + 1] - rangeTable[d | 0]) * (d - (d | 0));
-      const w10 = (1 - wx) * wy * r;
-      d = (h > guide[i11] ? h - guide[i11] : guide[i11] - h) * rangeScale;
-      r = d >= RANGE_TABLE_SIZE ? rangeTable[RANGE_TABLE_SIZE] : rangeTable[d | 0] + (rangeTable[(d | 0) + 1] - rangeTable[d | 0]) * (d - (d | 0));
-      const w11 = wx * wy * r;
-      const sum = w00 + w01 + w10 + w11;
-      const g = sum > 1e-9
-        ? (w00 * logGain[i00] + w01 * logGain[i01] + w10 * logGain[i10] + w11 * logGain[i11]) / sum
-        : (1 - wy) * ((1 - wx) * logGain[i00] + wx * logGain[i01]) + wy * ((1 - wx) * logGain[i10] + wx * logGain[i11]);
-      out[p] = g * Math.LOG2E;
+      const i = (y * width + x) * 4;
+      const L = DRC_LUMA[0] * lin(data[i]) + DRC_LUMA[1] * lin(data[i + 1]) + DRC_LUMA[2] * lin(data[i + 2]);
+      out[y * width + x] = drcStopsOf(lookupLogGain(stage, cx0[x], cx1[x], cwx[x], row0, row1, wy, L, logTable), method, inverted);
     }
   }
   return out;
 }
 
-// log(L + DRC_EPSILON) over L in [0, 1], for computeDrcStops.
+/**
+ * The exposure stage with the compression, in place, in JavaScript: the
+ * reference of the GPU stage (render/dynamicRangeGpu.js) and its fallback.
+ * Each pixel's stops are the compression's (from the map, guided by its own
+ * luminance) plus the dodge-and-burn strokes'; the exposure is
+ * exposeRgbaRun's arithmetic. `weights` (optional, one byte per pixel)
+ * receives saturation protection's weight. No stops plane is kept.
+ *
+ * @param {{ width, height, data: Uint16Array }} image16 - the plane entering the exposure stage
+ * @param {object} stage - buildDrcStage(map)
+ * @param {object} method - drcMethodParams(settings)
+ * @param {object} [options]
+ * @param {boolean} [options.inverted]
+ * @param {Float32Array|object|null} [options.strokes] - dense or tiled stops of the strokes, of this plane's size
+ * @param {{ x, y, frameWidth, frameHeight }} [options.frame]
+ * @param {Uint8Array} [options.weights]
+ */
+export function exposeDrcReference(image16, stage, method, options = {}) {
+  const { width, height, data } = image16;
+  const inverted = Boolean(options.inverted);
+  const frame = options.frame || { x: 0, y: 0, frameWidth: width, frameHeight: height };
+  const weights = options.weights || null;
+  const stroke = strokeReader(options.strokes, width);
+  const { cx0, cx1, cwx } = columnTables(width, frame, stage.width);
+  const logTable = logLuminanceTable();
+  // `rect`: only these pixels (the GPU stage's tiles it could not do).
+  const rect = options.rect || { x: 0, y: 0, width, height };
+  for (let y = rect.y; y < rect.y + rect.height; y++) {
+    const { y0, y1, wy } = rowOf(y, frame, stage.height);
+    const row0 = y0 * stage.width; const row1 = y1 * stage.width;
+    for (let x = rect.x; x < rect.x + rect.width; x++) {
+      const p = y * width + x;
+      const i = p * 4;
+      const lr = lin(data[i]); const lg = lin(data[i + 1]); const lb = lin(data[i + 2]);
+      const L = DRC_LUMA[0] * lr + DRC_LUMA[1] * lg + DRC_LUMA[2] * lb;
+      const drcStops = drcStopsOf(lookupLogGain(stage, cx0[x], cx1[x], cwx[x], row0, row1, wy, L, logTable), method, inverted);
+      if (weights) weights[p] = drcProtectWeight(drcStops, inverted);
+      const s = drcStops + (stroke ? stroke(x, y) : 0);
+      if (s === 0) continue;
+      const gain = Math.pow(2, s);
+      let v = lr * gain; data[i] = Math.round(Math.pow(v < 1 ? v : 1, 1 / 2.2) * 65535);
+      v = lg * gain; data[i + 1] = Math.round(Math.pow(v < 1 ? v : 1, 1 / 2.2) * 65535);
+      v = lb * gain; data[i + 2] = Math.round(Math.pow(v < 1 ? v : 1, 1 / 2.2) * 65535);
+    }
+  }
+  return image16;
+}
+
+// log(L + DRC_EPSILON) over L in [0, 1], for the per-pixel lookups.
 const LOG_TABLE_STEPS = 65536;
 let logTableCache = null;
 function logLuminanceTable() {
@@ -647,32 +780,39 @@ export function addStops(drcStops, strokes, width, height) {
 
 /**
  * Saturation protection, after the curves: a pixel the compression darkened
- * by d stops loses up to `protect` of its chroma (around its Rec. 709
- * luminance), reached at PROTECT_STOPS. Brought down from the shoulder of the
- * film's curve, highlights regain colour the curve had compressed, and they
- * can come back stronger and more cast than they look; lifted shadows
- * (which lose saturation instead) are left alone.
+ * loses up to `protect` of its chroma (around its Rec. 709 luminance), in
+ * proportion to its weight (drcProtectWeight: 255 at PROTECT_STOPS of
+ * darkening). Brought down from the shoulder of the film's curve, highlights
+ * regain colour the curve had compressed and can come back stronger and more
+ * cast than they look; lifted shadows (which lose saturation instead) are
+ * left alone.
  *
  * @param {{ width, height, data: Uint16Array }} image16 - the positive, in place
- * @param {Float32Array} stops - the compression's stops on the negative (computeDrcStops)
+ * @param {Uint8Array} weights - one per pixel
  * @param {number} protect - drcMethodParams(settings).protect
- * @param {boolean} inverted - a negative: positive stops darken the picture
  */
-export function applyDrcProtection(image16, stops, protect, inverted) {
-  if (!(protect > 0) || !stops || stops.length !== image16.width * image16.height) return image16;
+export function applyDrcProtection(image16, weights, protect) {
+  if (!(protect > 0) || !weights || weights.length !== image16.width * image16.height) return image16;
   const d = image16.data;
-  const sign = inverted ? 1 : -1;
-  const k = protect / PROTECT_STOPS;
-  for (let p = 0; p < stops.length; p++) {
-    const darkening = stops[p] * sign;
-    if (!(darkening > 0)) continue;
-    const keep = 1 - (darkening >= PROTECT_STOPS ? protect : darkening * k);
-    const i = p * 4;
+  // The share of chroma each weight keeps (the same products as 1 - w * protect / 255).
+  const k = protect / 255;
+  const keepOf = new Float64Array(256);
+  for (let w = 0; w < 256; w++) keepOf[w] = 1 - w * k;
+  const lr = DRC_LUMA[0]; const lg = DRC_LUMA[1]; const lb = DRC_LUMA[2];
+  for (let p = 0, n = weights.length; p < n; p++) {
+    const w = weights[p];
+    if (w === 0) continue;
+    const keep = keepOf[w];
+    const i = p << 2;
     const r = d[i]; const g = d[i + 1]; const b = d[i + 2];
-    const Y = DRC_LUMA[0] * r + DRC_LUMA[1] * g + DRC_LUMA[2] * b;
-    d[i] = clamp(Math.round(Y + (r - Y) * keep), 0, 65535);
-    d[i + 1] = clamp(Math.round(Y + (g - Y) * keep), 0, 65535);
-    d[i + 2] = clamp(Math.round(Y + (b - Y) * keep), 0, 65535);
+    const Y = lr * r + lg * g + lb * b;
+    // Math.round(x) is floor(x + 0.5); the clamp to the 16-bit range first.
+    let x = Y + (r - Y) * keep + 0.5;
+    d[i] = x < 0 ? 0 : x >= 65535 ? 65535 : x | 0;
+    x = Y + (g - Y) * keep + 0.5;
+    d[i + 1] = x < 0 ? 0 : x >= 65535 ? 65535 : x | 0;
+    x = Y + (b - Y) * keep + 0.5;
+    d[i + 2] = x < 0 ? 0 : x >= 65535 ? 65535 : x | 0;
   }
   return image16;
 }
@@ -726,16 +866,26 @@ function exposeCode(v, stops) {
  * @param {object} input - { data: Uint16Array RGBA, width, height } the negative as the engine receives it
  * @param {{ r: Uint16Array, g: Uint16Array, b: Uint16Array }} luts - the conversion's curves (65536 entries)
  * @param {boolean} inverted - a negative
+ * @param {object} [options]
+ * @param {{ x0, y0, x1, y1 }} [options.bounds] - the picture inside the scan (the crop or the
+ *   detected frame), in pixels: only it is measured, so a holder or rebate around it does not
+ *   count as clipped area (the compression itself still sees the whole frame)
  * @returns {{ base: { shadows, highlights }, byAmount: object, reduction: number, suggested: object|null }}
  */
-export function estimateDrcEffect(input, luts, inverted) {
+export function estimateDrcEffect(input, luts, inverted, options = {}) {
   const { data, width, height } = input;
   // Never finer than the frame itself (a tile, a test's small frame).
   const sample = sampleDrcInput(data, width, height, { longSide: Math.min(HINT_LONG_SIDE, Math.max(width, height)) });
-  const n = width * height;
-  const stride = Math.max(1, Math.floor(n / HINT_SAMPLES));
+  const b = options.bounds;
+  const x0 = b ? clamp(Math.floor(b.x0), 0, width - 1) : 0;
+  const y0 = b ? clamp(Math.floor(b.y0), 0, height - 1) : 0;
+  const x1 = b ? clamp(Math.ceil(b.x1), x0 + 1, width) : width;
+  const y1 = b ? clamp(Math.ceil(b.y1), y0 + 1, height) : height;
+  const bw = x1 - x0;
+  const area = bw * (y1 - y0);
+  const stride = Math.max(1, Math.floor(area / HINT_SAMPLES));
   const idx = [];
-  for (let p = 0; p < n; p += stride) idx.push(p);
+  for (let k = 0; k < area; k += stride) idx.push((y0 + Math.floor(k / bw)) * width + x0 + (k % bw));
   const lowLimit = 0.03 * 65535;
   const highLimit = 0.97 * 65535;
   const shares = (stopsAt) => {
@@ -755,12 +905,14 @@ export function estimateDrcEffect(input, luts, inverted) {
   const base = shares(null);
   const byAmount = {};
   for (const amount of HINT_AMOUNTS) {
-    const map = solveDrcMap(sample, { drcAmount: amount }, { inverted });
+    const settings = { drcAmount: amount };
+    const map = solveDrcMap(sample, settings, { inverted });
     const stage = buildDrcStage(map);
+    const method = drcMethodParams(settings);
     byAmount[amount] = shares((p, i) => {
       const x = p % width; const y = (p - x) / width;
       const L = DRC_LUMA[0] * linear16(data[i]) + DRC_LUMA[1] * linear16(data[i + 1]) + DRC_LUMA[2] * linear16(data[i + 2]);
-      return drcLogGainAt(stage, (x + 0.5) / width, (y + 0.5) / height, Math.log(L + DRC_EPSILON)) * Math.LOG2E;
+      return drcStopsOf(drcLogGainAt(stage, (x + 0.5) / width, (y + 0.5) / height, Math.log(L + DRC_EPSILON)), method, inverted);
     });
   }
   const clipped = (s) => s.shadows + s.highlights;

@@ -8,6 +8,7 @@ import {
   UNITS, TABLE_TEXTURE_SIZE, STEP3_CURVE_SIZE, STEP3_CURVE_ROWS, RESCUE_TONE_SIZE, RESCUE_OFFSET_BINS,
 } from './previewShader.js';
 import { packTableTexture, packHueWeights, packLinearLut, applyUniforms, packCurveRow, wholeFrame, displayModesSupported, TABLE_ENTRIES } from './previewTables.js';
+import { drcRangeTable } from '../pipeline/dynamicRange.js';
 import { SELF_TEST_SIZE, compareSelfTest, compareDisplayModes } from './gpuPreviewSelfTest.js';
 
 const QUAD = new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]);
@@ -55,6 +56,7 @@ const APPLY_UNIFORMS = [
   'u_posWb', 'u_stopsOn', 'u_stops', 'u_linearLut', 'u_toneLut', 'u_hslOn', 'u_hueSkip', 'u_bandActive', 'u_hueShift',
   'u_satFactor', 'u_hueWeights', 'u_lut3dOn', 'u_lut3dStr', 'u_lut3dInvStr', 'u_lut3d', 'u_satOn', 'u_sat', 'u_satRamp',
   'u_paperOn', 'u_paperLut', 'u_curve', 'u_wb', 'u_vib', 'u_cmy',
+  'u_drcOn', 'u_drcMap', 'u_drcRange', 'u_drcGrid', 'u_drcShares', 'u_drcRangeScale', 'u_drcRangeSize', 'u_drcProtect',
 ];
 // The display modes' uniforms (#253), in both mode variants.
 const MODE_UNIFORMS = [
@@ -140,7 +142,25 @@ export function createGpuPreviewRenderer(gl) {
       satRamp: tableTexture(gl.R16UI),
       satTable: null,
       lut3d: null, // { handle, profile }
+      drcMap: null, // { handle, key, width, height }
     };
+  }
+
+  // Dynamic range compression's map (512 px, log gain and guide) for this draw.
+  function uploadDrcMapInto(inputs, map) {
+    if (inputs.drcMap && inputs.drcMap.key === map.key && map.key) return inputs.drcMap;
+    if (!inputs.drcMap || inputs.drcMap.width !== map.width || inputs.drcMap.height !== map.height) {
+      if (inputs.drcMap) gl.deleteTexture(inputs.drcMap.handle);
+      const handle = texture();
+      gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RG32F, map.width, map.height);
+      inputs.drcMap = { handle, key: null, width: map.width, height: map.height };
+    }
+    const rg = new Float32Array(map.width * map.height * 2);
+    for (let i = 0; i < map.logGain.length; i++) { rg[i * 2] = map.logGain[i]; rg[i * 2 + 1] = map.guide[i]; }
+    bind(UNITS.drcMap, inputs.drcMap.handle);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, map.width, map.height, gl.RG, gl.FLOAT, rg);
+    inputs.drcMap.key = map.key || null;
+    return inputs.drcMap;
   }
 
   let apply = null; // { program, vs, fs, loc, status }
@@ -163,14 +183,23 @@ export function createGpuPreviewRenderer(gl) {
     gl.texImage3D(gl.TEXTURE_3D, 0, gl.RGB16UI, 1, 1, 1, 0, gl.RGB_INTEGER, gl.UNSIGNED_SHORT, new Uint16Array(3));
     const noPrepared = texture();
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16UI, 1, 1, 0, gl.RGBA_INTEGER, gl.UNSIGNED_SHORT, new Uint16Array(4));
-    statics = { hueWeights, linearLut, noStops, noProfile, noPrepared };
+    // Dynamic range compression: its range weights once, and a map to bind when it is off.
+    const range = drcRangeTable();
+    const rangeRows = Math.ceil((range.size + 2) / 64);
+    const rangeData = new Float32Array(rangeRows * 64);
+    rangeData.set(range.table);
+    const drcRange = texture();
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, 64, rangeRows, 0, gl.RED, gl.FLOAT, rangeData);
+    const noDrcMap = texture();
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RG32F, 1, 1, 0, gl.RG, gl.FLOAT, new Float32Array(2));
+    statics = { hueWeights, linearLut, noStops, noProfile, noPrepared, drcRange, drcRangeInfo: range, noDrcMap };
     return statics;
   }
 
   function deleteInputs(inputs) {
     if (!inputs) return;
     for (const handle of [inputs.prepared?.handle, inputs.stops?.handle, inputs.toneLut, inputs.paperLut,
-      inputs.preSatRamp, inputs.satRamp, inputs.lut3d?.handle]) {
+      inputs.preSatRamp, inputs.satRamp, inputs.lut3d?.handle, inputs.drcMap?.handle]) {
       if (handle) gl.deleteTexture(handle);
     }
   }
@@ -271,6 +300,10 @@ export function createGpuPreviewRenderer(gl) {
 
   function drawApplyWith(inputs, frame, step3Values, curveHandle, viewport, curveState = curve, frameUv = null) {
     const s = ensureStatics();
+    // The compression's map first: making its texture binds it on the active unit.
+    const drc = frame.drc && frame.drc.map ? frame.drc : null;
+    if (drc) gl.activeTexture(gl.TEXTURE0 + UNITS.drcMap);
+    const drcMap = drc ? uploadDrcMapInto(inputs, drc.map) : null;
     const stages = step3Values.stages;
     const program = wantsModes(stages) ? modes.apply : apply;
     const loc = program.loc;
@@ -319,6 +352,17 @@ export function createGpuPreviewRenderer(gl) {
     gl.uniform1i(loc.u_satOn, u.satOn);
     gl.uniform1f(loc.u_sat, u.sat);
     gl.uniform1i(loc.u_paperOn, u.paperOn);
+    // Dynamic range compression (frame.drc: { map, method, inverted, protect }).
+    bind(UNITS.drcMap, drcMap ? drcMap.handle : s.noDrcMap);
+    bind(UNITS.drcRange, s.drcRange);
+    gl.uniform1i(loc.u_drcMap, UNITS.drcMap);
+    gl.uniform1i(loc.u_drcRange, UNITS.drcRange);
+    gl.uniform1i(loc.u_drcOn, drc ? 1 : 0);
+    gl.uniform2i(loc.u_drcGrid, drc ? drc.map.width : 1, drc ? drc.map.height : 1);
+    gl.uniform3f(loc.u_drcShares, drc ? drc.method.shadowShare : 1, drc ? drc.method.highlightShare : 1, drc && drc.inverted ? 1 : 0);
+    gl.uniform1f(loc.u_drcRangeScale, s.drcRangeInfo.scale);
+    gl.uniform1i(loc.u_drcRangeSize, s.drcRangeInfo.size);
+    gl.uniform1f(loc.u_drcProtect, drc && frame.mode !== 'bw' ? drc.protect : 0);
     setStep3Uniforms(loc, step3Values);
     if (program !== apply) {
       const size = inputs.prepared || { width: 1, height: 1 };
@@ -679,7 +723,7 @@ export function createGpuPreviewRenderer(gl) {
         cases.forEach((testCase, k) => {
           uploadPreparedInto(scratch, { width: n, height: m, data16: testCase.prepared.data });
           uploadStopsInto(scratch, testCase.stops, n, m);
-          const frame = { mode: testCase.mode, params: testCase.params, plan: testCase.plan, engine: testCase.engine };
+          const frame = { mode: testCase.mode, params: testCase.params, plan: testCase.plan, engine: testCase.engine, drc: testCase.drc || null };
           uploadFrameTables(scratch, frame);
           drawApplyWith(scratch, frame, identity, identityCurve, [k * n, 0, n, m], { look: null });
         });

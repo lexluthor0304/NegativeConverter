@@ -58,7 +58,8 @@ import { applyFlatFieldToImage16 } from '../app/flatField.js';
 import { rasterizeExposureStopsTiled, exposureStopsBytes } from '../app/localExposure.js';
 import { applyFilmBaseCompensationToBuffer } from './filmBaseCompensation.js';
 import { resolveConversionMode } from './conversionRouter.js';
-import { drcEnabled } from './dynamicRange.js';
+import { drcEnabled, drcSolveSize, solveDrcMap, drcMethodParams, drcPrepKey } from './dynamicRange.js';
+import { exposeDrcFrame, drcPrepFor } from './silverAdapter.js';
 import {
   buildSilverCoreParams,
   toGrayscaleInPlace,
@@ -97,9 +98,13 @@ export function planConversionBands(height, count) {
 export function bandsSupported({ imageData, settings = {}, options = {} } = {}) {
   if (!options || !options.forceFullProcess || options.preview || options.scratch || options.workBuffer16) return false;
   if (settings && settings.positiveEngine === 'legacy' && resolveConversionMode(settings) === 'positive') return false;
-  // The compression's map is the whole frame's: one worker converts it.
-  if (drcEnabled(settings)) return false;
   const plane = imageData && imageData.__image16;
+  // A compressed frame's bands sum its sample cells, which needs a frame at
+  // least the size of the solve grid (smaller ones are sampled bilinearly).
+  if (drcEnabled(settings) && plane && !(settings.drcSample?.rgb instanceof Float32Array)) {
+    const grid = drcSolveSize(plane.width, plane.height);
+    if (plane.width < grid.width || plane.height < grid.height) return false;
+  }
   return Boolean(plane && plane.data instanceof Uint16Array
     && plane.width === imageData.width && plane.height === imageData.height
     && plane.data.length === imageData.width * imageData.height * 4 && imageData.height >= 1);
@@ -144,7 +149,11 @@ export async function planSilverCoreBands({ settings = {}, width, height, analys
   const preprocess = silverCorePreprocessFor(settings, mode);
   const reference = silverCoreAnalysisReference(analysisImageData);
   const analysisParams = reference ? { ...params, analysisRegion: null, excludeTransparent: true } : params;
-  const greyPath = mode === 'bw' && engine.greyTableAvailable(params);
+  // Dynamic range compression: the bands sum the frame's sample cells (unless
+  // the editor sent the photo's sample), worker 0 solves the map once, each
+  // band exposes its own rows with it. A B&W frame takes the RGBA path.
+  const drc = drcEnabled(settings) ? drcPlanFor(settings, mode, width, height) : null;
+  const greyPath = mode === 'bw' && !drc && engine.greyTableAvailable(params);
   const exposure = exposureFor(settings, width, height);
 
   // The reference sample's analysis, as runSilverCore runs it.
@@ -184,9 +193,10 @@ export async function planSilverCoreBands({ settings = {}, width, height, analys
     bounds: analysis === 'histogram' || analysis === 'grey-histogram' ? analysisBoundsFor(width, height, params) : null,
     positiveGrid: analysis === 'positive' ? positiveSampleGrid(width, height, params) : null,
     haloRows: 0,
+    drc,
   };
-  const job = { plan, engine, analysisParams };
-  const tables = analysis === 'none' ? buildBandTables(job, []) : null;
+  const job = { plan, engine, analysisParams, settings };
+  const tables = analysis === 'none' && !(drc && !drc.sample) ? buildBandTables(job, []) : null;
   return { plan, engine, job, tables, analysisPreview };
 }
 
@@ -205,6 +215,17 @@ function preSaturationRampOf(params) {
  * @returns {object} the band's partial analysis (structured-clone safe)
  */
 export function prepareSilverCoreBand(plan, band, y0) {
+  const { params } = plan;
+  const { width, height: rows, data } = band;
+  // The compression's sample cells this band's rows fall in, from the frame as
+  // received (integer sums: they add up to sampleDrcInput's exactly).
+  const drcPartial = plan.drc && !plan.drc.sample ? drcBandSums(plan, data, width, y0, rows) : null;
+  const partial = prepareBandAnalysis(plan, band, y0);
+  if (drcPartial) partial.drc = drcPartial;
+  return partial;
+}
+
+function prepareBandAnalysis(plan, band, y0) {
   const { params } = plan;
   const { width, height: rows, data } = band;
   if (plan.preprocess) {
@@ -245,9 +266,10 @@ export function prepareSilverCoreBand(plan, band, y0) {
 
 // The partial analyses of every band, in band order, merged.
 function mergePartials(partials) {
-  const merged = { histograms: null, grey: null, peaks: [], sample: [] };
+  const merged = { histograms: null, grey: null, peaks: [], sample: [], drc: [] };
   for (const partial of partials) {
     if (!partial) continue;
+    if (partial.drc) merged.drc.push(partial.drc);
     if (partial.kind === 'histogram') {
       if (!merged.histograms) merged.histograms = createAnalysisHistograms();
       for (let i = 0; i < 256; i++) {
@@ -279,6 +301,12 @@ function mergePartials(partials) {
  * @returns {object} structured-clone safe
  */
 export function buildBandTables(job, partials) {
+  const tables = buildBandTablesWithoutDrc(job, partials);
+  if (job.plan.drc) tables.drc = drcTablesFor(job, mergePartials(partials).drc);
+  return tables;
+}
+
+function buildBandTablesWithoutDrc(job, partials) {
   const { plan, engine } = job;
   const { params } = plan;
   const merged = mergePartials(partials);
@@ -364,8 +392,112 @@ export function applySilverCoreBand(plan, tables, band, y0) {
   engine.lastSettings = { ...tables.settings, sharpenAmount: 0 };
   engine._paperCache = tables.paper;
   const bandParams = { ...params, localExposureStops: stops };
+  if (tables.drc) bandParams.drc = drcBandStage(plan, tables.drc, bandParams, y0);
   engine._positiveExposureAndLuts(band, tables.luts, bandParams);
+  // Where the compression's exposure ran ('gpu', 'gpu+reference', 'reference').
+  band.drcPath = bandParams.drcPath || null;
   return data;
+}
+
+// ── Dynamic range compression in bands ───────────────────────────────────────
+
+let drcBandMaps = 0;
+
+function drcPlanFor(settings, mode, width, height) {
+  const supplied = settings.drcSample;
+  const valid = supplied && supplied.rgb instanceof Float32Array && supplied.rgb.length === supplied.width * supplied.height * 3;
+  const drcSettings = {};
+  for (const key of ['drcAmount', 'drcDetail', 'drcShadows', 'drcHighlights', 'drcLocalContrast', 'drcSaturation']) drcSettings[key] = settings[key];
+  return {
+    settings: drcSettings,
+    inverted: mode !== 'positive',
+    grid: drcSolveSize(width, height),
+    sample: valid ? { width: supplied.width, height: supplied.height, rgb: supplied.rgb } : null,
+  };
+}
+
+// The integer sums of the grid cells whose rows meet this band (sampleDrcInput's cells).
+function drcBandSums(plan, data, width, y0, rows) {
+  const { width: gw, height: gh } = plan.drc.grid;
+  const height = plan.height;
+  const xStart = new Int32Array(gw + 1);
+  for (let gx = 0; gx <= gw; gx++) xStart[gx] = Math.floor((gx * width) / gw);
+  const cellTop = (gy) => Math.floor((gy * height) / gh);
+  let gy0 = 0;
+  while (gy0 < gh && cellTop(gy0 + 1) <= y0) gy0++;
+  let gy1 = gy0;
+  while (gy1 < gh && cellTop(gy1) < y0 + rows) gy1++;
+  const sums = new Float64Array((gy1 - gy0) * gw * 3);
+  const counts = new Float64Array((gy1 - gy0) * gw);
+  for (let gy = gy0; gy < gy1; gy++) {
+    const from = Math.max(cellTop(gy), y0);
+    const to = Math.min(cellTop(gy + 1), y0 + rows);
+    for (let y = from; y < to; y++) {
+      const base = (y - y0) * width * 4;
+      for (let gx = 0; gx < gw; gx++) {
+        const x0 = xStart[gx];
+        const x1 = xStart[gx + 1];
+        let r = 0; let g = 0; let b = 0;
+        for (let i = base + x0 * 4, end = base + x1 * 4; i < end; i += 4) { r += data[i]; g += data[i + 1]; b += data[i + 2]; }
+        const o = (gy - gy0) * gw + gx;
+        sums[o * 3] += r; sums[o * 3 + 1] += g; sums[o * 3 + 2] += b;
+        counts[o] += x1 - x0;
+      }
+    }
+  }
+  return { gy0, gy1, sums, counts };
+}
+
+function drcTablesFor(job, partials) {
+  const { plan, engine } = job;
+  const drc = plan.drc;
+  let sample = drc.sample;
+  if (!sample) {
+    const { width: gw, height: gh } = drc.grid;
+    const sums = new Float64Array(gw * gh * 3);
+    const counts = new Float64Array(gw * gh);
+    for (const part of partials) {
+      const offset = part.gy0 * gw;
+      for (let k = 0; k < part.counts.length; k++) {
+        counts[offset + k] += part.counts[k];
+        sums[(offset + k) * 3] += part.sums[k * 3];
+        sums[(offset + k) * 3 + 1] += part.sums[k * 3 + 1];
+        sums[(offset + k) * 3 + 2] += part.sums[k * 3 + 2];
+      }
+    }
+    const rgb = new Float32Array(gw * gh * 3);
+    for (let i = 0; i < gw * gh; i++) {
+      const n = counts[i] || 1;
+      rgb[i * 3] = sums[i * 3] / n; rgb[i * 3 + 1] = sums[i * 3 + 1] / n; rgb[i * 3 + 2] = sums[i * 3 + 2] / n;
+    }
+    sample = { width: gw, height: gh, rgb };
+  }
+  const prep = drcPrepFor(job.settings || {}, plan.mode, plan.params, engine.positiveAnalysis);
+  const map = solveDrcMap(sample, drc.settings, { prep, inverted: drc.inverted });
+  if (!map) return null;
+  const method = drcMethodParams(drc.settings);
+  return {
+    // A key of its own per frame: the GPU stage keeps the last map it uploaded by key.
+    map: { width: map.width, height: map.height, logGain: map.logGain, guide: map.guide, key: `bands:${++drcBandMaps}:${Math.random().toString(36).slice(2)}:${drcPrepKey(prep)}` },
+    method,
+    inverted: drc.inverted,
+    protect: plan.mode !== 'bw' ? method.protect : 0,
+  };
+}
+
+// The band's exposure stage: its rows of the frame, the frame's map.
+function drcBandStage(plan, drc, bandParams, y0) {
+  return {
+    key: drc.map.key,
+    expose(image16) {
+      const weights = drc.protect > 0 ? new Uint8Array(image16.width * image16.height) : null;
+      const strokes = bandParams.localExposureStops || null;
+      bandParams.drcPath = exposeDrcFrame(image16, drc.map, drc.method, {
+        inverted: drc.inverted, strokes, weights, frame: { x: 0, y: y0, frameWidth: plan.width, frameHeight: plan.height }
+      });
+      bandParams.drcProtection = weights ? { weights, width: image16.width, height: image16.height, protect: drc.protect } : null;
+    }
+  };
 }
 
 /**
