@@ -798,6 +798,9 @@ function* compositeMarkingMaskSteps(data, metrics, mask, width, height, left, to
   const softened = yield* softenMarkingMaskSteps(mask, width, height, Math.max(0.38, metrics.mm * 0.026));
   const glow = metrics.edgeOverexposed ? metrics.edgeOverexposureStrength : 0;
   const core = mixColor(fill, [255, 232, 125, fill[3]], glow * 0.22);
+  // A brand style may print denser than the custom markings (Ilford's print
+  // is clipped white on the reference scans).
+  const inkDensity = metrics.styleInkDensity ?? 0.88;
   const firstX = Math.max(0, -left), endX = Math.min(width, metrics.outputWidth - left);
   const noiseRow = smoothNoiseRows(left + firstX, left + Math.max(firstX, endX), metrics.mm, 0.27, 4501);
   for (let y = 0; y < height; y++) {
@@ -809,7 +812,7 @@ function* compositeMarkingMaskSteps(data, metrics, mask, width, height, left, to
         const coverage = softened[y * width + x];
         if (coverage < 0.002) continue;
         noise ??= noiseRow(py);
-        const density = 0.88 + (noise[x - firstX] - 0.5) * 0.14;
+        const density = inkDensity + (noise[x - firstX] - 0.5) * 0.14;
         blendChannels(data, (py * metrics.outputWidth + px) * 4, core[0], core[1], core[2], core[3], coverage * density);
       }
     }
@@ -1319,6 +1322,7 @@ function styledDx(data, metrics, edge, style, x, frameNumber, half) {
 function paintStyledEdgeMarkings(data, metrics, edge, style, frameSlots) {
   const fill = edge.letteringColor;
   const sX = metrics.imagePxPerMmX, pitch = metrics.pitch;
+  if (style.inkDensity) metrics.styleInkDensity = style.inkDensity;
   const slots = frameSlots || styledFrameSlots(metrics, edge, style);
   const cache = new Map();
   const halfMarks = edge.frameNumberEnabled && edge.halfFrameMarksEnabled;

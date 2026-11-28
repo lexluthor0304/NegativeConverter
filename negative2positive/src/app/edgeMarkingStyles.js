@@ -83,8 +83,10 @@ export const EDGE_MARKING_STYLES = Object.freeze([
     text: 'ILFORD HP5 PLUS',
     stocks: ['ILFORD HP5 PLUS'],
     alternates: {},
-    // A black-and-white negative's print is dense silver: white in a positive.
-    letteringColor: '#ececec',
+    // A black-and-white negative's print is dense silver: in a positive it is
+    // as white as the scan gets (255 on the 2018 scan, clipped).
+    letteringColor: '#ffffff',
+    inkDensity: 1,
     dx: [109, 9],
     dxEnabled: false,
     anchorPerf: 0.66,
@@ -94,10 +96,10 @@ export const EDGE_MARKING_STYLES = Object.freeze([
       // references) and comes every other frame: the 2008 strip prints it
       // before frame 8 and not before 9 (where it prints "SAFETY" past the
       // number instead, seen on that strip only and not drawn).
-      { kind: 'text', edge: 'top', at: -2.0, from: [0.55, 1.75], glyphs: 'grotesk', stroke: 0.28, letterWidth: 1.08, tracking: 0.14, wordSpace: 0.62, digitWidth: 0.75, parity: 'even' },
-      { kind: 'number', edge: 'bottom', at: 0, from: [0.28, 1.72], glyphs: 'grotesk', stroke: 0.28, tracking: 0.1, digitWidth: 0.75 },
+      { kind: 'text', edge: 'top', at: -2.0, from: [0.55, 1.75], glyphs: 'ilford', stroke: 0.3, tracking: 0.12, wordSpace: 0.62, parity: 'even' },
+      { kind: 'number', edge: 'bottom', at: 0, from: [0.28, 1.72], glyphs: 'ilford', stroke: 0.3, tracking: 0.1 },
       // "nA" as large as the number, 2.79 and 2.88 perforations after it.
-      { kind: 'halfNumber', edge: 'bottom', at: 2.83, from: [0.28, 1.72], glyphs: 'grotesk', stroke: 0.28, tracking: 0.1, digitWidth: 0.75 }
+      { kind: 'halfNumber', edge: 'bottom', at: 2.83, from: [0.28, 1.72], glyphs: 'ilford', stroke: 0.3, tracking: 0.1 }
     ])
   }),
   Object.freeze({
