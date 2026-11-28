@@ -484,15 +484,89 @@ assert.equal(
   const own = slots.find((slot) => slot.number === 31);
   assert.ok(Math.abs(own.x - (m.frameStartX + 1.5 * m.pitch)) < 1e-9);
   assert.ok(slots.every((slot, i) => i === 0 || Math.abs(slot.x - slots[i - 1].x - 8 * m.pitch) < 1e-9));
-  // A caller composing several photos on one film names each frame itself.
-  const given = [{ x: m.frameStartX + 1.5 * m.pitch, number: 5 }];
-  const withSlots = composeSprocketFrame(image, { ...styled('kodakColor'), frameSlots: given });
-  const withNumber = composeSprocketFrame(image, styled('kodakColor', { frameNumber: 5 }));
-  assert.notEqual(fnv(withSlots.data), fnv(withNumber.data), 'only the named frame is drawn');
-
   // Letters the style has no shape for fall back to the pixel font.
   const cjk = composeSprocketFrame(image, styled('kodakColor', { text: 'KODAK 中文' }));
   assertPhotoRegionMatchesSource(cjk, getSprocketFrameMetrics(1203, 801, styled('kodakColor')), image);
+}
+
+// Film strips (contact sheets): several pictures on one continuous film.
+{
+  const { composeFilmStrip, composeFilmStripAsync, filmStripGeometry, fitPictureInWindow } = await import('./sprocketFrame.js');
+  const { applyEdgeMarkingStyle } = await import('./edgeMarkingStyles.js');
+  const fnv = (data) => { let h = 2166136261; for (let i = 0; i < data.length; i++) h = Math.imul(h ^ data[i], 16777619); return (h >>> 0).toString(16).padStart(8, '0'); };
+  const E = DEFAULT_SPROCKET_EDGE_MARKINGS;
+  const windowHeight = 120;
+  const geometry = filmStripGeometry(6, { windowHeight });
+  const picture = (seed, w = geometry.windowWidth, h = geometry.windowHeight) => {
+    const d = new Uint8ClampedArray(w * h * 4);
+    for (let i = 0; i < w * h; i++) { d[i * 4] = (i * 7 + seed * 31) & 255; d[i * 4 + 1] = (i * 3 + seed * 17) & 255; d[i * 4 + 2] = (seed * 50) & 255; d[i * 4 + 3] = 255; }
+    return new ImageData(d, w, h);
+  };
+  const pictures = [1, 2, 3, 4, 5, 6].map((n) => ({ imageData: picture(n), number: n + 9 }));
+  const kodak = { edgeMarkings: { ...applyEdgeMarkingStyle(E, 'kodakColor') }, windowHeight };
+  const strip = composeFilmStrip(pictures, kodak);
+  // Frames eight perforations apart, 2 mm of film between pictures.
+  assert.equal(geometry.framePitch, 8 * geometry.pitch);
+  assert.equal(strip.windows.length, 6);
+  for (let i = 1; i < 6; i++) assert.equal(strip.windows[i].x - strip.windows[i - 1].x, geometry.framePitch);
+  assert.ok(Math.abs((geometry.framePitch - geometry.windowWidth) / geometry.pxPerMm - 2) < 0.5, 'a 2 mm gap between frames (the pitch is a whole number of pixels)');
+  assert.equal(strip.width, 6 * geometry.framePitch, 'the cuts fall half-way between frames');
+  // Each window holds its picture's pixels unchanged.
+  strip.windows.forEach((window, i) => {
+    const source = pictures[i].imageData;
+    for (const [x, y] of [[0, 0], [source.width - 1, 0], [17, 33], [source.width - 1, source.height - 1]]) {
+      const a = (y * source.width + x) * 4, b = ((window.y + y) * strip.width + window.x + x) * 4;
+      assert.deepEqual(Array.from(strip.data.slice(b, b + 4)), Array.from(source.data.slice(a, a + 4)), `picture ${i} pixel ${x},${y}`);
+    }
+  });
+  // The perforations run on through the gaps: one pitch apart from end to end.
+  const holeRow = Math.round(geometry.pxPerMm * 3.4), lefts = [];
+  for (let x = 1; x < strip.width; x++) {
+    const i = (holeRow * strip.width + x) * 4, j = i - 4;
+    if (strip.data[i] > 200 && strip.data[j] <= 200) lefts.push(x);
+  }
+  assert.ok(lefts.length >= 6 * 8 - 1, `holes along the strip (${lefts.length})`);
+  for (let i = 1; i < lefts.length; i++) assert.ok(Math.abs(lefts[i] - lefts[i - 1] - geometry.pitch) <= 1, `hole ${i} keeps the 4.75 mm pitch across frame boundaries`);
+  // Each frame carries its own number: changing one frame's number changes the film.
+  const renumbered = composeFilmStrip(pictures.map((p, i) => (i === 3 ? { ...p, number: 40 } : p)), kodak);
+  assert.notEqual(fnv(renumbered.data), fnv(strip.data));
+  // Custom markings number per frame too.
+  const custom = { edgeMarkings: { ...E, textEnabled: true, frameNumberEnabled: true, dxEnabled: true }, windowHeight };
+  assert.notEqual(fnv(composeFilmStrip(pictures, custom).data), fnv(composeFilmStrip(pictures.map((p, i) => (i === 2 ? { ...p, number: 50 } : p)), custom).data));
+  // Pinned, and the same composed in slices.
+  const pinnedStrips = {
+    kodakStrip: 'bc61ae12',
+    customStrip: '05e05db1',
+    halfStrip: 'a7da5e72'
+  };
+  const half = { ...kodak, halfFrame: true };
+  const halfGeometry = filmStripGeometry(5, { windowHeight, halfFrame: true });
+  const halfPictures = [1, 2, 3, 4, 5].map((n) => ({ imageData: picture(n, halfGeometry.windowWidth, windowHeight), number: Math.ceil(n / 2) + 9 }));
+  const halfStrip = composeFilmStrip(halfPictures, half);
+  assert.equal(halfGeometry.framePitch, 4 * halfGeometry.pitch, 'half-frames four perforations apart');
+  assert.equal(halfStrip.width, 5 * halfGeometry.framePitch);
+  assert.equal(fnv(strip.data), pinnedStrips.kodakStrip, 'kodak strip pinned');
+  assert.equal(fnv(composeFilmStrip(pictures, custom).data), pinnedStrips.customStrip, 'custom strip pinned');
+  assert.equal(fnv(halfStrip.data), pinnedStrips.halfStrip, 'half-frame strip pinned');
+  let pauses = 0;
+  const sliced = await composeFilmStripAsync(pictures, kodak, { budgetMs: 0, pause: () => { pauses++; return Promise.resolve(); } });
+  assert.equal(fnv(sliced.data), fnv(strip.data), 'sliced and whole agree');
+  assert.ok(pauses > 10);
+  // A short last strip; a portrait picture turned a quarter clockwise into
+  // its window; a square one fitted inside, never stretched.
+  assert.deepEqual(fitPictureInWindow(400, 600, 180, 120), { rotate: true, x: 0, y: 0, width: 180, height: 120 });
+  assert.deepEqual(fitPictureInWindow(500, 500, 180, 120), { rotate: false, x: 30, y: 0, width: 120, height: 120 });
+  assert.deepEqual(fitPictureInWindow(600, 400, 90, 120), { rotate: true, x: 5, y: 0, width: 80, height: 120 }, 'a landscape picture turns into a half-frame window');
+  const short = composeFilmStrip([{ imageData: picture(1, 400, 600), number: 36 }, { imageData: null, number: 37 }], kodak);
+  assert.equal(short.width, 2 * geometry.framePitch);
+  assert.equal(short.windows.length, 1, 'a frame that failed leaves film in its window');
+  // A portrait picture's top row becomes its right-hand column (clockwise).
+  const portrait = picture(9, 40, 60);
+  const turned = composeFilmStrip([{ imageData: portrait, number: 1 }], { ...kodak, windowHeight: 40 });
+  assert.equal(turned.windows[0].width, 60);
+  const topLeft = Array.from(portrait.data.slice(0, 4));
+  const w0 = turned.windows[0], at = ((w0.y) * turned.width + w0.x + w0.width - 1) * 4;
+  assert.deepEqual(Array.from(turned.data.slice(at, at + 4)), topLeft, 'turned clockwise');
 }
 
 console.log('sprocketFrame.test.mjs passed');
