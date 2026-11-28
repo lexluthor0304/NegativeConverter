@@ -58,6 +58,7 @@ import { applyFlatFieldToImage16 } from '../app/flatField.js';
 import { rasterizeExposureStopsTiled, exposureStopsBytes } from '../app/localExposure.js';
 import { applyFilmBaseCompensationToBuffer } from './filmBaseCompensation.js';
 import { resolveConversionMode } from './conversionRouter.js';
+import { drcEnabled } from './dynamicRange.js';
 import {
   buildSilverCoreParams,
   toGrayscaleInPlace,
@@ -96,6 +97,8 @@ export function planConversionBands(height, count) {
 export function bandsSupported({ imageData, settings = {}, options = {} } = {}) {
   if (!options || !options.forceFullProcess || options.preview || options.scratch || options.workBuffer16) return false;
   if (settings && settings.positiveEngine === 'legacy' && resolveConversionMode(settings) === 'positive') return false;
+  // The compression's map is the whole frame's: one worker converts it.
+  if (drcEnabled(settings)) return false;
   const plane = imageData && imageData.__image16;
   return Boolean(plane && plane.data instanceof Uint16Array
     && plane.width === imageData.width && plane.height === imageData.height

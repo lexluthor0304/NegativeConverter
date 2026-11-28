@@ -26,7 +26,9 @@ export const RECIPE_KEYS = Object.freeze([
   'coreSharpenAmount', 'coreSharpenRadius', 'coreSharpenThreshold', 'positiveMode',
   // Expired-film rescue strengths; the per-frame analysis is never shared.
   'expiredEnabled', 'expiredLevels', 'expiredNeutralize', 'expiredCrossover',
-  'expiredBrightness', 'expiredContrast', 'expiredUnevenFog', 'expiredLocalContrast'
+  'expiredBrightness', 'expiredContrast', 'expiredUnevenFog', 'expiredLocalContrast',
+  // Dynamic range compression (pipeline/dynamicRange.js).
+  'drcAmount', 'drcDetail', 'drcShadows', 'drcHighlights', 'drcLocalContrast', 'drcSaturation'
 ]);
 
 export const RECIPE_TAG_KEYS = Object.freeze(['stock', 'lab', 'scanner', 'note']);

@@ -221,6 +221,8 @@ async function convert(msg) {
     if (Number.isInteger(result.__liveFrame)) payload.liveFrame = { seq: result.__liveFrame, slot: slotNameFor(options) };
     // The analysis a full-resolution frame was converted with (#254 follow-up).
     if (result.__analysis) payload.analysis = result.__analysis;
+    // What dynamic range compression would bring back (the editor's hint).
+    if (result.__drcEstimate) payload.drcEstimate = result.__drcEstimate;
     const transfers = [result.data.buffer];
     if (result.__analysisPreview) {
       const sample = result.__analysisPreview;

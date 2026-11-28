@@ -346,6 +346,7 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
     if (result.liveFrame) liveFrames.set(out, { ...result.liveFrame, worker: w });
     // The analysis a full-resolution frame was converted with (#254 follow-up).
     if (result.analysis) out.__analysis = result.analysis;
+    if (result.drcEstimate) out.__drcEstimate = result.drcEstimate;
     if (result.histogram) {
       const sample = result.histogram;
       const histogram = new ImageData(new Uint8ClampedArray(sample.rgba), sample.width, sample.height);

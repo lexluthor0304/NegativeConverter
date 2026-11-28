@@ -1,5 +1,5 @@
 // Toast notifications. Renders into #toastContainer (see index.html).
-// An optional action adds one button; that toast accepts pointer input and
+// An optional action adds one button (a secondary action a second one); that toast accepts pointer input and
 // closes when the action runs or its duration ends. The duration counts from
 // the frame that shows the toast: a hidden page runs no frames, so a toast
 // made there (the end of a long import in a background window) is shown, for
@@ -62,7 +62,7 @@ function isHeld(el, movesWhenShown) {
   return pointer.x >= box.left && pointer.x <= box.right && pointer.y >= box.top && pointer.y <= box.bottom;
 }
 
-export function showToast(message, durationMs = 0, { action = null } = {}) {
+export function showToast(message, durationMs = 0, { action = null, secondaryAction = null } = {}) {
   const container = document.getElementById('toastContainer');
   if (!container) return null;
   const el = document.createElement('div');
@@ -95,14 +95,16 @@ export function showToast(message, durationMs = 0, { action = null } = {}) {
       dismiss();
     }
   };
-  if (action?.label && typeof action.onClick === 'function') {
+  // One action, or two (an offer: do it / not now). Either closes the toast.
+  for (const item of [action, secondaryAction]) {
+    if (!item?.label || typeof item.onClick !== 'function') continue;
     el.classList.add('toast-with-action');
     const button = document.createElement('button');
     button.type = 'button';
-    button.className = 'toast-action';
-    if (action.id) button.dataset.toastAction = action.id;
-    button.textContent = action.label;
-    button.addEventListener('click', () => { dismiss(); action.onClick(); }, { once: true });
+    button.className = item === action ? 'toast-action' : 'toast-action toast-action-secondary';
+    if (item.id) button.dataset.toastAction = item.id;
+    button.textContent = item.label;
+    button.addEventListener('click', () => { dismiss(); item.onClick(); }, { once: true });
     el.append(button);
   }
   container.appendChild(el);

@@ -12,7 +12,8 @@ export const STUDIO_COLOR_KEYS = [
   'vibrance', 'saturation', 'cyan', 'magenta', 'yellow', 'curvePoints', 'curves',
   'expiredEnabled', 'expiredLevels', 'expiredNeutralize', 'expiredCrossover',
   'expiredBrightness', 'expiredContrast', 'expiredUnevenFog', 'expiredLocalContrast',
-  'expiredBrightnessUserOverride', 'expiredContrastUserOverride'
+  'expiredBrightnessUserOverride', 'expiredContrastUserOverride',
+  'drcAmount', 'drcDetail', 'drcShadows', 'drcHighlights', 'drcLocalContrast', 'drcSaturation'
 ];
 
 export function pickStudioColors(settings) {

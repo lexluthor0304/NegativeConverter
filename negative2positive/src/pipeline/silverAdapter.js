@@ -23,6 +23,7 @@ import { rasterizeExposureStopsTiled, updateExposureStopsMap, exposureMapKey, ex
 import { applyFlatFieldToImage16 } from '../app/flatField.js';
 import { analysisPixelBounds } from '../app/analysisRegion.js';
 import { LARGE_IMAGE_PIXELS } from '../app/imageMemoryBudget.js';
+import { drcEnabled, sampleDrcInput, solveDrcMap, buildDrcStage, computeDrcStops, addStops, drcMapKey, drcMethodParams, estimateDrcEffect } from './dynamicRange.js';
 
 // EnhancedProfiles.js owns the list of shipped 3D-LUT profiles and their .bin URLs;
 // deriving the whitelist from it keeps the two in step. A hand-copied list here is
@@ -128,6 +129,65 @@ function localExposureStopsForSlot(slot, settings, width, height, region = null,
   if (map !== previous || change) slot.exposureChange = change;
   slot.exposureMap = map;
   return map.stops;
+}
+
+// Dynamic range compression (dynamicRange.js, docs/dynamic-range-compression.md):
+// stops of exposure on the negative after the analysis and before the curves,
+// added to the dodge-and-burn stops so every path that exposes (the levels,
+// the grey and transient paths, the engine) applies them alike.
+//
+// The map comes from `settings.drcSample`, the photo's sample the editor made
+// from its full-resolution frame, or else from this buffer (a full-resolution
+// conversion makes the same sample from the same pixels). A detail region
+// needs the frame's sample: alone it would solve another map.
+let _drcSeq = 0;
+function _validDrcSample(sample) {
+  return sample && typeof sample.key === 'string' && sample.lum instanceof Float32Array
+    && sample.lum.length === sample.width * sample.height && sample.width > 0 ? sample : null;
+}
+
+function _applyDrc(slot, settings, mode, input16, params, region, transient) {
+  params.drcProtection = null;
+  slot.drcExposure = null;
+  if (!drcEnabled(settings)) {
+    slot.drc = null;
+    return false;
+  }
+  const supplied = _validDrcSample(settings.drcSample);
+  if (region && !supplied) return false;
+  const width = input16.width;
+  const height = input16.height;
+  const bufferId = _bufferId(input16.data);
+  const cache = slot.drc || null;
+  const sampleKey = supplied ? `s:${supplied.key}` : `own:${bufferId}:${width}x${height}`;
+  const sample = supplied || (cache && cache.sampleKey === sampleKey ? cache.sample : sampleDrcInput(input16.data, width, height));
+  const mapKey = `${sampleKey}|${drcMapKey(settings)}|${mode === 'positive' ? 'pos' : 'neg'}`;
+  const map = cache && cache.mapKey === mapKey ? cache.map : solveDrcMap(sample, settings, { inverted: mode !== 'positive' });
+  if (!map) return false;
+  const frame = region ? { x: region.originX, y: region.originY, frameWidth: region.frameWidth, frameHeight: region.frameHeight } : null;
+  const stopsKey = `${mapKey}|${bufferId}:${width}x${height}|${frame ? `${frame.x},${frame.y},${frame.frameWidth},${frame.frameHeight}` : ''}`;
+  const stops = cache && cache.stopsKey === stopsKey ? cache.stops : computeDrcStops(input16.data, width, height, buildDrcStage(map), { frame });
+  const strokes = params.localExposureStops;
+  const strokesKey = strokes ? (slot.exposureMap?.key || 'strokes') : '';
+  const merged = !strokes ? stops
+    : cache && cache.stopsKey === stopsKey && cache.strokesKey === strokesKey && !transient ? cache.merged
+    : addStops(stops, strokes, width, height);
+  const key = cache && cache.stopsKey === stopsKey ? cache.key : ++_drcSeq;
+  // Full-resolution requests keep nothing in the slot (#250's transient rule).
+  slot.drc = transient ? null : { sampleKey, sample, mapKey, map, stopsKey, stops, strokesKey, merged, key };
+  params.localExposureStops = merged;
+  // The stops changed as a whole: no stroke box to follow in place.
+  slot.exposureChange = null;
+  slot.drcExposure = { key: `drc${key}:${strokesKey}` };
+  const protect = drcMethodParams(settings).protect;
+  params.drcProtection = mode !== 'bw' && protect > 0
+    ? { stops, width, height, protect, inverted: mode !== 'positive' } : null;
+  return true;
+}
+
+// The post-exposure level's key: the strokes' map and the compression's.
+function _exposureKeyOf(slot) {
+  return `${slot.exposureMap ? slot.exposureMap.key : ''}${slot.drcExposure ? `|${slot.drcExposure.key}` : ''}`;
 }
 
 function normalizeAnalysisOverride(value) {
@@ -339,6 +399,10 @@ function _createSlot() {
     referencePixels: {},
     promotedSource: null,
     exposureMap: null,
+    // Dynamic range compression: the sample, map and stops of the last
+    // interactive conversion (_applyDrc), and the key it adds to the exposed level.
+    drc: null,
+    drcExposure: null,
     // What the last map update changed in place: { fromKey, rect } or null (#254).
     exposureChange: null,
     // Pre-exposure level: { key, kind: 'rgba' | 'grey', plane, alpha }. `plane` is an
@@ -774,7 +838,7 @@ function _prepareRgba(ctx) {
     slot.exposed = null;
     return pre;
   }
-  const exposedKey = `${key}|${slot.exposureMap.key}`;
+  const exposedKey = `${key}|${_exposureKeyOf(slot)}`;
   if (slot.exposed && slot.exposed.key === exposedKey) return slot.exposed.plane;
   // A stroke added or undone in place (#254 D1): the level changes inside its box only.
   if (_followExposureChange(slot, key, 'rgba', pre, stops, slot.exposureChange)) return slot.exposed.plane;
@@ -835,7 +899,7 @@ function _prepareGrey(ctx) {
     slot.exposed = null;
     return level;
   }
-  const exposedKey = `${key}|${slot.exposureMap.key}`;
+  const exposedKey = `${key}|${_exposureKeyOf(slot)}`;
   if (slot.exposed && slot.exposed.key === exposedKey) return { grey: slot.exposed.plane, alpha: level.alpha };
   if (_followExposureChange(slot, key, 'grey', level, stops, slot.exposureChange)) return { grey: slot.exposed.plane, alpha: level.alpha };
   const recycled = slot.exposed?.plane || null;
@@ -946,6 +1010,7 @@ async function runSilverCore(imageData, settings, mode, options) {
   // applies them after the analysis and before the curves; the analysis
   // sample (reference) is never dodged, like the base exposure in a darkroom.
   params.localExposureStops = localExposureStopsForSlot(slot, settings, input16.width, input16.height, region, transient);
+  const drcActive = _applyDrc(slot, settings, mode, input16, params, region, transient);
 
   // B&W: every stage after the mix depends on the grey value alone, so unless a
   // spatial stage is active the output comes from one grey plane and a grey → RGB table.
@@ -1011,7 +1076,7 @@ async function runSilverCore(imageData, settings, mode, options) {
   // What a live dodge-and-burn rectangle over this frame needs (#254 C): the
   // pre-exposure level, the tables and settings the tail ran with, and the
   // working geometry of the strokes. References only: the planes are the slot's.
-  slot.live = !transient && !region && ctx.preLevel && settings?.localExposureGeometry ? {
+  slot.live = !transient && !region && !drcActive && ctx.preLevel && settings?.localExposureGeometry ? {
     seq: ++_liveSeq,
     epoch: slot.planeEpoch,
     kind: greyPath ? 'grey' : 'rgba',
@@ -1040,6 +1105,12 @@ async function runSilverCore(imageData, settings, mode, options) {
 
   if (needsFullProcess) slot.analysis = analysisState;
   if (analysisPreview) result.__analysisPreview = analysisPreview;
+  // The dynamic range hint: what the compression would bring back
+  // from near black and white, measured with this conversion's curves.
+  if (options?.drcEstimate && !region && engine.lastLuts?.r?.length === 65536) {
+    const sample = _validDrcSample(settings.drcSample) || (slot.drc?.sample) || sampleDrcInput(input16.data, input16.width, input16.height);
+    result.__drcEstimate = estimateDrcEffect(input16, engine.lastLuts, sample, mode !== 'positive');
+  }
   // 参照の種類・寸法・画素バッファ・解析設定をキーにし、通常画像と混同しない。
   if (!reference || transient) slot.referencePixels = {};
   return result;
@@ -1087,6 +1158,8 @@ export function releaseSlotBuffers(which = 'full') {
   slot.promotedSource = null;
   slot.exposureMap = null;
   slot.exposureChange = null;
+  slot.drc = null;
+  slot.drcExposure = null;
   slot.prepared = null;
   slot.exposed = null;
   slot.live = null;
