@@ -71,10 +71,15 @@ proof does not establish the unmeasured performance targets.
 
 ## Dynamic range compression
 
-- **low/behaviour** — On a frame whose dark half is mostly deep shadow, the compression can darken it further (2026-11-28)  
-  `negative2positive/src/pipeline/dynamicRange.js` (`compressLogLuminance`, the median anchor)  
-  The anchor keeps the frame's median log luminance where it was and lowers what lies above it in the picture. On 2 of 66 real negatives (Amount 70) the picture's near-black share (luminance at most 1 %) grows past 1 %: L1002388 (B&W forest, people in sun) 0.3 % to 10.5 %, L1002112 (colour lake under trees) 0.6 % to 3.2 %. Shadow Recovery above 50 brings it back by hand. An anchor at another percentile (tried: 30th and 70th of the picture) only moves the problem to other frames.  
-  _Suggested fix:_ Anchor on the frame's measured black and white points instead of one percentile, so the stretch the curves give afterwards never pushes a lifted shadow below the black point.
+- **low/behaviour** — The hint and Auto see the conversion's curves, not the stages after them (2026-11-28)  
+  `negative2positive/src/pipeline/dynamicRange.js` (`estimateDrcEffect`), `negative2positive/src/app/main.js` (`measureDrcEstimate`)  
+  The estimate runs in the conversion worker with the engine's curves. The automatic colour correction's tone (expired-film rescue, on for every photo), Step 3 and a look come after it on the page. Where they crush or lift a photo's ends further, the hint can miss a photo whose gain would show on screen (seen on a synthetic photo whose dark third the rescue's tone takes to black: the estimate read its shadows as already showing detail).  
+  _Suggested fix:_ Send the rescue's luminance tone (and Step 3's) with the estimate request and evaluate the ends through it.
+
+- **low/colour** — Lifted shadows lose saturation (2026-11-28)  
+  `negative2positive/src/pipeline/dynamicRange.js` (`applyDrcProtection`)  
+  Saturation protection only reduces the chroma of pixels the compression darkened. Lifted shadows come out less saturated than they were (mean HSV saturation 0.407 → 0.286 on 31 colour negatives at Amount 50).  
+  _Suggested fix:_ Restore the chroma of lifted pixels towards their original saturation, with the same weight plane (signed).
 
 ## Dust removal
 

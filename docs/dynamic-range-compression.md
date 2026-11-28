@@ -62,8 +62,12 @@ the fallback.
    its H. The Shadow recovery and Highlight compression shares are applied
    per pixel (`drcStopsOf`): the part that brightens the picture scaled by
    one, the part that darkens it by the other (on a negative the signs are
-   the other way round), limited to ±4.5 stops. So those two controls never
-   need a new solve.
+   the other way round), limited to ±4.5 stops, and then held inside the
+   picture's own extremes (below, "No crushed shadows"). So those two
+   controls never need a new solve. The map also keeps the picture's
+   extremes and middle; when the conversion names the picture (a crop, or
+   the detected frame of an uncropped scan) the solve runs on the picture's
+   cells alone, so a film holder or rebate is no part of it.
 7. **Per pixel.** At any resolution each pixel gets the log gain of the
    map's four nearest cells weighted by distance and by how close their H is
    to the pixel's own ln(L + 0.001) (a joint bilateral upsampling, Kopf et
@@ -84,7 +88,9 @@ cached levels of the interactive slots, the transient full-resolution path,
 a detail region, a band of the band pool, the engine) applies the
 compression at the same point. B&W frames take the RGBA path while it is on
 (the grey fast path has no exposure stage), and a positive's folded tables
-(`_positiveFold`) are not used, so its exposure stays a stage of its own. The engine's black and white points and automatic colour
+(`_positiveFold`) are not used, so its exposure stays a stage of its own.
+
+The engine's black and white points and automatic colour
 are measured on the uncompressed frame, so turning the compression up does
 not make the curve stretch back what was just compressed: compressed
 highlights land inside the clip points instead of on them. On a negative
@@ -94,13 +100,60 @@ the same point without the inversion, after their gain and white balance.
 
 **Saturation protection** acts after the curves, the one part that does: a
 pixel the compression darkened by d stops loses up to 0.6 × (control/100)
-of its chroma around its luminance, reached at 1.5 stops. Measured on the 31
-colour negatives (`.cache/drc/proto/satprobe.mjs`, Amount 70), highlights
-brought down from the shoulder of the curve come back much more saturated
-(mean HSV saturation 0.21 → 0.38 where the compression darkened a pixel by
-more than 20 %), while lifted shadows lose saturation (0.39 → 0.27): only
-the darkened side is protected, and at 50 it takes the darkened areas to
-0.33. B&W is untouched.
+of its chroma around its luminance, reached at 1.5 stops. Highlights
+brought down from the shoulder of the curve come back more saturated than
+they were. Measured on the 31 colour negatives at Amount 50
+(`.cache/drc/proto/satprobe.mjs`; mean HSV saturation of the pixels the
+compression darkened by more than 20 %, 0.194 without it): 0.372 with
+protection 0, 0.314 at 50, 0.283 at 75, 0.251 at 100. The default is 75
+(it was 50): the darkened areas stay close to their own colour and the
+control keeps room above it. Lifted shadows lose saturation at every
+setting (0.407 → 0.286): only the darkened side is protected (a known
+limit). B&W is untouched.
+
+### No crushed shadows, no blown highlights
+
+The gain is regional: a region gets the gain its large-scale tone needs,
+and detail darker (or brighter) than its region gets the same gain. With
+the method alone, that pushed some pixels past the frame's own black or
+white, where the curves clip them: on 2 of 66 real negatives the
+near-black share (luminance at most 1 %) grew past 1 % at Amount 70
+(L1002388, a B&W forest with people in sun, 0.3 % → 10.5 %; L1002112, a
+colour lake under trees, 0.6 % → 3.2 %), and frames whose middle already
+sits near black (more than half of the picture at the negative's clear end)
+were pulled further into it. The cause on L1002388: the positive's black
+point sits inside a large dark mass, and the compression darkened that mass
+by 0.08–0.16 stops on the negative (a uniform +0.06 stops on the negative
+alone takes its near-black share from 0.32 % to 0.71 %).
+
+So every pixel's gain is held inside the frame (`drcLimitGain`). The map
+keeps the picture's extremes (its 0.5 % and 99.5 % solve cells) and its
+middle (the anchor). In the direction a pixel moves, it moves freely up to a
+ceiling (the middle, and at least half a stop inside the extreme); past
+the ceiling its new level goes through a soft knee a quarter of the
+remaining way wide, so it approaches the extreme and never passes it, and
+two pixels keep their order. Moving towards the middle (lifting shadows,
+lowering highlights) is untouched up to the middle. The same function runs
+in the reference, the GPU stage and the preview shader.
+
+Measured at Amount 30, 50 and 70 (only Amount moved) on the 66 real
+negatives and the 32 public frames (`.cache/drc/proto/crushset.mjs`):
+no frame gains more than a quarter of a percentage point of near-black or
+near-white at any Amount; the worst is +0.03 points of near-black
+(L1002388 at Amount 70) and no frame gains near-white. Before the fix 14 of
+the 98 frames gained more than that at Amount 70 (up to +14.5 points). The
+compression did not get weaker for it: the mean change of the p2–p98 range
+is −0.81, −1.07 and −1.25 stops at Amount 30, 50 and 70 (−0.78, −1.03 and
+−1.21 before) `dynamicRange.test.mjs` checks four scenes (a backlit
+forest with dark detail inside bright regions, a night frame whose middle
+is near black, its mirror near white, the room) at Amount 30–100: none
+gains more than a quarter of a percentage point of near-black or
+near-white, and the limit's own properties (never past the extreme, order
+kept, inward moves untouched).
+
+If shadows still look heavy, raise **Shadow recovery** (the share of the
+gain that lifts the dark side); if highlights look dull, lower **Highlight
+compression**.
 
 ### The controls
 
@@ -111,7 +164,7 @@ the darkened side is protected, and at 50 it takes the darkened areas to
 | Shadow recovery | 50 | share of the gain that brightens: ×(value/50) |
 | Highlight compression | 50 | share of the gain that darkens: ×(value/50) |
 | Local contrast | 50 | gradients below the level's 70th percentile (or α_k if lower) get the exponent 1 − 2 × (1 − β) × (value − 50)/50: at 50 they keep their contrast, towards 100 they are raised (the product of the raises bounded by 1 + (value − 50)/50), towards 0 flattened |
-| Saturation protection | 50 | chroma of darkened pixels, after the curves (above) |
+| Saturation protection | 75 | chroma of darkened pixels, after the curves (above) |
 
 Shadow recovery and Highlight compression are an extension: the paper's
 method is symmetric in the log domain. At 50 and 50 their shares are 1 and 1,
@@ -186,18 +239,21 @@ pixels with luminance at most 1 % or at least 99 %:
 | | highlight detail, median (p10–p90) | shadow detail, median | frames > 1 % near white | frames > 1 % near black |
 |---|---|---|---|---|
 | off | 0.46 (0.30–0.77) | 1.21 | 3 | 2 |
-| A: on the converted 16-bit positive | 0.40 (0.21–0.65) | 1.69 | 15 | 0 |
-| B: on the negative, before the curves (the product) | 0.53 (0.42–1.11) | 1.21 | 0 | 3 |
+| A: on the converted 16-bit positive | 0.44 (0.24–0.73) | 1.85 | 1 | 0 |
+| B: on the negative, before the curves (the product) | 0.56 (0.44–1.17) | 1.26 | 0 | 1 |
+
+(The final method, with the per-pixel limits of "No crushed shadows" in
+both A and B. Before them A sent 15 frames past 1 % white and B darkened
+two frames' shadows: L1002388 0.3 % → 10.5 % near black, L1002112 0.6 % →
+3.2 %.)
 
 Without the compression the shoulder squeezes the brightest 2 % into few
 levels on some frames (7 of 66 keep under 600 distinct 16-bit levels there,
 one only 5). Compressing the positive (A) cannot bring that back: it lowers
-the highlight detail further, multiplies the deep shadows' noise (shadow
-detail 1.69) and sends 15 frames past 1 % white. Compressing the negative
-(B) spreads the highlights out again and clips none. Of B's three frames
-with more than 1 % near black, one was already there without it (L1002408,
-2.1 % → 1.3 %); two get darker shadows (L1002388 0.3 % → 10.5 %, L1002112
-0.6 % → 3.2 %), which is queued in `docs/audit-backlog.md`. So B: the
+the highlight detail and multiplies the deep shadows' noise (shadow detail
+1.85). Compressing the negative (B) spreads the highlights out again and
+clips none; its one frame with more than 1 % near black was there without
+it and has less with it (L1002408, 2.1 % → 1.3 %). So B: the
 information the curve squeezes into a few levels still exists on the
 negative, and only there can it be spread out again. It is also where the
 method is defined (scene-referred log luminance) and where RawTherapee puts
@@ -309,37 +365,89 @@ no key or plane changes, and every output is byte-identical
 
 ## Leading users to it
 
-With a photo's first automatic conversion in a session the adapter
-estimates, on a strided sample of 16k pixels and with that conversion's
-curves, how much of the frame sits within 3 % of black or white without the
-compression and with it at Amount 30, 50 and 70 (`estimateDrcEffect`). The
-estimate solves on its own 256 px grid so the conversion it rides on is not
-held up for long (about 40–70 ms on one thread for a 2 MP frame; at 512 px it
-was 150–400 ms, which slowed a reopened photo past the display-session
-smoke's budget and the history tests past their time limit; at 160 px it no
-longer told the frames apart). If
-Amount 50 brings back at least 8 % of the frame (`DRC_HINT_THRESHOLD`), a
-toast offers it: "This photo has a wide brightness range…" with **Apply**
-(Auto) and **Not now**. The estimate is taken inside the picture: its
-bounds are the conversion's analysis region (the crop, or the detected
-frame of an uncropped camera scan) less the border buffer, so a film holder
-or rebate around the picture, near black once converted, does not count as
-clipped (`dynamicRange.test.mjs`: a picture inside a holder 150 px wide reads
-as the picture alone, within 0.06, and gets the hint; measured on the whole
-scan the holder adds more than 20 % "clipped"). On the 66 real negatives
-(`.cache/drc/proto/hintdata2.mjs`, the full conversion of each) the
-threshold offers it on one frame, L1002036 (estimate 12.8 %; measured 14.8 %
-of the picture within 3 % of the ends, 6.6 % at Amount 50); the next two
-read 6.7 % and 6.2 % (10–14 % of the picture at the ends, 3–5 % at Amount
-50), and every other frame under 3.3 %. The threshold stays at 8 % (a hint
-on about one frame in sixty of ordinary rolls); 6 % would add those two. The hint comes once per photo per session; Not now, Apply, or
-moving Amount above 0 keeps it away for good (`drcHintDismissed`, saved with
-the photo).
+**What the compression would give a photo** is measured, not guessed
+(`estimateDrcEffect`). With the conversion's own curves, on a strided sample
+of 16 k pixels of the picture and on its 256 px grid:
 
-**Auto**: the smallest of 30, 50, 70 that brings back 80 % of what 70 would;
-the end that was clipped more gets the larger share (Shadow recovery and
-Highlight compression 50 ± 15); Detail, Local contrast and Saturation
-protection stay at 50.
+- *the gain*: the fine detail a viewer sees in the picture's darkest and
+  brightest tenth: the contrast a texture of ±0.1 stop on the negative makes
+  there on screen, as Weber contrast in linear light with the screen's
+  flare (2 % of white: a difference in deep shadow is lost in it). The
+  curves' toe and shoulder flatten it; the compression moves an end back to
+  where the curve shows it. This is the position study's measure (local
+  contrast in the ends), on the cheap estimate;
+- *against it*: what the middle loses of its local contrast between
+  neighbouring grid cells (the flat, grey look), an end moved by more than
+  25 display levels (a bright end dimmed to grey, a dark end lifted to
+  grey), and a colour change in the ends (chroma relative to brightness, so
+  an exposure change that keeps the saturation does not count and a black
+  turning blue does);
+- *excluded*: any setting that adds near-black or near-white (within 1 %)
+  beyond a quarter of a percentage point of the sampled pixels.
+
+**Auto** weighs 36 settings: Amount 15, 30, 50 and 70 with Shadow recovery
+and Highlight compression at 25, 50 and 75 (only Amount needs a solve; the
+shares are per pixel). It takes the gentlest setting within 90 % of the best
+score (smallest Amount, then shares nearest 50), and when no setting scores
+above 0 it leaves the compression off and says so ("This photo's brightness
+range already fits"). Detail stays at 50, Local contrast at 50 and
+Saturation protection at its default. Auto works from Amount 0 in one
+press, measuring the photo first if it has not been measured.
+
+**The hint** is offered when Auto's score is at least 6
+(`DRC_HINT_THRESHOLD`). It says what the user gains, from the end whose
+detail comes back: "Detail in this photo's bright areas (sky, windows,
+lights) is washed out…", "…dark areas is lost in shadow…" or both, with
+**Apply** (Auto) and **Not now**, as unobtrusive as before. It is measured
+about a second after a photo's automatic conversion, when the page is idle
+(a separate conversion of the display level in the worker), so opening a
+photo never waits for it. It comes once per photo per session; Not now,
+Apply, or moving Amount above 0 keeps it away for good (`drcHintDismissed`,
+saved with the photo).
+
+The measure and the threshold were chosen by looking, on the 66 real
+negatives and the 32 public frames (`.cache/drc/proto/hintset.mjs`, each
+frame converted at 1600 px; `.cache/drc/hint/`: `hinted_*.png`,
+`not_hinted_sample_*.png`, `auto_worst10_*.png`, each cell the frame without
+| with Auto, names in the `.txt` beside each page):
+
+- the hint goes to 19 of 98 frames: 8 of the 66 real negatives (L1001985 a
+  white car in sun, L1002419 a jellyfish on black, L1002425, L1002415 and
+  L1002441 contrasty underwater B&W frames, L1002384 a forest pond, L1002376,
+  L1002396 a night street with lamps) and 11 of the 32 public frames;
+- the public frames were made with an expanded range, so many have blown
+  whites by construction; some of those hinted look ordinary at thumbnail
+  size, Auto bringing their whites down a little;
+- missed by eye: the tunnel window (L1002450, 5.3), a sun flare over grass
+  and the coloured glasses (public), just under 6;
+- Auto switches the compression on for 88 of 98 frames when asked, never
+  adds near-black (worst +0.01 points) or near-white (0); its ten largest
+  moves (`auto_worst10`) look natural.
+
+Three versions of the measure were tried and dropped, by eye: neighbour
+contrast on the grid (the compression lowers it by design), fine detail in
+display levels (it rewarded dimming bright subjects to grey, and called
+lifted shadows a loss), and a hue-angle colour term (it missed a black
+background turning blue in a fire picture).
+
+**Inside the picture.** The measure reads the picture only (the
+conversion's analysis region, the crop or the detected frame of an
+uncropped scan, less its border), and when the conversion names the
+picture the map is solved on it alone, so a film holder or rebate in view
+neither counts as clipped nor takes part in the solve. Tested in
+`dynamicRange.test.mjs` (a picture inside a holder 150 px wide, 60 % of the
+scan: the decision is the picture alone's; measured on the whole scan the
+holder adds over 20 % of "clipped" area). In the Studio on the owner's
+60 MP camera scan L1002152 (a B&W positive, uncropped, a strip of holder
+along its bottom edge): benefit 0.40, no hint; the same frame in Node reads
+0.23 uncropped, 0.30 with the picture named as the analysis region, 0.33
+cropped to the picture (the strip is 1.6 % of the height; the Studio
+detected the frame but kept no analysis area for it).
+
+The measure sees the conversion's curves only: the stages after them (the
+automatic colour correction's tone, Step 3, a look) are not in it. Where
+they crush or lift the ends further, the hint can miss a photo that would
+show the gain on screen (`docs/audit-backlog.md`).
 
 ## Compared with RawTherapee
 
@@ -354,22 +462,24 @@ positive and fine detail (high-pass energy against the original):
 
 | frame | original | ours 50 | RawTherapee 20 | RawTherapee 50 |
 |---|---|---|---|---|
-| L1002028 | 0.113 / 0.927 | 0.204 / 0.906, detail 0.99 | 0.180 / 0.904, 0.92 | 0.281 / 0.883, 0.85 |
-| L1002100 | 0.109 / 0.966 | 0.204 / 0.903, 0.97 | 0.186 / 0.897, 0.93 | 0.305 / 0.865, 0.84 |
-| L1002112 | 0.039 / 0.931 | 0.008 / 0.864, 1.06 | 0.055 / 0.845, 0.87 | 0.075 / 0.772, 0.76 |
-| L1002404 (B&W) | 0.042 / 0.967 | 0.149 / 0.922, 1.02 | 0.116 / 0.907, 0.94 | 0.217 / 0.844, 0.88 |
-| n75 | 0.015 / 0.985 | 0.031 / 0.899, 0.96 | 0.046 / 0.940, 1.00 | 0.111 / 0.891, 0.98 |
-| n96 | 0.016 / 0.992 | 0.099 / 0.961, 0.96 | 0.039 / 1.000, 1.08 | 0.089 / 1.000, 1.22 |
-| n50 | 0.016 / 0.958 | 0.009 / 0.915, 0.95 | 0.029 / 0.931, 1.06 | 0.056 / 0.934, 1.10 |
-| n7 | 0.017 / 0.981 | 0.147 / 0.954, 0.91 | 0.061 / 0.965, 1.00 | 0.142 / 0.953, 0.96 |
+| L1002028 | 0.113 / 0.927 | 0.187 / 0.902, detail 0.98 | 0.180 / 0.904, 0.92 | 0.281 / 0.883, 0.85 |
+| L1002100 | 0.109 / 0.966 | 0.203 / 0.900, 0.96 | 0.186 / 0.897, 0.93 | 0.305 / 0.865, 0.84 |
+| L1002112 | 0.039 / 0.931 | 0.050 / 0.863, 0.98 | 0.055 / 0.845, 0.87 | 0.075 / 0.772, 0.76 |
+| L1002404 (B&W) | 0.042 / 0.967 | 0.150 / 0.922, 1.01 | 0.116 / 0.907, 0.94 | 0.217 / 0.844, 0.88 |
+| n75 | 0.015 / 0.985 | 0.014 / 0.882, 0.93 | 0.046 / 0.940, 1.00 | 0.111 / 0.891, 0.98 |
+| n96 | 0.016 / 0.992 | 0.076 / 0.951, 0.95 | 0.039 / 1.000, 1.08 | 0.089 / 1.000, 1.22 |
+| n50 | 0.016 / 0.958 | 0.044 / 0.926, 0.91 | 0.029 / 0.931, 1.06 | 0.056 / 0.934, 1.10 |
+| n7 | 0.017 / 0.981 | 0.158 / 0.956, 0.90 | 0.061 / 0.965, 1.00 | 0.142 / 0.953, 0.96 |
 
 - On the real negatives ours at 50 sits between RawTherapee's 20 and 50 in
-  range and keeps the fine detail (0.97–1.06 against 0.76–0.94): it
+  range and keeps the fine detail (0.96–1.01 against 0.76–0.94): it
   compresses on the negative, where the curve has not yet flattened the
   highlights.
-- On L1002112 (a lake under dark trees) and n50 ours makes the darkest 2 %
-  darker (p2 0.039 → 0.008) where RawTherapee lifts them: the median anchor
-  (`docs/audit-backlog.md`); Shadow recovery above 50 brings them back.
+- What the crush fix moved (against the previous round's run): L1002112's
+  and n50's darkest 2 % now come up as RawTherapee's do (p2 0.039 → 0.050,
+  0.016 → 0.044; they went down to 0.008 and 0.009 before); L1002028 lifts
+  a little less (0.204 → 0.187); fine detail on the real negatives
+  0.96–1.01 (0.97–1.06 before), on the public frames 0.90–0.95 (0.91–0.96).
 - RawTherapee raises saturation as it compresses (visible in reds); ours
   holds it in the darkened highlights.
 - On a synthetic 6-stop window ours at 25 leaves 2.8 stops and at 50 1.2;
@@ -404,6 +514,51 @@ Without WebGL2 in the worker the reference runs: its fused exposure takes
 1.85 s at 24 MP and 4.65 s at 60 MP on one Node thread, about round 1's
 cost (+4.7 s per 60 MP export).
 
+The hint's estimate (four 256 px solves and 36 settings weighed) takes
+140–190 ms in the worker for a 1600–2400 px display level; it is measured
+when the page is idle after a photo opens, not with its conversion.
+
+### WebKit (the App Store builds, WebKitGTK)
+
+Playwright's WebKit build on this Mac (Safari 26.5's engine), driving the
+production build served with the isolation headers on every response
+(under `vite preview` WebKit refused the conversion workers, "blocked by
+Cross-Origin-Embedder-Policy", although the headers were sent; a plain
+server without caching loads them):
+
+- a dedicated worker gets an OffscreenCanvas WebGL2 context, with float
+  render targets (EXT_color_buffer_float: RGBA32F and RGBA16F complete) and
+  the integer targets the stage draws to (RGBA16UI, R8UI); RG32F uploads;
+- the full-resolution stage in WebKit against the reference: at most one
+  16-bit code on 0.24–0.30 % of the values, weights at most 1, across a
+  band border (2348 × 1997: GPU 24–81 ms, reference 604–610 ms);
+- every compressed conversion of the app ran on the workers' GPU stage
+  (`__ncDynamicRange.paths()`: 22 and 13 conversions, none on the
+  reference); the reference fallback itself is tested in Node (no stage, a
+  stage that cannot start, one that fails part-way: the reference's pixels);
+- the GPU preview's own check of the compression's shader stage (run at
+  its start-up, `__ncDynamicRange.previewSelfTest()`): identical to the CPU
+  chain (0 levels);
+- times: at 60 MP (L1002112) release to the updated frame 47–178 ms (the
+  first switch-on 178 ms; display level 1131 × 752); the GPU preview's frame
+  16–23 ms once the map is there (24 MP, DPR 2); a single export 3.46–3.78 s
+  with the compression against 3.20–3.23 s without (+0.24 to +0.58 s); at
+  24 MP 610–628 ms against 625–681 ms (no added time measurable);
+- one run at DPR 2 lost its page at the first switch-on (WebKit's
+  WebContent process ended); four later runs at DPR 2, two with the
+  compression, did not, so it is not reproduced.
+
+So in WebKit the worker stage and the preview stage are the GPU ones; the
+page's context is not needed for full resolution.
+
+### First switch-on
+
+When a photo opens, the page makes its sample in slices and asks the map
+worker for the map at the default settings once the page is idle. The
+first time Amount moves, the GPU preview draws at once with that map (24 ms
+in Chrome on the hint photo), then with the map for the chosen Amount when
+it is solved; the frame on screen never waits.
+
 ### Memory
 
 There is no stops plane: the stops are computed per pixel inside the
@@ -425,8 +580,12 @@ uncompressed one:
 
 ## Known limits
 
-- On frames whose dark half is mostly deep shadow the compression can
-  darken it further (L1002388, L1002112: `docs/audit-backlog.md`).
+- The hint and Auto measure the conversion's curves, not the stages after
+  them (the automatic colour correction's tone, Step 3, a look).
+- Lifted shadows lose some saturation (Saturation protection acts on the
+  darkened side only).
+- Auto may dim a bright subject (a jellyfish, a fish on black) by about 20
+  display levels to show its texture.
 - A compressed export is reproducible on one machine, but different GPUs
   may round the last bit of some pixels differently (one 16-bit code).
 - The map of a thumbnail or tile of an unopened photo is solved from that
@@ -435,15 +594,17 @@ uncompressed one:
   can leave a faint band of 0.02–0.05 stops where the gain changes sign.
 - The detail percentile is per level of the frame, so a frame that is almost
   all edges compresses less than a calm one at the same Amount.
-- Platforms: measured in Chrome on macOS only (OffscreenCanvas WebGL2 in a
-  dedicated worker works there). Not measured:
-  - WebView2 (Windows) is Chromium and is expected to behave as Chrome;
-  - WKWebView (macOS, iOS) and WebKitGTK (Linux) have the page's WebGL2
-    (the preview stage runs where the GPU preview already does), but
-    whether their workers get an OffscreenCanvas WebGL2 context was not
-    measured. Where they do not, `createDrcExposer` reports unsupported and
-    the reference runs: the same pixels within one code, about 4.7 s more
-    per 60 MP export.
+- Platforms: Chrome and WebKit measured on macOS (above). Not measured:
+  WebView2 (Windows, Chromium: expected to behave as Chrome), WebKitGTK
+  (Linux) and WKWebView on iPhone/iPad (the same WebKit engine family as
+  the one measured, but their GPU drivers and memory limits differ). Where a
+  worker has no WebGL2, `createDrcExposer` reports unsupported and the
+  reference runs: the same pixels within one code, about 4.7 s more per
+  60 MP export.
+- WebKit: the first switch-on of a 24 MP RAW did not draw on the GPU (the
+  worker converted it while the frame stayed on screen); later ticks did.
+  Probably the full decode replacing the preview after the warm-up; not
+  verified.
 
 ## Validation
 
@@ -464,14 +625,18 @@ lowers highlights; interactive = full-resolution path; the editor's sample =
 the conversion's own; a region = that window of the frame; protection only on
 darkened pixels; the estimate changes no pixel), the band pool equal to one
 worker byte for byte (colour, B&W, positive, with and without the editor's
-sample), and the hint inside a film holder. `dynamicRangeHint.test.mjs`:
+sample), the hint inside a film holder, no crushed or blown ends at Amount
+30–100 on four scenes and the limit's own properties, Auto adding no
+clipped area and an ordinary frame getting no hint, and the fallback to the
+reference (no GPU stage, one that cannot start, one that fails part-way).
+`dynamicRangeHint.test.mjs`:
 recipe code, Sync color, snapshots, main.js's key lists, the GPU preview
-gate, when the hint is wanted, Auto, the page's sampler.
+gate, when the hint is wanted and what it says, Auto, the page's sampler.
 
 The DRC smoke, in the real Studio: the GPU stage against the reference
 (within one code, across a band border, dense and tiled strokes, a
 positive), the GPU preview's shader stage against the CPU chain (within one
-level), WebGL2 in a worker; then a synthetic 9-stop negative: the hint and
+level), WebGL2 in a worker; then a synthetic 9-stop 16-bit negative: the hint and
 Not now, Auto (the histogram's ends move in), Undo/Redo (the frame exact),
 Hold to see before, a single export and Export All (same pixels, the
 compression on screen), and Amount 0. The batch-pipeline smoke exports
