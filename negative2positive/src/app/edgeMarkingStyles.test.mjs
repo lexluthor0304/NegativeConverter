@@ -23,7 +23,15 @@ for (const style of EDGE_MARKING_STYLES) {
   assert.ok(style.dx[0] >= 0 && style.dx[0] <= 126 && style.dx[1] >= 0 && style.dx[1] <= 15);
   assert.ok(style.elements.length > 0);
   for (const element of style.elements) {
-    assert.ok(['number', 'halfNumber', 'label', 'code', 'text', 'dx', 'arrow', 'triangle', 'outlineArrow'].includes(element.kind), element.kind);
+    assert.ok(['number', 'halfNumber', 'label', 'code', 'text', 'dx', 'arrow', 'triangle', 'outlineArrow', 'stripes'].includes(element.kind), element.kind);
+    if (element.kind === 'stripes') {
+      // Stripes are per stock: each listed stock has one, with sane geometry.
+      for (const stripe of Object.values(style.stripes).flat()) {
+        assert.ok(stripe.period > 0 && stripe.on[1] > stripe.on[0] && stripe.widthMm > 0 && Math.abs(stripe.offsetMm) < 1.4, style.id);
+        assert.match(stripe.color, /^#[0-9a-f]{6}$/);
+      }
+      continue;
+    }
     assert.ok(['top', 'bottom'].includes(element.edge));
     assert.ok(Number.isFinite(element.at));
     if (element.from) {
@@ -61,7 +69,7 @@ for (const stock of stocks) {
   else unbranded.push(stock);
 }
 assert.deepEqual(unbranded.sort(), [
-  'CINESTILL', 'FOMAPAN', 'KENTMERE', 'LOMOGRAPHY', 'PRO 400H', 'SUPERIA', 'SUPERIA 200', 'SUPERIA 400', 'EKTACHROME'
+  'CINESTILL', 'FOMAPAN', 'KENTMERE', 'LOMOGRAPHY', 'SUPERIA', 'SUPERIA 400', 'EKTACHROME'
 ].sort(), 'stocks without a style are exactly the brands left out');
 assert.ok(LEFT_OUT_BRANDS.includes('KODAK VISION3') && LEFT_OUT_BRANDS.includes('FOMAPAN'));
 assert.equal(edgeStyleForFilmName('Kodak ULTRA MAX 400 Film GC400'), 'kodakColor');
@@ -70,6 +78,11 @@ assert.equal(edgeStyleForFilmName('KODAK PORTRA 400'), 'kodakColor');
 assert.equal(edgeStyleForFilmName('Kodak Tri-X 400'), 'kodakBw');
 assert.equal(edgeStyleForFilmName('Kodak T-Max 400'), 'kodakBw');
 assert.equal(edgeStyleForFilmName('Kodak Ektachrome E100'), 'kodakSlide');
+assert.equal(edgeStyleForFilmName('Fujicolor Superia 200'), 'fujiColor');
+assert.equal(edgeStyleForFilmName('Fujicolor Pro 400H'), 'fujiColor');
+assert.equal(edgeStyleForFilmName('Fujifilm Superia X-TRA 400'), null);
+assert.equal(edgeTextForFilmName('Fujicolor Pro 400H'), 'PRO400H');
+assert.deepEqual(Object.keys(edgeMarkingStyle('fujiColor').stripes).sort(), ['PRO400H', 'S-200']);
 assert.equal(edgeTextForFilmName('Kodak Tri-X 400'), 'KODAK 400TX');
 assert.equal(edgeTextForFilmName('Kodak T-Max 400'), 'KODAK 400-2TMY');
 assert.equal(edgeTextForFilmName('Kodak Portra 800'), 'KODAK PORTRA 800-3');
