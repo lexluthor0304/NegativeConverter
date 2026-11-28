@@ -156,6 +156,35 @@ export const EDGE_MARKING_STYLES = Object.freeze([
     ])
   }),
   Object.freeze({
+    id: 'fujifilmUs',
+    labelKey: 'filmEdgeStyleFujifilmUs',
+    brand: 'FUJI',
+    filmKind: 'color',
+    // Fujifilm 200 and 400 as sold since 2021 (made in the USA): Kodak's
+    // layout and printer (Mark Frey's negatives on EMULSIVE, 2023, beside a
+    // Kodak GC 400 strip), with "FUJI 200"/"FUJI 400" in lighter, narrower
+    // letters than Kodak's, the top number narrow too, no stripes. Fujifilm
+    // 200: Flickr 55666870630 (2026); Fujifilm 400: Flickr 54095652528 (2024).
+    text: 'FUJI 200',
+    stocks: ['FUJI 200', 'FUJI 400'],
+    alternates: {},
+    letteringColor: '#ecd18b',
+    // The database's FUJICOLOR 200 code; not read off these films' bars.
+    dx: [8, 1],
+    dxEnabled: true,
+    // 0.13 and 0.45 of a pitch past a hole on the two scans.
+    anchorPerf: 1.3,
+    // Solid blocks as Kodak's (the Fujifilm 400 scan; the 200 one is too faint to tell).
+    dxGeometry: { moduleMm: 0.405, rowMm: 1.08 },
+    elements: Object.freeze([
+      // Kodak's places; the numbers in the narrow, light digits of these films.
+      ...KODAK_NUMBERING.map((element) => (element.kind === 'number' || element.kind === 'halfNumber'
+        ? { ...element, stroke: 0.17, digitWidth: 0.6, tracking: 0.15 }
+        : element)),
+      { kind: 'text', edge: 'top', at: 1.68, from: [0.42, 1.58], glyphs: 'grotesk', stroke: 0.17, letterWidth: 0.8, tracking: 0.12, wordSpace: 0.65, brandGap: 1.1, digitWidth: 0.6 }
+    ])
+  }),
+  Object.freeze({
     id: 'fujiSlide',
     labelKey: 'filmEdgeStyleFujiSlide',
     brand: 'FUJI',
@@ -415,7 +444,7 @@ export const EDGE_MARKING_STYLES = Object.freeze([
 // not offered. A film of theirs resolves to the unbranded style under "auto".
 export const LEFT_OUT_BRANDS = Object.freeze([
   'KODAK BW400CN', 'CINESTILL BWXX', 'KODAK ELITE CHROME',
-  'FUJIFILM 200', 'FUJIFILM 400', 'KENTMERE', 'AGFA', 'LOMOGRAPHY'
+  'KENTMERE', 'AGFA', 'LOMOGRAPHY'
 ]);
 
 const STYLE_BY_ID = new Map(EDGE_MARKING_STYLES.map((style) => [style.id, style]));
@@ -423,7 +452,7 @@ const STYLE_BY_ID = new Map(EDGE_MARKING_STYLES.map((style) => [style.id, style]
 // Every id a setting may hold.
 export const EDGE_STYLE_IDS = Object.freeze([EDGE_STYLE_AUTO, ...EDGE_MARKING_STYLES.map((style) => style.id), EDGE_STYLE_CUSTOM]);
 // The ids the dropdown lists, in order.
-export const EDGE_STYLE_MENU = Object.freeze([EDGE_STYLE_AUTO, 'kodakColor', 'kodakBw', 'kodakSlide', 'ilford', 'agfaApx', 'fomapan', 'fujiColor', 'fujiSlide', 'kodakVision3', 'cineStill', EDGE_STYLE_PLAIN, EDGE_STYLE_CUSTOM]);
+export const EDGE_STYLE_MENU = Object.freeze([EDGE_STYLE_AUTO, 'kodakColor', 'kodakBw', 'kodakSlide', 'ilford', 'agfaApx', 'fomapan', 'fujiColor', 'fujifilmUs', 'fujiSlide', 'kodakVision3', 'cineStill', EDGE_STYLE_PLAIN, EDGE_STYLE_CUSTOM]);
 export const EDGE_STYLE_LABEL_KEYS = Object.freeze({
   [EDGE_STYLE_AUTO]: 'filmEdgeStyleAuto',
   [EDGE_STYLE_CUSTOM]: 'filmEdgeStyleCustom',
@@ -467,6 +496,8 @@ const KNOWN_EDGE_PRINTS = [
   { words: ['X-TRA 400', 'XTRA 400', 'X-TRA400', 'XTRA400'], text: 'S-400' },
   { words: ['HP5'], text: 'ILFORD HP5 PLUS' },
   { words: ['PROVIA 100F', 'RDP III', 'RDPIII'], text: 'FUJI RDPIII' },
+  { words: ['FUJIFILM 200', 'FUJI 200'], text: 'FUJI 200' },
+  { words: ['FUJIFILM 400', 'FUJI 400'], text: 'FUJI 400' },
   { words: ['APX 100', 'APX100'], text: 'AGFAPHOTO APX 100' },
   { words: ['APX 400', 'APX400'], text: 'AGFAPHOTO APX 400' },
   { words: ['CINESTILL 800T', 'CINESTILL 800 T'], text: 'CINESTILL 800T' },
@@ -491,6 +522,7 @@ const STYLE_RULES = [
   { id: 'kodakVision3', words: ['VISION3', 'VISION 3', '5219', '5207', '5203', '5213'], not: ['CINESTILL'] },
   { id: 'agfaApx', words: ['APX 100', 'APX 400', 'APX100', 'APX400', 'AGFAPHOTO APX', 'AGFA APX'], not: ['PROFESSIONAL'] },
   { id: 'fomapan', words: ['FOMAPAN', 'FOMA '], not: ['RETROPAN', 'ORTHO'] },
+  { id: 'fujifilmUs', words: ['FUJIFILM 200', 'FUJIFILM 400', 'FUJI 200', 'FUJI 400'], not: ['400H', 'PRO 400', 'SUPERIA', 'X-TRA', 'XTRA', 'NATURA', 'PRESS'] },
   { id: 'fujiSlide', words: ['FUJICHROME', 'VELVIA', 'PROVIA', 'ASTIA', 'SENSIA', 'RDP', 'RVP', 'RXP'], not: [] }
 ];
 
