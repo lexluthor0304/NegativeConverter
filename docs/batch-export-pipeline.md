@@ -333,6 +333,7 @@ Budgets, in estimated bytes (`batchExportScheduler.js`):
 | decoded, waiting for its lane | 12 B/px, ~0.72 GB | `DECODED_BASE_BYTES_PER_PIXEL` |
 | one processing lane | 25 B/px, ~1.5 GB (code accounting) | `PROCESSING_SLOT_BYTES_PER_PIXEL` |
 | a lane converting in the band pool, on top | 10 B/px, ~0.6 GB (code accounting: the assembled planes beside the bands' outputs, 12 B per converted pixel at an 81 % crop) | `BAND_POOL_BYTES_PER_PIXEL` |
+| a lane whose recipe compresses the dynamic range, on top | 1 B/px, ~60 MB (the saturation protection's weights, `docs/dynamic-range-compression.md`) | `DRC_BYTES_PER_PIXEL` |
 | encoded, waiting for its write | the payload's size, at most 512 MiB in all | `EXPORT_MAX_UNWRITTEN_BYTES` |
 | the editor (open photo, sessions, previews, stores, workers) and frames decoded ahead that wait for their lane | resident bytes | the memory ledger (`hiddenResidentBytes()`, #258) |
 | everything else the memory budget has reserved (roll and tile lanes, the prefetch, other jobs) | their reservations | `memoryBudget.reserved` minus the batch's own lanes |

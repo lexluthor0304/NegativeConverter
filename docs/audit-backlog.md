@@ -71,15 +71,10 @@ proof does not establish the unmeasured performance targets.
 
 ## Dynamic range compression
 
-- **medium/memory** — The compression's stops plane is not counted (2026-11-28)  
-  `negative2positive/src/pipeline/silverAdapter.js` (`_applyDrc`), `docs/dynamic-range-compression.md`, `docs/memory-budget.md`  
-  While a compressed frame converts, its stops are a dense Float32 plane (4 B/px: 96 MB at 24 MP, 241 MB at 60 MP; a second one when dodge-and-burn strokes are merged in). The interactive slot keeps the display level's. Neither the ledger nor the 50 B/px lane figure knows.  
-  _Suggested fix:_ Add 4 B/px (8 with strokes) to a lane's reservation when its recipe has `drcAmount > 0`, or compute the stops row by row inside the exposure pass instead of as a plane.
-
-- **low/performance** — Compressed photos drag SilverCore controls through the preview worker (2026-11-28)  
-  `negative2positive/src/app/main.js` (`gpuPreviewCanTake`), `render/previewShader.js`  
-  The GPU preview has no stage for the compression, so with Amount above 0 every SilverCore tick converts in the preview worker (about 0.4 s for a 3.8 MP display frame when the map changes, less when only the curves do), and a compressed frame does not use the conversion band pool.  
-  _Suggested fix:_ The map (log gain and guide, 512 px) as a texture and the joint bilateral upsampling in applyProgram's exposure stage; band workers given the frame's sample.
+- **low/behaviour** — On a frame whose dark half is mostly deep shadow, the compression can darken it further (2026-11-28)  
+  `negative2positive/src/pipeline/dynamicRange.js` (`compressLogLuminance`, the median anchor)  
+  The anchor keeps the frame's median log luminance where it was and lowers what lies above it in the picture. On 2 of 66 real negatives (Amount 70) the picture's near-black share (luminance at most 1 %) grows past 1 %: L1002388 (B&W forest, people in sun) 0.3 % to 10.5 %, L1002112 (colour lake under trees) 0.6 % to 3.2 %. Shadow Recovery above 50 brings it back by hand. An anchor at another percentile (tried: 30th and 70th of the picture) only moves the problem to other frames.  
+  _Suggested fix:_ Anchor on the frame's measured black and white points instead of one percentile, so the stretch the curves give afterwards never pushes a lifted shadow below the black point.
 
 ## Dust removal
 
