@@ -74,7 +74,7 @@ or the baseline end flat there (feet of A, V, K), not round.
 
 `sprocketEdge.style` is one of `auto`, `kodakColor`, `kodakBw`, `kodakSlide`,
 `ilford`, `agfaApx`, `fomapan`, `fujiColor`, `fujiSlide`, `kodakVision3`,
-`plain`, `custom`. A setting without it (a project, photo snapshot, history
+`cineStill`, `plain`, `custom`. A setting without it (a project, photo snapshot, history
 step or interrupted batch job saved before styles) and any unknown id are
 `custom`: the border drawn before, byte for byte (`sprocketFrame.test.mjs`
 pins it). A new session starts on `auto`. The layout, letters and marks come
@@ -384,6 +384,33 @@ negative respooled for still cameras)
 - Left out: the match-check symbols (Kodak places two at random in each
   foot: "#", "↑", "[", "■", "△", "$" on the roll), and the older KeyKode
   format of Kodak's diagram.
+
+**CineStill (`cineStill`)** — 800T, 400D, 50D, later rolls
+
+- References (Flickr; kept locally): 800T [54284730212](https://www.flickr.com/photos/grimesmc/54284730212/)
+  (Jay Smith, 2025) and [52713899704](https://www.flickr.com/photos/thart2009/52713899704/)
+  (Tom Hart, 2023, CC BY 2.0); 400D [54881331048](https://www.flickr.com/photos/40940504@N06/54881331048/)
+  (Roger, 2025) and [53998201851](https://www.flickr.com/photos/jacklandau/53998201851/)
+  (Jack Landau, 2024). Four rolls, two stocks, the same wordmark and
+  numbering. A 50D roll of 2024 ([Lomography](https://www.lomography.com/photos/27537970))
+  shows the same "34 ▶34A"; earlier rolls (2014–2016) carry Kodak's own
+  Vision3 print and are drawn with the Vision3 style.
+- Measured: Harman's layout (as Ilford and AgfaPhoto print it). Top edge:
+  "CINESTILL 800T" every frame from −1.56 (−1.47 on Tom Hart's roll),
+  square monoline capitals 1.4 mm tall, and the emulsion code "8034-11" at
+  +3.47 ("-11" smaller on the film; 400D shows "…-11"). Bottom edge: the
+  number, 0.58 of a pitch past a hole's left edge (0.60 and 0.59 on the
+  other rolls), cap 1.66 mm; a wedge with a needle at +3.76 (both 800T
+  rolls; 3.66 on 400D) and the smaller "nA" just after it. No DX code. The
+  print is yellow in a positive (about 253, 245, 80; the 400D scan's
+  wordmark paler).
+- Approximate: both 800T scans and one 400D cut the film's top edge, so
+  the heights of the name are inferred; the wedge is drawn as Ilford's
+  triangle and needle, CineStill's is stepped and blockier; the numbers on
+  the film are heavier. On the 400D scan the numbers 18 and 19 are 7.66
+  perforations apart (the wordmarks 8.0); the 800T rolls show 8.0, which
+  is drawn. The code is drawn for 800T only; 400D's and 50D's were not
+  readable. CineStill BWXX is not mapped (not seen).
 
 **Unbranded (`plain`)**: Kodak's numbering (numbers, arrows, measured as
 above) without text or DX code, for re-spooled and rebranded rolls.
