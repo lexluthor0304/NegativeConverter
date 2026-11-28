@@ -352,6 +352,11 @@ contact sheet lays the roll out as a lab cuts it: strips of six frames
   strip the numbers still come every eight perforations, with "nA" between
   them on the second picture of each pair. One frame beyond each cut is
   numbered too, so printing that runs over a cut is there as on cut film.
+  A film that numbers every four perforations (Fomapan) counts on along the
+  strip from its first picture's number, two numbers to a full frame and one
+  to a half-frame, whatever the later pictures' own numbers; its name, speed
+  and batch number fall every 24 numbers, so about every other strip of a
+  roll carries them.
 - Style: a strip takes the edge style, text and DX of its first photo; under
   Auto, of the first photo of the strip whose film was recognised (one strip
   is one film).
