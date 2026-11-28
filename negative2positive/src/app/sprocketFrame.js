@@ -1312,7 +1312,8 @@ function styledDx(data, metrics, edge, style, x, frameNumber, half) {
   const modulePitch = Math.max(1, geometry.moduleMm * metrics.imagePxPerMmX);
   const blockHeight = Math.max(1, geometry.rowMm * metrics.filmEdgePxPerMmY);
   const top = metrics.outputHeight - blockHeight * 2;
-  paintDxSequence(data, metrics, edge, x, top, modulePitch, modulePitch * 0.96, blockHeight, blockHeight, half, frameNumber);
+  // On film the bars of neighbouring modules run together into solid blocks.
+  paintDxSequence(data, metrics, edge, x, top, modulePitch, modulePitch * 1.02, blockHeight, blockHeight, half, frameNumber);
 }
 
 function paintStyledEdgeMarkings(data, metrics, edge, style, frameSlots) {

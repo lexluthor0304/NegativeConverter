@@ -33,11 +33,11 @@ export const EDGE_STYLE_PLAIN = 'plain';
 
 const KODAK_NUMBERING = Object.freeze([
   // Top (text) edge: the frame number, the same height as the brand text.
-  { kind: 'number', edge: 'top', at: 0, from: [0.42, 1.58], glyphs: 'grotesk', stroke: 0.2, digitWidth: 1.0 },
+  { kind: 'number', edge: 'top', at: 0, from: [0.42, 1.58], glyphs: 'grotesk', stroke: 0.24, digitWidth: 1.0 },
   // DX edge: a larger number, then the code; half a frame on, "nA" over an arrow, then the code again.
-  { kind: 'number', edge: 'bottom', at: -0.2, from: [0.40, 1.74], glyphs: 'grotesk', stroke: 0.2, digitWidth: 1.03 },
+  { kind: 'number', edge: 'bottom', at: -0.2, from: [0.40, 1.74], glyphs: 'grotesk', stroke: 0.24, digitWidth: 1.03 },
   { kind: 'dx', edge: 'bottom', at: 0.65, half: false },
-  { kind: 'halfNumber', edge: 'bottom', at: 3.9, from: [0.88, 1.75], glyphs: 'grotesk', stroke: 0.2, digitWidth: 1.0 },
+  { kind: 'halfNumber', edge: 'bottom', at: 3.9, from: [0.88, 1.75], glyphs: 'grotesk', stroke: 0.24, digitWidth: 1.0 },
   { kind: 'arrow', edge: 'bottom', at: 3.68, from: [0.09, 0.56], lengthMm: 3.6, shaftMm: 0.13, headMm: 0.67 },
   { kind: 'dx', edge: 'bottom', at: 4.6, half: true }
 ]);
@@ -67,7 +67,7 @@ export const EDGE_MARKING_STYLES = Object.freeze([
     elements: Object.freeze([
       ...KODAK_NUMBERING,
       // The brand text follows the number by 1.37 perforations of space.
-      { kind: 'text', edge: 'top', at: 1.78, from: [0.42, 1.58], glyphs: 'grotesk', stroke: 0.2, tracking: 0.21, wordSpace: 0.65, brandGap: 1.1, digitWidth: 0.72 }
+      { kind: 'text', edge: 'top', at: 1.78, from: [0.42, 1.58], glyphs: 'grotesk', stroke: 0.24, tracking: 0.21, wordSpace: 0.65, brandGap: 1.1, digitWidth: 0.72 }
     ])
   }),
   Object.freeze({
